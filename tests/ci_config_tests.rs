@@ -3968,8 +3968,8 @@ fn test_release_binary_attach_job_preserves_partial_success_gate() {
         .expect("attach-binaries must define an explicit job-level if condition");
 
     assert!(
-        attach_job.contains("needs: [publish, build-binaries]"),
-        "attach-binaries must depend on both `publish` and `build-binaries` so \
+        attach_job.contains("needs: [resolve-release, publish, build-binaries]"),
+        "attach-binaries must depend on release identity, `publish`, and `build-binaries` so \
          the Release exists and all binary matrix legs have finished before the \
          single release upload starts.\nJob block:\n{attach_job}"
     );
@@ -4023,7 +4023,6 @@ fn test_release_workflow_skips_binary_attach_when_no_artifacts_exist() {
     for step_name in [
         "Checkout repository",
         "Download all binary artifacts",
-        "Resolve release tag",
         "Attach binaries to release",
     ] {
         let marker = format!("      - name: {step_name}");
@@ -4041,6 +4040,179 @@ fn test_release_workflow_skips_binary_attach_when_no_artifacts_exist() {
             step_block.contains("if: steps.binary-artifacts.outputs.count != '0'"),
             "attach-binaries step `{step_name}` must be skipped when no binary \
              artifacts exist.\nStep block:\n{step_block}"
+        );
+    }
+
+    assert!(
+        attach_job.contains("tag_name: ${{ needs.resolve-release.outputs.tag }}"),
+        "attach-binaries must consume the canonical tag from resolve-release instead of \
+         re-deriving it from event-specific state.\nJob block:\n{attach_job}"
+    );
+}
+
+#[test]
+fn test_release_path_calls_container_publication_directly() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let publish_container = extract_workflow_job_block(&release, "publish-container")
+        .expect("release.yml must define publish-container");
+
+    for required in [
+        "needs: [resolve-release, ensure-tag]",
+        "uses: ./.github/workflows/docker-publish.yml",
+        "release_version: ${{ needs.resolve-release.outputs.version }}",
+        "release_tag: ${{ needs.resolve-release.outputs.tag }}",
+        "source_revision: ${{ needs.resolve-release.outputs.source_revision }}",
+        "packages: write",
+    ] {
+        assert!(
+            publish_container.contains(required),
+            "release.yml publish-container must contain `{required}` so manual releases publish \
+             the tagged container directly. The release path must not depend on a tag push made \
+             with GITHUB_TOKEN starting another workflow.\nJob block:\n{publish_container}"
+        );
+    }
+
+    for forbidden in ["repository_dispatch", "workflow_run:"] {
+        assert!(
+            !release.contains(forbidden),
+            "release.yml must call the reusable container workflow directly, not rely on \
+             `{forbidden}` event chaining."
+        );
+    }
+}
+
+#[test]
+fn test_container_publish_supports_release_and_backfill_entry_points() {
+    let root = repo_root();
+    let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+
+    for required in [
+        "workflow_call:",
+        "workflow_dispatch:",
+        "push:",
+        "tags:",
+        "- \"v*\"",
+        "release_tag:",
+        "source_ref:",
+        "source_revision:",
+        "ref: ${{ inputs.source_ref || inputs.release_tag || github.sha }}",
+        "if [ -n \"$CALL_REVISION\" ]",
+        "workflow_dispatch)",
+        "refs/tags/",
+    ] {
+        assert!(
+            docker.contains(required),
+            "docker-publish.yml must contain live `{required}` configuration so reusable \
+             releases, direct human tag pushes, and historical tagged backfills share one \
+             publication implementation."
+        );
+    }
+}
+
+#[test]
+fn test_release_identity_fails_closed_across_artifacts() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+    let verifier = read_live_file(&root.join("scripts/verify-release-image.sh"));
+
+    let required_by_file = [
+        (
+            "release.yml",
+            &release,
+            vec![
+                "Cargo.toml version package",
+                "grep -Fqx \"## [${version}]\" CHANGELOG.md",
+                "git cat-file -t \"refs/tags/${TAG}\"",
+                "refusing to move it",
+                ".cargo_vcs_info.json",
+                "published_revision",
+                "target_commitish: ${{ needs.resolve-release.outputs.source_revision }}",
+                "Verify GitHub Release identity",
+            ],
+        ),
+        (
+            "docker-publish.yml",
+            &docker,
+            vec![
+                "Cargo.toml version package",
+                "git cat-file -t \"refs/tags/${release_tag}\"",
+                "grep -Fqx \"## [${release_version}]\" CHANGELOG.md",
+                "org.opencontainers.image.revision=",
+                "org.opencontainers.image.version=",
+                "Verify versioned tags, platforms, and source labels",
+            ],
+        ),
+        (
+            "verify-release-image.sh",
+            &verifier,
+            vec![
+                "linux/amd64",
+                "linux/arm64",
+                "linux/arm/v7",
+                "org.opencontainers.image.revision",
+                "org.opencontainers.image.version",
+                "release tags do not resolve to one manifest",
+            ],
+        ),
+    ];
+
+    for (file, content, required_tokens) in required_by_file {
+        for required in required_tokens {
+            assert!(
+                content.contains(required),
+                "{file} must contain live `{required}` enforcement so the release gate fails \
+                 closed when source, tag, crate, Release, image labels, or GHCR tags disagree."
+            );
+        }
+    }
+}
+
+#[test]
+fn test_release_retries_reuse_digest_and_record_verification() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+    let marker = "      - name: Reuse a verified immutable release digest";
+    let start = docker
+        .find(marker)
+        .expect("docker-publish.yml must define immutable digest reuse");
+    let after_start = &docker[start + marker.len()..];
+    let end = after_start
+        .find("\n      - name:")
+        .map(|offset| start + marker.len() + offset)
+        .unwrap_or(docker.len());
+    let existing = &docker[start..end];
+
+    for required in [
+        "desired_tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\")",
+        "desired_tags+=(\"$SHA_TAG\")",
+        "scripts/verify-release-image.sh",
+        "docker buildx imagetools create --tag",
+        "refusing to rebuild over an unknown registry state",
+        "reuse=true",
+        "publish_sha=false",
+    ] {
+        assert!(
+            existing.contains(required),
+            "immutable release retry step must contain `{required}` so a partial retry repairs \
+             only missing aliases while preserving verified bytes.\nStep block:\n{existing}"
+        );
+    }
+    assert!(
+        !existing.contains(":latest"),
+        "historical/versioned retries must never backfill from mutable :latest.\nStep block:\n{existing}"
+    );
+
+    for required in [
+        "needs.publish-container.outputs.digest",
+        "Multi-architecture manifest digest:",
+        "Source revision:",
+    ] {
+        assert!(
+            release.contains(required),
+            "release.yml must record verified container evidence `{required}` in release notes."
         );
     }
 }
@@ -14057,7 +14229,7 @@ fn test_release_workflow_requires_preflight() {
     //
     // Checks:
     //   1. release.yml has a `preflight` job
-    //   2. The `publish` job depends on `preflight` via `needs:`
+    //   2. Every publication path is transitively gated by `preflight`
     //   3. The preflight job references the required workflow names
 
     let root = repo_root();
@@ -14079,14 +14251,24 @@ fn test_release_workflow_requires_preflight() {
         release_yml.display()
     );
 
-    // The publish job must depend on preflight
-    // Look for `needs:` containing `preflight` in the publish job context
+    let ensure_tag = extract_workflow_job_block(&content, "ensure-tag")
+        .expect("release.yml must define ensure-tag");
+    let publish_container = extract_workflow_job_block(&content, "publish-container")
+        .expect("release.yml must define publish-container");
+    let publish =
+        extract_workflow_job_block(&content, "publish").expect("release.yml must define publish");
+
+    // The irreversible publication chain must remain resolve -> preflight ->
+    // immutable tag -> verified container -> crate/GitHub Release.
     assert!(
-        content.contains("needs: [preflight]") || content.contains("needs: preflight"),
-        "release.yml 'publish' job must depend on 'preflight' via needs.\n\
-         Add 'needs: [preflight]' to the publish job.\n\
-         File: {}",
-        release_yml.display()
+        ensure_tag.contains("needs: [resolve-release, preflight]")
+            && publish_container.contains("needs: [resolve-release, ensure-tag]")
+            && publish.contains("needs: [resolve-release, publish-container]"),
+        "release.yml publication jobs must preserve the fail-closed dependency chain \
+         resolve-release -> preflight -> ensure-tag -> publish-container -> publish.\n\
+         ensure-tag:\n{ensure_tag}\n\
+         publish-container:\n{publish_container}\n\
+         publish:\n{publish}"
     );
 
     // Preflight must reference the required workflow names from REQUIRED_WORKFLOW_NAMES.

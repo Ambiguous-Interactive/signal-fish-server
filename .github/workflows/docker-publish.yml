@@ -1,52 +1,17 @@
 # Docker Publish Workflow
 #
-# Builds and pushes the Signal Fish Server Docker image to the GitHub Container
-# Registry (ghcr.io) so that users can pull it publicly.
+# One implementation serves three entry points:
+#   - pushes to main publish rolling :latest and immutable :sha-* tags;
+#   - direct annotated v* tag pushes publish versioned tags;
+#   - workflow calls from release.yml publish the exact release commit directly,
+#     without relying on a GITHUB_TOKEN-generated tag event;
+#   - manual dispatch with an existing annotated tag backfills historical tags
+#     from that tag's commit.
 #
-# Runs on:
-#   - Push to main branch (publishes the :latest tag)
-#   - Tag pushes matching v* (publishes semver tags, e.g. :1.2.3, :v1.2.3)
-#
-# Published image: ghcr.io/<repository_owner>/<repository_name>
-#
-# Tags published:
-#   - :latest      — always points to the most recent push to main
-#   - :sha-<short> — immutable, traceable to exact commit
-#   - :v1.2.3      — raw git tag (on v* tag pushes)
-#   - :1.2.3       — semver without 'v' prefix (on v* tag pushes)
-#   - :1.2         — major.minor only (on v* tag pushes)
-#
-# Multi-architecture (issue #122):
-#   The image is published as a single multi-arch manifest list covering
-#   linux/amd64, linux/arm64, and linux/arm/v7 so ARM consumers (AWS Graviton,
-#   Ampere, Raspberry Pi, Apple Silicon under Docker) can pull it. The Rust
-#   build is cross-compiled natively on the amd64 runner (see Dockerfile);
-#   QEMU only emulates the tiny runtime stage. Keep the `platforms:` list below
-#   in sync with the Dockerfile arch map and with REQUIRED_CONTAINER_PLATFORMS
-#   in tests/ci_config_tests.rs.
-#
-# ⚠️  Making the package public (one-time manual step):
-#   After the first successful workflow run, the package will be private by
-#   default. An owner must make it public at:
-#   https://github.com/orgs/${{ github.repository_owner }}/packages/container/signal-fish-server/settings
-#
-#   Alternatively, run:
-#   gh api --method PATCH \
-#     /orgs/${{ github.repository_owner }}/packages/container/signal-fish-server \
-#     -f visibility=public
-#
-# Permissions:
-#   packages: write  — required to push to GHCR
-#   contents: read   — required to check out the repository
-#
-# Action reference policy:
-#   This repository requires explicit version tags (for example `@v6.0.3`) and
-#   disallows commit SHAs/moving refs for remote actions.
-#
-# Security note:
-#   The GITHUB_TOKEN is used for authentication. No long-lived secrets are
-#   baked into the image. Image visibility is managed separately via the
-#   GitHub package settings.
+# Every release image is one multi-architecture manifest covering linux/amd64,
+# linux/arm64, and linux/arm/v7. Version tags are immutable: retries reuse a
+# verified digest and repair missing aliases, but never move an existing version
+# tag to different bytes.
 
 name: Docker Publish
 
@@ -55,28 +20,179 @@ on:
     branches: [main]
     tags:
       - "v*"
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing annotated tag to backfill, e.g. v0.4.0"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      release_version:
+        description: "Canonical Cargo version without the v prefix"
+        required: true
+        type: string
+      release_tag:
+        description: "Canonical annotated Git tag"
+        required: true
+        type: string
+      source_ref:
+        description: "Exact source ref to check out"
+        required: true
+        type: string
+      source_revision:
+        description: "Exact 40-character source commit SHA"
+        required: true
+        type: string
+    outputs:
+      digest:
+        description: "Verified multi-architecture manifest digest"
+        value: ${{ jobs.docker-publish.outputs.digest }}
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  resolve:
+    name: Resolve container identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      source_revision: ${{ steps.identity.outputs.source_revision }}
+      release_version: ${{ steps.identity.outputs.release_version }}
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+      major_minor: ${{ steps.identity.outputs.major_minor }}
+      short_sha: ${{ steps.identity.outputs.short_sha }}
+      is_release: ${{ steps.identity.outputs.is_release }}
+      publish_latest: ${{ steps.identity.outputs.publish_latest }}
+      image_version: ${{ steps.identity.outputs.image_version }}
+      is_backfill: ${{ steps.identity.outputs.is_backfill }}
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref || inputs.release_tag || github.sha }}
+
+      - name: Resolve and validate source identity
+        id: identity
+        shell: bash
+        env:
+          CALL_VERSION: ${{ inputs.release_version }}
+          CALL_TAG: ${{ inputs.release_tag }}
+          CALL_REVISION: ${{ inputs.source_revision }}
+        run: |
+          set -euo pipefail
+
+          source_revision=$(git rev-parse "HEAD^{commit}")
+          cargo_version=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+          if [ -z "$cargo_version" ]; then
+            echo "ERROR: Could not extract [package].version from Cargo.toml." >&2
+            exit 1
+          fi
+
+          release_version=""
+          release_tag=""
+          publish_latest=false
+          is_backfill=false
+          if [ -n "$CALL_REVISION" ]; then
+            # Reusable workflows retain caller event context, so the explicit
+            # source revision is the unambiguous workflow_call discriminator.
+            release_version=$CALL_VERSION
+            release_tag=$CALL_TAG
+            if [ "$source_revision" != "$CALL_REVISION" ]; then
+              echo "ERROR: Checked-out revision $source_revision does not match requested revision $CALL_REVISION." >&2
+              exit 1
+            fi
+          else
+            case "${{ github.event_name }}" in
+              workflow_dispatch)
+              release_tag=$CALL_TAG
+              release_version=${release_tag#v}
+                is_backfill=true
+                ;;
+              push)
+                if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+                  release_tag=${GITHUB_REF#refs/tags/}
+                  release_version=${release_tag#v}
+                elif [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+                  publish_latest=true
+                else
+                  echo "ERROR: Unsupported Docker Publish ref: $GITHUB_REF" >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "ERROR: Unsupported Docker Publish event: ${{ github.event_name }}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          if [ -n "$release_version" ]; then
+            if [ "$release_tag" != "v${release_version}" ] || [ "$release_version" != "$cargo_version" ]; then
+              echo "ERROR: Release tag ($release_tag), requested version ($release_version), and Cargo.toml ($cargo_version) disagree." >&2
+              exit 1
+            fi
+            if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: Release version is not canonical semantic version text: $release_version" >&2
+              exit 1
+            fi
+            if [ "$(git cat-file -t "refs/tags/${release_tag}" 2>/dev/null || true)" != "tag" ]; then
+              echo "ERROR: $release_tag must exist as an annotated Git tag before container publication." >&2
+              exit 1
+            fi
+            tag_revision=$(git rev-parse "refs/tags/${release_tag}^{commit}")
+            if [ "$tag_revision" != "$source_revision" ]; then
+              echo "ERROR: $release_tag resolves to $tag_revision, not checked-out commit $source_revision." >&2
+              exit 1
+            fi
+            if [ "$is_backfill" != "true" ] && ! grep -Fqx "## [${release_version}]" CHANGELOG.md; then
+              echo "ERROR: CHANGELOG.md has no exact ## [${release_version}] release section." >&2
+              exit 1
+            fi
+            major_minor=${release_version%.*}
+            is_release=true
+          else
+            major_minor=""
+            is_release=false
+          fi
+
+          {
+            echo "source_revision=$source_revision"
+            echo "release_version=$release_version"
+            echo "release_tag=$release_tag"
+            echo "major_minor=$major_minor"
+            echo "short_sha=${source_revision:0:7}"
+            echo "is_release=$is_release"
+            echo "publish_latest=$publish_latest"
+            echo "image_version=$cargo_version"
+            echo "is_backfill=$is_backfill"
+          } >> "$GITHUB_OUTPUT"
+
   docker-publish:
     name: Build and Push Docker Image
+    needs: [resolve]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: container-publish-${{ needs.resolve.outputs.source_revision }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.verify.outputs.digest }}
     steps:
-      - name: Checkout repository
+      - name: Checkout exact source
         uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.resolve.outputs.source_revision }}
 
       - name: Set up QEMU
-        # Provides binfmt handlers so buildx can execute the target-arch runtime
-        # stage (useradd + apt-get). The Rust compile itself is cross-compiled
-        # natively on this amd64 runner and never runs under emulation.
         uses: docker/setup-qemu-action@v4.2.0
 
       - name: Set up Docker Buildx
@@ -98,19 +214,101 @@ jobs:
           repo="${repo,,}"
           echo "name=ghcr.io/${owner}/${repo}" >> "$GITHUB_OUTPUT"
 
+      - name: Reuse a verified immutable release digest
+        id: existing
+        if: needs.resolve.outputs.is_release == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          SHA_TAG: sha-${{ needs.resolve.outputs.short_sha }}
+          IS_BACKFILL: ${{ needs.resolve.outputs.is_backfill }}
+        run: |
+          set -euo pipefail
+
+          tag_exists() {
+            local reference=$1
+            local inspect_output
+            if inspect_output=$(docker buildx imagetools inspect "$reference" 2>&1); then
+              return 0
+            fi
+            if grep -Eqi 'not found|manifest unknown|name unknown' <<< "$inspect_output"; then
+              return 1
+            fi
+            echo "ERROR: Could not determine whether $reference exists; refusing to rebuild over an unknown registry state." >&2
+            printf '%s\n' "$inspect_output" >&2
+            exit 1
+          }
+
+          desired_tags=("$RELEASE_TAG" "$RELEASE_VERSION")
+          sha_exists=false
+          if tag_exists "${IMAGE}:${SHA_TAG}"; then
+            sha_exists=true
+          fi
+          if [ "$IS_BACKFILL" != "true" ]; then
+            desired_tags+=("$SHA_TAG")
+          fi
+          existing_tags=()
+          missing_tags=()
+          for tag in "${desired_tags[@]}"; do
+            if tag_exists "${IMAGE}:${tag}"; then
+              existing_tags+=("$tag")
+            else
+              missing_tags+=("$tag")
+            fi
+          done
+
+          if [ "${#existing_tags[@]}" -eq 0 ]; then
+            {
+              echo "reuse=false"
+              if [ "$IS_BACKFILL" = "true" ] && [ "$sha_exists" = "true" ]; then
+                echo "publish_sha=false"
+              else
+                echo "publish_sha=true"
+              fi
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          digest=$(bash scripts/verify-release-image.sh \
+            "$IMAGE" "$SOURCE_REVISION" "$RELEASE_VERSION" "${existing_tags[@]}")
+          for tag in "${missing_tags[@]}"; do
+            docker buildx imagetools create --tag "${IMAGE}:${tag}" "${IMAGE}@${digest}"
+          done
+          if [ "$IS_BACKFILL" = "true" ] && [ "$sha_exists" != "true" ]; then
+            docker buildx imagetools create --tag "${IMAGE}:${SHA_TAG}" "${IMAGE}@${digest}"
+          fi
+          echo "Reusing verified release digest $digest"
+          {
+            echo "reuse=true"
+            echo "digest=$digest"
+            echo "publish_sha=false"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
           images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
           tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ needs.resolve.outputs.publish_latest == 'true' }}
+            type=raw,value=sha-${{ needs.resolve.outputs.short_sha }},enable=${{ steps.existing.outputs.publish_sha != 'false' }}
+            type=raw,value=${{ needs.resolve.outputs.release_tag }},enable=${{ needs.resolve.outputs.is_release == 'true' }}
+            type=raw,value=${{ needs.resolve.outputs.release_version }},enable=${{ needs.resolve.outputs.is_release == 'true' }}
+            type=raw,value=${{ needs.resolve.outputs.major_minor }},enable=${{ needs.resolve.outputs.is_release == 'true' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.source_revision }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.image_version }}
 
       - name: Build and push Docker image
+        id: build
+        if: steps.existing.outputs.reuse != 'true'
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
@@ -118,5 +316,41 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Update release rolling tag
+        if: needs.resolve.outputs.is_release == 'true' && steps.existing.outputs.reuse == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.existing.outputs.digest }}
+          MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
+        run: docker buildx imagetools create --tag "${IMAGE}:${MAJOR_MINOR}" "${IMAGE}@${DIGEST}"
+
+      - name: Verify versioned tags, platforms, and source labels
+        id: verify
+        if: needs.resolve.outputs.is_release == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          SHA_TAG: sha-${{ needs.resolve.outputs.short_sha }}
+          PUBLISH_SHA: ${{ steps.existing.outputs.publish_sha }}
+        run: |
+          set -euo pipefail
+          tags=("$RELEASE_TAG" "$RELEASE_VERSION")
+          if [ "$PUBLISH_SHA" != "false" ]; then
+            tags+=("$SHA_TAG")
+          fi
+          bash scripts/verify-release-image.sh \
+            "$IMAGE" "$SOURCE_REVISION" "$RELEASE_VERSION" "${tags[@]}"
+
+      - name: Record rolling image digest
+        id: rolling-digest
+        if: needs.resolve.outputs.is_release != 'true'
+        shell: bash
+        run: echo "digest=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"

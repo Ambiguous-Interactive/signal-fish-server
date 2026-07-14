@@ -25,13 +25,13 @@
 #     - Least-privilege workflow permissions
 #
 # Steps:
-#   1. Preflight: verify CI and doc-validation passed on this commit
-#   2. Verify version consistency (tag vs Cargo.toml)
-#   3. Dry-run publish to validate packaging
-#   4. Publish to crates.io
-#   5. Create git tag (for workflow_dispatch)
+#   1. Resolve one version/source identity and validate Cargo.toml + CHANGELOG
+#   2. Preflight: verify CI and doc-validation passed on that exact commit
+#   3. Create or validate the immutable annotated Git tag
+#   4. Call Docker Publish directly and verify version tags/platforms/OCI labels
+#   5. Dry-run and idempotently publish the crate from the tagged commit
 #   6. Generate SBOM (CycloneDX JSON) for supply-chain provenance
-#   7. Extract changelog section and create GitHub Release (with SBOM attached)
+#   7. Create/verify the GitHub Release and record the GHCR digest in its notes
 #   8. build-binaries: cross-compile standalone binaries for every supported
 #      OS/arch (Linux/macOS/Windows x86_64+aarch64) in parallel with publish
 #   9. attach-binaries: download all binary artifacts and attach them (with
@@ -52,17 +52,87 @@ on:
 permissions:
   contents: write
   actions: read
+  packages: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.release_version) || github.ref_name }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  resolve-release:
+    name: Resolve release identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      source_revision: ${{ steps.release.outputs.source_revision }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Validate canonical release identity
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_revision=$(git rev-parse "HEAD^{commit}")
+          cargo_version=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+          if [ -z "$cargo_version" ]; then
+            echo "ERROR: Could not extract [package].version from Cargo.toml." >&2
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.release_version }}"
+            tag="v${version}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+            version="${tag#v}"
+          fi
+
+          if [ "$version" != "$cargo_version" ] || [ "$tag" != "v${cargo_version}" ]; then
+            echo "ERROR: Workflow version ($version), Git tag ($tag), and Cargo.toml ($cargo_version) disagree." >&2
+            exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Release version is not canonical semantic version text: $version" >&2
+            exit 1
+          fi
+          if ! grep -Fqx "## [${version}]" CHANGELOG.md; then
+            echo "ERROR: CHANGELOG.md has no exact ## [${version}] release section." >&2
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ "$(git cat-file -t "refs/tags/${tag}" 2>/dev/null || true)" != "tag" ]; then
+              echo "ERROR: Direct release tag $tag must be annotated, not lightweight." >&2
+              exit 1
+            fi
+            tag_revision=$(git rev-parse "refs/tags/${tag}^{commit}")
+            if [ "$tag_revision" != "$source_revision" ]; then
+              echo "ERROR: $tag resolves to $tag_revision, not release commit $source_revision." >&2
+              exit 1
+            fi
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "source_revision=$source_revision"
+          } >> "$GITHUB_OUTPUT"
+
   preflight:
     name: Preflight
+    needs: [resolve-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -73,9 +143,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # github.sha resolves to the underlying commit for both tag pushes
-          # and workflow_dispatch events
-          COMMIT_SHA="${{ github.sha }}"
+          COMMIT_SHA="${{ needs.resolve-release.outputs.source_revision }}"
           REPO="${{ github.repository }}"
           echo "Verifying CI status for commit: $COMMIT_SHA"
 
@@ -239,14 +307,85 @@ jobs:
 
           echo "All required CI checks passed. Proceeding with release."
 
+  ensure-tag:
+    name: Ensure immutable annotated tag
+    needs: [resolve-release, preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-release.outputs.source_revision }}
+
+      - name: Create or validate annotated tag
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+          SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
+        run: |
+          set -euo pipefail
+
+          validate_tag() {
+            if [ "$(git cat-file -t "refs/tags/${TAG}" 2>/dev/null || true)" != "tag" ]; then
+              echo "ERROR: ${TAG} exists but is not an annotated Git tag." >&2
+              exit 1
+            fi
+            actual_revision=$(git rev-parse "refs/tags/${TAG}^{commit}")
+            if [ "$actual_revision" != "$SOURCE_REVISION" ]; then
+              echo "ERROR: ${TAG} resolves to ${actual_revision}, not ${SOURCE_REVISION}; refusing to move it." >&2
+              exit 1
+            fi
+          }
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            validate_tag
+            echo "Reusing immutable annotated tag ${TAG} at ${SOURCE_REVISION}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$SOURCE_REVISION" -m "Release $TAG"
+          if git push origin "refs/tags/${TAG}"; then
+            echo "Created annotated tag ${TAG} at ${SOURCE_REVISION}."
+            exit 0
+          fi
+
+          # A concurrent retry may have won the create race. Accept only the
+          # exact immutable tag we intended; every other outcome fails closed.
+          git tag -d "$TAG"
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          validate_tag
+
+  publish-container:
+    name: Publish versioned container
+    needs: [resolve-release, ensure-tag]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      release_version: ${{ needs.resolve-release.outputs.version }}
+      release_tag: ${{ needs.resolve-release.outputs.tag }}
+      source_ref: ${{ needs.resolve-release.outputs.source_revision }}
+      source_revision: ${{ needs.resolve-release.outputs.source_revision }}
+
   publish:
-    needs: [preflight]
+    needs: [resolve-release, publish-container]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-release.outputs.source_revision }}
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -298,35 +437,8 @@ jobs:
           restore-keys: |
             publish-${{ runner.os }}-cargo-
 
-      - name: Verify version consistency
-        run: |
-          CARGO_VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
-          if [ -z "$CARGO_VERSION" ]; then
-            echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
-            exit 1
-          fi
-          echo "Cargo.toml version: $CARGO_VERSION"
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            INPUT_VERSION="${{ github.event.inputs.release_version }}"
-            if [ "$INPUT_VERSION" != "$CARGO_VERSION" ]; then
-              echo "Input version $INPUT_VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
-              exit 1
-            fi
-            echo "Input version matches Cargo.toml"
-          fi
-
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            TAG_VERSION=${GITHUB_REF#refs/tags/}
-            if [ "$TAG_VERSION" != "v${CARGO_VERSION}" ]; then
-              echo "Tag version $TAG_VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
-              exit 1
-            fi
-            echo "Tag version matches Cargo.toml"
-          fi
-
       - name: Publish (dry-run)
-        run: cargo publish --dry-run
+        run: cargo publish --locked --dry-run
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
@@ -334,39 +446,60 @@ jobs:
           SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
           SCCACHE_IDLE_TIMEOUT: "0"
 
+      - name: Check for an idempotent crates.io retry
+        id: crate
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+          SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
+        run: |
+          set -euo pipefail
+
+          api_url="https://crates.io/api/v1/crates/signal-fish-server/${VERSION}"
+          user_agent="signal-fish-server-release-workflow (https://github.com/${GITHUB_REPOSITORY})"
+          status=$(curl --user-agent "$user_agent" --retry 3 --retry-all-errors --silent --show-error \
+            --output crate-version.json --write-out '%{http_code}' "$api_url")
+          case "$status" in
+            404)
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              ;;
+            200)
+              checksum=$(jq -r '.version.checksum // empty' crate-version.json)
+              if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
+                echo "ERROR: crates.io returned no valid checksum for signal-fish-server ${VERSION}." >&2
+                exit 1
+              fi
+
+              crate_file="signal-fish-server-${VERSION}.crate"
+              curl --user-agent "$user_agent" --retry 3 --retry-all-errors --fail --silent --show-error \
+                --location --output "$crate_file" \
+                "https://crates.io/api/v1/crates/signal-fish-server/${VERSION}/download"
+              actual_checksum=$(sha256sum "$crate_file" | awk '{print $1}')
+              if [ "$actual_checksum" != "$checksum" ]; then
+                echo "ERROR: Downloaded crate checksum $actual_checksum does not match crates.io $checksum." >&2
+                exit 1
+              fi
+
+              vcs_info=$(tar -xOf "$crate_file" --wildcards '*/.cargo_vcs_info.json' 2>/dev/null || true)
+              published_revision=$(printf '%s' "$vcs_info" | jq -r '.git.sha1 // empty' 2>/dev/null || true)
+              if [ "$published_revision" != "$SOURCE_REVISION" ]; then
+                echo "ERROR: signal-fish-server ${VERSION} already exists on crates.io from revision '$published_revision', expected '$SOURCE_REVISION'." >&2
+                exit 1
+              fi
+              echo "Crate ${VERSION} already exists from ${SOURCE_REVISION}; retry is safe."
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ERROR: crates.io version lookup failed closed with HTTP ${status}." >&2
+              exit 1
+              ;;
+          esac
+
       - name: Publish to crates.io
+        if: steps.crate.outputs.exists != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish
-
-      - name: Create and push git tag
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          CARGO_VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
-          if [ -z "$CARGO_VERSION" ]; then
-            echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
-            exit 1
-          fi
-          TAG_NAME="v${CARGO_VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
-          git push origin "$TAG_NAME"
-
-      - name: Get version for release
-        id: get_version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
-            if [ -z "$VERSION" ]; then
-              echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
-              exit 1
-            fi
-          else
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+        run: cargo publish --locked
 
       - name: Install cargo-sbom
         uses: taiki-e/install-action@v2.83.2
@@ -381,7 +514,7 @@ jobs:
       - name: Extract changelog for release
         id: changelog
         run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
+          VERSION="${{ needs.resolve-release.outputs.version }}"
           # Extract the section for this version from CHANGELOG.md
           # Matches from "## [X.Y.Z]" until the next "## [" or end of file
           CHANGELOG_CONTENT=$(awk -v ver="$VERSION" '
@@ -397,14 +530,47 @@ jobs:
             CHANGELOG_CONTENT="Release $VERSION"
           fi
 
-          # Write to file to preserve newlines
-          echo "$CHANGELOG_CONTENT" > release_notes.md
+          {
+            echo "$CHANGELOG_CONTENT"
+            echo ""
+            echo "### Container image"
+            echo ""
+            echo "\`ghcr.io/${GITHUB_REPOSITORY,,}:${VERSION}\`"
+            echo ""
+            echo "Multi-architecture manifest digest: \`${{ needs.publish-container.outputs.digest }}\`"
+            echo ""
+            echo "Source revision: \`${{ needs.resolve-release.outputs.source_revision }}\`"
+          } > release_notes.md
+
+      - name: Validate an existing GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>/dev/null); then
+            actual_tag=$(printf '%s' "$release" | jq -r '.tag_name // empty')
+            if [ "$actual_tag" != "$TAG" ]; then
+              echo "ERROR: Existing GitHub Release tag '$actual_tag' disagrees with '$TAG'." >&2
+              exit 1
+            fi
+            echo "Existing GitHub Release for $TAG will be completed idempotently."
+          else
+            status=$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>&1 \
+              | sed -n 's/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*/\1/p' | head -n 1 || true)
+            if [ "$status" != "404" ]; then
+              echo "ERROR: Could not verify whether GitHub Release $TAG exists (HTTP ${status:-unknown})." >&2
+              exit 1
+            fi
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3.0.2
         with:
-          tag_name: ${{ steps.get_version.outputs.tag }}
-          name: ${{ steps.get_version.outputs.tag }}
+          tag_name: ${{ needs.resolve-release.outputs.tag }}
+          name: ${{ needs.resolve-release.outputs.tag }}
+          target_commitish: ${{ needs.resolve-release.outputs.source_revision }}
           body_path: release_notes.md
           draft: false
           prerelease: false
@@ -415,10 +581,25 @@ jobs:
         if: steps.sbom.outcome == 'success'
         uses: softprops/action-gh-release@v3.0.2
         with:
-          tag_name: ${{ steps.get_version.outputs.tag }}
+          tag_name: ${{ needs.resolve-release.outputs.tag }}
           files: sbom.cdx.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify GitHub Release identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
+          actual_tag=$(printf '%s' "$release" | jq -r '.tag_name // empty')
+          is_draft=$(printf '%s' "$release" | jq -r '.draft')
+          if [ "$actual_tag" != "$TAG" ] || [ "$is_draft" != "false" ]; then
+            echo "ERROR: GitHub Release identity is inconsistent (tag=$actual_tag, draft=$is_draft)." >&2
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # Cross-platform standalone binaries
@@ -430,7 +611,8 @@ jobs:
   # Build and upload are deliberately SPLIT into two jobs:
   #   - `build-binaries` (this job): a `fail-fast: false` matrix that compiles
   #     each target and uploads its archive + checksum as a workflow artifact.
-  #     It depends only on `preflight`, so it runs in PARALLEL with `publish`.
+  #     It starts after the immutable tag exists, in PARALLEL with container and
+  #     crate publication.
   #   - `attach-binaries` (below): a single job that downloads every artifact
   #     and performs ONE `action-gh-release` upload. Funnelling all assets
   #     through one release API call avoids the race where N parallel matrix
@@ -448,7 +630,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-binaries:
     name: Binary (${{ matrix.target }})
-    needs: [preflight]
+    needs: [resolve-release, ensure-tag]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     permissions:
@@ -480,6 +662,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ needs.resolve-release.outputs.source_revision }}
 
       - name: Read Rust toolchain
         id: toolchain
@@ -524,17 +708,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve version: tag pushes carry it in the ref; dispatch reads it
-          # from Cargo.toml.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
-            if [ -z "$VERSION" ]; then
-              echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
-              exit 1
-            fi
-          else
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          fi
+          VERSION="${{ needs.resolve-release.outputs.version }}"
 
           BIN=signal-fish-server
           EXE=""
@@ -589,7 +763,7 @@ jobs:
   # ---------------------------------------------------------------------------
   attach-binaries:
     name: Attach binaries to release
-    needs: [publish, build-binaries]
+    needs: [resolve-release, publish, build-binaries]
     if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -630,29 +804,11 @@ jobs:
           pattern: release-binary-*
           merge-multiple: true
 
-      - name: Resolve release tag
-        if: steps.binary-artifacts.outputs.count != '0'
-        id: tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
-            if [ -z "$VERSION" ]; then
-              echo "ERROR: Could not extract [package].version from Cargo.toml" >&2
-              exit 1
-            fi
-            TAG="v${VERSION}"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
       - name: Attach binaries to release
         if: steps.binary-artifacts.outputs.count != '0'
         uses: softprops/action-gh-release@v3.0.2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ needs.resolve-release.outputs.tag }}
           files: |
             dist/*.tar.gz
             dist/*.zip
