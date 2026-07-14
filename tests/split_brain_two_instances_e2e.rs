@@ -14,12 +14,13 @@ mod websocket_test_helpers;
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, ErrorCode, PlayerId, RoomJoinedPayload, ServerMessage, Topology, Transport,
+    ClientMessage, ErrorCode, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage, Topology,
+    Transport,
 };
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{send, SERVER_MESSAGE_TIMEOUT};
 use websocket_test_helpers::server_process::{spawn_server, CONNECT_TIMEOUT};
-use websocket_test_helpers::{next_matching_server_message_within, WsStream};
+use websocket_test_helpers::{next_server_message_within, WsStream};
 
 const APP_ID: &str = "split-brain-catalog-app";
 const GAME_NAME: &str = "split-brain-catalog-game";
@@ -54,26 +55,27 @@ async fn connect_v3(port: u16) -> WsStream {
     )
     .await;
 
-    next_matching_server_message_within(
+    let authenticated = next_server_message_within(
         &mut ws,
         SERVER_MESSAGE_TIMEOUT,
         "split-brain authentication",
-        |message| matches!(message, ServerMessage::Authenticated { .. }).then_some(()),
     )
     .await;
-    next_matching_server_message_within(
+    assert!(
+        matches!(authenticated, ServerMessage::Authenticated { .. }),
+        "expected Authenticated, got {authenticated:?}"
+    );
+
+    let protocol_info = next_server_message_within(
         &mut ws,
         SERVER_MESSAGE_TIMEOUT,
         "split-brain protocol negotiation",
-        |message| match message {
-            ServerMessage::ProtocolInfo(info) => {
-                assert_eq!(info.protocol_version, Some(3));
-                Some(())
-            }
-            _ => None,
-        },
     )
     .await;
+    let ServerMessage::ProtocolInfo(info) = protocol_info else {
+        panic!("expected ProtocolInfo, got {protocol_info:?}");
+    };
+    assert_eq!(info.protocol_version, Some(3));
 
     ws
 }
@@ -96,19 +98,36 @@ async fn join_room(
     )
     .await;
 
-    next_matching_server_message_within(
+    let message =
+        next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "split-brain room join").await;
+    let payload = match message {
+        ServerMessage::RoomJoined(payload) => payload,
+        ServerMessage::RoomJoinFailed { reason, error_code } => {
+            panic!("split-brain room join failed: {reason} ({error_code:?})")
+        }
+        other => panic!("expected RoomJoined, got {other:?}"),
+    };
+
+    let lobby_transition = next_server_message_within(
         ws,
         SERVER_MESSAGE_TIMEOUT,
-        "split-brain room join",
-        |message| match message {
-            ServerMessage::RoomJoined(payload) => Some(payload),
-            ServerMessage::RoomJoinFailed { reason, error_code } => {
-                panic!("split-brain room join failed: {reason} ({error_code:?})")
-            }
-            _ => None,
-        },
+        "split-brain first-player lobby transition",
     )
-    .await
+    .await;
+    match lobby_transition {
+        ServerMessage::LobbyStateChanged {
+            lobby_state,
+            ready_players,
+            all_ready,
+        } => {
+            assert_eq!(lobby_state, LobbyState::Lobby);
+            assert!(ready_players.is_empty());
+            assert!(!all_ready);
+        }
+        other => panic!("expected LobbyStateChanged, got {other:?}"),
+    }
+
+    payload
 }
 
 async fn expect_signal_rejection(ws: &mut WsStream, target: PlayerId) {
@@ -121,26 +140,23 @@ async fn expect_signal_rejection(ws: &mut WsStream, target: PlayerId) {
     )
     .await;
 
-    next_matching_server_message_within(
+    let rejection = next_server_message_within(
         ws,
         SERVER_MESSAGE_TIMEOUT,
         "cross-instance signal rejection",
-        |message| match message {
-            ServerMessage::Error {
-                message,
-                error_code,
-            } => {
-                assert_eq!(error_code, Some(ErrorCode::SignalTargetNotFound));
-                assert_eq!(message, "Signal target is not in any room");
-                Some(())
-            }
-            ServerMessage::Signal { .. } => {
-                panic!("a cross-instance Signal must never be relayed")
-            }
-            _ => None,
-        },
     )
     .await;
+    match rejection {
+        ServerMessage::Error {
+            message,
+            error_code,
+        } => {
+            assert_eq!(error_code, Some(ErrorCode::SignalTargetNotFound));
+            assert_eq!(message, "Signal target is not in any room");
+        }
+        ServerMessage::Signal { .. } => panic!("a cross-instance Signal must never be relayed"),
+        other => panic!("expected SignalTargetNotFound, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -186,20 +202,20 @@ async fn two_instances_produce_the_documented_split_brain_catalog() {
         },
     )
     .await;
-    let (reason, error_code) = next_matching_server_message_within(
+    let reconnect_rejection = next_server_message_within(
         &mut cross_instance_reconnector,
         SERVER_MESSAGE_TIMEOUT,
         "cross-instance reconnect rejection",
-        |message| match message {
-            ServerMessage::ReconnectionFailed { reason, error_code } => Some((reason, error_code)),
-            ServerMessage::Reconnected(payload) => panic!(
-                "a different process must not reconnect instance A player {}",
-                payload.player_id
-            ),
-            _ => None,
-        },
     )
     .await;
+    let (reason, error_code) = match reconnect_rejection {
+        ServerMessage::ReconnectionFailed { reason, error_code } => (reason, error_code),
+        ServerMessage::Reconnected(payload) => panic!(
+            "a different process must not reconnect instance A player {}",
+            payload.player_id
+        ),
+        other => panic!("expected ReconnectionFailed, got {other:?}"),
+    };
     assert_eq!(error_code, ErrorCode::ReconnectionFailed);
     assert_eq!(reason, "No disconnection record found");
 

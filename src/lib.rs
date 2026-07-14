@@ -31,7 +31,7 @@ pub mod coordination;
 /// Database abstraction layer (in-memory implementation)
 pub mod database;
 
-/// Distributed locking (in-memory implementation)
+/// Process-local locking behind a future coordination extension seam
 pub mod distributed;
 
 /// Structured logging configuration

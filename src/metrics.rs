@@ -139,7 +139,7 @@ pub struct ServerMetrics {
     pub retry_attempts: AtomicU64,
     pub retry_successes: AtomicU64,
 
-    // Cross-instance communication metrics
+    // Reserved remote-coordination seam metrics (the shipped backend is local)
     pub cross_instance_messages: AtomicU64,
     pub dedup_cache_hits: AtomicU64,
     pub dedup_cache_misses: AtomicU64,
@@ -900,7 +900,7 @@ impl ServerMetrics {
         self.retry_successes.fetch_add(1, Ordering::Relaxed);
     }
 
-    // Cross-instance communication metrics
+    // Reserved remote-coordination seam metrics (the shipped backend is local)
     #[allow(dead_code)]
     pub fn increment_cross_instance_messages(&self) {
         self.cross_instance_messages.fetch_add(1, Ordering::Relaxed);

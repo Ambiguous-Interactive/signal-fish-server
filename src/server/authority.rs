@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
-    /// Handle authority request with distributed coordination.
+    /// Handle an authority request under process-local room coordination.
     pub async fn handle_authority_request(&self, player_id: &PlayerId, become_authority: bool) {
         let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
             return;

@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-process failure modes with a nightly two-binary H5 experiment. Startup
   logs now state that room/reconnect state is in-memory, room affinity is
   required, and session handoff is unavailable. The scaling/deployment docs no
-  longer imply that generic sticky sessions provide horizontal safety. Added
-  ADR-0006 for the completed protocol-v3 delivery-reliability revision
+  longer imply that generic sticky sessions provide horizontal safety. Run-mode,
+  pre-deployment, configuration, API, and metrics descriptions now consistently
+  identify shipped coordination as process-local and remote coordination as a
+  future extension seam. Added ADR-0006 for the completed protocol-v3 delivery-reliability revision
   (delivery classes, epoch, reconnect watermarks, drain, and WebSocket pings),
   including the rejected/deferred feature cut list.
 

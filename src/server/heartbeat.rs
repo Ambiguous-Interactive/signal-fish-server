@@ -28,7 +28,7 @@ impl EnhancedGameServer {
     }
 
     /// Conditionally updates `last_seen` if the throttle threshold has elapsed.
-    /// This reduces update overhead while maintaining cross-instance staleness accuracy.
+    /// This reduces database writes while keeping local liveness timestamps current.
     pub(super) async fn maybe_update_last_seen(&self, player_id: &PlayerId) {
         let threshold = self.config.heartbeat_throttle;
 

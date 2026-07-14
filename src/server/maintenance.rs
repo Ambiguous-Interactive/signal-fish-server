@@ -141,12 +141,11 @@ impl EnhancedGameServer {
         count
     }
 
-    /// Enhanced cleanup task with distributed coordination and idempotency
+    /// Enhanced cleanup task with process-local coordination and idempotency.
     ///
-    /// In multi-instance deployments, this task uses idempotency keys to ensure
-    /// that post-cleanup operations (event publishing, relay session cleanup,
-    /// application mapping cleanup) only happen once per room, even if multiple
-    /// instances attempt cleanup simultaneously.
+    /// Idempotency keys ensure post-cleanup operations (event publishing, relay
+    /// session cleanup, application mapping cleanup) happen once per room in
+    /// this process. They do not coordinate cleanup between server processes.
     pub async fn cleanup_task(self: &Arc<Self>) {
         self.cleanup_task_until(std::future::pending::<()>()).await;
     }
@@ -308,7 +307,7 @@ impl EnhancedGameServer {
                         for room_id in &deleted_room_ids {
                             // The stored v3 session decision is per-node in-memory
                             // state, so it is dropped unconditionally for every
-                            // deleted room — independent of the cross-instance
+                            // deleted room — independent of the cleanup
                             // idempotency claim below.
                             self.clear_active_session_plan(room_id);
 

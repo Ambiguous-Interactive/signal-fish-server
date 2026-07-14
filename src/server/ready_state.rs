@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
-    /// Handle a player ready-state toggle with distributed coordination.
+    /// Handle a player ready-state toggle under process-local room coordination.
     ///
     /// Readiness can be toggled at any time while the room is open; it no longer
     /// starts the game. The server broadcasts the updated lobby snapshot (with

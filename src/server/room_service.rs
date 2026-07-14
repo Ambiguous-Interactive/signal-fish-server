@@ -88,7 +88,7 @@ impl EnhancedGameServer {
         self.metrics.increment_players_left();
     }
 
-    /// Enhanced room joining with distributed coordination
+    /// Join a room under process-local coordination.
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_join_room(
         self: &Arc<Self>,
@@ -288,7 +288,7 @@ impl EnhancedGameServer {
         };
         room_join_span.record("room_code", tracing::field::display(&room_code));
 
-        // Use distributed coordination for room operations
+        // Serialize room operations with the process-local coordinator.
         let room_join_result = self
             .join_room_with_coordination(
                 player_id,
@@ -595,7 +595,7 @@ impl EnhancedGameServer {
                     %game_name,
                     room_code = %room.code,
                     instance_id = %self.instance_id,
-                    "Player joined room with distributed coordination"
+                    "Player joined room with process-local coordination"
                 );
             }
             Err(error) => {
@@ -678,9 +678,9 @@ impl EnhancedGameServer {
             }
             Ok(None) => {
                 // Persistence is authoritative. A stale local assignment can
-                // survive a prior cross-instance removal, so converge routing
-                // and publish the terminal event below even though this call
-                // did not perform the durable removal itself.
+                // survive a prior removal path, so converge routing and publish
+                // the terminal event below even though this call did not
+                // perform the durable removal itself.
                 tracing::warn!(%player_id, %room_id, "Player persistence entry was already absent during leave");
                 self.pending_durable_player_detaches
                     .remove(&(room_id, *player_id));
@@ -877,7 +877,7 @@ impl EnhancedGameServer {
             %room_id,
             room_code = latest_room_code.as_deref().unwrap_or("unknown"),
             instance_id = %self.instance_id,
-            "Player left room with distributed coordination"
+            "Player left room with process-local coordination"
         );
     }
 
@@ -925,7 +925,7 @@ impl EnhancedGameServer {
         );
     }
 
-    /// Join room with distributed coordination
+    /// Join a room with process-local admission coordination.
     pub(super) async fn join_room_with_coordination(
         &self,
         player_id: &PlayerId,

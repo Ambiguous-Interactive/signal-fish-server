@@ -7,7 +7,10 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-/// Distributed lock interface for cross-instance coordination
+/// Lock interface used for process-local room coordination.
+///
+/// The shipped implementation is in-memory and cannot coordinate server
+/// processes. The trait is only an extension seam for a future backend.
 #[async_trait]
 pub trait DistributedLock: Send + Sync {
     /// Acquire a lock with specified TTL
@@ -29,7 +32,7 @@ pub trait DistributedLock: Send + Sync {
     async fn cleanup_expired_locks(&self) -> Result<usize>;
 }
 
-/// Handle for a distributed lock
+/// Handle for a coordination lock.
 #[derive(Debug, Clone)]
 pub struct LockHandle {
     pub key: String,
@@ -57,7 +60,7 @@ impl LockHandle {
     }
 }
 
-/// In-memory distributed lock
+/// In-memory, process-local coordination lock.
 pub struct InMemoryDistributedLock {
     locks: Arc<RwLock<HashMap<String, LockEntry>>>,
 }
@@ -235,7 +238,7 @@ struct CircuitBreakerInner {
     last_failure_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Circuit breaker for cross-instance operations
+/// Circuit breaker extension seam for fallible coordination operations.
 pub struct CircuitBreaker {
     inner: Arc<Mutex<CircuitBreakerInner>>,
     failure_threshold: u32,

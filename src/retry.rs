@@ -79,7 +79,7 @@ pub enum RetryableError {
     RoomCodeCollision,
     /// Authority conflict
     AuthorityConflict,
-    /// Cross-instance communication failure
+    /// Remote-coordination extension failure (no shipped remote backend)
     CrossInstanceFailure(String),
     /// Temporary resource unavailable
     ResourceUnavailable(String),

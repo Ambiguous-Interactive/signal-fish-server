@@ -171,10 +171,10 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_CLEANUP_INTERVAL_SECS` | `auth.rate_limit_cache_cleanup_interval_secs` | `300` | Auth rate-limit cache cleanup interval |
 | `SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_RETENTION_SECS` | `auth.rate_limit_cache_retention_secs` | `172800` | Auth rate-limit cache retention window |
 | `SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_ALERT_ROWS` | `auth.rate_limit_cache_alert_rows` | `100000` | Auth rate-limit cache warning threshold |
-| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CAPACITY` | `coordination.dedup_cache.capacity` | `100000` | Cross-instance dedup cache capacity |
-| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__TTL_SECS` | `coordination.dedup_cache.ttl_secs` | `60` | Cross-instance dedup cache TTL |
-| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CLEANUP_INTERVAL_SECS` | `coordination.dedup_cache.cleanup_interval_secs` | `30` | Cross-instance dedup cache cleanup interval |
-| `SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS` | `coordination.membership_snapshot_interval_secs` | `30` | Membership snapshot interval |
+| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CAPACITY` | `coordination.dedup_cache.capacity` | `100000` | In-memory coordinator dedup cache capacity (future-backend seam; not cross-process coordination) |
+| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__TTL_SECS` | `coordination.dedup_cache.ttl_secs` | `60` | In-memory coordinator dedup cache TTL |
+| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CLEANUP_INTERVAL_SECS` | `coordination.dedup_cache.cleanup_interval_secs` | `30` | In-memory coordinator dedup cache cleanup interval |
+| `SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS` | `coordination.membership_snapshot_interval_secs` | `30` | Reserved membership-snapshot seam; the shipped coordinator is process-local |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_REFRESH_INTERVAL_SECS` | `metrics.dashboard_cache_refresh_interval_secs` | `5` | Dashboard metrics refresh interval |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_TTL_SECS` | `metrics.dashboard_cache_ttl_secs` | `30` | Dashboard metrics cache TTL |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_WINDOW_SECS` | `metrics.dashboard_cache_history_window_secs` | `300` | Dashboard history window |

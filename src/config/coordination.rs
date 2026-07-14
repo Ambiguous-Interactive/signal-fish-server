@@ -1,4 +1,4 @@
-//! Coordination and cross-instance configuration types.
+//! Process-local coordination configuration and future-backend seams.
 
 use super::defaults::{
     default_dedup_cache_capacity, default_dedup_cache_cleanup_interval_secs,
@@ -6,12 +6,13 @@ use super::defaults::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Coordination configuration for cross-instance messaging.
+/// Configuration for the in-memory coordinator.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CoordinationConfig {
     #[serde(default)]
     pub dedup_cache: DedupCacheConfig,
-    /// Interval between cross-instance membership snapshots (seconds).
+    /// Reserved interval for a future membership-snapshot backend (seconds).
+    /// The shipped coordinator does not exchange snapshots between processes.
     #[serde(default = "default_membership_snapshot_interval_secs")]
     pub membership_snapshot_interval_secs: u64,
 }

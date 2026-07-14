@@ -466,4 +466,5 @@ Enable file logging:
 - [Configuration](configuration.md) - Full configuration reference
 - [Authentication](authentication.md) - Securing your server
 - [TURN Deployment](deployment-turn.md) - TURN relay for WebRTC sessions
-- [Scaling Architecture](architecture/scaling.md) - Multi-node signaling
+- [Scaling Architecture](architecture/scaling.md) - Single-process capacity and
+  externally routed isolated deployments

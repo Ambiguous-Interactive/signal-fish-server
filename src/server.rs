@@ -71,7 +71,7 @@ use spectator_service::SpectatorService;
 
 // Removed unused imports
 
-/// Enhanced GameServer with distributed coordination
+/// Enhanced game server with process-local coordination.
 pub struct EnhancedGameServer {
     /// In-memory game state storage
     database: Arc<dyn GameDatabase>,
@@ -91,11 +91,11 @@ pub struct EnhancedGameServer {
     rate_limiter: Arc<RoomRateLimiter>,
     /// Server metrics
     pub(crate) metrics: Arc<crate::metrics::ServerMetrics>,
-    /// Message coordinator for cross-instance communication
+    /// Process-local message coordinator behind a future remote-backend seam
     message_coordinator: Arc<dyn MessageCoordinator>,
-    /// Room operation coordinator for distributed state management
+    /// Process-local room operation coordinator
     room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
-    /// Distributed locking system
+    /// Process-local coordination lock
     distributed_lock: Arc<dyn DistributedLock>,
     /// Instance identifier
     instance_id: Uuid,
@@ -251,7 +251,7 @@ impl EnhancedGameServer {
         ));
         dashboard_metrics_cache.spawn(database.clone());
 
-        // Setup distributed coordination - in-memory only
+        // Set up process-local coordination behind the extension interfaces.
         let distributed_lock = Arc::new(InMemoryDistributedLock::new());
         let message_coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
             Duration::from_millis(config.websocket_config.slow_consumer_timeout_ms),

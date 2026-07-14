@@ -141,8 +141,8 @@ use super::types::{
 // - **Authority Player Leaves**: If the authority player disconnects, authority
 //   is cleared (`authority_player = None`) with no automatic reassignment.
 //
-// - **Stale Finalization**: Ready state version tracking prevents multiple
-//   server instances from finalizing the same room (distributed lock protection).
+// - **Stale Finalization**: Ready-state version tracking and the process-local
+//   room lock prevent concurrent handlers from finalizing the same room twice.
 //
 // ## Timestamps and Activity Tracking
 //

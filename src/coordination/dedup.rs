@@ -1,7 +1,8 @@
-//! Message deduplication cache for cross-instance coordination
+//! Message deduplication cache for the coordination extension seam.
 //!
-//! This module provides an LRU-based cache for deduplicating cross-instance messages,
-//! ensuring that messages are only processed once even when delivered via multiple paths.
+//! The shipped coordinator is process-local. This LRU cache preserves the
+//! deduplication contract for local envelopes and a possible future remote
+//! backend; it does not provide cross-process delivery by itself.
 
 #![allow(dead_code)]
 

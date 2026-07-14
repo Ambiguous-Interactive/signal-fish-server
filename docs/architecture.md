@@ -105,7 +105,8 @@ See:
 - [Transport Fallback (v3)](architecture/transport-fallback.md)
 - [Handoff & Topologies (v3)](architecture/handoff-and-topologies.md)
 - [Formal Verification (v3)](architecture/formal-verification.md)
-- [Scaling (Multi-Node)](architecture/scaling.md)
+- [Single-Instance Deployment](architecture/single-instance-deployment.md)
+- [Scaling](architecture/scaling.md)
 
 ### Configuration
 

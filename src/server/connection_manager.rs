@@ -642,8 +642,8 @@ impl ConnectionManager {
     /// Returns true if the threshold has elapsed since the last update, and marks
     /// the update as performed. Returns false if update should be skipped.
     ///
-    /// This throttling mechanism reduces update overhead while maintaining
-    /// the 5-minute cross-instance staleness window accuracy (30s << 5min).
+    /// This throttling mechanism reduces database writes while keeping local
+    /// liveness and cleanup timestamps current.
     pub fn should_update_last_seen(
         &self,
         player_id: &PlayerId,
