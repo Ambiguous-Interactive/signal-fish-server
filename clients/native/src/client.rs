@@ -817,7 +817,14 @@ impl Orchestrator<'_> {
             }
             emit(&Event::Error {
                 message: if self.criteria_met() {
-                    "--run-for-secs elapsed while waiting for --success-release-file".to_string()
+                    match &self.cli.success_release_file {
+                        Some(path) => format!(
+                            "--run-for-secs elapsed while waiting for --success-release-file {}",
+                            path.display()
+                        ),
+                        None => "--run-for-secs elapsed while waiting for the success release file"
+                            .to_string(),
+                    }
                 } else {
                     format!(
                         "--run-for-secs elapsed with unmet success criteria: {}",

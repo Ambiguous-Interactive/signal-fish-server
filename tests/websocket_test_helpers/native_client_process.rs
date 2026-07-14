@@ -155,23 +155,29 @@ impl NativeClientProcess {
     /// Read until `count` events with this tag have been recorded in total.
     pub async fn await_event_count(&mut self, event_name: &str, count: usize, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
-        while self.recorded_event_count(event_name) < count {
-            let context = format!(
-                "awaiting {count} `{event_name}` events (have {})",
-                self.recorded_event_count(event_name)
-            );
+        let mut observed = self.recorded_event_count(event_name);
+        while observed < count {
+            let context = format!("awaiting {count} `{event_name}` events (have {observed})");
             let event = self.next_event_before(deadline, &context).await;
+            if event
+                .as_ref()
+                .and_then(|item| item.get("event"))
+                .and_then(Value::as_str)
+                == Some(event_name)
+            {
+                observed += 1;
+            }
             assert!(
                 event.is_some(),
                 "client {}: stdout ended with {} of {count} `{event_name}` events;\n{}",
                 self.name,
-                self.recorded_event_count(event_name),
+                observed,
                 self.diagnostics()
             );
         }
     }
 
-    pub fn recorded_event_count(&self, event_name: &str) -> usize {
+    fn recorded_event_count(&self, event_name: &str) -> usize {
         self.events
             .iter()
             .filter(|event| event.get("event").and_then(Value::as_str) == Some(event_name))

@@ -256,7 +256,7 @@ fn assert_exact_channel_ledger(
     );
 }
 
-fn assert_client_log(
+fn assert_client_barrier(
     client: &NativeClientProcess,
     player_id: &str,
     all_ids: &BTreeSet<&str>,
@@ -280,9 +280,6 @@ fn assert_client_log(
         events_named(&client.events, "fallback_engaged").is_empty(),
         "{who}: clean full mesh must never engage fallback"
     );
-    let exit = single_event(&client.events, "exiting", who);
-    assert_eq!(exit.get("code").and_then(Value::as_i64), Some(0));
-
     let plan = single_event(window, "session_plan", who);
     assert_eq!(string_field(plan, "topology", who), "mesh");
     assert_eq!(string_field(plan, "transport", who), "webrtc");
@@ -375,12 +372,34 @@ fn assert_client_log(
         "{who}: relay-floor sender ledger"
     );
 
-    let signal_count = events_named(&client.events, "signal_sent").len();
+    let signal_count = events_named(window, "signal_sent").len();
     assert!(
         signal_count <= signal_budget,
         "{who}: emitted {signal_count} signals, exceeding production budget {signal_budget}"
     );
     signal_count
+}
+
+fn assert_clean_client_exit(client: &NativeClientProcess, status: &std::process::ExitStatus) {
+    assert!(
+        status.success(),
+        "{} exited {status};\n{}",
+        client.name,
+        client.diagnostics()
+    );
+    assert!(
+        events_named(&client.events, "error").is_empty(),
+        "{}: errors after mesh release: {:?}",
+        client.name,
+        client.error_messages()
+    );
+    assert!(
+        events_named(&client.events, "fallback_engaged").is_empty(),
+        "{}: clean full mesh must never engage fallback",
+        client.name
+    );
+    let exit = single_event(&client.events, "exiting", &client.name);
+    assert_eq!(exit.get("code").and_then(Value::as_i64), Some(0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -430,25 +449,6 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     )
     .await;
     let barrier_elapsed = barrier_started.elapsed();
-    std::fs::write(&success_release_file, b"release")
-        .expect("release successful clients from the mesh barrier");
-    let statuses = join_all(
-        clients
-            .iter_mut()
-            .map(|client| client.drain_to_termination(CLIENT_EXIT_DEADLINE)),
-    )
-    .await;
-    let total_elapsed = total_started.elapsed();
-    stop_tx.send(true).expect("stop RSS sampler");
-    let peak_rss = rss_task.await.expect("RSS sampler task succeeds");
-    for (client, status) in clients.iter().zip(&statuses) {
-        assert!(
-            status.success(),
-            "{} exited {status};\n{}",
-            client.name,
-            client.diagnostics()
-        );
-    }
 
     let ids: Vec<String> = clients
         .iter()
@@ -471,7 +471,7 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
 
     let mut per_client_signals = Vec::with_capacity(PLAYERS);
     for (client, id) in clients.iter().zip(&ids) {
-        per_client_signals.push(assert_client_log(
+        per_client_signals.push(assert_client_barrier(
             client,
             id,
             &all_ids,
@@ -485,6 +485,47 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     let signal_p50 = sorted_signals[(sorted_signals.len() - 1) / 2];
     let signal_p99 = *sorted_signals.last().expect("the matrix has clients");
 
+    let held_counters = scrape_delivery_counters(server.port).await;
+    assert_eq!(
+        held_counters.backpressure_events, 0,
+        "clean mesh backpressure"
+    );
+    assert_eq!(
+        held_counters.slow_consumer_disconnects, 0,
+        "clean mesh slow-consumer evictions"
+    );
+    assert_eq!(
+        held_counters.dropped, 0,
+        "clean mesh messages dropped before coordinated teardown"
+    );
+    assert_scraped_message_conservation(&held_counters);
+    let held_metrics = fetch_prometheus_text(server.port).await;
+    assert_eq!(
+        sample_value(&held_metrics, "signal_fish_transport_signals_relayed_total"),
+        u64::try_from(total_signals).expect("signal total fits u64"),
+        "server accepted signal count must equal client emission ledger"
+    );
+    assert_eq!(
+        sample_value(&held_metrics, "signal_fish_websocket_ping_timeouts_total"),
+        0,
+        "clean mesh must not lose clients to ping timeout"
+    );
+
+    std::fs::write(&success_release_file, b"release")
+        .expect("release successful clients from the mesh barrier");
+    let statuses = join_all(
+        clients
+            .iter_mut()
+            .map(|client| client.drain_to_termination(CLIENT_EXIT_DEADLINE)),
+    )
+    .await;
+    let total_elapsed = total_started.elapsed();
+    stop_tx.send(true).expect("stop RSS sampler");
+    let peak_rss = rss_task.await.expect("RSS sampler task succeeds");
+    for (client, status) in clients.iter().zip(&statuses) {
+        assert_clean_client_exit(client, status);
+    }
+
     wait_for_metrics_quiescence(server.port).await;
     let counters = scrape_delivery_counters(server.port).await;
     assert_eq!(counters.backpressure_events, 0, "clean mesh backpressure");
@@ -492,14 +533,8 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         counters.slow_consumer_disconnects, 0,
         "clean mesh slow-consumer evictions"
     );
-    assert_eq!(counters.dropped, 0, "clean mesh dropped server messages");
     assert_scraped_message_conservation(&counters);
     let metrics = fetch_prometheus_text(server.port).await;
-    assert_eq!(
-        sample_value(&metrics, "signal_fish_transport_signals_relayed_total"),
-        u64::try_from(total_signals).expect("signal total fits u64"),
-        "server accepted signal count must equal client emission ledger"
-    );
     assert_eq!(
         sample_value(&metrics, "signal_fish_websocket_ping_timeouts_total"),
         0,
@@ -507,8 +542,12 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     );
 
     println!(
-        "H8 mesh complete: players={PLAYERS} pairs={} total_signals={total_signals} signals_per_client={per_client_signals:?} signal_p50={signal_p50} signal_p99={signal_p99} all_clients_at_success_barrier={barrier_elapsed:?} total_elapsed={total_elapsed:?} post_spawn_server_peak_rss_kib={} post_spawn_client_peak_rss_kib={:?}",
+        "H8 mesh complete: players={PLAYERS} pairs={} total_signals={total_signals} signals_per_client={per_client_signals:?} signal_p50={signal_p50} signal_p99={signal_p99} all_clients_at_success_barrier={barrier_elapsed:?} total_elapsed={total_elapsed:?} coordinated_teardown_drops={} post_spawn_server_peak_rss_kib={} post_spawn_client_peak_rss_kib={:?}",
         PLAYERS * (PLAYERS - 1) / 2,
+        counters
+            .dropped
+            .checked_sub(held_counters.dropped)
+            .expect("server dropped-message counter is monotonic"),
         peak_rss.first().copied().unwrap_or(0),
         &peak_rss[1..]
     );

@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowing the experiment to prove the simultaneous 120-edge graph, exact
   reliable/unreliable channel ledgers, relay-floor delivery, and production
   600-signal budget without teardown races. Normal client exit behavior is
-  unchanged when the new flag is omitted.
+  unchanged when the new flag is omitted, and barrier-timeout diagnostics name
+  the exact path still awaited.
 - Add canonical release identity across the annotated Git tag, crates.io,
   GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
   container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and
