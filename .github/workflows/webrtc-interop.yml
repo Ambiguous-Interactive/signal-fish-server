@@ -129,7 +129,7 @@ jobs:
           fi
           echo "version=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Run cargo-deny (reference client)
-        uses: EmbarkStudios/cargo-deny-action@v2.0.20
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           manifest-path: clients/native/Cargo.toml
           arguments: --all-features
