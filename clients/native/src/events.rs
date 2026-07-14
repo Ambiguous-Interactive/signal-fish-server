@@ -99,6 +99,10 @@ pub enum Event {
     },
     /// The P2P window resolved with zero connected pairs; relay carries the session.
     FallbackEngaged,
+    /// Every flag-driven success criterion currently holds. When a harness
+    /// supplied `--success-release-file`, the client remains live until that
+    /// file appears.
+    SuccessCriteriaMet,
     /// A non-fatal or fatal error (fatal errors are followed by `exiting`).
     Error { message: String },
     /// Final event before process exit with the given code.
@@ -223,6 +227,7 @@ mod tests {
             ),
             (Event::GameDataSent, "game_data_sent"),
             (Event::FallbackEngaged, "fallback_engaged"),
+            (Event::SuccessCriteriaMet, "success_criteria_met"),
             (Event::Exiting { code: 0 }, "exiting"),
         ];
         for (event, expected_tag) in cases {

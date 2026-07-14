@@ -76,6 +76,8 @@ const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 /// Grace period between meeting all success criteria and exiting, so the last
 /// unreliable-channel sends are not torn down mid-flight for slower siblings.
 const EXIT_LINGER: Duration = Duration::from_millis(250);
+/// Poll cadence for an optional harness-controlled success release file.
+const SUCCESS_RELEASE_POLL: Duration = Duration::from_millis(100);
 
 /// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
 /// `Ping` mandatory for every client (the server evicts idle connections);
@@ -202,6 +204,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pending_signals: BTreeMap::new(),
         run_deadline,
         linger_until: None,
+        success_criteria_reported: false,
+        success_release_poll_at: None,
         next_ping_at: Instant::now() + PING_INTERVAL,
         pong_deadline: None,
         pong_grace_applied: false,
@@ -613,6 +617,10 @@ struct Orchestrator<'a> {
     run_deadline: Instant,
     /// Set once all criteria are met; exit 0 when it elapses.
     linger_until: Option<Instant>,
+    /// Whether the stable machine event announcing complete criteria was sent.
+    success_criteria_reported: bool,
+    /// Next poll for an optional harness-controlled release-file barrier.
+    success_release_poll_at: Option<Instant>,
     /// Next keepalive `Ping` send (the mandatory client keepalive contract).
     next_ping_at: Instant,
     /// Deadline for the `Pong` answering the most recent `Ping`; `None` while
@@ -732,6 +740,9 @@ impl Orchestrator<'_> {
         if let Some(at) = self.linger_until {
             wake = wake.min(at);
         }
+        if let Some(at) = self.success_release_poll_at {
+            wake = wake.min(at);
+        }
         wake = wake.min(self.next_ping_at);
         if let Some(at) = self.pong_deadline {
             wake = wake.min(at);
@@ -801,14 +812,19 @@ impl Orchestrator<'_> {
         }
 
         if now >= self.run_deadline {
-            if self.criteria_met() {
+            if self.criteria_met() && !self.success_release_pending() {
                 return Ok(Some(EXIT_SUCCESS));
             }
             emit(&Event::Error {
-                message: format!(
-                    "--run-for-secs elapsed with unmet success criteria: {}",
-                    self.unmet_criteria().join(", ")
-                ),
+                message: if self.criteria_met() {
+                    "--run-for-secs elapsed while waiting for --success-release-file"
+                        .to_string()
+                } else {
+                    format!(
+                        "--run-for-secs elapsed with unmet success criteria: {}",
+                        self.unmet_criteria().join(", ")
+                    )
+                },
             });
             return Ok(Some(EXIT_CRITERIA_UNMET));
         }
@@ -816,9 +832,30 @@ impl Orchestrator<'_> {
     }
 
     fn arm_success_linger(&mut self, now: Instant) {
-        if self.linger_until.is_none() && self.criteria_met() {
-            self.linger_until = Some(now + EXIT_LINGER);
+        if !self.criteria_met() {
+            self.success_release_poll_at = None;
+            return;
         }
+        if self.cli.success_release_file.is_some() && !self.success_criteria_reported {
+            emit(&Event::SuccessCriteriaMet);
+            self.success_criteria_reported = true;
+        }
+        if self.success_release_pending() {
+            self.linger_until = None;
+            self.success_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
+        } else {
+            self.success_release_poll_at = None;
+            if self.linger_until.is_none() {
+                self.linger_until = Some(now + EXIT_LINGER);
+            }
+        }
+    }
+
+    fn success_release_pending(&self) -> bool {
+        self.cli
+            .success_release_file
+            .as_ref()
+            .is_some_and(|path| !path.exists())
     }
 
     async fn handle_server_message(&mut self, message: ServerMessage) -> Result<(), FatalError> {

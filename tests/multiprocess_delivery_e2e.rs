@@ -59,17 +59,16 @@
 //! keeps plain `cargo test` from co-scheduling the floods in one process.
 #![cfg(unix)]
 
+#[path = "websocket_test_helpers/native_client_process.rs"]
+mod native_client_process;
 mod websocket_test_helpers;
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use native_client_process::{spawn_native_client, NativeClientProcess};
 use serde_json::{json, Value};
 use signal_fish_server::protocol::{ClientMessage, PlayerId, ServerMessage};
-use tokio::io::{AsyncBufReadExt, BufReader, Lines};
-use tokio::process::ChildStdout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::delivery_ledger::{extract, LedgerPayload};
 use websocket_test_helpers::prometheus_scrape::{
@@ -124,98 +123,6 @@ fn config_overlay(knobs: DeliveryKnobs) -> Value {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Native reference client process harness (JSONL stdout consumer; adapted
-// from clients/native/tests/harness/mod.rs, which this crate cannot import).
-// ---------------------------------------------------------------------------
-
-/// Locate the `signal-fish-reference-native` binary: `SIGNAL_FISH_CLIENT_BIN`
-/// when set (CI pre-builds it), else a once-per-process
-/// `cargo build --manifest-path clients/native/Cargo.toml` fallback for local
-/// runs. Panics with actionable instructions on failure.
-fn native_client_binary() -> PathBuf {
-    if let Some(raw) = std::env::var_os("SIGNAL_FISH_CLIENT_BIN") {
-        let path = PathBuf::from(raw);
-        assert!(
-            path.is_file(),
-            "SIGNAL_FISH_CLIENT_BIN points at {path:?}, which is not a file. Run \
-             `cargo build --manifest-path clients/native/Cargo.toml --bin \
-             signal-fish-reference-native` and point the variable at the built binary."
-        );
-        return path;
-    }
-
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let manifest = root.join("clients").join("native").join("Cargo.toml");
-            let mut command = std::process::Command::new(env!("CARGO"));
-            command
-                .arg("build")
-                .arg("--manifest-path")
-                .arg(&manifest)
-                .args(["--bin", "signal-fish-reference-native"]);
-            // Instrumented parent cargo processes (coverage/sanitizer lanes)
-            // must not leak flags into the nested build (same scrub set as
-            // tests/common/mod.rs `scrub_nested_cargo_env`).
-            for var in [
-                "RUSTFLAGS",
-                "CARGO_ENCODED_RUSTFLAGS",
-                "RUSTDOCFLAGS",
-                "CARGO_TARGET_DIR",
-                "ASAN_OPTIONS",
-                "LSAN_OPTIONS",
-                "UBSAN_OPTIONS",
-                "TSAN_OPTIONS",
-                "MIRIFLAGS",
-            ] {
-                command.env_remove(var);
-            }
-            let status = command
-                .status()
-                .expect("run `cargo build` for the native reference client");
-            assert!(
-                status.success(),
-                "building the native reference client failed ({status}); build it manually with \
-                 `cargo build --manifest-path clients/native/Cargo.toml --bin \
-                 signal-fish-reference-native` or set SIGNAL_FISH_CLIENT_BIN"
-            );
-            let path = root
-                .join("clients")
-                .join("native")
-                .join("target")
-                .join("debug")
-                .join("signal-fish-reference-native");
-            assert!(
-                path.is_file(),
-                "the nested client build succeeded but {path:?} does not exist"
-            );
-            path
-        })
-        .clone()
-}
-
-/// Guard around one spawned reference-client process; collects its JSONL
-/// stdout events. Dropping it kills the child.
-struct ClientProcess {
-    name: String,
-    child: Option<tokio::process::Child>,
-    lines: Lines<BufReader<ChildStdout>>,
-    events: Vec<Value>,
-    stderr_path: PathBuf,
-}
-
-impl Drop for ClientProcess {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            if let Err(error) = child.start_kill() {
-                eprintln!("failed to kill client {} on drop: {error}", self.name);
-            }
-        }
-    }
-}
-
 /// Spawn one native reference client that joins `room_code` and lingers,
 /// reading relay traffic, for the given soft window. `peers` is set to a
 /// count the room never reaches a full lobby with, so the client stays a
@@ -227,185 +134,24 @@ fn spawn_lingering_client(
     peers: usize,
     run_for_secs: u64,
     workdir: &std::path::Path,
-) -> ClientProcess {
-    let stderr_path = workdir.join(format!("client-{name}-stderr.log"));
-    let stderr_file = std::fs::File::create(&stderr_path).expect("create client stderr capture");
-
-    let mut command = tokio::process::Command::new(native_client_binary());
-    command
-        .arg("--server-url")
-        .arg(format!("ws://127.0.0.1:{server_port}/v3/ws"))
-        .arg("--join-code")
-        .arg(room_code)
-        .arg("--game-name")
-        .arg(GAME_NAME)
-        .arg("--player-name")
-        .arg(name)
-        .arg("--peers")
-        .arg(peers.to_string())
-        .arg("--run-for-secs")
-        .arg(run_for_secs.to_string())
-        .arg("--max-runtime-secs")
-        .arg((run_for_secs + 60).to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::from(stderr_file))
-        .env("RUST_LOG", "info")
-        .kill_on_drop(true);
-
-    let mut child = command.spawn().expect("spawn the native reference client");
-    let stdout = child.stdout.take().expect("client stdout is piped");
-    ClientProcess {
-        name: name.to_string(),
-        child: Some(child),
-        lines: BufReader::new(stdout).lines(),
-        events: Vec::new(),
-        stderr_path,
-    }
-}
-
-impl ClientProcess {
-    /// OS pid of the still-running client (panics once reaped).
-    fn pid(&self) -> u32 {
-        self.child
-            .as_ref()
-            .and_then(tokio::process::Child::id)
-            .expect("client process already exited or was reaped")
-    }
-
-    /// Read events until one named `event_name` arrives; panics with
-    /// diagnostics on timeout, EOF, or a non-JSONL stdout line.
-    async fn await_event(&mut self, event_name: &str, timeout: Duration) -> Value {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            match self
-                .next_event_before(deadline, &format!("awaiting `{event_name}`"))
-                .await
-            {
-                Some(event) => {
-                    if event.get("event").and_then(Value::as_str) == Some(event_name) {
-                        return event;
-                    }
-                }
-                None => panic!(
-                    "client {}: stdout ended before `{event_name}`;\n{}",
-                    self.name,
-                    self.diagnostics()
-                ),
-            }
-        }
-    }
-
-    /// Read events until `count` events named `event_name` have been recorded
-    /// in total (already-recorded ones included).
-    async fn await_event_count(&mut self, event_name: &str, count: usize, timeout: Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while self.recorded_event_count(event_name) < count {
-            let context = format!(
-                "awaiting {count} `{event_name}` events (have {})",
-                self.recorded_event_count(event_name)
-            );
-            let event = self.next_event_before(deadline, &context).await;
-            assert!(
-                event.is_some(),
-                "client {}: stdout ended with {} of {count} `{event_name}` events;\n{}",
-                self.name,
-                self.recorded_event_count(event_name),
-                self.diagnostics()
-            );
-        }
-    }
-
-    fn recorded_event_count(&self, event_name: &str) -> usize {
-        self.events
-            .iter()
-            .filter(|event| event.get("event").and_then(Value::as_str) == Some(event_name))
-            .count()
-    }
-
-    /// Read and record the next event line before `deadline`; `None` on EOF.
-    async fn next_event_before(
-        &mut self,
-        deadline: tokio::time::Instant,
-        context: &str,
-    ) -> Option<Value> {
-        let read = tokio::time::timeout_at(deadline, self.lines.next_line()).await;
-        let line = read
-            .unwrap_or_else(|_elapsed| {
-                panic!(
-                    "client {}: timed out {context};\n{}",
-                    self.name,
-                    self.diagnostics()
-                )
-            })
-            .unwrap_or_else(|error| {
-                panic!(
-                    "client {}: stdout read error: {error};\n{}",
-                    self.name,
-                    self.diagnostics()
-                )
-            })?;
-        let event: Value = serde_json::from_str(&line).unwrap_or_else(|error| {
-            panic!(
-                "client {}: stdout line is not a JSON event ({error}): {line}",
-                self.name
-            )
-        });
-        self.events.push(event.clone());
-        Some(event)
-    }
-
-    /// Drain every remaining event to EOF, reap the child, and return its
-    /// exit status (callers assert code vs. signal explicitly).
-    async fn drain_to_termination(&mut self, timeout: Duration) -> std::process::ExitStatus {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while let Some(_event) = self
-            .next_event_before(deadline, "draining events to process exit")
-            .await
-        {
-            // Recorded by next_event_before; nothing else to do.
-        }
-        let mut child = self.child.take().expect("client child already reaped");
-        tokio::time::timeout_at(deadline, child.wait())
-            .await
-            .unwrap_or_else(|_elapsed| {
-                panic!(
-                    "client {}: stdout closed but the process did not exit;\n{}",
-                    self.name,
-                    self.diagnostics()
-                )
-            })
-            .unwrap_or_else(|error| panic!("client {}: failed to reap process: {error}", self.name))
-    }
-
-    /// All `error`-event messages recorded so far.
-    fn error_messages(&self) -> Vec<String> {
-        self.events
-            .iter()
-            .filter(|event| event.get("event").and_then(Value::as_str) == Some("error"))
-            .filter_map(|event| event.get("message").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// Recent events plus captured stderr, for failure messages.
-    fn diagnostics(&self) -> String {
-        const EVENT_TAIL: usize = 12;
-        let tail_start = self.events.len().saturating_sub(EVENT_TAIL);
-        let recent: Vec<String> = self.events[tail_start..]
-            .iter()
-            .map(|event| event.to_string())
-            .collect();
-        let stderr = std::fs::read_to_string(&self.stderr_path)
-            .unwrap_or_else(|error| format!("<failed to read stderr: {error}>"));
-        format!(
-            "last {} events:\n{}\n--- client {} stderr ---\n{}",
-            recent.len(),
-            recent.join("\n"),
-            self.name,
-            stderr
-        )
-    }
+) -> NativeClientProcess {
+    let args = vec![
+        "--server-url".to_string(),
+        format!("ws://127.0.0.1:{server_port}/v3/ws"),
+        "--join-code".to_string(),
+        room_code.to_string(),
+        "--game-name".to_string(),
+        GAME_NAME.to_string(),
+        "--player-name".to_string(),
+        name.to_string(),
+        "--peers".to_string(),
+        peers.to_string(),
+        "--run-for-secs".to_string(),
+        run_for_secs.to_string(),
+        "--max-runtime-secs".to_string(),
+        (run_for_secs + 60).to_string(),
+    ];
+    spawn_native_client(name, &args, workdir)
 }
 
 /// Deliver `signal` (e.g. "-STOP") to `pid` via the portable `kill` binary —
@@ -817,11 +563,7 @@ async fn sigkill_client_mid_burst_conserves() {
 
     // SIGKILL: no goodbye, no close frame — the kernel does the teardown.
     signal_process(victim.pid(), "-KILL", "kill the native client mid-burst");
-    let mut victim_child = victim.child.take().expect("victim child already reaped");
-    let status = tokio::time::timeout(EVENT_DEADLINE, victim_child.wait())
-        .await
-        .expect("timed out reaping the SIGKILLed client")
-        .expect("failed to reap the SIGKILLed client");
+    let status = victim.drain_to_termination(EVENT_DEADLINE).await;
     assert!(
         status.code().is_none(),
         "a SIGKILLed process terminates by signal, got exit status {status}"

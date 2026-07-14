@@ -7,6 +7,7 @@
 
 use clap::{ArgGroup, Parser, ValueEnum};
 use signal_fish_server::protocol::{Topology, Transport};
+use std::path::PathBuf;
 
 /// Native Rust reference client for the Signal Fish protocol v3.
 ///
@@ -104,6 +105,13 @@ pub struct Cli {
     /// what (the guarantee that this process can never hang a harness).
     #[arg(long, default_value_t = 60)]
     pub max_runtime_secs: u64,
+
+    /// Test-harness coordination: after all success criteria are met, emit
+    /// `success_criteria_met` and keep the connection/pairs alive until this
+    /// path exists. Normal runs omit this flag and retain immediate bounded
+    /// success exit behavior.
+    #[arg(long)]
+    pub success_release_file: Option<PathBuf>,
 
     /// Protocol version to advertise in Authenticate. 2 omits every v3 field
     /// entirely (a pure v2 client for mixed-room tests).
@@ -260,6 +268,7 @@ mod tests {
         assert_eq!(cli.runtime, RuntimeFlavor::Multi);
         assert_eq!(cli.runtime.as_str(), "multi");
         assert_eq!(cli.tick_stall_ms, 0, "fault injection is off by default");
+        assert_eq!(cli.success_release_file, None);
         assert_eq!(
             cli.topologies(),
             vec![Topology::Relay, Topology::Host, Topology::Mesh]
@@ -331,6 +340,22 @@ mod tests {
         assert_eq!(cli.runtime, RuntimeFlavor::Current);
         assert_eq!(cli.runtime.as_str(), "current");
         assert_eq!(cli.tick_stall_ms, 750);
+    }
+
+    #[test]
+    fn success_release_file_parses() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--success-release-file",
+            "/tmp/signal-fish-release",
+        ]);
+        assert_eq!(
+            cli.success_release_file.as_deref(),
+            Some(std::path::Path::new("/tmp/signal-fish-release"))
+        );
     }
 
     #[test]
