@@ -15,7 +15,9 @@
 //! unexercised scaffolding.
 
 use futures_util::SinkExt;
-use signal_fish_server::protocol::{ClientMessage, ErrorCode, PlayerId, ServerMessage};
+use signal_fish_server::protocol::{
+    ClientMessage, ErrorCode, GameDataEncoding, PlayerId, RoomJoinedPayload, ServerMessage,
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::{next_matching_server_message_within, WsStream};
@@ -34,6 +36,10 @@ pub struct PlayerHandle {
     /// assert co-location — that N joiners share ONE room — without a second
     /// round-trip or draining every socket's `PlayerJoined` stream.
     pub room_player_count: usize,
+    /// The exact join snapshot consumed by the harness. Delivery suites feed
+    /// this into `ConformanceAuditor` before recording the later lifecycle and
+    /// game-data frames on the retained socket.
+    pub room_joined: RoomJoinedPayload,
     pub ws: WsStream,
 }
 
@@ -60,13 +66,24 @@ async fn send(ws: &mut WsStream, msg: &ClientMessage) {
 /// silently on the later `ProtocolInfo` (matching the auth helpers in the other
 /// e2e suites).
 pub async fn authenticate(ws: &mut WsStream, protocol_version: u16) {
+    authenticate_with_encoding(ws, protocol_version, None).await;
+}
+
+/// Authenticate with an explicit relay encoding. The matrix uses this seam to
+/// exercise both JSON text frames and MessagePack binary frames through the
+/// same room/admission path.
+pub async fn authenticate_with_encoding(
+    ws: &mut WsStream,
+    protocol_version: u16,
+    game_data_format: Option<GameDataEncoding>,
+) {
     send(
         ws,
         &ClientMessage::Authenticate {
             app_id: "room16".to_string(),
             sdk_version: None,
             platform: None,
-            game_data_format: None,
+            game_data_format,
             protocol_version: Some(protocol_version),
             supported_transports: None,
             supported_topologies: None,
@@ -112,27 +129,30 @@ pub async fn try_join(
         STEP_DEADLINE,
         "room join outcome",
         |message| match message {
-            ServerMessage::RoomJoined(payload) => {
-                Some(Ok((payload.player_id, payload.current_players.len())))
-            }
+            ServerMessage::RoomJoined(payload) => Some(Ok(payload)),
             ServerMessage::RoomJoinFailed { reason, error_code } => Some(Err((reason, error_code))),
             _ => None,
         },
     )
     .await;
 
-    outcome.map(|(player_id, room_player_count)| PlayerHandle {
-        player_id,
-        room_player_count,
-        ws,
+    outcome.map(|room_joined| {
+        let room_joined = *room_joined;
+        PlayerHandle {
+            player_id: room_joined.player_id,
+            room_player_count: room_joined.current_players.len(),
+            room_joined,
+            ws,
+        }
     })
 }
 
 /// Connect + authenticate + join `n` players from loopback into one room,
 /// creating it on the first join at `max_players`. Every player shares IP
-/// `127.0.0.1`, so the per-IP admission cap is exercised. Panics on any refusal
-/// — use it for the success path; drive [`connect`] / [`try_join`] directly to
-/// assert a refusal.
+/// `127.0.0.1`, so the per-IP admission cap is exercised. `game_data_format`
+/// selects JSON text or MessagePack binary relay for matrix consumers. Panics
+/// on any refusal — use it for the success path; drive [`connect`] /
+/// [`try_join`] directly to assert a refusal.
 ///
 /// The returned sockets are NOT drained afterward. That is safe as long as the
 /// caller uses a server started via `create_router` + `axum::serve` (no
@@ -147,12 +167,13 @@ pub async fn join_n_players(
     max_players: Option<u8>,
     n: usize,
     protocol_version: u16,
+    game_data_format: Option<GameDataEncoding>,
 ) -> Vec<PlayerHandle> {
     let mut handles = Vec::with_capacity(n);
     for i in 0..n {
         let name = format!("P{i}");
         let mut ws = connect(addr).await;
-        authenticate(&mut ws, protocol_version).await;
+        authenticate_with_encoding(&mut ws, protocol_version, game_data_format).await;
         match try_join(ws, game_name, room_code, max_players, &name).await {
             Ok(handle) => handles.push(handle),
             Err((reason, code)) => {
