@@ -15,6 +15,9 @@ $script:Failed = 0
 $script:Skipped = 0
 $script:WorktreePseudoCommit = "__WORKTREE__"
 $script:HookBudgetMs = 1000
+$script:MaxBatchedBlobBytes = 8 * 1024 * 1024
+$script:CommitBlobTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+$script:MissingCommitBlobCache = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 
 . (Join-Path $PSScriptRoot "native-process.ps1")
 
@@ -214,6 +217,112 @@ function Get-ChangedFilesForWorktreePreflight {
     $files
 }
 
+function Get-CommitBlobCacheKey {
+    param(
+        [Parameter(Mandatory = $true)][string]$Commit,
+        [Parameter(Mandatory = $true)][string]$File
+    )
+
+    "${Commit}`n${File}"
+}
+
+function Read-AsciiLineFromBytes {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][ref]$Offset
+    )
+
+    if ($Offset.Value -ge $Bytes.Length) {
+        return $null
+    }
+
+    $start = $Offset.Value
+    while ($Offset.Value -lt $Bytes.Length -and $Bytes[$Offset.Value] -ne 10) {
+        $Offset.Value++
+    }
+
+    $length = $Offset.Value - $start
+    $line = [System.Text.Encoding]::ASCII.GetString($Bytes, $start, $length).TrimEnd("`r")
+    if ($Offset.Value -lt $Bytes.Length -and $Bytes[$Offset.Value] -eq 10) {
+        $Offset.Value++
+    }
+
+    $line
+}
+
+function Initialize-CommitBlobTextCache {
+    param([System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$ChangedFiles)
+
+    $requests = [System.Collections.Generic.List[object]]::new()
+    foreach ($file in $ChangedFiles.Keys) {
+        $isHookPolicyFile = $file -in @(
+            ".githooks/pre-commit",
+            ".githooks/pre-push",
+            "scripts/hooks/native-process.ps1",
+            "scripts/hooks/pre-commit.ps1",
+            "scripts/hooks/pre-commit-rust.ps1",
+            "scripts/hooks/pre-push.ps1"
+        )
+        if (-not $isHookPolicyFile -and $file -notmatch "^\.github/workflows/.*\.ya?ml$") {
+            continue
+        }
+
+        foreach ($commit in $ChangedFiles[$file]) {
+            if ($commit -eq $script:WorktreePseudoCommit) {
+                continue
+            }
+            [void]$requests.Add([pscustomobject]@{
+                    Expression = "${commit}:${file}"
+                    Key = Get-CommitBlobCacheKey -Commit $commit -File $file
+                })
+        }
+    }
+
+    if ($requests.Count -eq 0) {
+        return
+    }
+
+    $batchInput = (($requests | ForEach-Object { $_.Expression }) -join "`n") + "`n"
+    $result = Invoke-NativeBytesWithInput -FileName "git" -Arguments @("cat-file", "--batch") -InputText $batchInput
+    if ($result.ExitCode -ne 0) {
+        throw "git cat-file --batch failed:`n$($result.Output)"
+    }
+
+    $offset = 0
+    $totalByteCount = [int64]0
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    foreach ($request in $requests) {
+        $header = Read-AsciiLineFromBytes -Bytes $result.StdoutBytes -Offset ([ref]$offset)
+        if ($null -eq $header) {
+            throw "git cat-file --batch ended before $($request.Expression)"
+        }
+        if ($header.EndsWith(" missing", [System.StringComparison]::Ordinal)) {
+            [void]$script:MissingCommitBlobCache.Add($request.Key)
+            continue
+        }
+
+        $headerFields = @($header.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries))
+        if ($headerFields.Count -ne 3 -or $headerFields[1] -ne "blob") {
+            throw "Unexpected git cat-file header for $($request.Expression): $header"
+        }
+
+        $byteCount = [int64]::Parse($headerFields[2], [System.Globalization.CultureInfo]::InvariantCulture)
+        $totalByteCount += $byteCount
+        if ($totalByteCount -gt $script:MaxBatchedBlobBytes) {
+            throw "Pushed hook/workflow blob batch is $totalByteCount bytes, above the $script:MaxBatchedBlobBytes byte pre-push limit."
+        }
+        if ($byteCount -gt [int]::MaxValue -or $offset + $byteCount -gt $result.StdoutBytes.Length) {
+            throw "git cat-file --batch returned truncated or oversized content for $($request.Expression)"
+        }
+
+        $script:CommitBlobTextCache[$request.Key] = $utf8NoBom.GetString($result.StdoutBytes, $offset, [int]$byteCount)
+        $offset += [int]$byteCount
+        if ($offset -lt $result.StdoutBytes.Length -and $result.StdoutBytes[$offset] -eq 10) {
+            $offset++
+        }
+    }
+}
+
 function Get-CommitBlobText {
     param(
         [Parameter(Mandatory = $true)][string]$Commit,
@@ -226,6 +335,14 @@ function Get-CommitBlobText {
             return $null
         }
         return [System.IO.File]::ReadAllText($path)
+    }
+
+    $cacheKey = Get-CommitBlobCacheKey -Commit $Commit -File $File
+    if ($script:CommitBlobTextCache.ContainsKey($cacheKey)) {
+        return $script:CommitBlobTextCache[$cacheKey]
+    }
+    if ($script:MissingCommitBlobCache.Contains($cacheKey)) {
+        return $null
     }
 
     $result = Invoke-Native -FileName "git" -Arguments @("show", "${Commit}:$File")
@@ -563,6 +680,7 @@ if ($changedFiles.Count -eq 0) {
     Pass "Changed file discovery"
 }
 
+Initialize-CommitBlobTextCache -ChangedFiles $changedFiles
 Test-FastHookSource -ChangedFiles $changedFiles
 Test-WorkflowDirectScriptInvocations -ChangedFiles $changedFiles
 

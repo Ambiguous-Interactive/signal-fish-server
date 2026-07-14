@@ -17442,6 +17442,11 @@ fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
         content.contains("Test-WorkflowDirectScriptInvocations")
             && content.contains("^\\.github/workflows/.*\\.ya?ml$")
             && content.contains("scripts/hooks/pre-commit-rust.ps1")
+            && content.contains("Initialize-CommitBlobTextCache")
+            && content.contains("Invoke-NativeBytesWithInput")
+            && content.contains("\"cat-file\", \"--batch\"")
+            && content.contains("CommitBlobTextCache")
+            && content.contains("MaxBatchedBlobBytes")
             && content.contains("Get-CommitBlobText")
             && content.contains("Test-WorkflowContentForDirectScripts")
             && content.contains("Test-CommandTextForDirectScript")
@@ -17452,8 +17457,9 @@ fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
             && content.contains("HookBudgetMs")
             && content.contains("runBlockIndent"),
         "pre-push runner must keep a workflow direct-script invocation guard that \
-         reads pushed commit content, scans only run commands, and permits local \
-         scripts only when invoked through an interpreter."
+         batch-reads bounded pushed commit content without per-blob process fanout, \
+         scans only run commands, and permits local scripts only when invoked through \
+         an interpreter."
     );
 }
 
