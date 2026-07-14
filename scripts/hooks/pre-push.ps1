@@ -617,6 +617,9 @@ function Test-WorkflowContentForDirectScripts {
     $lineNumber = 0
     foreach ($line in $Content -split "`r?`n") {
         $lineNumber++
+        if (-not $inRunBlock -and -not $line.Contains("run:")) {
+            continue
+        }
         $trimmed = $line.Trim()
         $indent = Get-Indent -Line $line
 
@@ -625,7 +628,9 @@ function Test-WorkflowContentForDirectScripts {
                 continue
             }
             if ($indent -gt $runBlockIndent) {
-                Test-CommandTextForDirectScript -CommandText $trimmed -File $File -LineNumber $lineNumber -Violations $Violations
+                if ($trimmed.Contains("scripts/")) {
+                    Test-CommandTextForDirectScript -CommandText $trimmed -File $File -LineNumber $lineNumber -Violations $Violations
+                }
                 continue
             }
             $inRunBlock = $false
