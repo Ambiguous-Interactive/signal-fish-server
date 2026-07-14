@@ -4054,8 +4054,15 @@ fn test_release_workflow_skips_binary_attach_when_no_artifacts_exist() {
 fn test_release_path_calls_container_publication_directly() {
     let root = repo_root();
     let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let workflow_permissions = extract_yaml_mapping_block(&release, "permissions", 0)
+        .expect("release.yml must define workflow-level permissions");
     let publish_container = extract_workflow_job_block(&release, "publish-container")
         .expect("release.yml must define publish-container");
+
+    assert!(
+        !workflow_permissions.contains("packages: write"),
+        "release.yml must not grant packages: write to every job; keep it scoped to publish-container."
+    );
 
     for required in [
         "needs: [resolve-release, ensure-tag]",

@@ -52,7 +52,6 @@ on:
 permissions:
   contents: write
   actions: read
-  packages: write
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.release_version) || github.ref_name }}
