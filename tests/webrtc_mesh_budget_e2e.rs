@@ -31,8 +31,10 @@ use websocket_test_helpers::server_process::{spawn_server, ServerProcess};
 const PLAYERS: usize = 16;
 const GAME_NAME: &str = "webrtc-mesh-budget";
 const EVENT_DEADLINE: Duration = Duration::from_secs(60);
-const CLIENT_EXIT_DEADLINE: Duration = Duration::from_secs(360);
+const SUCCESS_BARRIER_DEADLINE: Duration = Duration::from_secs(360);
+const CLIENT_EXIT_DEADLINE: Duration = Duration::from_secs(30);
 const METRIC_QUIESCENCE_DEADLINE: Duration = Duration::from_secs(30);
+const CLIENT_MAX_RUNTIME_SECS: u64 = 540;
 const CHANNEL_LABELS: [&str; 2] = ["reliable", "unreliable"];
 
 fn event_name(event: &Value) -> Option<&str> {
@@ -102,7 +104,7 @@ fn client_args(
         "--run-for-secs".to_string(),
         "240".to_string(),
         "--max-runtime-secs".to_string(),
-        "300".to_string(),
+        CLIENT_MAX_RUNTIME_SECS.to_string(),
         "--success-release-file".to_string(),
         success_release_file.to_string_lossy().into_owned(),
     ];
@@ -426,6 +428,12 @@ fn assert_clean_client_exit(client: &NativeClientProcess, status: &std::process:
 #[ignore = "nightly-only (verification-nightly.yml): spawns 16 real webrtc-rs clients"]
 async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     let total_started = tokio::time::Instant::now();
+    let maximum_bounded_pre_release_wait =
+        EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE + EVENT_DEADLINE;
+    assert!(
+        Duration::from_secs(CLIENT_MAX_RUNTIME_SECS) > maximum_bounded_pre_release_wait,
+        "client watchdog must leave headroom beyond room creation, the success barrier, and signal-ledger settlement"
+    );
     let signal_budget = usize::try_from(Config::default().rate_limit.max_signals)
         .expect("production signal budget fits usize");
     assert_eq!(
@@ -462,11 +470,9 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let rss_task = tokio::spawn(sample_peak_rss(pids, stop_rx));
     let barrier_started = tokio::time::Instant::now();
-    join_all(
-        clients.iter_mut().map(|client| {
-            client.await_event_count("success_criteria_met", 1, CLIENT_EXIT_DEADLINE)
-        }),
-    )
+    join_all(clients.iter_mut().map(|client| {
+        client.await_event_count("success_criteria_met", 1, SUCCESS_BARRIER_DEADLINE)
+    }))
     .await;
     let barrier_elapsed = barrier_started.elapsed();
 

@@ -48,7 +48,7 @@ filter = 'binary(v3_multiprocess_e2e) or binary(multiprocess_delivery_e2e) or bi
 test-group = 'process-spawning'
 threads-required = 4
 
-# The real 16-client mesh has a 300s watchdog per child plus startup and
+# The real 16-client mesh has a 540s watchdog per child plus startup and
 # server-metric settlement. Keep nextest's outer deadline strictly above those
 # composed bounds so the clients, rather than nextest, emit useful diagnostics.
 [[profile.default.overrides]]

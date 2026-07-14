@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ledger. Normal client exit behavior is unchanged when the new flag is
   omitted, the soft run deadline does not break an active barrier hold, and
   a release observed after that deadline still honors the post-success linger.
+  Held clients sleep until that linger expires instead of spinning on an
+  elapsed soft deadline, and the nightly harness keeps explicit watchdog
+  headroom for its barrier assertions before coordinated release.
   Hard-watchdog diagnostics name the exact release path. Release-path metadata
   errors fail immediately with the underlying I/O diagnostic instead of
   masquerading as an absent file.

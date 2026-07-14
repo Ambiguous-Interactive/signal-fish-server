@@ -735,9 +735,14 @@ impl Orchestrator<'_> {
     fn next_wake(&self) -> Instant {
         // Once a harness-held client has reported success, the soft run
         // deadline no longer applies: the release path or the binary-wide
-        // hard watchdog is authoritative. Starting from the poll deadline
-        // avoids a busy loop after `run_deadline` passes.
-        let mut wake = self.success_release_poll_at.unwrap_or(self.run_deadline);
+        // hard watchdog is authoritative. Starting from the release poll or
+        // post-release linger avoids a busy loop after `run_deadline` passes.
+        let mut wake = harness_aware_base_wake(
+            self.run_deadline,
+            self.success_release_poll_at,
+            self.linger_until,
+            self.success_criteria_reported,
+        );
         if !self.relay_sent {
             if let Some(at) = self.relay_send_at {
                 wake = wake.min(at);
@@ -1674,6 +1679,21 @@ fn should_defer_success_at_run_deadline(
     release_pending || (success_criteria_reported && success_linger_pending)
 }
 
+fn harness_aware_base_wake(
+    run_deadline: Instant,
+    success_release_poll_at: Option<Instant>,
+    linger_until: Option<Instant>,
+    success_criteria_reported: bool,
+) -> Instant {
+    if success_criteria_reported {
+        success_release_poll_at
+            .or(linger_until)
+            .unwrap_or(run_deadline)
+    } else {
+        run_deadline
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1689,7 +1709,7 @@ mod tests {
 
     use super::{
         authoritative_peer_delta, changed_transport_status, clear_departed_membership_plan,
-        connection_targets_for_plan, consume_join_accountability_preface,
+        connection_targets_for_plan, consume_join_accountability_preface, harness_aware_base_wake,
         is_terminal_peer_connection_state, negotiated_version_from, next_handshake_message,
         require_finalized_membership_plan, requires_authoritative_finalization_plan,
         restore_reconnected_member, should_buffer_signal_for_unpaired_peer,
@@ -1718,6 +1738,22 @@ mod tests {
         assert!(should_defer_success_at_run_deadline(false, true, true));
         assert!(!should_defer_success_at_run_deadline(false, true, false));
         assert!(!should_defer_success_at_run_deadline(false, false, true));
+    }
+
+    #[test]
+    fn harness_linger_replaces_elapsed_soft_deadline_as_next_wake() {
+        let now = tokio::time::Instant::now();
+        let elapsed_run_deadline = now - std::time::Duration::from_secs(1);
+        let linger_until = now + super::EXIT_LINGER;
+        assert_eq!(
+            harness_aware_base_wake(elapsed_run_deadline, None, Some(linger_until), true),
+            linger_until
+        );
+        assert_eq!(
+            harness_aware_base_wake(elapsed_run_deadline, None, Some(linger_until), false),
+            elapsed_run_deadline,
+            "ordinary clients retain the soft-deadline behavior"
+        );
     }
 
     #[test]
