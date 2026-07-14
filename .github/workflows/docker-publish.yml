@@ -187,7 +187,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      digest: ${{ steps.verify.outputs.digest }}
+      digest: ${{ steps.verify.outputs.digest || steps.rolling-digest.outputs.digest }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@v7.0.0

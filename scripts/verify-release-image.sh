@@ -42,7 +42,11 @@ resolved_digest=""
 
 for tag in "${tags[@]}"; do
   reference="${image}:${tag}"
-  inspect=$(docker buildx imagetools inspect "$reference")
+  if ! inspect=$(docker buildx imagetools inspect "$reference" 2>&1); then
+    echo "ERROR: could not inspect release image tag $reference." >&2
+    printf '%s\n' "$inspect" >&2
+    exit 1
+  fi
   digest=$(printf '%s\n' "$inspect" | sed -n 's/^Digest:[[:space:]]*//p' | head -n 1)
   if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "ERROR: could not resolve an OCI digest for $reference." >&2
@@ -58,7 +62,11 @@ for tag in "${tags[@]}"; do
 done
 
 canonical_reference="${image}@${resolved_digest}"
-raw_manifest=$(docker buildx imagetools inspect --raw "$canonical_reference")
+if ! raw_manifest=$(docker buildx imagetools inspect --raw "$canonical_reference" 2>&1); then
+  echo "ERROR: could not inspect release manifest $canonical_reference." >&2
+  printf '%s\n' "$raw_manifest" >&2
+  exit 1
+fi
 media_type=$(printf '%s' "$raw_manifest" | jq -r '.mediaType // empty')
 case "$media_type" in
   application/vnd.docker.distribution.manifest.list.v2+json|application/vnd.oci.image.index.v1+json) ;;
@@ -85,8 +93,12 @@ fi
 
 while IFS=$'\t' read -r manifest_digest platform; do
   [ -n "$manifest_digest" ] || continue
-  image_config=$(docker buildx imagetools inspect \
-    --format '{{json .Image}}' "${image}@${manifest_digest}")
+  if ! image_config=$(docker buildx imagetools inspect \
+    --format '{{json .Image}}' "${image}@${manifest_digest}" 2>&1); then
+    echo "ERROR: could not inspect $platform image ${image}@${manifest_digest}." >&2
+    printf '%s\n' "$image_config" >&2
+    exit 1
+  fi
   revision=$(printf '%s' "$image_config" | jq -r '.config.Labels["org.opencontainers.image.revision"] // empty')
   version=$(printf '%s' "$image_config" | jq -r '.config.Labels["org.opencontainers.image.version"] // empty')
 

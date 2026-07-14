@@ -4160,6 +4160,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
                 "org.opencontainers.image.revision",
                 "org.opencontainers.image.version",
                 "docker buildx version",
+                "could not inspect release image tag",
                 "release tags do not resolve to one manifest",
             ],
         ),
@@ -4222,6 +4223,11 @@ fn test_release_retries_reuse_digest_and_record_verification() {
             "release.yml must record verified container evidence `{required}` in release notes."
         );
     }
+
+    assert!(
+        docker.contains("steps.verify.outputs.digest || steps.rolling-digest.outputs.digest"),
+        "docker-publish.yml must expose a digest for both versioned releases and rolling main-branch publishes."
+    );
 }
 
 #[test]
