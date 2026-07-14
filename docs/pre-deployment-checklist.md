@@ -106,13 +106,20 @@ cargo run -- --print-config
   `server.reconnection_window` and `server.event_buffer_size` match how long and
   how much you want to buffer for replay.
 
-## Multi-node (if applicable)
+## Deployment topology
 
-- [ ] Each node has a distinct `server.room_code_prefix` so the load balancer can
-  pin a room's peers to one node (room affinity is the only hard constraint).
-- [ ] `server.region_id` set for observability.
-- [ ] `coordination.*` intervals reviewed if running cross-instance coordination.
-- [ ] See the [scaling architecture notes](architecture/scaling.md).
+- [ ] One active Signal Fish process serves each routing domain; no generic
+  round-robin or cookie-sticky load balancer fronts interchangeable processes.
+- [ ] If operating several isolated deployments, an application-owned directory
+  assigns the room home before the WebSocket upgrade and routes every initial
+  connection and reconnect for that room to the same process.
+- [ ] `server.room_code_prefix` and `server.region_id`, if set, are treated as
+  routing/observability metadata rather than shared-state coordination.
+- [ ] The load balancer stops sending new connections before `SIGTERM`, and its
+  timeout allows at least `server.drain_grace_secs` for the close boundary.
+- [ ] Review the
+  [single-instance deployment contract](architecture/single-instance-deployment.md)
+  and [scaling architecture notes](architecture/scaling.md).
 
 ## Final smoke test
 

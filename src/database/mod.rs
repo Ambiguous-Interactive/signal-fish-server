@@ -171,7 +171,7 @@ pub trait GameDatabase: Send + Sync {
     /// Health check
     async fn health_check(&self) -> bool;
 
-    /// Update player's last_seen (heartbeat) for cross-instance liveness
+    /// Update a player's `last_seen` timestamp for local liveness and cleanup.
     async fn update_player_last_seen(&self, player_id: &PlayerId) -> Result<()>;
 
     /// Get room counts by game name for metrics
@@ -221,11 +221,12 @@ pub trait GameDatabase: Send + Sync {
     async fn get_room_spectators(&self, room_id: &RoomId) -> Result<Vec<SpectatorInfo>>;
 
     /// Try to claim a room cleanup operation for idempotency.
-    /// Returns true if this instance should process the cleanup (we claimed it),
-    /// false if another instance already processed it.
+    /// Returns true if this cleanup path claimed the operation, or false if an
+    /// earlier cleanup path in the process already claimed it.
     ///
-    /// This is used in multi-instance deployments to ensure post-cleanup operations
-    /// (publishing room_closed events, clearing relay sessions, etc.) only happen once.
+    /// The shipped database is process-local, so this prevents duplicate
+    /// post-cleanup operations within one process. A future shared backend would
+    /// also need a separately verified room-authority and routing protocol.
     async fn try_claim_room_cleanup(
         &self,
         room_id: &RoomId,

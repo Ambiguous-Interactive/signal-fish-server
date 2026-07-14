@@ -17175,6 +17175,7 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
         runner.contains("pre-commit-rust.ps1")
             && runner.contains("$changedProductionRustFiles")
             && runner.contains("Test-RustAddedPanicPatterns")
+            && runner.contains("Test-RustPanicPolicyRelevantDiff")
             && runner.contains("RustPanicPolicyLoaded")
             && !runner.contains("function Get-RustTestLineSet"),
         "pre-commit must lazy-load the Rust panic policy only when production Rust \
@@ -17223,6 +17224,104 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
 }
 
 #[test]
+fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"
+                . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+                $script:InspectWorktree = $false
+                $script:NextExitCode = 0
+                $script:Calls = 0
+                $script:CapturedArguments = @()
+                function Invoke-Native {
+                    param([string]$FileName, [string[]]$Arguments)
+                    $script:Calls++
+                    $script:CapturedArguments = [string[]]$Arguments
+                    [pscustomobject]@{
+                        ExitCode = $script:NextExitCode
+                        Stdout = ""
+                        Stderr = "fixture failure"
+                        Output = "fixture failure"
+                    }
+                }
+
+                $changed = Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")
+                Assert (-not $changed) "exit 0 should skip the full Rust scanner"
+                Assert ($script:Calls -eq 1) "staged fast gate should run one git query"
+                Assert ($script:CapturedArguments -contains "--cached") "fast gate must inspect the staged index"
+                Assert ($script:CapturedArguments -contains "--quiet") "fast gate should avoid materializing a diff"
+                $patternIndex = [array]::IndexOf($script:CapturedArguments, "-G") + 1
+                Assert ($patternIndex -gt 0) "fast gate must use a pickaxe regex"
+                $pattern = $script:CapturedArguments[$patternIndex]
+                Assert ($pattern.Contains("panic|todo|unimplemented|unreachable")) "fast gate must detect panic macro edits"
+                Assert ($pattern.Contains("tokio::test")) "fast gate must detect test-context edits"
+
+                $script:NextExitCode = 1
+                Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "exit 1 should load the full scanner"
+
+                $script:NextExitCode = 2
+                $threw = $false
+                try {
+                    Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")
+                } catch {
+                    $threw = $true
+                }
+                Assert $threw "unexpected git failures must fail closed"
+
+                $script:InspectWorktree = $true
+                $script:WorktreeUntrackedFileSet.Add("src/lib.rs") | Out-Null
+                $script:Calls = 0
+                Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "worktree mode must retain the full scanner"
+                Assert ($script:Calls -eq 0) "worktree mode must not trust a diff that omits untracked files"
+
+                $script:WorktreeUntrackedFileSet.Clear()
+                $script:NextExitCode = 0
+                Assert (-not (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs"))) "tracked worktree edits should use the fast gate"
+                Assert ($script:CapturedArguments -contains "HEAD") "worktree fast gate must include staged and unstaged edits"
+
+                $nul = [char]0
+                $script:StatusFixture = " M src/lib.rs${nul}M  src/main.rs${nul}MM src/server.rs${nul}?? src/new.rs${nul}R  src/new_name.rs${nul}src/old_name.rs${nul}"
+                function Invoke-Git {
+                    param([string[]]$Arguments)
+                    [pscustomobject]@{ ExitCode = 0; Stdout = $script:StatusFixture; Stderr = ""; Output = $script:StatusFixture }
+                }
+                $paths = [string[]]@(Get-WorktreeChangedFiles)
+                Assert ($paths.Count -eq 5) "porcelain parser should return each current path once"
+                Assert ($script:StagedChangedFileSet.Contains("src/main.rs")) "index-only edit should be staged"
+                Assert ($script:StagedChangedFileSet.Contains("src/server.rs")) "mixed edit should be staged"
+                Assert ($script:StagedChangedFileSet.Contains("src/new_name.rs")) "rename destination should be staged"
+                Assert ($script:WorktreeChangedFileSet.Contains("src/lib.rs")) "worktree-only edit should be tracked"
+                Assert ($script:WorktreeChangedFileSet.Contains("src/server.rs")) "mixed edit should be in the worktree set"
+                Assert ($script:WorktreeUntrackedFileSet.Contains("src/new.rs")) "untracked edit should fail closed"
+                Assert (-not ($paths -contains "src/old_name.rs")) "rename source metadata is not a current policy path"
+            "#,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping PowerShell Rust panic fast-gate test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "PowerShell Rust panic fast gate should skip only irrelevant staged diffs and fail closed otherwise.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
     let root = repo_root();
     let runner = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
@@ -17232,13 +17331,11 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
     assert!(
         content.contains("[switch]$Worktree")
             && content.contains("Get-WorktreeChangedFiles")
-            && content.contains(
-                "\"diff\", \"--cached\", \"--name-only\", \"-z\", \"--diff-filter=ACDMR\""
-            )
             && content
-                .contains("\"ls-files\", \"-z\", \"-m\", \"-d\", \"-o\", \"--exclude-standard\"")
+                .contains("\"status\", \"--porcelain=v1\", \"-z\", \"--untracked-files=all\"")
             && content.contains("StagedChangedFileSet")
             && content.contains("WorktreeChangedFileSet")
+            && content.contains("WorktreeUntrackedFileSet")
             && content.contains("Test-WorktreeIndexPolicyConsistency")
             && content.contains("Worktree/index policy consistency")
             && content.contains("Changed file discovery")
@@ -17345,6 +17442,11 @@ fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
         content.contains("Test-WorkflowDirectScriptInvocations")
             && content.contains("^\\.github/workflows/.*\\.ya?ml$")
             && content.contains("scripts/hooks/pre-commit-rust.ps1")
+            && content.contains("Initialize-CommitBlobTextCache")
+            && content.contains("Invoke-NativeBytesWithInput")
+            && content.contains("\"cat-file\", \"--batch\"")
+            && content.contains("CommitBlobTextCache")
+            && content.contains("MaxBatchedBlobBytes")
             && content.contains("Get-CommitBlobText")
             && content.contains("Test-WorkflowContentForDirectScripts")
             && content.contains("Test-CommandTextForDirectScript")
@@ -17355,8 +17457,9 @@ fn test_pre_push_hook_checks_workflow_direct_script_invocations() {
             && content.contains("HookBudgetMs")
             && content.contains("runBlockIndent"),
         "pre-push runner must keep a workflow direct-script invocation guard that \
-         reads pushed commit content, scans only run commands, and permits local \
-         scripts only when invoked through an interpreter."
+         batch-reads bounded pushed commit content without per-blob process fanout, \
+         scans only run commands, and permits local scripts only when invoked through \
+         an interpreter."
     );
 }
 

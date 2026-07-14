@@ -29,6 +29,9 @@
 #   - scenario-profiles: tests/scenario_realworld_e2e.rs with
 #     --run-ignored all — the PR-lane traffic profiles plus the nightly-only
 #     backgrounded-tab profile (multi-second absorbed pauses + eviction).
+#   - split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
+#     server processes pin the unsupported multi-instance failure catalog used
+#     by the deployment doctrine.
 #
 # All targeted tests are `#[ignore]`d in-tree (a scheduling decision, not a
 # flakiness mask) and activated here with `--run-ignored all`. Job timeouts
@@ -54,6 +57,7 @@ on:
       - "tests/load_tests.rs"
       - "tests/multiprocess_delivery_e2e.rs"
       - "tests/scenario_realworld_e2e.rs"
+      - "tests/split_brain_two_instances_e2e.rs"
       - "tests/websocket_test_helpers/**"
       - "clients/native/**"
       - ".github/workflows/verification-nightly.yml"
@@ -399,3 +403,38 @@ jobs:
             tail -n 60 scenario-output.txt 2>/dev/null || echo "no scenario output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  split-brain-catalog:
+    name: Single-Instance Doctrine Catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.82.9
+        with:
+          tool: cargo-nextest
+      - name: Run split-brain failure catalog
+        shell: bash
+        run: |
+          cargo nextest run --profile ci --locked --all-features \
+            --test split_brain_two_instances_e2e --run-ignored all

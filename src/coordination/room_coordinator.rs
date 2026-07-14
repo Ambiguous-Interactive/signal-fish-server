@@ -1,7 +1,8 @@
-//! Room operation coordination for distributed state management
+//! Room operation coordination for process-local state management.
 //!
 //! This module provides coordinators for managing room operations (lobby transitions,
-//! authority transfers, player ready states) with distributed locking to ensure consistency.
+//! authority transfers, player ready states) with in-memory locking to ensure
+//! consistency inside one server process.
 
 use anyhow::Result;
 use async_trait::async_trait;

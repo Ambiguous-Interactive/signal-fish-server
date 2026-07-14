@@ -108,6 +108,13 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     tracing::info!(%addr, "Starting Signal Fish server");
+    tracing::info!(
+        deployment_mode = "single_instance",
+        room_state = "in_memory",
+        room_affinity_required = true,
+        session_handoff = false,
+        "Deployment contract: one process owns each room; losing the process loses its rooms"
+    );
 
     // Create server configuration from loaded config
     let server_config = ServerConfig {

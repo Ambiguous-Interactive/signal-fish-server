@@ -387,19 +387,23 @@ scrape_configs:
 
 ## Scaling Considerations
 
-Signal Fish Server uses in-memory storage, so each instance maintains its own room state. For multi-instance
-deployments:
+Signal Fish Server's supported topology is one active, in-memory process per
+routing domain. A room, its WebSocket routes, reconnect records, and relay
+counters all live on that process; losing it loses the room. Generic load-
+balancer stickiness is not enough because the room code arrives after the
+WebSocket upgrade.
 
-1. **Session affinity** - Use sticky sessions at the load balancer
-2. **Room sharding** - Route by game_name or room_code so all of a room's peers land on the same instance
-3. **Health checks** - Monitor each instance independently
-4. **Graceful shutdown** - Allow in-flight connections to complete
+Scale the process vertically, or place an application-owned room directory in
+front of separate deployments so it selects the room home **before** clients
+connect. Do not put interchangeable active processes behind a round-robin or
+cookie-sticky load balancer: a misrouted join can silently create a second room
+with the same public code.
 
-The room is the scaling unit: all forwarding (relay-floor `GameData` and v3 WebRTC
-signaling) happens within a single room, so room affinity is the only constraint a
-multi-instance deployment must preserve. See the
-[scaling architecture notes](architecture/scaling.md) for the full reasoning,
-the cross-node seams in the code, and the `region_id` / room-code-prefix plumbing.
+See the
+[single-instance deployment contract](architecture/single-instance-deployment.md)
+for the proven two-process failure catalog and drain procedure, and the
+[scaling architecture notes](architecture/scaling.md) for capacity drivers and
+future extension seams.
 
 ## Resource Requirements
 
@@ -462,4 +466,5 @@ Enable file logging:
 - [Configuration](configuration.md) - Full configuration reference
 - [Authentication](authentication.md) - Securing your server
 - [TURN Deployment](deployment-turn.md) - TURN relay for WebRTC sessions
-- [Scaling Architecture](architecture/scaling.md) - Multi-node signaling
+- [Scaling Architecture](architecture/scaling.md) - Single-process capacity and
+  externally routed isolated deployments

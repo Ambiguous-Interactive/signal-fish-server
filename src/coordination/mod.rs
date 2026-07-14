@@ -2,7 +2,7 @@
 //!
 //! This module provides facilities for coordinating messages and room operations:
 //! - Message deduplication (LRU-based cache)
-//! - Room operation coordination with distributed locking
+//! - Room operation coordination with process-local locking
 //!
 //! For signal-fish-server, this is an in-memory-only implementation.
 
@@ -1416,7 +1416,7 @@ pub trait MessageCoordinator: Send + Sync {
     }
 }
 
-/// Membership update for cross-instance coordination.
+/// Membership-update extension seam for a future remote coordinator.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[allow(dead_code)]
 pub struct MembershipUpdate {

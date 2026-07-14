@@ -444,7 +444,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_cross_instance_messages_total",
-        "Total cross-instance messages processed",
+        "Reserved remote-coordination envelopes processed (zero for the shipped in-memory backend)",
         snapshot.cross_instance.cross_instance_messages,
     );
     counter(
@@ -480,31 +480,31 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_cross_instance_membership_updates_published_total",
-        "Total membership deltas/snapshots published to the cross-instance bus",
+        "Reserved membership updates published to a remote-coordination backend",
         snapshot.cross_instance.remote_membership_updates_published,
     );
     counter(
         &mut buf,
         "signal_fish_cross_instance_membership_updates_received_total",
-        "Total membership deltas/snapshots consumed from the cross-instance bus",
+        "Reserved membership updates consumed from a remote-coordination backend",
         snapshot.cross_instance.remote_membership_updates_received,
     );
     counter(
         &mut buf,
         "signal_fish_cross_instance_membership_known_broadcasts_total",
-        "Room broadcasts sent because remote members are known to be listening",
+        "Reserved room broadcasts sent to known remote members",
         snapshot.cross_instance.remote_membership_known_broadcasts,
     );
     counter(
         &mut buf,
         "signal_fish_cross_instance_membership_forced_broadcasts_total",
-        "Room broadcasts sent without cached remote membership info (safety fallback)",
+        "Reserved remote broadcasts sent without cached membership information",
         snapshot.cross_instance.remote_membership_forced_broadcasts,
     );
     counter(
         &mut buf,
         "signal_fish_cross_instance_membership_skipped_broadcasts_total",
-        "Room broadcasts skipped because no remote listeners are known",
+        "Reserved remote broadcasts skipped because no listeners are known",
         snapshot.cross_instance.remote_membership_skipped_broadcasts,
     );
 

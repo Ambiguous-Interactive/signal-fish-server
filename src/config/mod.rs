@@ -16,7 +16,7 @@
 //! - [`crate::config::session`]: Session topology / transport selection (protocol v3)
 //! - [`crate::config::turn`]: TURN / STUN ICE-server configuration (protocol v3)
 //! - [`crate::config::logging`]: Logging configuration
-//! - [`crate::config::coordination`]: Cross-instance coordination settings
+//! - [`crate::config::coordination`]: Process-local coordination settings and future-backend seams
 //! - [`crate::config::metrics`]: Metrics configuration
 //! - [`crate::config::websocket`]: WebSocket connection settings
 //! - [`crate::config::loader`]: Configuration loading functions

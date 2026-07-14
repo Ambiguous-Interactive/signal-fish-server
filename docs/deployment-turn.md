@@ -173,8 +173,8 @@ hardening items in the [security checklist](deployment.md#security-checklist).
   pricing) this dwarfs the cost of running the signaling server itself.
 - **Signaling is light.** The signaling server only brokers small JSON messages
   (session plans, SDP/ICE signals, relay-floor `GameData`); see the
-  [scaling architecture notes](architecture/scaling.md) for how to scale it
-  horizontally.
+  [scaling architecture notes](architecture/scaling.md) for vertical capacity
+  drivers and externally routed isolated deployments.
 - **STUN is effectively free.** Public or self-hosted STUN handles the ~80–85% of
   connections that can hole-punch; only the remainder consumes TURN relay
   bandwidth.
@@ -184,6 +184,7 @@ hardening items in the [security checklist](deployment.md#security-checklist).
 - [Deployment guide](deployment.md) — Docker, reverse proxies, cloud providers
 - [TURN and STUN configuration reference](configuration.md#turn-and-stun-ice-credentials-protocol-v3)
 - [Transport Fallback Contract](architecture/transport-fallback.md) — the relay floor
-- [Scaling architecture notes](architecture/scaling.md) — multi-node signaling
+- [Scaling architecture notes](architecture/scaling.md) — single-process capacity
+  and future extension seams
 - [Protocol v3 ICE and TURN credentials](protocol.md#ice-and-turn-credentials)
 - [Platform Integration Guide](guides/platform-integration.md) — which client stacks consume these credentials

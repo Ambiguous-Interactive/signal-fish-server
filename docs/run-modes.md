@@ -32,7 +32,7 @@ v2 relay floor, so enabling v3 never breaks a v2-only client.
 | TLS (built-in) | Terminates HTTPS/`wss://` in the server itself | `security.transport.tls.enabled=true`, `security.transport.tls.certificate_path`, `security.transport.tls.private_key_path` (env: `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true`) | `cargo run` (with the three TLS keys set) |
 | TLS (reverse proxy) | Terminates TLS at nginx/Caddy; server stays plain `ws://` on loopback | none on the server; configure the proxy (see [reverse proxy setup](deployment.md#reverse-proxy-setup)) | `cargo run` (server) + proxy in front |
 | Metrics + Prometheus | Exposes JSON + Prometheus metrics, optionally behind a bearer token | `security.require_metrics_auth=true`, `security.metrics_auth_token=<token>` (env: `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN`) | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN="$(openssl rand -hex 32)" SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=true cargo run` |
-| Multi-node behind a load balancer | Several instances share a fleet; room-code prefixes give the LB an affinity key so a room's peers land on one node | `server.room_code_prefix="us-east-"`, `server.region_id="us-east"` (env: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east-`) | `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east- SIGNAL_FISH__SERVER__REGION_ID=us-east cargo run` |
+| Externally routed isolated deployments | An application-owned directory chooses one independent, single-process room home before any peer opens its WebSocket; Signal Fish does not share or hand off room state | Optional observability metadata: `server.room_code_prefix="us-east-"`, `server.region_id="us-east"` (env: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east-`) | After deploying the external directory: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east- SIGNAL_FISH__SERVER__REGION_ID=us-east cargo run` |
 
 Per-feature JSON snippets (with env equivalents and "when to use") live in the
 [configuration recipes](configuration-recipes.md).
@@ -148,13 +148,19 @@ Prometheus at `/metrics/prom` (see
 [metrics-auth recipe](configuration-recipes.md#metrics-auth) covers the scrape
 config with a bearer token.
 
-### Multi-node behind a load balancer
+### Externally routed isolated deployments
 
-The server uses in-memory state, so each instance owns its own rooms. The **room
-is the scaling unit**: all forwarding for a room happens on one node, so the only
-constraint a fleet must preserve is room affinity. Give each node a distinct
-`server.room_code_prefix` so generated room codes carry a routable prefix the
-load balancer can hash on, and set `server.region_id` for observability:
+Signal Fish does not support a fleet of interchangeable active processes behind
+a generic load balancer. Room state, reconnect tokens, routes, and sequence
+counters are process-local, and the room code arrives only after the WebSocket
+upgrade. Neither cookie stickiness nor `server.room_code_prefix` can establish
+the required room home by itself.
+
+You may operate several isolated deployments only when an application-owned
+directory chooses the home **before** clients connect and sends every initial
+connection and reconnect for that room to the same process. A prefix can be part
+of that external routing scheme, and `server.region_id` can label metrics, but
+both are metadata rather than coordination:
 
 ```bash
 SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east- \
@@ -162,8 +168,11 @@ SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east- \
   cargo run
 ```
 
-See the [scaling architecture notes](architecture/scaling.md) for the full
-reasoning and the cross-node seams.
+See the
+[single-instance deployment contract](architecture/single-instance-deployment.md)
+for the exact boundary and failure catalog, and the
+[scaling architecture notes](architecture/scaling.md) for capacity drivers and
+future extension seams.
 
 ## CLI flags
 
