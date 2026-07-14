@@ -562,14 +562,14 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
             .websocket_backpressure_events
             .load(Ordering::Relaxed),
         0,
-        "{cell_label}: bounded matrix fault must not enter backpressure"
+        "{cell_label}: bounded matrix cell must not enter backpressure"
     );
     assert_eq!(
         metrics
             .websocket_slow_consumer_disconnects
             .load(Ordering::Relaxed),
         0,
-        "{cell_label}: bounded matrix fault must not evict a receiver"
+        "{cell_label}: bounded matrix cell must not evict a receiver"
     );
 
     let expected_samples = cell.players * expected_per_receiver;
