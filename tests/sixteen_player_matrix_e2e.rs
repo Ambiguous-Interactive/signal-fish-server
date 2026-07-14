@@ -14,7 +14,7 @@ mod websocket_test_helpers;
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -366,21 +366,16 @@ fn record_latency(
     receiver: &str,
     data: &serde_json::Value,
     origin: Instant,
-    latencies_micros: &Mutex<Vec<u64>>,
-) {
+) -> u64 {
     let sent_at = data
         .get("sent_at_micros")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_else(|| panic!("{cell_label}: {receiver} payload lacks sent_at_micros: {data}"));
     let observed_at =
         u64::try_from(origin.elapsed().as_micros()).expect("matrix duration fits u64 micros");
-    let latency = observed_at.checked_sub(sent_at).unwrap_or_else(|| {
+    observed_at.checked_sub(sent_at).unwrap_or_else(|| {
         panic!("{cell_label}: {receiver} observed a payload timestamp from the future")
-    });
-    latencies_micros
-        .lock()
-        .expect("matrix latency samples poisoned")
-        .push(latency);
+    })
 }
 
 fn decode_binary_payload(
@@ -424,9 +419,6 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
 
     let origin = Instant::now();
     let first_send = origin + Duration::from_millis(50);
-    let latencies_micros = Arc::new(Mutex::new(Vec::with_capacity(
-        cell.players * (cell.players - 1) * usize::try_from(MESSAGES_PER_SENDER).expect("count"),
-    )));
     let expected_per_receiver =
         (cell.players - 1) * usize::try_from(MESSAGES_PER_SENDER).expect("count");
 
@@ -466,11 +458,11 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
         }));
 
         let reader_auditor = Arc::clone(&auditor);
-        let reader_latencies = Arc::clone(&latencies_micros);
         let reader_label = cell_label.clone();
         readers.push(tokio::spawn(async move {
             let deadline = Instant::now() + FRAME_DEADLINE;
             let mut delivered = 0usize;
+            let mut latencies_micros = Vec::with_capacity(expected_per_receiver);
             while delivered < expected_per_receiver {
                 let frame = tokio::time::timeout_at(deadline, stream.next())
                     .await
@@ -519,31 +511,34 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
                         "{reader_label}: {receiver_name} received unexpected raw frame: {frame:?}"
                     ),
                 };
-                record_latency(
+                latencies_micros.push(record_latency(
                     &reader_label,
                     &receiver_name,
                     &data,
                     origin,
-                    &reader_latencies,
-                );
+                ));
                 delivered += 1;
             }
-            stream
+            (stream, latencies_micros)
         }));
     }
 
     exercise_fault_profile(profile, &proxies, &completed_senders, cell.players).await;
 
-    let (sinks, streams) = tokio::time::timeout(CELL_DEADLINE, async {
+    let (sinks, streams, mut latencies) = tokio::time::timeout(CELL_DEADLINE, async {
         let mut sinks = Vec::with_capacity(cell.players);
         let mut streams = Vec::with_capacity(cell.players);
+        let mut latencies = Vec::with_capacity(cell.players * expected_per_receiver);
         for writer in writers {
             sinks.push(writer.await.expect("matrix writer task panicked"));
         }
         for reader in readers {
-            streams.push(reader.await.expect("matrix reader task panicked"));
+            let (stream, mut receiver_latencies) =
+                reader.await.expect("matrix reader task panicked");
+            streams.push(stream);
+            latencies.append(&mut receiver_latencies);
         }
-        (sinks, streams)
+        (sinks, streams, latencies)
     })
     .await
     .unwrap_or_else(|_| panic!("{cell_label}: cell exceeded {CELL_DEADLINE:?}"));
@@ -577,10 +572,6 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
         "{cell_label}: bounded matrix fault must not evict a receiver"
     );
 
-    let mut latencies = latencies_micros
-        .lock()
-        .expect("matrix latency samples poisoned")
-        .clone();
     let expected_samples = cell.players * expected_per_receiver;
     assert_eq!(
         latencies.len(),

@@ -395,7 +395,7 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test scenario_realworld_e2e --run-ignored all \
             --success-output final 2>&1 | tee scenario-output.txt
-      - name: Run 16-player relay fault matrix
+      - name: Run 16-player relay matrix
         shell: bash
         run: |
           set -o pipefail
@@ -413,7 +413,7 @@ jobs:
             tail -n 60 scenario-output.txt 2>/dev/null || echo "no scenario output captured"
             echo '```'
             echo
-            echo "### 16-player relay fault matrix"
+            echo "### 16-player relay matrix"
             echo
             echo '```text'
             tail -n 60 relay-matrix-output.txt 2>/dev/null || echo "no relay matrix output captured"
