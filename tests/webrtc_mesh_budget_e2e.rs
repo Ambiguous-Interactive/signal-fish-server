@@ -353,10 +353,10 @@ fn assert_client_barrier(
     let expected_connected_peers = expected_connected_peers(player_id, all_ids, crippled_id);
     let expected_connected = !expected_connected_peers.is_empty();
 
+    let barrier_errors = events_named(window, "error");
     assert!(
-        events_named(&client.events, "error").is_empty(),
-        "{who}: errors before the successful mesh barrier: {:?}",
-        client.error_messages()
+        barrier_errors.is_empty(),
+        "{who}: errors before the successful mesh barrier: {barrier_errors:?}"
     );
     assert_eq!(
         events_named(window, "fallback_engaged").len(),
