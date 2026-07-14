@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peer connection's terminal ICE-gathering marker before freezing the signal
   ledger. Normal client exit behavior is unchanged when the new flag is
   omitted, the soft run deadline does not break an active barrier hold, and
-  hard-watchdog diagnostics name the exact release path. Release-path metadata
+  a release observed after that deadline still honors the post-success linger.
+  Hard-watchdog diagnostics name the exact release path. Release-path metadata
   errors fail immediately with the underlying I/O diagnostic instead of
   masquerading as an absent file.
 - Add canonical release identity across the annotated Git tag, crates.io,

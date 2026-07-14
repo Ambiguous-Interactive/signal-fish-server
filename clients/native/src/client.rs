@@ -822,7 +822,12 @@ impl Orchestrator<'_> {
 
         if now >= self.run_deadline {
             if self.criteria_met() {
-                if self.success_release_pending()? {
+                let release_pending = self.success_release_pending()?;
+                if should_defer_success_at_run_deadline(
+                    release_pending,
+                    self.success_criteria_reported,
+                    self.linger_until.is_some(),
+                ) {
                     return Ok(None);
                 }
                 return Ok(Some(EXIT_SUCCESS));
@@ -1658,6 +1663,17 @@ impl Orchestrator<'_> {
     }
 }
 
+/// A harness-held client treats the soft run deadline as advisory after it has
+/// reported success. It must wait both for the harness release and for the
+/// post-release linger that was armed on the release-observation tick.
+fn should_defer_success_at_run_deadline(
+    release_pending: bool,
+    success_criteria_reported: bool,
+    success_linger_pending: bool,
+) -> bool {
+    release_pending || (success_criteria_reported && success_linger_pending)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1677,8 +1693,8 @@ mod tests {
         is_terminal_peer_connection_state, negotiated_version_from, next_handshake_message,
         require_finalized_membership_plan, requires_authoritative_finalization_plan,
         restore_reconnected_member, should_buffer_signal_for_unpaired_peer,
-        should_resolve_connected_pair, validate_json_negotiated_server_message,
-        EXIT_PROTOCOL_ERROR,
+        should_defer_success_at_run_deadline, should_resolve_connected_pair,
+        validate_json_negotiated_server_message, EXIT_PROTOCOL_ERROR,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -1694,6 +1710,14 @@ mod tests {
         assert!(!wire::is_transparent_transport_control(&Message::Binary(
             Bytes::new()
         )));
+    }
+
+    #[test]
+    fn harness_release_after_soft_deadline_still_honors_exit_linger() {
+        assert!(should_defer_success_at_run_deadline(true, true, false));
+        assert!(should_defer_success_at_run_deadline(false, true, true));
+        assert!(!should_defer_success_at_run_deadline(false, true, false));
+        assert!(!should_defer_success_at_run_deadline(false, false, true));
     }
 
     #[test]
