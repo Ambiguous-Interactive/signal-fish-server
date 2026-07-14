@@ -82,7 +82,7 @@ async fn sixteen_players_admit_at_default_ip_cap() {
     // at the default cap (the A3 regression). The assertions below add the
     // non-tautological facts: distinct identities AND actual co-location in ONE
     // room (not 16 separate rooms).
-    let players = join_n_players(addr, GAME, "LOBBYA", Some(16), 16, PROTOCOL_VERSION).await;
+    let players = join_n_players(addr, GAME, "LOBBYA", Some(16), 16, PROTOCOL_VERSION, None).await;
 
     let unique: HashSet<_> = players.iter().map(|p| p.player_id).collect();
     assert_eq!(
