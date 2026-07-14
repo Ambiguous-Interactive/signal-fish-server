@@ -441,7 +441,7 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         "H8 is registered against the real default"
     );
 
-    let server = spawn_server(mesh_server_config()).await;
+    let mut server = spawn_server(mesh_server_config()).await;
     let workdir = tempfile::tempdir().expect("create native-client workdir");
     let success_release_file = workdir.path().join("release-success");
     assert!(!success_release_file.exists());
@@ -577,4 +577,5 @@ async fn sixteen_native_clients_form_complete_mesh_within_signal_budget() {
         peak_rss.first().copied().unwrap_or(0),
         &peak_rss[1..]
     );
+    server.kill_and_wait().await;
 }
