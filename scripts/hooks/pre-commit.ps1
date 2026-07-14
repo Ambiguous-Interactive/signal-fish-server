@@ -604,6 +604,11 @@ function Test-FastHookSource {
             if ($trimmed.StartsWith("#")) {
                 continue
             }
+            if ($trimmed.IndexOf("cargo", [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                $trimmed.IndexOf("npm", [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                $trimmed.IndexOf("npx", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                continue
+            }
             if ($trimmed -match $slowCommandPattern) {
                 [void]$violations.Add("${file}:${lineNumber}: $trimmed")
             }
