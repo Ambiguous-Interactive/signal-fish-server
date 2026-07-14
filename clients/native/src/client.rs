@@ -817,8 +817,7 @@ impl Orchestrator<'_> {
             }
             emit(&Event::Error {
                 message: if self.criteria_met() {
-                    "--run-for-secs elapsed while waiting for --success-release-file"
-                        .to_string()
+                    "--run-for-secs elapsed while waiting for --success-release-file".to_string()
                 } else {
                     format!(
                         "--run-for-secs elapsed with unmet success criteria: {}",
