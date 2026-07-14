@@ -27,7 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Release-file metadata polling runs off the async networking executor.
   Hard-watchdog diagnostics name the exact release path. Release-path metadata
   errors fail immediately with the underlying I/O diagnostic instead of
-  masquerading as an absent file.
+  masquerading as an absent file. The same nightly suite now includes a
+  16-player partial-partition variant: one deterministically ICE-crippled
+  client must fall back exactly once while the other fifteen preserve their
+  exact 105-edge WebRTC submesh, and all sixteen preserve the complete
+  WebSocket relay-floor ledger. Terminal peer-connection generations count as
+  signal-settled for the harness barrier because they can emit no later ICE
+  candidates; live generations still require their end-of-gathering marker.
 - Add canonical release identity across the annotated Git tag, crates.io,
   GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
   container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and

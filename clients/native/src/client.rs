@@ -1617,7 +1617,10 @@ impl Orchestrator<'_> {
             }
             if self.cli.success_release_file.is_some() {
                 for peer in &self.expected_peers {
-                    if !self.ice_gathering_complete.contains(peer) {
+                    if needs_ice_gathering_marker(
+                        self.engine.is_paired(*peer),
+                        self.ice_gathering_complete.contains(peer),
+                    ) {
                         unmet.push(format!("ICE gathering incomplete for {peer}"));
                     }
                 }
@@ -1688,6 +1691,14 @@ fn should_defer_success_at_run_deadline(
     success_criteria_reported && (release_pending || success_linger_pending)
 }
 
+/// A harness freezes the signal ledger only after every live peer-connection
+/// generation reaches the end-of-gathering callback. A terminal generation is
+/// removed from the engine and cannot emit another candidate, so it is already
+/// settled even though its generation-scoped marker is cleared during cleanup.
+fn needs_ice_gathering_marker(is_current_generation: bool, gathering_complete: bool) -> bool {
+    is_current_generation && !gathering_complete
+}
+
 fn harness_aware_base_wake(
     run_deadline: Instant,
     success_release_poll_at: Option<Instant>,
@@ -1719,11 +1730,12 @@ mod tests {
     use super::{
         authoritative_peer_delta, changed_transport_status, clear_departed_membership_plan,
         connection_targets_for_plan, consume_join_accountability_preface, harness_aware_base_wake,
-        is_terminal_peer_connection_state, negotiated_version_from, next_handshake_message,
-        require_finalized_membership_plan, requires_authoritative_finalization_plan,
-        restore_reconnected_member, should_buffer_signal_for_unpaired_peer,
-        should_defer_success_at_run_deadline, should_resolve_connected_pair,
-        validate_json_negotiated_server_message, EXIT_PROTOCOL_ERROR,
+        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
+        next_handshake_message, require_finalized_membership_plan,
+        requires_authoritative_finalization_plan, restore_reconnected_member,
+        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
+        should_resolve_connected_pair, validate_json_negotiated_server_message,
+        EXIT_PROTOCOL_ERROR,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -1748,6 +1760,23 @@ mod tests {
         assert!(!should_defer_success_at_run_deadline(false, true, false));
         assert!(!should_defer_success_at_run_deadline(true, false, false));
         assert!(!should_defer_success_at_run_deadline(false, false, true));
+    }
+
+    #[test]
+    fn harness_waits_only_for_current_generation_ice_gathering() {
+        let cases = [
+            ("current and gathering", true, false, true),
+            ("current and complete", true, true, false),
+            ("terminal before marker", false, false, false),
+            ("terminal after marker", false, true, false),
+        ];
+        for (scenario, is_current, complete, expected) in cases {
+            assert_eq!(
+                needs_ice_gathering_marker(is_current, complete),
+                expected,
+                "{scenario}"
+            );
+        }
     }
 
     #[test]
