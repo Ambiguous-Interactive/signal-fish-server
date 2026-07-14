@@ -24,6 +24,7 @@ $script:UseWorktreeTextForStagedFiles = $false
 $script:RustPanicPolicyLoaded = $false
 $script:StagedChangedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeChangedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$script:WorktreeUntrackedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:HookBudgetMs = 1000
 $script:CheckTimings = [System.Collections.Generic.List[object]]::new()
 $script:HookPolicyFiles = @(
@@ -146,26 +147,45 @@ function Get-WorktreeChangedFiles {
     $seenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $script:StagedChangedFileSet.Clear()
     $script:WorktreeChangedFileSet.Clear()
+    $script:WorktreeUntrackedFileSet.Clear()
 
-    $stagedArgs = @("diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $Pathspecs
-    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $stagedArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths -ChangedSet $script:StagedChangedFileSet
+    # One porcelain query replaces separate staged, unstaged, and untracked
+    # discovery processes. `-z` makes paths literal and NUL-delimited; rename
+    # records carry a second NUL-delimited source path, which is skipped because
+    # policy evaluates the current destination.
+    $arguments = @("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--") + $Pathspecs
+    $records = (Invoke-Git -Arguments $arguments).Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
+    $skipRenameSource = $false
+    foreach ($record in $records) {
+        if ($skipRenameSource) {
+            $skipRenameSource = $false
+            continue
+        }
+        if ($record.Length -lt 4 -or $record[2] -ne " ") {
+            throw "Unable to parse git status porcelain record: $record"
+        }
 
-    if ($script:StagedChangedFileSet.Count -gt 0) {
-        $stagedPaths = [string[]]@($script:StagedChangedFileSet)
-        $stagedWorktreeArgs = @("diff", "--name-only", "-z", "--diff-filter=ACDMR", "--") + $stagedPaths
-        Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $stagedWorktreeArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths -ChangedSet $script:WorktreeChangedFileSet
-        foreach ($path in $script:StagedChangedFileSet) {
-            if ($script:WorktreeChangedFileSet.Contains($path)) {
-                foreach ($changedPath in $orderedPaths) {
-                    $changedPath
-                }
-                return
+        $indexStatus = [string]$record[0]
+        $worktreeStatus = [string]$record[1]
+        $path = $record.Substring(3)
+        if ($seenPaths.Add($path)) {
+            [void]$orderedPaths.Add($path)
+        }
+
+        if ($indexStatus -eq "?" -and $worktreeStatus -eq "?") {
+            [void]$script:WorktreeChangedFileSet.Add($path)
+            [void]$script:WorktreeUntrackedFileSet.Add($path)
+        } else {
+            if ($indexStatus -ne " ") {
+                [void]$script:StagedChangedFileSet.Add($path)
+            }
+            if ($worktreeStatus -ne " ") {
+                [void]$script:WorktreeChangedFileSet.Add($path)
             }
         }
-    }
 
-    $worktreeArgs = @("ls-files", "-z", "-m", "-d", "-o", "--exclude-standard", "--") + $Pathspecs
-    Add-UniqueGitPaths -NulDelimitedPaths (Invoke-Git -Arguments $worktreeArgs).Stdout -OrderedPaths $orderedPaths -SeenPaths $seenPaths -ChangedSet $script:WorktreeChangedFileSet
+        $skipRenameSource = $indexStatus -in @("R", "C") -or $worktreeStatus -in @("R", "C")
+    }
 
     foreach ($path in $orderedPaths) {
         $path
@@ -633,6 +653,42 @@ function Test-ProductionRustSourcePath {
     }
 
     -not ($Path.Contains("/test/") -or $Path.Contains("/tests/"))
+}
+
+function Test-RustPanicPolicyRelevantDiff {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Pathspecs)
+
+    if ($Pathspecs.Count -eq 0) {
+        return $false
+    }
+
+    # `git diff HEAD` cannot see untracked files, so keep their full scanner
+    # fail-closed. Tracked worktree edits and staged changes can share the fast
+    # pickaxe query below.
+    if ($script:InspectWorktree -and @($Pathspecs | Where-Object {
+                $script:WorktreeUntrackedFileSet.Contains($_)
+            }).Count -gt 0) {
+        return $true
+    }
+
+    $panicPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
+    $testContextPattern = "#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest)"
+    $grepPattern = "($panicPattern)|($testContextPattern)"
+    $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
+    $result = Invoke-Native -FileName "git" -Arguments (@(
+            "diff", $diffBase, "--quiet", "-G", $grepPattern, "--"
+        ) + $Pathspecs)
+    if ($result.ExitCode -eq 0) {
+        return $false
+    }
+    if ($result.ExitCode -eq 1) {
+        return $true
+    }
+    if ($script:InspectWorktree -and $result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
+        return $true
+    }
+
+    throw "git diff Rust panic policy precheck failed:`n$($result.Output)"
 }
 
 function Test-WorktreeIndexPolicyConsistency {
@@ -1466,6 +1522,8 @@ if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-
 $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
 if ($changedProductionRustFiles.Count -eq 0) {
     if (-not (Invoke-Check "Rust panic patterns" { Skip "Rust panic patterns" "no production Rust files staged" })) { Complete-PreCommit }
+} elseif (-not (Test-RustPanicPolicyRelevantDiff -Pathspecs $changedProductionRustFiles)) {
+    if (-not (Invoke-Check "Rust panic patterns" { Pass "Rust panic patterns" })) { Complete-PreCommit }
 } else {
     if (-not (Invoke-Check "Rust panic patterns" {
                 if (-not $script:RustPanicPolicyLoaded) {
