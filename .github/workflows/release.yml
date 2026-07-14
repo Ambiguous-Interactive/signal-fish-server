@@ -369,7 +369,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.82.9
+        uses: taiki-e/install-action@v2.83.2
         with:
           tool: cargo-sbom
 
@@ -401,7 +401,7 @@ jobs:
           echo "$CHANGELOG_CONTENT" > release_notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ steps.get_version.outputs.tag }}
           name: ${{ steps.get_version.outputs.tag }}
@@ -413,7 +413,7 @@ jobs:
 
       - name: Attach SBOM to release
         if: steps.sbom.outcome == 'success'
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ steps.get_version.outputs.tag }}
           files: sbom.cdx.json
@@ -650,7 +650,7 @@ jobs:
 
       - name: Attach binaries to release
         if: steps.binary-artifacts.outputs.count != '0'
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
