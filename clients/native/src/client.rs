@@ -803,7 +803,7 @@ impl Orchestrator<'_> {
             self.p2p_deadline = None;
         }
 
-        self.arm_success_linger(now);
+        self.arm_success_linger(now)?;
         if self.linger_until.is_some_and(|at| now >= at) {
             // Criteria can regress during the linger: an authoritative plan or
             // a freshly connected pair adds new obligations (exchange,
@@ -822,7 +822,7 @@ impl Orchestrator<'_> {
 
         if now >= self.run_deadline {
             if self.criteria_met() {
-                if self.success_release_pending() {
+                if self.success_release_pending()? {
                     return Ok(None);
                 }
                 return Ok(Some(EXIT_SUCCESS));
@@ -838,16 +838,16 @@ impl Orchestrator<'_> {
         Ok(None)
     }
 
-    fn arm_success_linger(&mut self, now: Instant) {
+    fn arm_success_linger(&mut self, now: Instant) -> Result<(), FatalError> {
         if !self.criteria_met() {
             self.success_release_poll_at = None;
-            return;
+            return Ok(());
         }
         if self.cli.success_release_file.is_some() && !self.success_criteria_reported {
             emit(&Event::SuccessCriteriaMet);
             self.success_criteria_reported = true;
         }
-        if self.success_release_pending() {
+        if self.success_release_pending()? {
             self.linger_until = None;
             self.success_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
         } else {
@@ -856,13 +856,19 @@ impl Orchestrator<'_> {
                 self.linger_until = Some(now + EXIT_LINGER);
             }
         }
+        Ok(())
     }
 
-    fn success_release_pending(&self) -> bool {
-        self.cli
-            .success_release_file
-            .as_ref()
-            .is_some_and(|path| !path.exists())
+    fn success_release_pending(&self) -> Result<bool, FatalError> {
+        let Some(path) = &self.cli.success_release_file else {
+            return Ok(false);
+        };
+        path.try_exists().map(|exists| !exists).map_err(|error| {
+            FatalError::connection(format!(
+                "inspect --success-release-file {}: {error}",
+                path.display()
+            ))
+        })
     }
 
     async fn handle_server_message(&mut self, message: ServerMessage) -> Result<(), FatalError> {

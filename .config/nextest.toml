@@ -81,6 +81,7 @@ test-group = 'powershell-subprocess'
 # Activate with: cargo nextest run --profile ci
 # Inherits all [profile.default] settings and adds CI-tuned overrides.
 [profile.ci]
+inherits = "default"
 fail-fast = true
 failure-output = "immediate-final"
 success-output = "never"
