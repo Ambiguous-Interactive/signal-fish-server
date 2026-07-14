@@ -808,7 +808,7 @@ impl Orchestrator<'_> {
             self.p2p_deadline = None;
         }
 
-        self.arm_success_linger(now)?;
+        self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
             // Criteria can regress during the linger: an authoritative plan or
             // a freshly connected pair adds new obligations (exchange,
@@ -826,7 +826,7 @@ impl Orchestrator<'_> {
         }
 
         if now >= self.run_deadline {
-            let release_pending = self.success_release_pending()?;
+            let release_pending = self.success_release_pending().await?;
             if should_defer_success_at_run_deadline(
                 release_pending,
                 self.success_criteria_reported,
@@ -848,10 +848,10 @@ impl Orchestrator<'_> {
         Ok(None)
     }
 
-    fn arm_success_linger(&mut self, now: Instant) -> Result<(), FatalError> {
+    async fn arm_success_linger(&mut self, now: Instant) -> Result<(), FatalError> {
         if !self.criteria_met() {
             let release_pending =
-                self.success_criteria_reported && self.success_release_pending()?;
+                self.success_criteria_reported && self.success_release_pending().await?;
             self.success_release_poll_at = release_pending.then_some(now + SUCCESS_RELEASE_POLL);
             return Ok(());
         }
@@ -859,7 +859,7 @@ impl Orchestrator<'_> {
             emit(&Event::SuccessCriteriaMet);
             self.success_criteria_reported = true;
         }
-        if self.success_release_pending()? {
+        if self.success_release_pending().await? {
             self.linger_until = None;
             self.success_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
         } else {
@@ -871,16 +871,23 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
-    fn success_release_pending(&self) -> Result<bool, FatalError> {
+    async fn success_release_pending(&self) -> Result<bool, FatalError> {
         let Some(path) = &self.cli.success_release_file else {
             return Ok(false);
         };
-        path.try_exists().map(|exists| !exists).map_err(|error| {
-            FatalError::connection(format!(
-                "inspect --success-release-file {}: {error}",
-                path.display()
-            ))
-        })
+        let path = path.clone();
+        let display = path.display().to_string();
+        tokio::task::spawn_blocking(move || path.try_exists())
+            .await
+            .map_err(|error| {
+                FatalError::connection(format!(
+                    "inspect --success-release-file {display}: metadata task failed: {error}"
+                ))
+            })?
+            .map(|exists| !exists)
+            .map_err(|error| {
+                FatalError::connection(format!("inspect --success-release-file {display}: {error}"))
+            })
     }
 
     async fn handle_server_message(&mut self, message: ServerMessage) -> Result<(), FatalError> {
