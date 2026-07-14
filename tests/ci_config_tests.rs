@@ -17515,6 +17515,7 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
             && content.contains("Get-WorktreeChangedFiles")
             && content
                 .contains("\"status\", \"--porcelain=v1\", \"-z\", \"--untracked-files=all\"")
+            && content.contains("\"--no-renames\"")
             && content.contains("StagedChangedFileSet")
             && content.contains("WorktreeChangedFileSet")
             && content.contains("WorktreeUntrackedFileSet")
@@ -17728,7 +17729,7 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
         runner.contains("Get-ChangedFilesForPush")
             && runner.contains("\"--not\", $remoteArg")
             && runner.contains("--remotes=$RemoteName")
-            && runner.contains("\"rev-list\", \"$RemoteSha..$LocalSha\"")
+            && runner.contains("\"rev-list\", $LocalSha, \"--not\", $RemoteSha, $remoteArg")
             && runner.contains("Add-ChangedFilesFromCommits")
             && runner.contains("[switch]$Worktree")
             && runner.contains("Get-ChangedFilesForWorktreePreflight")
@@ -17738,6 +17739,58 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
          workflow policy checks without invoking cargo tests. It must also expose \
          a worktree preflight mode so agents/local CI catch push-policy failures \
          before Git hooks are the last resort."
+    );
+}
+
+#[test]
+fn test_pre_push_existing_ref_excludes_commits_already_on_remote_when_pwsh_available() {
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"
+                . ./scripts/hooks/pre-push.ps1 -SourceOnly
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+                $script:CapturedArguments = @()
+                function Invoke-Native {
+                    param([string]$FileName, [string[]]$Arguments)
+                    $script:CapturedArguments = [string[]]$Arguments
+                    [pscustomobject]@{
+                        ExitCode = 0
+                        Stdout = "introduced-commit`n"
+                        Stderr = ""
+                        Output = "introduced-commit`n"
+                    }
+                }
+
+                $commits = @(Get-RevList -LocalSha "local-tip" -RemoteSha "old-remote-tip" -AllZeroSha ("0" * 40) -RemoteName "origin")
+                $expected = @("rev-list", "local-tip", "--not", "old-remote-tip", "--remotes=origin")
+                Assert ($commits.Count -eq 1 -and $commits[0] -eq "introduced-commit") "revision output should be preserved"
+                Assert ($script:CapturedArguments.Count -eq $expected.Count) "rev-list should receive the expected argument count"
+                for ($index = 0; $index -lt $expected.Count; $index++) {
+                    Assert ($script:CapturedArguments[$index] -eq $expected[$index]) "unexpected rev-list argument at index $index"
+                }
+            "#,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping PowerShell pre-push reachability test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "pre-push reachability must exclude commits already present on the target remote.\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
