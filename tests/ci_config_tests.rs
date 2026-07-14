@@ -4126,6 +4126,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
                 "Cargo.toml version package",
                 "escaped_version=${version//./\\\\.}",
                 "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
+                "git fetch --no-tags origin \"refs/tags/${tag}:refs/tags/${tag}\"",
                 "git cat-file -t \"refs/tags/${TAG}\"",
                 "refusing to move it",
                 ".cargo_vcs_info.json",
@@ -4139,6 +4140,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
             &docker,
             vec![
                 "Cargo.toml version package",
+                "git fetch --no-tags origin \"refs/tags/${release_tag}:refs/tags/${release_tag}\"",
                 "git cat-file -t \"refs/tags/${release_tag}\"",
                 "escaped_version=${release_version//./\\\\.}",
                 "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
@@ -4157,6 +4159,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
                 "linux/arm/v7",
                 "org.opencontainers.image.revision",
                 "org.opencontainers.image.version",
+                "docker buildx version",
                 "release tags do not resolve to one manifest",
             ],
         ),

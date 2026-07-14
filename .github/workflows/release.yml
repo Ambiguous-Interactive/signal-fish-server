@@ -114,6 +114,7 @@ jobs:
           fi
 
           if [ "${{ github.event_name }}" = "push" ]; then
+            git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"
             if [ "$(git cat-file -t "refs/tags/${tag}" 2>/dev/null || true)" != "tag" ]; then
               echo "ERROR: Direct release tag $tag must be annotated, not lightweight." >&2
               exit 1

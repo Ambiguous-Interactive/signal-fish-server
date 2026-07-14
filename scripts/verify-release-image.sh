@@ -27,6 +27,11 @@ for command in docker jq; do
   fi
 done
 
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "ERROR: Docker Buildx is required to verify a release image." >&2
+  exit 1
+fi
+
 if [[ ! "$expected_revision" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: expected source revision must be a full 40-character lowercase Git SHA." >&2
   exit 1

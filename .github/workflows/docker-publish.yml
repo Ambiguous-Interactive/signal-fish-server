@@ -141,6 +141,7 @@ jobs:
               echo "ERROR: Release version is not canonical semantic version text: $release_version" >&2
               exit 1
             fi
+            git fetch --no-tags origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
             if [ "$(git cat-file -t "refs/tags/${release_tag}" 2>/dev/null || true)" != "tag" ]; then
               echo "ERROR: $release_tag must exist as an annotated Git tag before container publication." >&2
               exit 1
