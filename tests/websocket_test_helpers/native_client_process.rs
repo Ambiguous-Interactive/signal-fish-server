@@ -21,7 +21,7 @@ pub fn native_client_binary() -> PathBuf {
         assert!(
             path.is_file(),
             "SIGNAL_FISH_CLIENT_BIN points at {path:?}, which is not a file. Run \
-             `cargo build --manifest-path clients/native/Cargo.toml --bin \
+             `cargo build --locked --manifest-path clients/native/Cargo.toml --bin \
              signal-fish-reference-native` and point the variable at the built binary."
         );
         return path;
@@ -60,7 +60,7 @@ pub fn native_client_binary() -> PathBuf {
             assert!(
                 status.success(),
                 "building the native reference client failed ({status}); build it manually with \
-                 `cargo build --manifest-path clients/native/Cargo.toml --bin \
+                 `cargo build --locked --manifest-path clients/native/Cargo.toml --bin \
                  signal-fish-reference-native` or set SIGNAL_FISH_CLIENT_BIN"
             );
             let path = root
