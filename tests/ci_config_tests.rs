@@ -4100,6 +4100,7 @@ fn test_container_publish_supports_release_and_backfill_entry_points() {
         "if [ -n \"$CALL_REVISION\" ]",
         "workflow_dispatch)",
         "refs/tags/",
+        "publish_latest == 'true' && 'latest' || needs.resolve.outputs.source_revision",
     ] {
         assert!(
             docker.contains(required),
@@ -4123,7 +4124,8 @@ fn test_release_identity_fails_closed_across_artifacts() {
             &release,
             vec![
                 "Cargo.toml version package",
-                "grep -Fqx \"## [${version}]\" CHANGELOG.md",
+                "escaped_version=${version//./\\\\.}",
+                "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
                 "git cat-file -t \"refs/tags/${TAG}\"",
                 "refusing to move it",
                 ".cargo_vcs_info.json",
@@ -4138,7 +4140,8 @@ fn test_release_identity_fails_closed_across_artifacts() {
             vec![
                 "Cargo.toml version package",
                 "git cat-file -t \"refs/tags/${release_tag}\"",
-                "grep -Fqx \"## [${release_version}]\" CHANGELOG.md",
+                "escaped_version=${release_version//./\\\\.}",
+                "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
                 "org.opencontainers.image.revision=",
                 "org.opencontainers.image.version=",
                 "Verify versioned tags, platforms, and source labels",

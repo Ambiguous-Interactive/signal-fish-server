@@ -150,8 +150,9 @@ jobs:
               echo "ERROR: $release_tag resolves to $tag_revision, not checked-out commit $source_revision." >&2
               exit 1
             fi
-            if [ "$is_backfill" != "true" ] && ! grep -Fqx "## [${release_version}]" CHANGELOG.md; then
-              echo "ERROR: CHANGELOG.md has no exact ## [${release_version}] release section." >&2
+            escaped_version=${release_version//./\\.}
+            if [ "$is_backfill" != "true" ] && ! grep -Eq "^## \\[${escaped_version}\\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md; then
+              echo "ERROR: CHANGELOG.md has no ## [${release_version}] release section, with or without a date." >&2
               exit 1
             fi
             major_minor=${release_version%.*}
@@ -179,7 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: container-publish-${{ needs.resolve.outputs.source_revision }}
+      group: container-publish-${{ needs.resolve.outputs.publish_latest == 'true' && 'latest' || needs.resolve.outputs.source_revision }}
       cancel-in-progress: false
     permissions:
       contents: read

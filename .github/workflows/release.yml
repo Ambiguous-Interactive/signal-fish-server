@@ -107,8 +107,9 @@ jobs:
             echo "ERROR: Release version is not canonical semantic version text: $version" >&2
             exit 1
           fi
-          if ! grep -Fqx "## [${version}]" CHANGELOG.md; then
-            echo "ERROR: CHANGELOG.md has no exact ## [${version}] release section." >&2
+          escaped_version=${version//./\\.}
+          if ! grep -Eq "^## \\[${escaped_version}\\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md; then
+            echo "ERROR: CHANGELOG.md has no ## [${version}] release section, with or without a date." >&2
             exit 1
           fi
 
