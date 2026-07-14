@@ -728,7 +728,11 @@ impl Orchestrator<'_> {
     /// Earliest pending timer (the run deadline at the latest), so the select
     /// loop always wakes for due work even on a silent wire.
     fn next_wake(&self) -> Instant {
-        let mut wake = self.run_deadline;
+        // Once a harness-held client has reported success, the soft run
+        // deadline no longer applies: the release path or the binary-wide
+        // hard watchdog is authoritative. Starting from the poll deadline
+        // avoids a busy loop after `run_deadline` passes.
+        let mut wake = self.success_release_poll_at.unwrap_or(self.run_deadline);
         if !self.relay_sent {
             if let Some(at) = self.relay_send_at {
                 wake = wake.min(at);
@@ -812,25 +816,17 @@ impl Orchestrator<'_> {
         }
 
         if now >= self.run_deadline {
-            if self.criteria_met() && !self.success_release_pending() {
+            if self.criteria_met() {
+                if self.success_release_pending() {
+                    return Ok(None);
+                }
                 return Ok(Some(EXIT_SUCCESS));
             }
             emit(&Event::Error {
-                message: if self.criteria_met() {
-                    match &self.cli.success_release_file {
-                        Some(path) => format!(
-                            "--run-for-secs elapsed while waiting for --success-release-file {}",
-                            path.display()
-                        ),
-                        None => "--run-for-secs elapsed while waiting for the success release file"
-                            .to_string(),
-                    }
-                } else {
-                    format!(
-                        "--run-for-secs elapsed with unmet success criteria: {}",
-                        self.unmet_criteria().join(", ")
-                    )
-                },
+                message: format!(
+                    "--run-for-secs elapsed with unmet success criteria: {}",
+                    self.unmet_criteria().join(", ")
+                ),
             });
             return Ok(Some(EXIT_CRITERIA_UNMET));
         }
