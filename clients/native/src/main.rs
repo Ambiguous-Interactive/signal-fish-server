@@ -56,10 +56,17 @@ fn main() {
             Ok(code) => code,
             Err(_elapsed) => {
                 emit(&Event::Error {
-                    message: format!(
-                        "--max-runtime-secs ({}) watchdog fired; hard abort",
-                        cli.max_runtime_secs
-                    ),
+                    message: match &cli.success_release_file {
+                        Some(path) => format!(
+                            "--max-runtime-secs ({}) watchdog fired; hard abort; success release path: {}",
+                            cli.max_runtime_secs,
+                            path.display()
+                        ),
+                        None => format!(
+                            "--max-runtime-secs ({}) watchdog fired; hard abort",
+                            cli.max_runtime_secs
+                        ),
+                    },
                 });
                 EXIT_HARD_TIMEOUT
             }

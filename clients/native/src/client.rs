@@ -76,6 +76,8 @@ const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 /// Grace period between meeting all success criteria and exiting, so the last
 /// unreliable-channel sends are not torn down mid-flight for slower siblings.
 const EXIT_LINGER: Duration = Duration::from_millis(250);
+/// Poll cadence for an optional harness-controlled success release file.
+const SUCCESS_RELEASE_POLL: Duration = Duration::from_millis(100);
 
 /// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
 /// `Ping` mandatory for every client (the server evicts idle connections);
@@ -187,6 +189,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         webrtc_plan_seen: false,
         expected_peers: BTreeSet::new(),
         connected_pairs: BTreeSet::new(),
+        ice_gathering_complete: BTreeSet::new(),
         last_ice_servers: Vec::new(),
         transport_status: None,
         p2p_deadline: None,
@@ -202,6 +205,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pending_signals: BTreeMap::new(),
         run_deadline,
         linger_until: None,
+        success_criteria_reported: false,
+        success_release_poll_at: None,
         next_ping_at: Instant::now() + PING_INTERVAL,
         pong_deadline: None,
         pong_grace_applied: false,
@@ -589,6 +594,10 @@ struct Orchestrator<'a> {
     /// Peers whose pair fully connected (both channels open) at some point.
     /// Drives the `--exchange` obligations and the Appendix G resolution.
     connected_pairs: BTreeSet<PlayerId>,
+    /// Peers whose current connection generation emitted the terminal local
+    /// ICE gathering callback. Harness-held success uses this as the exact
+    /// outbound signal-ledger boundary.
+    ice_gathering_complete: BTreeSet<PlayerId>,
     /// ICE servers from the most recent plan (also used for compatible `NewPeer`).
     last_ice_servers: Vec<IceServer>,
     /// Last reported overall WebRTC state, retained to suppress duplicates.
@@ -613,6 +622,10 @@ struct Orchestrator<'a> {
     run_deadline: Instant,
     /// Set once all criteria are met; exit 0 when it elapses.
     linger_until: Option<Instant>,
+    /// Whether the stable machine event announcing complete criteria was sent.
+    success_criteria_reported: bool,
+    /// Next poll for an optional harness-controlled release-file barrier.
+    success_release_poll_at: Option<Instant>,
     /// Next keepalive `Ping` send (the mandatory client keepalive contract).
     next_ping_at: Instant,
     /// Deadline for the `Pong` answering the most recent `Ping`; `None` while
@@ -720,7 +733,16 @@ impl Orchestrator<'_> {
     /// Earliest pending timer (the run deadline at the latest), so the select
     /// loop always wakes for due work even on a silent wire.
     fn next_wake(&self) -> Instant {
-        let mut wake = self.run_deadline;
+        // Once a harness-held client has reported success, the soft run
+        // deadline no longer applies: the release path or the binary-wide
+        // hard watchdog is authoritative. Starting from the release poll or
+        // post-release linger avoids a busy loop after `run_deadline` passes.
+        let mut wake = harness_aware_base_wake(
+            self.run_deadline,
+            self.success_release_poll_at,
+            self.linger_until,
+            self.success_criteria_reported,
+        );
         if !self.relay_sent {
             if let Some(at) = self.relay_send_at {
                 wake = wake.min(at);
@@ -730,6 +752,9 @@ impl Orchestrator<'_> {
             wake = wake.min(at);
         }
         if let Some(at) = self.linger_until {
+            wake = wake.min(at);
+        }
+        if let Some(at) = self.success_release_poll_at {
             wake = wake.min(at);
         }
         wake = wake.min(self.next_ping_at);
@@ -783,7 +808,7 @@ impl Orchestrator<'_> {
             self.p2p_deadline = None;
         }
 
-        self.arm_success_linger(now);
+        self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
             // Criteria can regress during the linger: an authoritative plan or
             // a freshly connected pair adds new obligations (exchange,
@@ -801,6 +826,14 @@ impl Orchestrator<'_> {
         }
 
         if now >= self.run_deadline {
+            let release_pending = self.success_release_pending().await?;
+            if should_defer_success_at_run_deadline(
+                release_pending,
+                self.success_criteria_reported,
+                self.linger_until.is_some(),
+            ) {
+                return Ok(None);
+            }
             if self.criteria_met() {
                 return Ok(Some(EXIT_SUCCESS));
             }
@@ -815,10 +848,46 @@ impl Orchestrator<'_> {
         Ok(None)
     }
 
-    fn arm_success_linger(&mut self, now: Instant) {
-        if self.linger_until.is_none() && self.criteria_met() {
-            self.linger_until = Some(now + EXIT_LINGER);
+    async fn arm_success_linger(&mut self, now: Instant) -> Result<(), FatalError> {
+        if !self.criteria_met() {
+            let release_pending =
+                self.success_criteria_reported && self.success_release_pending().await?;
+            self.success_release_poll_at = release_pending.then_some(now + SUCCESS_RELEASE_POLL);
+            return Ok(());
         }
+        if self.cli.success_release_file.is_some() && !self.success_criteria_reported {
+            emit(&Event::SuccessCriteriaMet);
+            self.success_criteria_reported = true;
+        }
+        if self.success_release_pending().await? {
+            self.linger_until = None;
+            self.success_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
+        } else {
+            self.success_release_poll_at = None;
+            if self.linger_until.is_none() {
+                self.linger_until = Some(now + EXIT_LINGER);
+            }
+        }
+        Ok(())
+    }
+
+    async fn success_release_pending(&self) -> Result<bool, FatalError> {
+        let Some(path) = &self.cli.success_release_file else {
+            return Ok(false);
+        };
+        let path = path.clone();
+        let display = path.display().to_string();
+        tokio::task::spawn_blocking(move || path.try_exists())
+            .await
+            .map_err(|error| {
+                FatalError::connection(format!(
+                    "inspect --success-release-file {display}: metadata task failed: {error}"
+                ))
+            })?
+            .map(|exists| !exists)
+            .map_err(|error| {
+                FatalError::connection(format!("inspect --success-release-file {display}: {error}"))
+            })
     }
 
     async fn handle_server_message(&mut self, message: ServerMessage) -> Result<(), FatalError> {
@@ -1159,6 +1228,9 @@ impl Orchestrator<'_> {
                 )
                 .await?;
             }
+            EngineEvent::IceGatheringComplete { peer, .. } => {
+                self.ice_gathering_complete.insert(peer);
+            }
             EngineEvent::PcState { peer, state, .. } => {
                 emit(&Event::PcState {
                     peer,
@@ -1166,6 +1238,7 @@ impl Orchestrator<'_> {
                 });
                 if is_terminal_peer_connection_state(&state) {
                     self.connected_pairs.remove(&peer);
+                    self.ice_gathering_complete.remove(&peer);
                     self.sent_labels.remove(&peer);
                     self.received_labels.remove(&peer);
                     self.pending_signals.remove(&peer);
@@ -1220,6 +1293,9 @@ impl Orchestrator<'_> {
         }
         let newly_expected = self.expected_peers.insert(peer);
         let needs_connection = !self.engine.is_paired(peer);
+        if needs_connection {
+            self.ice_gathering_complete.remove(&peer);
+        }
         if (newly_expected || needs_connection) && !self.connected_pairs.contains(&peer) {
             self.p2p_deadline =
                 Some(Instant::now() + Duration::from_secs(self.cli.p2p_timeout_secs));
@@ -1250,6 +1326,7 @@ impl Orchestrator<'_> {
     async fn remove_pair_obligation(&mut self, peer: PlayerId) {
         self.expected_peers.remove(&peer);
         self.connected_pairs.remove(&peer);
+        self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
         self.sent_labels.remove(&peer);
         self.received_labels.remove(&peer);
@@ -1538,6 +1615,13 @@ impl Orchestrator<'_> {
                     }
                 }
             }
+            if self.cli.success_release_file.is_some() {
+                for peer in &self.expected_peers {
+                    if !self.ice_gathering_complete.contains(peer) {
+                        unmet.push(format!("ICE gathering incomplete for {peer}"));
+                    }
+                }
+            }
         }
         if self.cli.exchange {
             // Exchange obligations cover the expected peers whose pair
@@ -1593,6 +1677,32 @@ impl Orchestrator<'_> {
     }
 }
 
+/// A harness-held client treats the soft run deadline as advisory after it has
+/// reported success. It must wait both for the harness release and for the
+/// post-release linger that was armed on the release-observation tick.
+fn should_defer_success_at_run_deadline(
+    release_pending: bool,
+    success_criteria_reported: bool,
+    success_linger_pending: bool,
+) -> bool {
+    success_criteria_reported && (release_pending || success_linger_pending)
+}
+
+fn harness_aware_base_wake(
+    run_deadline: Instant,
+    success_release_poll_at: Option<Instant>,
+    linger_until: Option<Instant>,
+    success_criteria_reported: bool,
+) -> Instant {
+    if success_criteria_reported {
+        success_release_poll_at
+            .or(linger_until)
+            .unwrap_or(run_deadline)
+    } else {
+        run_deadline
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1608,12 +1718,12 @@ mod tests {
 
     use super::{
         authoritative_peer_delta, changed_transport_status, clear_departed_membership_plan,
-        connection_targets_for_plan, consume_join_accountability_preface,
+        connection_targets_for_plan, consume_join_accountability_preface, harness_aware_base_wake,
         is_terminal_peer_connection_state, negotiated_version_from, next_handshake_message,
         require_finalized_membership_plan, requires_authoritative_finalization_plan,
         restore_reconnected_member, should_buffer_signal_for_unpaired_peer,
-        should_resolve_connected_pair, validate_json_negotiated_server_message,
-        EXIT_PROTOCOL_ERROR,
+        should_defer_success_at_run_deadline, should_resolve_connected_pair,
+        validate_json_negotiated_server_message, EXIT_PROTOCOL_ERROR,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -1629,6 +1739,40 @@ mod tests {
         assert!(!wire::is_transparent_transport_control(&Message::Binary(
             Bytes::new()
         )));
+    }
+
+    #[test]
+    fn harness_release_after_soft_deadline_still_honors_exit_linger() {
+        assert!(should_defer_success_at_run_deadline(true, true, false));
+        assert!(should_defer_success_at_run_deadline(false, true, true));
+        assert!(!should_defer_success_at_run_deadline(false, true, false));
+        assert!(!should_defer_success_at_run_deadline(true, false, false));
+        assert!(!should_defer_success_at_run_deadline(false, false, true));
+    }
+
+    #[test]
+    fn reported_success_keeps_soft_deadline_deferred_during_regression() {
+        assert!(should_defer_success_at_run_deadline(true, true, false));
+        assert!(
+            !should_defer_success_at_run_deadline(false, true, false),
+            "release ends the hold so regressed criteria can fail normally"
+        );
+    }
+
+    #[test]
+    fn harness_linger_replaces_elapsed_soft_deadline_as_next_wake() {
+        let now = tokio::time::Instant::now();
+        let elapsed_run_deadline = now - std::time::Duration::from_secs(1);
+        let linger_until = now + super::EXIT_LINGER;
+        assert_eq!(
+            harness_aware_base_wake(elapsed_run_deadline, None, Some(linger_until), true),
+            linger_until
+        );
+        assert_eq!(
+            harness_aware_base_wake(elapsed_run_deadline, None, Some(linger_until), false),
+            elapsed_run_deadline,
+            "ordinary clients retain the soft-deadline behavior"
+        );
     }
 
     #[test]

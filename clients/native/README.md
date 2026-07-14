@@ -61,6 +61,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--p2p-timeout-secs <S>` | `15` | Window for WebRTC pair establishment before the overall transport status resolves |
 | `--run-for-secs <S>` | `30` | Soft cap: exit 1 if the flag-driven success criteria are still unmet |
 | `--max-runtime-secs <S>` | `60` | Hard watchdog: abort with exit 4 no matter what (the no-hang guarantee) |
+| `--success-release-file <PATH>` | — | Test harness only: after success criteria hold, emit `success_criteria_met` and stay connected until PATH exists; the normal bounded exit behavior is unchanged when omitted |
 | `--protocol-version <V>` | `3` | `2` omits every v3 `Authenticate` field — a pure v2 client for mixed-room tests |
 | `--supported-topologies <LIST>` | `relay,host,mesh` | Comma-separated topologies advertised in v3 `Authenticate` |
 | `--supported-transports <LIST>` | `relay,webrtc` | Comma-separated transports advertised in v3 `Authenticate` |
@@ -127,6 +128,7 @@ process continues to its normal bounded exit.
 | `game_data_sent` | — | The `--relay-payload` GameData was sent |
 | `game_data_received` | `from`, `payload` | A validated, application-current relayed GameData payload arrived; lifecycle-overtaken stale tails are accounted but suppressed |
 | `fallback_engaged` | — | The P2P window resolved with ZERO connected pairs; the relay floor carries the session |
+| `success_criteria_met` | — | Harness-only barrier emitted when criteria hold and `--success-release-file` was supplied; the client remains connected until the path exists |
 | `error` | `message` | Non-fatal or fatal error (fatal ones are followed by `exiting`) |
 | `exiting` | `code` | Final event before process exit |
 

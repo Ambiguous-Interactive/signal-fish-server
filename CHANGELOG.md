@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a harness-only native reference-client success barrier and a nightly
+  16-player WebRTC mesh experiment. The client can emit
+  `success_criteria_met` and remain connected until a release file appears,
+  allowing the experiment to prove the simultaneous 120-edge graph, exact
+  reliable/unreliable channel ledgers, relay-floor delivery, and production
+  600-signal budget without teardown races. The barrier waits for every current
+  peer connection's terminal ICE-gathering marker before freezing the signal
+  ledger. Normal client exit behavior is unchanged when the new flag is
+  omitted, the soft run deadline does not break an active barrier hold, and
+  a release observed after that deadline still honors the post-success linger.
+  Held clients sleep until that linger expires instead of spinning on an
+  elapsed soft deadline, and the nightly harness keeps explicit watchdog
+  headroom for its barrier assertions before coordinated release.
+  Once success is reported, the release hold remains authoritative even if
+  criteria temporarily regress; criteria are revalidated after release.
+  Release-file metadata polling runs off the async networking executor.
+  Hard-watchdog diagnostics name the exact release path. Release-path metadata
+  errors fail immediately with the underlying I/O diagnostic instead of
+  masquerading as an absent file.
 - Add canonical release identity across the annotated Git tag, crates.io,
   GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
   container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and

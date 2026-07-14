@@ -96,6 +96,14 @@ pub struct ServerProcess {
 }
 
 impl ServerProcess {
+    /// OS process id of the live server child (for resource diagnostics).
+    pub fn pid(&self) -> u32 {
+        self.child
+            .as_ref()
+            .and_then(tokio::process::Child::id)
+            .expect("server process was already killed")
+    }
+
     /// SIGKILL the child (TerminateProcess on Windows) and reap it.
     pub async fn kill_and_wait(&mut self) {
         let mut child = self
