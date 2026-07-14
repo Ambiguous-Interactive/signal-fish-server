@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Held clients sleep until that linger expires instead of spinning on an
   elapsed soft deadline, and the nightly harness keeps explicit watchdog
   headroom for its barrier assertions before coordinated release.
+  Once success is reported, the release hold remains authoritative even if
+  criteria temporarily regress; criteria are revalidated after release.
   Hard-watchdog diagnostics name the exact release path. Release-path metadata
   errors fail immediately with the underlying I/O diagnostic instead of
   masquerading as an absent file.

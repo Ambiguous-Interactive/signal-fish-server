@@ -826,15 +826,15 @@ impl Orchestrator<'_> {
         }
 
         if now >= self.run_deadline {
+            let release_pending = self.success_release_pending()?;
+            if should_defer_success_at_run_deadline(
+                release_pending,
+                self.success_criteria_reported,
+                self.linger_until.is_some(),
+            ) {
+                return Ok(None);
+            }
             if self.criteria_met() {
-                let release_pending = self.success_release_pending()?;
-                if should_defer_success_at_run_deadline(
-                    release_pending,
-                    self.success_criteria_reported,
-                    self.linger_until.is_some(),
-                ) {
-                    return Ok(None);
-                }
                 return Ok(Some(EXIT_SUCCESS));
             }
             emit(&Event::Error {
@@ -850,7 +850,9 @@ impl Orchestrator<'_> {
 
     fn arm_success_linger(&mut self, now: Instant) -> Result<(), FatalError> {
         if !self.criteria_met() {
-            self.success_release_poll_at = None;
+            let release_pending =
+                self.success_criteria_reported && self.success_release_pending()?;
+            self.success_release_poll_at = release_pending.then_some(now + SUCCESS_RELEASE_POLL);
             return Ok(());
         }
         if self.cli.success_release_file.is_some() && !self.success_criteria_reported {
@@ -1676,7 +1678,7 @@ fn should_defer_success_at_run_deadline(
     success_criteria_reported: bool,
     success_linger_pending: bool,
 ) -> bool {
-    release_pending || (success_criteria_reported && success_linger_pending)
+    success_criteria_reported && (release_pending || success_linger_pending)
 }
 
 fn harness_aware_base_wake(
@@ -1737,7 +1739,17 @@ mod tests {
         assert!(should_defer_success_at_run_deadline(true, true, false));
         assert!(should_defer_success_at_run_deadline(false, true, true));
         assert!(!should_defer_success_at_run_deadline(false, true, false));
+        assert!(!should_defer_success_at_run_deadline(true, false, false));
         assert!(!should_defer_success_at_run_deadline(false, false, true));
+    }
+
+    #[test]
+    fn reported_success_keeps_soft_deadline_deferred_during_regression() {
+        assert!(should_defer_success_at_run_deadline(true, true, false));
+        assert!(
+            !should_defer_success_at_run_deadline(false, true, false),
+            "release ends the hold so regressed criteria can fail normally"
+        );
     }
 
     #[test]
