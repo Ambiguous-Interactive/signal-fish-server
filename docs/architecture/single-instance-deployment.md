@@ -58,7 +58,7 @@ The formal suite makes the same boundary executable. `SplitBrainStampBug` in
 `SequencedRelay.tla` breaks gap accountability when two instances stamp one
 logical sender independently. `SplitBrainCounterBug` in `ReconnectReplay.tla`
 breaks replay faithfulness and status honesty when a reconnect lands on a fresh
-instance. See [Single-instance theorems](formal-verification.md) for the model
+instance. See [Single-instance theorems](formal-verification.md#single-instance-theorems) for the model
 scope and seeded counterexamples.
 
 ## Load balancer and drain behavior

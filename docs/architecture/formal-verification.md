@@ -121,6 +121,32 @@ in
 each with the suite that covers
 it instead.
 
+## Single-instance theorems
+
+The formal suite makes the single-instance correctness boundary executable via
+two seeded counterexamples (full table in
+[`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md)):
+
+- **`SplitBrainStampBug`** in
+  [`SequencedRelay.tla`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/tla/SequencedRelay.tla)
+  — a second instance stamps the same sender's stream from an independent
+  counter (`counter2`); a no-affinity load balancer collapses both onto one
+  recipient queue, producing interleaved duplicate/regressing `seq` values that
+  violate `GapAccountable` in four actions.
+- **`SplitBrainCounterBug`** in
+  [`ReconnectReplay.tla`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/tla/ReconnectReplay.tla)
+  — the reconnect is served by a second instance that created the room fresh
+  (empty ring, zero watermark, its own `next_sequence`); the empty replay drops
+  retained needed events, violating `ReplayFaithful` in three actions.
+  `StatusHonest` is also violated at five actions (masked by `ReplayFaithful`
+  failing first unless it is removed from `INVARIANTS`).
+
+The composed
+[`EndToEndGapAccountability.tla`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/tla/EndToEndGapAccountability.tla)
+model proves these single-instance behaviors compose correctly. These
+counterexamples are the formal complement to the nightly two-process test in
+`tests/split_brain_two_instances_e2e.rs`.
+
 ## Correspondence-maintenance rule
 
 The TLA+ spec mirrors `src/server/session_policy.rs`, `src/server/signaling.rs`,
