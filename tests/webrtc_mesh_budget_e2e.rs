@@ -689,11 +689,11 @@ fn assert_client_exit(client: &NativeClientProcess, status: &std::process::ExitS
 
 async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let total_started = tokio::time::Instant::now();
-    let maximum_bounded_pre_release_wait =
-        EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE + EVENT_DEADLINE;
+    let maximum_bounded_host_release_wait =
+        EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE + EVENT_DEADLINE + CLIENT_EXIT_DEADLINE;
     assert!(
-        Duration::from_secs(CLIENT_MAX_RUNTIME_SECS) > maximum_bounded_pre_release_wait,
-        "client watchdog must leave headroom beyond room creation, the success barrier, and signal-ledger settlement"
+        Duration::from_secs(CLIENT_MAX_RUNTIME_SECS) > maximum_bounded_host_release_wait,
+        "client watchdog must leave headroom beyond room creation, the success barrier, signal-ledger settlement, and staged host teardown"
     );
     let signal_budget = usize::try_from(Config::default().rate_limit.max_signals)
         .expect("production signal budget fits usize");
@@ -714,11 +714,23 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
 
     let mut server = spawn_server(server_config(scenario.topology)).await;
     let workdir = tempfile::tempdir().expect("create native-client workdir");
-    let success_release_file = workdir.path().join("release-success");
-    assert!(!success_release_file.exists());
+    let success_release_files = match scenario.topology {
+        MatrixTopology::Mesh => {
+            let shared = workdir.path().join("release-success");
+            vec![shared; scenario.players]
+        }
+        MatrixTopology::Host => (0..scenario.players)
+            .map(|ordinal| {
+                workdir
+                    .path()
+                    .join(format!("release-success-c{ordinal:02}"))
+            })
+            .collect(),
+    };
+    assert!(success_release_files.iter().all(|path| !path.exists()));
     let mut creator = spawn_native_client(
         "c00",
-        &client_args(&server, "c00", None, &success_release_file, scenario, 0),
+        &client_args(&server, "c00", None, &success_release_files[0], scenario, 0),
         workdir.path(),
     );
     let created = creator.await_event("room_created", EVENT_DEADLINE).await;
@@ -726,7 +738,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
 
     let mut clients = Vec::with_capacity(scenario.players);
     clients.push(creator);
-    for ordinal in 1..scenario.players {
+    for (ordinal, success_release_file) in success_release_files.iter().enumerate().skip(1) {
         let name = format!("c{ordinal:02}");
         clients.push(spawn_native_client(
             &name,
@@ -734,7 +746,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
                 &server,
                 &name,
                 Some(&room_code),
-                &success_release_file,
+                success_release_file,
                 scenario,
                 ordinal,
             ),
@@ -911,14 +923,44 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
         scenario.label()
     );
 
-    std::fs::write(&success_release_file, b"release")
-        .expect("release successful clients from the WebRTC barrier");
-    let statuses = join_all(
-        clients
-            .iter_mut()
-            .map(|client| client.drain_to_termination(CLIENT_EXIT_DEADLINE)),
-    )
-    .await;
+    let statuses = match scenario.topology {
+        MatrixTopology::Mesh => {
+            std::fs::write(&success_release_files[0], b"release")
+                .expect("release successful mesh clients from the WebRTC barrier");
+            join_all(
+                clients
+                    .iter_mut()
+                    .map(|client| client.drain_to_termination(CLIENT_EXIT_DEADLINE)),
+            )
+            .await
+        }
+        MatrixTopology::Host => {
+            // Keep the elected host alive until every leaf has completed its
+            // teardown signaling and the server has causally broadcast every
+            // departure. Releasing the whole star at once can let the host
+            // leave first and turn a leaf's final signal into a genuine
+            // SignalTargetNotFound server error, obscuring the measured phase.
+            for release_file in success_release_files.iter().skip(1) {
+                std::fs::write(release_file, b"release")
+                    .expect("release successful host-topology leaf client");
+            }
+            let (host, leaves) = clients
+                .split_first_mut()
+                .expect("the scenario always has a creator");
+            let leaf_terminations = join_all(
+                leaves
+                    .iter_mut()
+                    .map(|client| client.drain_to_termination(CLIENT_EXIT_DEADLINE)),
+            );
+            let host_departure_barrier =
+                host.await_event_count("player_left", scenario.players - 1, CLIENT_EXIT_DEADLINE);
+            let (leaf_statuses, ()) = tokio::join!(leaf_terminations, host_departure_barrier);
+            std::fs::write(&success_release_files[0], b"release")
+                .expect("release successful host-topology creator client");
+            let host_status = host.drain_to_termination(CLIENT_EXIT_DEADLINE).await;
+            std::iter::once(host_status).chain(leaf_statuses).collect()
+        }
+    };
     let total_elapsed = total_started.elapsed();
     stop_tx.send(true).expect("stop RSS sampler");
     let peak_rss = rss_task.await.expect("RSS sampler task succeeds");
