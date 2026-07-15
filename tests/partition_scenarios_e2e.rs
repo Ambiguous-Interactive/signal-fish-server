@@ -224,8 +224,12 @@ async fn complete_while_servicing_healthy<T>(
     tokio::pin!(operation);
     loop {
         tokio::select! {
-            output = &mut operation => return output,
+            // If recovery and a socket frame become ready in the same poll,
+            // consume the frame first. In particular, never return while a
+            // ready protocol Ping is still waiting for its Pong.
+            biased;
             frame = healthy.next() => service_healthy_frame(healthy, frame, context).await,
+            output = &mut operation => return output,
         }
     }
 }
