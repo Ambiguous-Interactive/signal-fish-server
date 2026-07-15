@@ -82,9 +82,79 @@ reconnect token routable and does not establish room affinity by itself.
 - **TURN:** TURN relay bandwidth is operated separately from the signaling
   process; see the [TURN deployment guide](../deployment-turn.md).
 
-These are operational starting points, not measured saturation guarantees. The
-P10.F2 throughput knee table remains pending the planned 16-player saturation
-experiment.
+These are operational starting points, not universal saturation guarantees.
+
+## Size the relay floor
+
+Relay cost grows with fan-out, not just sender rate. For a room with `N`
+players where every player sends `S` messages per second, each client receives
+`S × (N - 1)` messages per second and the server performs:
+
+```text
+recipient deliveries/second = N × S × (N - 1)
+payload egress/second        = deliveries/second × payload bytes
+```
+
+WebSocket, protocol, JSON/MessagePack, IP, and TLS framing add to the payload
+floor. Measure the encoded frames for capacity planning; do not provision only
+the application payload number.
+
+The H2 exact-ledger experiment fixes `N = 16`, a 1 KiB application payload,
+JSON relay, production queue defaults, and one second at each sender rate. It
+requires every `(receiver, sender, sequence)` delivery, valid v3 stamps, no
+slow-consumer eviction, and reports p50/p95/p99/max latency, backpressure, wall
+time, and process RSS. The registered load grid is:
+
+| Per-player send rate | Per-client receive rate | Server recipient deliveries | Application-payload egress floor |
+| ---: | ---: | ---: | ---: |
+| 30 msg/s | 450 msg/s | 7,200/s | 7.03 MiB/s (56.3 Mbit/s) |
+| 60 msg/s | 900 msg/s | 14,400/s | 14.06 MiB/s (112.5 Mbit/s) |
+| 120 msg/s | 1,800 msg/s | 28,800/s | 28.13 MiB/s (225 Mbit/s) |
+| 240 msg/s | 3,600 msg/s | 57,600/s | 56.25 MiB/s (450 Mbit/s) |
+| 480 msg/s | 7,200 msg/s | 115,200/s | 112.50 MiB/s (900 Mbit/s) |
+
+The bounded PR-lane matrix already proves the 30 msg/s point across JSON and
+MessagePack with 2, 8, and 16 players: 17,880/17,880 deliveries, zero default-
+queue backpressure, zero eviction, and measured p99 of 20–55 ms. Treat the
+higher-rate nightly sweep as a trend measurement for its GitHub-hosted runner,
+not a portable capacity promise. Benchmark the release binary on the intended
+CPU, kernel, TLS termination, and network path, and retain headroom below the
+first point where p99 or queue pressure bends sharply.
+
+### Queue and freeze budget
+
+For one recipient, estimate queue-fill time in messages, using encoded-message
+rates:
+
+```text
+excess_rate = max(0, incoming_messages_per_second - drain_messages_per_second)
+queue_fill_seconds = send_queue_capacity / excess_rate
+fail_loud_bound ≈ queue_fill_seconds + slow_consumer_timeout
+```
+
+If `excess_rate` is zero, the queue does not fill under steady state; still
+reserve burst headroom. A full reliable queue can pace room senders for at most
+one `slow_consumer_timeout_ms` window before that recipient is closed loudly.
+`max_sojourn_ms` is an independent upper bound on the age of queued, batched,
+or in-flight work and may close the connection first.
+
+Do not multiply `send_queue_capacity × slow_consumer_timeout` and interpret the
+result as seconds: queue slots and time have different units. With the defaults,
+`1024 × 5000 ms` is only a message-time exposure measure; the actionable time
+bound is queue fill **plus** the 5-second capacity wait. Raising queue capacity
+absorbs a larger burst but retains more stale reliable work. Raising the
+timeout tolerates a longer drain pause but directly raises the maximum room
+freeze after the queue is full.
+
+### Batching latency
+
+With batching enabled, a sparse message may wait up to
+`websocket.batch_interval_ms` (16 ms by default) for the timer; a full
+`batch_size` flushes earlier. The low-rate two-player matrix measured roughly
+20 ms p99 end to end, consistent with one default batch interval plus local
+processing. This is not a universal latency floor: under dense traffic the
+size trigger can flush sooner, while network and scheduler delay can dominate
+it. Lower the interval only after measuring the syscall/throughput tradeoff.
 
 ## Directional partition detection
 

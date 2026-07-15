@@ -7,7 +7,10 @@
 //! protocol-v3 `(epoch, seq)` rules through `ConformanceAuditor`, avoid all
 //! backpressure/evictions, and keep observed p99 relay latency below 250 ms.
 //! The nightly lane repeats the grid behind one chaos proxy per client for
-//! jitter/throttle and complete-burst pause/resume recovery.
+//! jitter/throttle and complete-burst pause/resume recovery, then sweeps the
+//! 16-player JSON cell through increasing sender rates to expose the measured
+//! throughput/latency knee without turning runner-specific timing into a
+//! brittle correctness threshold.
 
 mod test_helpers;
 mod websocket_test_helpers;
@@ -35,16 +38,76 @@ use websocket_test_helpers::room16::{authenticate_with_encoding, connect, try_jo
 
 const PROTOCOL_VERSION: u16 = 3;
 const MESSAGES_PER_SENDER: u64 = 30;
-const SEND_INTERVAL: Duration = Duration::from_nanos(33_333_333);
 const PAYLOAD_BYTES: usize = 1024;
 const CELL_DEADLINE: Duration = Duration::from_secs(45);
 const FRAME_DEADLINE: Duration = Duration::from_secs(30);
 const P99_LIMIT_MICROS: u64 = 250_000;
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 #[derive(Clone, Copy)]
 struct MatrixCell {
     encoding: GameDataEncoding,
     players: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TrafficProfile {
+    messages_per_sender: u64,
+    send_interval: Duration,
+    target_sender_rate_hz: u64,
+    enforce_pr_latency_limit: bool,
+}
+
+impl TrafficProfile {
+    fn one_second_at(target_sender_rate_hz: u64, enforce_pr_latency_limit: bool) -> Self {
+        assert!(target_sender_rate_hz > 0, "sender rate must be positive");
+        Self {
+            messages_per_sender: target_sender_rate_hz,
+            send_interval: Duration::from_nanos(NANOS_PER_SECOND / target_sender_rate_hz),
+            target_sender_rate_hz,
+            enforce_pr_latency_limit,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CellObservation {
+    target_deliveries_per_second: usize,
+    completed_deliveries: usize,
+    achieved_ingress_messages_per_second: f64,
+    sender_completion_millis: u128,
+    observed_deliveries_per_second: f64,
+    completion_millis: u128,
+    p50_micros: u64,
+    p95_micros: u64,
+    p99_micros: u64,
+    max_micros: u64,
+    backpressure_events: u64,
+    rss_kib: Option<u64>,
+}
+
+impl std::fmt::Display for CellObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "target_deliveries_per_second={} completed_deliveries={} \
+             achieved_ingress_messages_per_second={:.1} sender_completion_ms={} \
+             observed_deliveries_per_second={:.1} completion_ms={} p50_us={} \
+             p95_us={} p99_us={} max_us={} backpressure_events={} rss_kib={:?}",
+            self.target_deliveries_per_second,
+            self.completed_deliveries,
+            self.achieved_ingress_messages_per_second,
+            self.sender_completion_millis,
+            self.observed_deliveries_per_second,
+            self.completion_millis,
+            self.p50_micros,
+            self.p95_micros,
+            self.p99_micros,
+            self.max_micros,
+            self.backpressure_events,
+            self.rss_kib,
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -393,8 +456,17 @@ fn decode_binary_payload(
     })
 }
 
-async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
-    let cell_label = format!("{}-{}", cell.label(), profile.label());
+async fn run_cell(
+    cell: MatrixCell,
+    profile: NetworkProfile,
+    traffic: TrafficProfile,
+) -> CellObservation {
+    let cell_label = format!(
+        "{}-{}-{}hz",
+        cell.label(),
+        profile.label(),
+        traffic.target_sender_rate_hz
+    );
     let server =
         create_test_server_with_config(matrix_server_config(), matrix_protocol_config()).await;
     let metrics = server.metrics();
@@ -419,8 +491,8 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
 
     let origin = Instant::now();
     let first_send = origin + Duration::from_millis(50);
-    let expected_per_receiver =
-        (cell.players - 1) * usize::try_from(MESSAGES_PER_SENDER).expect("count");
+    let expected_per_receiver = (cell.players - 1)
+        * usize::try_from(traffic.messages_per_sender).expect("message count fits usize");
 
     let mut writers = Vec::with_capacity(cell.players);
     let mut readers = Vec::with_capacity(cell.players);
@@ -433,10 +505,10 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
         let writer_label = cell_label.clone();
         let writer_completion = Arc::clone(&completed_senders);
         writers.push(tokio::spawn(async move {
-            let mut ticker = tokio::time::interval_at(first_send, SEND_INTERVAL);
+            let mut ticker = tokio::time::interval_at(first_send, traffic.send_interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let padding = "x".repeat(PAYLOAD_BYTES);
-            for seq in 0..MESSAGES_PER_SENDER {
+            for seq in 0..traffic.messages_per_sender {
                 ticker.tick().await;
                 let sent_at_micros = u64::try_from(origin.elapsed().as_micros())
                     .expect("matrix duration fits u64 micros");
@@ -454,7 +526,7 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
                 });
             }
             writer_completion.fetch_add(1, Ordering::Release);
-            sink
+            (sink, origin.elapsed())
         }));
 
         let reader_auditor = Arc::clone(&auditor);
@@ -525,23 +597,27 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
 
     exercise_fault_profile(profile, &proxies, &completed_senders, cell.players).await;
 
-    let (sinks, streams, mut latencies) = tokio::time::timeout(CELL_DEADLINE, async {
-        let mut sinks = Vec::with_capacity(cell.players);
-        let mut streams = Vec::with_capacity(cell.players);
-        let mut latencies = Vec::with_capacity(cell.players * expected_per_receiver);
-        for writer in writers {
-            sinks.push(writer.await.expect("matrix writer task panicked"));
-        }
-        for reader in readers {
-            let (stream, mut receiver_latencies) =
-                reader.await.expect("matrix reader task panicked");
-            streams.push(stream);
-            latencies.append(&mut receiver_latencies);
-        }
-        (sinks, streams, latencies)
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{cell_label}: cell exceeded {CELL_DEADLINE:?}"));
+    let (sinks, streams, mut latencies, sender_completed_at) =
+        tokio::time::timeout(CELL_DEADLINE, async {
+            let mut sinks = Vec::with_capacity(cell.players);
+            let mut streams = Vec::with_capacity(cell.players);
+            let mut latencies = Vec::with_capacity(cell.players * expected_per_receiver);
+            let mut sender_completion = Duration::ZERO;
+            for writer in writers {
+                let (sink, completed_at) = writer.await.expect("matrix writer task panicked");
+                sender_completion = sender_completion.max(completed_at);
+                sinks.push(sink);
+            }
+            for reader in readers {
+                let (stream, mut receiver_latencies) =
+                    reader.await.expect("matrix reader task panicked");
+                streams.push(stream);
+                latencies.append(&mut receiver_latencies);
+            }
+            (sinks, streams, latencies, sender_completion)
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{cell_label}: cell exceeded {CELL_DEADLINE:?}"));
 
     let expectations: Vec<_> = (0..cell.players)
         .map(|receiver| ReceiverExpectation {
@@ -550,20 +626,22 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
                 .filter(|sender| *sender != receiver)
                 .map(|sender| SenderExpectation {
                     sender: format!("P{sender}"),
-                    total_sent: MESSAGES_PER_SENDER,
+                    total_sent: traffic.messages_per_sender,
                 })
                 .collect(),
         })
         .collect();
     auditor.assert_conformance(&metrics, &expectations).await;
 
-    assert_eq!(
-        metrics
-            .websocket_backpressure_events
-            .load(Ordering::Relaxed),
-        0,
-        "{cell_label}: bounded matrix cell must not enter backpressure"
-    );
+    let backpressure_events = metrics
+        .websocket_backpressure_events
+        .load(Ordering::Relaxed);
+    if traffic.enforce_pr_latency_limit {
+        assert_eq!(
+            backpressure_events, 0,
+            "{cell_label}: bounded matrix cell must not enter backpressure"
+        );
+    }
     assert_eq!(
         metrics
             .websocket_slow_consumer_disconnects
@@ -579,23 +657,64 @@ async fn run_cell(cell: MatrixCell, profile: NetworkProfile) {
         "{cell_label}: every delivery contributes one latency sample"
     );
     latencies.sort_unstable();
-    let p99_index = latencies.len().saturating_mul(99).div_ceil(100) - 1;
-    let p99_micros = latencies[p99_index];
-    if profile == NetworkProfile::Clean {
+    let percentile = |percent: usize| {
+        let index = latencies.len().saturating_mul(percent).div_ceil(100) - 1;
+        latencies[index]
+    };
+    let p50_micros = percentile(50);
+    let p95_micros = percentile(95);
+    let p99_micros = percentile(99);
+    let max_micros = *latencies.last().expect("matrix produced latency samples");
+    if profile == NetworkProfile::Clean && traffic.enforce_pr_latency_limit {
         assert!(
             p99_micros < P99_LIMIT_MICROS,
             "{cell_label}: p99 relay latency {p99_micros}us exceeded {P99_LIMIT_MICROS}us"
         );
     }
+    let sender_completion = sender_completed_at.saturating_sub(Duration::from_millis(50));
+    let ingress_messages = cell.players as f64 * traffic.messages_per_sender as f64;
+    let achieved_ingress_messages_per_second = ingress_messages / sender_completion.as_secs_f64();
+    let completion = origin.elapsed().saturating_sub(Duration::from_millis(50));
+    let observed_deliveries_per_second = expected_samples as f64 / completion.as_secs_f64();
+    let target_deliveries_per_second = cell
+        .players
+        .saturating_mul(cell.players.saturating_sub(1))
+        .saturating_mul(
+            usize::try_from(traffic.target_sender_rate_hz).expect("sender rate fits usize"),
+        );
+    let rss_kib = resident_set_kib();
     eprintln!(
-        "matrix cell {cell_label}: deliveries={expected_samples} p99_us={p99_micros} rss_kib={:?}",
-        resident_set_kib()
+        "matrix cell {cell_label}: target_deliveries_per_second={target_deliveries_per_second} \
+         completed_deliveries={expected_samples} \
+         achieved_ingress_messages_per_second={achieved_ingress_messages_per_second:.1} \
+         sender_completion_ms={} \
+         observed_deliveries_per_second={observed_deliveries_per_second:.1} \
+         completion_ms={} p50_us={p50_micros} p95_us={p95_micros} \
+         p99_us={p99_micros} max_us={max_micros} \
+         backpressure_events={backpressure_events} rss_kib={rss_kib:?}",
+        sender_completion.as_millis(),
+        completion.as_millis(),
     );
 
     drop(sinks);
     drop(streams);
     drop(proxies);
     running_server.shutdown().await;
+
+    CellObservation {
+        target_deliveries_per_second,
+        completed_deliveries: expected_samples,
+        achieved_ingress_messages_per_second,
+        sender_completion_millis: sender_completion.as_millis(),
+        observed_deliveries_per_second,
+        completion_millis: completion.as_millis(),
+        p50_micros,
+        p95_micros,
+        p99_micros,
+        max_micros,
+        backpressure_events,
+        rss_kib,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -615,8 +734,9 @@ fn resident_set_kib() -> Option<u64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn clean_relay_matrix_is_complete_fast_and_backpressure_free() {
+    let traffic = TrafficProfile::one_second_at(MESSAGES_PER_SENDER, true);
     for cell in matrix_cells() {
-        run_cell(cell, NetworkProfile::Clean).await;
+        run_cell(cell, NetworkProfile::Clean, traffic).await;
     }
 }
 
@@ -624,12 +744,50 @@ async fn clean_relay_matrix_is_complete_fast_and_backpressure_free() {
 #[serial_test::serial]
 #[ignore = "nightly-only (verification-nightly.yml): twelve per-client proxy fault cells"]
 async fn fault_relay_matrix_recovers_completely_after_fault_lift() {
+    let traffic = TrafficProfile::one_second_at(MESSAGES_PER_SENDER, true);
     for profile in [
         NetworkProfile::JitterThrottle,
         NetworkProfile::BurstPauseResume,
     ] {
         for cell in matrix_cells() {
-            run_cell(cell, profile).await;
+            run_cell(cell, profile, traffic).await;
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+#[ignore = "nightly-only (verification-nightly.yml): machine-measured 16-player saturation sweep"]
+async fn sixteen_player_relay_knee_sweep_preserves_exact_delivery() {
+    let cell = MatrixCell {
+        encoding: GameDataEncoding::Json,
+        players: 16,
+    };
+    let mut observations = Vec::new();
+
+    for sender_rate_hz in [30, 60, 120, 240, 480] {
+        observations.push(
+            run_cell(
+                cell,
+                NetworkProfile::Clean,
+                TrafficProfile::one_second_at(sender_rate_hz, false),
+            )
+            .await,
+        );
+    }
+
+    assert_eq!(
+        observations.len(),
+        5,
+        "the registered knee grid must report every rate"
+    );
+    for pair in observations.windows(2) {
+        assert!(
+            pair[0].target_deliveries_per_second < pair[1].target_deliveries_per_second,
+            "knee targets must increase strictly: {pair:?}"
+        );
+    }
+    for observation in observations {
+        eprintln!("relay knee observation: {observation}");
     }
 }

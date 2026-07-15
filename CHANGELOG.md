@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add data-backed relay-floor sizing guidance for fan-out bandwidth, queue-fill
+  and fail-loud timing, batching latency, and directional partitions. A nightly
+  exact-ledger 16-player rate sweep reports the GitHub runner's achieved
+  ingress, delivery throughput, latency quantiles, backpressure, and RSS so
+  operators can compare their own deployment benchmark without treating CI
+  hardware as a portable capacity guarantee.
 - Document bidirectional WebSocket liveness under symmetric and one-way
   partitions. The client and operator guides now distinguish reliable-delivery
   close `4002 slow_consumer` from transport-liveness close `4003
