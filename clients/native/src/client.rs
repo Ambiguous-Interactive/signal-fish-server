@@ -202,6 +202,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         peer_status_from: BTreeSet::new(),
         sent_labels: BTreeMap::new(),
         received_labels: BTreeMap::new(),
+        exchange_released: cli.exchange_release_file.is_none(),
+        exchange_ready_reported: false,
+        exchange_release_poll_at: None,
         pending_signals: BTreeMap::new(),
         run_deadline,
         linger_until: None,
@@ -615,6 +618,12 @@ struct Orchestrator<'a> {
     /// Exchange bookkeeping: channel labels sent/received per peer.
     sent_labels: BTreeMap<PlayerId, BTreeSet<String>>,
     received_labels: BTreeMap<PlayerId, BTreeSet<String>>,
+    /// Whether an optional harness gate has released the application exchange.
+    exchange_released: bool,
+    /// Whether the stable all-planned-pairs-open barrier event was emitted.
+    exchange_ready_reported: bool,
+    /// Next poll for `--exchange-release-file` while application traffic is held.
+    exchange_release_poll_at: Option<Instant>,
     /// Signals that arrived before their peer was paired (defensive: server
     /// FIFO ordering makes this unreachable in the documented flows).
     pending_signals: BTreeMap<PlayerId, VecDeque<serde_json::Value>>,
@@ -757,6 +766,9 @@ impl Orchestrator<'_> {
         if let Some(at) = self.success_release_poll_at {
             wake = wake.min(at);
         }
+        if let Some(at) = self.exchange_release_poll_at {
+            wake = wake.min(at);
+        }
         wake = wake.min(self.next_ping_at);
         if let Some(at) = self.pong_deadline {
             wake = wake.min(at);
@@ -807,6 +819,8 @@ impl Orchestrator<'_> {
             self.resolve_transport_status().await?;
             self.p2p_deadline = None;
         }
+
+        self.process_exchange_gate(now).await?;
 
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
@@ -872,22 +886,111 @@ impl Orchestrator<'_> {
     }
 
     async fn success_release_pending(&self) -> Result<bool, FatalError> {
-        let Some(path) = &self.cli.success_release_file else {
+        Self::release_file_pending(
+            self.cli.success_release_file.as_deref(),
+            "--success-release-file",
+        )
+        .await
+    }
+
+    async fn exchange_release_pending(&self) -> Result<bool, FatalError> {
+        Self::release_file_pending(
+            self.cli.exchange_release_file.as_deref(),
+            "--exchange-release-file",
+        )
+        .await
+    }
+
+    async fn release_file_pending(
+        path: Option<&std::path::Path>,
+        flag: &'static str,
+    ) -> Result<bool, FatalError> {
+        let Some(path) = path else {
             return Ok(false);
         };
-        let path = path.clone();
+        let path = path.to_path_buf();
         let display = path.display().to_string();
         tokio::task::spawn_blocking(move || path.try_exists())
             .await
             .map_err(|error| {
                 FatalError::connection(format!(
-                    "inspect --success-release-file {display}: metadata task failed: {error}"
+                    "inspect {flag} {display}: metadata task failed: {error}"
                 ))
             })?
             .map(|exists| !exists)
-            .map_err(|error| {
-                FatalError::connection(format!("inspect --success-release-file {display}: {error}"))
+            .map_err(|error| FatalError::connection(format!("inspect {flag} {display}: {error}")))
+    }
+
+    async fn process_exchange_gate(&mut self, now: Instant) -> Result<(), FatalError> {
+        if !self.cli.exchange
+            || self.exchange_released
+            || !self.exchange_gate_ready()
+            || self
+                .exchange_release_poll_at
+                .is_some_and(|poll_at| now < poll_at)
+        {
+            return Ok(());
+        }
+        if !self.exchange_ready_reported {
+            emit(&Event::ExchangeReady);
+            self.exchange_ready_reported = true;
+        }
+        if self.exchange_release_pending().await? {
+            self.exchange_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
+            return Ok(());
+        }
+
+        self.exchange_released = true;
+        self.exchange_release_poll_at = None;
+        let peers: Vec<PlayerId> = self.connected_pairs.iter().copied().collect();
+        for peer in peers {
+            self.send_exchange(peer).await?;
+        }
+        Ok(())
+    }
+
+    fn exchange_gate_ready(&self) -> bool {
+        self.all_expected_pairs_connected()
+            && self.expected_peers.iter().all(|peer| {
+                !needs_ice_gathering_marker(
+                    self.engine.is_paired(*peer),
+                    self.ice_gathering_complete.contains(peer),
+                )
             })
+    }
+
+    async fn send_exchange(&mut self, peer: PlayerId) -> Result<(), FatalError> {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            if self
+                .sent_labels
+                .get(&peer)
+                .is_some_and(|labels| labels.contains(label))
+            {
+                continue;
+            }
+            let Some(channel) = self.engine.channel(peer, label) else {
+                return Err(FatalError::connection(format!(
+                    "open pair with {peer} is missing channel {label}"
+                )));
+            };
+            let text = format!(
+                r#"{{"from":"{}","channel":"{}","seq":0}}"#,
+                self.my_id, label
+            );
+            channel.send_text(text.clone()).await.map_err(|error| {
+                FatalError::connection(format!("send on {label} to {peer} failed: {error}"))
+            })?;
+            self.sent_labels
+                .entry(peer)
+                .or_default()
+                .insert(label.to_string());
+            emit(&Event::ChannelMessageSent {
+                peer,
+                label: label.to_string(),
+                text,
+            });
+        }
+        Ok(())
     }
 
     async fn handle_server_message(&mut self, message: ServerMessage) -> Result<(), FatalError> {
@@ -1413,37 +1516,8 @@ impl Orchestrator<'_> {
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
         self.connected_pairs.insert(peer);
         emit(&Event::P2pPairConnected { peer });
-        if self.cli.exchange {
-            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
-                let Some(channel) = self.engine.channel(peer, label) else {
-                    return Err(FatalError::connection(format!(
-                        "open pair with {peer} is missing channel {label}"
-                    )));
-                };
-                // The exact documented exchange payload (stable field order).
-                let text = format!(
-                    r#"{{"from":"{}","channel":"{}","seq":0}}"#,
-                    self.my_id, label
-                );
-                match channel.send_text(text.clone()).await {
-                    Ok(_bytes_sent) => {
-                        self.sent_labels
-                            .entry(peer)
-                            .or_default()
-                            .insert(label.to_string());
-                        emit(&Event::ChannelMessageSent {
-                            peer,
-                            label: label.to_string(),
-                            text,
-                        });
-                    }
-                    Err(error) => {
-                        return Err(FatalError::connection(format!(
-                            "send on {label} to {peer} failed: {error}"
-                        )));
-                    }
-                }
-            }
+        if self.cli.exchange && self.exchange_released {
+            self.send_exchange(peer).await?;
         }
         // Initial resolution waits for all pairs; after any prior resolution,
         // one late pair is enough to change the overall any-pair state.

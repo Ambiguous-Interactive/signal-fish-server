@@ -239,8 +239,9 @@ jobs:
   multiprocess-delivery:
     name: Multi-Process Delivery Faults
     runs-on: ubuntu-latest
-    # Generous floor: after the native reference client build, seven WebRTC
-    # cells run serially in the process-spawning group. Each cell has a 600s
+    # Generous floor: after the native reference client build, eleven WebRTC
+    # cells run serially in the process-spawning group (seven clean/H8 plus
+    # four privileged 1%-loss cells). Each cell has a 600s
     # nextest ceiling above its 540s child watchdog, so the job ceiling keeps
     # principled headroom for all cells plus the delivery-fault suite and cold
     # compilation (zero-flakiness policy).
@@ -292,7 +293,7 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test multiprocess_delivery_e2e --run-ignored all \
             --success-output final 2>&1 | tee multiprocess-output.txt
-      - name: Run WebRTC topology and size matrix
+      - name: Run clean WebRTC topology and size matrix
         shell: bash
         env:
           SIGNAL_FISH_CLIENT_BIN: ${{ github.workspace }}/clients/native/target/debug/signal-fish-reference-native
@@ -300,7 +301,45 @@ jobs:
           set -o pipefail
           cargo nextest run --profile ci --locked --all-features \
             --test webrtc_mesh_budget_e2e --run-ignored all \
+            -E 'not test(one_percent_loss)' \
+            --no-tests fail \
             --success-output final 2>&1 | tee webrtc-matrix-output.txt
+      - name: Run fail-loud WebRTC netem loss matrix
+        shell: bash
+        env:
+          SIGNAL_FISH_CLIENT_BIN: ${{ github.workspace }}/clients/native/target/debug/signal-fish-reference-native
+          SF_NETEM_ACTIVE: "1"
+        run: |
+          set -o pipefail
+          cleanup_netem() {
+            sudo -n tc qdisc del dev lo root 2>/dev/null || true
+          }
+          for test_name in \
+            one_percent_loss_mesh_n2_recovers_exact_ledgers_after_fault_lift \
+            one_percent_loss_mesh_n8_recovers_exact_ledgers_after_fault_lift \
+            one_percent_loss_host_n2_recovers_exact_ledgers_after_fault_lift \
+            one_percent_loss_host_n8_recovers_exact_ledgers_after_fault_lift
+          do
+            cleanup_netem
+            trap cleanup_netem EXIT
+            cargo nextest run --profile ci --locked --all-features \
+              --test webrtc_mesh_budget_e2e --run-ignored all \
+              -E "test($test_name)" \
+              --no-tests fail \
+              --success-output final 2>&1 | tee -a webrtc-matrix-output.txt
+            cleanup_netem
+            trap - EXIT
+          done
+      - name: Remove WebRTC network fault state
+        if: always()
+        shell: bash
+        run: |
+          sudo -n tc qdisc del dev lo root 2>/dev/null || true
+          if tc qdisc show dev lo | grep -q netem; then
+            echo "ERROR: netem remained active after the WebRTC matrix"
+            tc qdisc show dev lo
+            exit 1
+          fi
       - name: Report multi-process results to job summary
         if: always()
         shell: bash
@@ -312,7 +351,7 @@ jobs:
             tail -n 60 multiprocess-output.txt 2>/dev/null || echo "no multiprocess output captured"
             echo '```'
             echo
-            echo "### WebRTC clean topology/size matrix and H8 fallback"
+            echo "### WebRTC clean/loss topology-size matrix and H8 fallback"
             echo
             echo '```text'
             tail -n 260 webrtc-matrix-output.txt 2>/dev/null || echo "no WebRTC matrix output captured"

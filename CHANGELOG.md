@@ -38,7 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{mesh, host} x {2, 8, 16}` topology/size grid with exact plan, signaling,
   channel, room-wide transport-status, and relay-floor ledgers. The signal
   budget guard accounts for the accepted `TransportStatus` report that shares
-  the 600-message control-plane bucket with WebRTC signals.
+  the 600-message control-plane bucket with WebRTC signals. Four additional
+  `{mesh, host} x {2, 8}` cells form every planned pair under verified 1%
+  loopback packet loss, then lift the fault before releasing the exact channel
+  exchange. The native client's new harness-only exchange release file emits
+  `exchange_ready` after pair formation and ICE gathering; ordinary exchange
+  behavior remains unchanged when the flag is omitted.
 - Add canonical release identity across the annotated Git tag, crates.io,
   GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
   container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and

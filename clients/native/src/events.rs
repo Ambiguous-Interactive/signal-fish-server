@@ -79,6 +79,9 @@ pub enum Event {
     },
     /// Both channels (`reliable` + `unreliable`) are open toward `peer`.
     P2pPairConnected { peer: PlayerId },
+    /// Every planned pair is open and local ICE gathering is complete, but
+    /// `--exchange-release-file` still holds the exact application exchange.
+    ExchangeReady,
     /// An overall `TransportStatus` state change was sent (Appendix G).
     TransportStatusSent {
         transport: Transport,
@@ -227,6 +230,7 @@ mod tests {
             ),
             (Event::GameDataSent, "game_data_sent"),
             (Event::FallbackEngaged, "fallback_engaged"),
+            (Event::ExchangeReady, "exchange_ready"),
             (Event::SuccessCriteriaMet, "success_criteria_met"),
             (Event::Exiting { code: 0 }, "exiting"),
         ];
