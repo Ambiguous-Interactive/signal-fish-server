@@ -490,7 +490,12 @@ async fn run_cell(
     arm_fault_profile(profile, &proxies);
 
     let origin = Instant::now();
-    let first_send = origin + Duration::from_millis(50);
+    let measurement_start = origin + Duration::from_millis(50);
+    // Tokio intervals tick immediately at their start instant. Scheduling the
+    // first message one interval after the measurement boundary makes N
+    // messages span N intervals, so a perfectly paced 30 Hz writer reports
+    // 30 Hz rather than 30 / 29 intervals.
+    let first_send = measurement_start + traffic.send_interval;
     let cell_deadline = first_send + CELL_DEADLINE;
     let expected_per_receiver = (cell.players - 1)
         * usize::try_from(traffic.messages_per_sender).expect("message count fits usize");
