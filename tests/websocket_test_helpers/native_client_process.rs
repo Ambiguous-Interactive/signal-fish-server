@@ -154,24 +154,46 @@ impl NativeClientProcess {
 
     /// Read until `count` events with this tag have been recorded in total.
     pub async fn await_event_count(&mut self, event_name: &str, count: usize, timeout: Duration) {
+        self.await_event_counts(&[(event_name, count)], timeout)
+            .await;
+    }
+
+    /// Read until every `(tag, total count)` requirement is satisfied against
+    /// one absolute deadline. This lets held-process barriers settle concurrent
+    /// event streams without accidentally granting one full timeout per tag.
+    pub async fn await_event_counts(&mut self, expected: &[(&str, usize)], timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut observed = self.recorded_event_count(event_name);
-        while observed < count {
-            let context = format!("awaiting {count} `{event_name}` events (have {observed})");
+        let mut observed: Vec<usize> = expected
+            .iter()
+            .map(|(event_name, _count)| self.recorded_event_count(event_name))
+            .collect();
+        while observed
+            .iter()
+            .zip(expected)
+            .any(|(seen, (_event_name, count))| seen < count)
+        {
+            let context = expected
+                .iter()
+                .zip(&observed)
+                .map(|((event_name, count), seen)| format!("{seen}/{count} `{event_name}` events"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let event = self.next_event_before(deadline, &context).await;
-            if event
+            if let Some(event_name) = event
                 .as_ref()
                 .and_then(|item| item.get("event"))
                 .and_then(Value::as_str)
-                == Some(event_name)
             {
-                observed += 1;
+                for ((expected_name, _count), seen) in expected.iter().zip(&mut observed) {
+                    if event_name == *expected_name {
+                        *seen += 1;
+                    }
+                }
             }
             assert!(
                 event.is_some(),
-                "client {}: stdout ended with {} of {count} `{event_name}` events;\n{}",
+                "client {}: stdout ended before all event counts settled ({context});\n{}",
                 self.name,
-                observed,
                 self.diagnostics()
             );
         }
