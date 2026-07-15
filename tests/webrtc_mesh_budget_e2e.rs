@@ -506,7 +506,7 @@ fn assert_client_barrier(
     let barrier_errors = events_named(window, "error");
     assert!(
         barrier_errors.is_empty(),
-        "{who}: errors before the successful {} barrier: {barrier_errors:?}",
+        "{who}: errors in the held {} event window: {barrier_errors:?}",
         scenario.label()
     );
     assert_eq!(
