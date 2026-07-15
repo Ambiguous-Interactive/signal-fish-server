@@ -83,8 +83,34 @@ reconnect token routable and does not establish room affinity by itself.
   process; see the [TURN deployment guide](../deployment-turn.md).
 
 These are operational starting points, not measured saturation guarantees. The
-P10.F2 sizing table remains pending the planned 16-player knee and partition
-experiments.
+P10.F2 throughput knee table remains pending the planned 16-player saturation
+experiment.
+
+## Directional partition detection
+
+A WebSocket can fail in only one direction. Do not use successful inbound or
+outbound application traffic as proof that the reverse path is healthy. The
+server has two independent fail-loud mechanisms:
+
+| Fault | What may still work | Default detection path | Authoritative result |
+| --- | --- | --- | --- |
+| client → server blackhole | The client can keep receiving room traffic and RFC 6455 Ping frames | The matching Pong cannot return; the next probe plus its deadline is roughly bounded by `server_ping_interval_secs + pong_timeout_secs` (10 + 5 seconds by default) | close `4003 activity_timeout`; `signal_fish_websocket_ping_timeouts_total` increments |
+| server → client blackhole, otherwise idle | The server can keep receiving application `Ping` and game traffic | The client never receives the next protocol Ping, so no matching Pong returns; the same probe bound applies | close `4003 activity_timeout` |
+| server → client blackhole under reliable relay pressure | Client writes can still reach the server while its outbound socket/data queue stops draining | Queue/socket fill plus `slow_consumer_timeout_ms` (5 seconds by default), or `max_sojourn_ms` (15 seconds by default); a socket probe can win first depending on probe phase | close `4002 slow_consumer` when delivery pressure wins, otherwise `4003 activity_timeout` |
+| symmetric blackhole | Neither direction carries new traffic | The next protocol probe cannot complete | close `4003 activity_timeout` |
+
+The close code describes the mechanism that won, not the physical direction of
+the fault. In particular, application Pings crossing client → server do not
+make a blocked server → client path healthy. Keep protocol Ping handling enabled
+in the WebSocket stack, treat `4002` and `4003` as terminal for that physical
+connection, and reconnect according to the client contract.
+
+The directional real-socket experiments use shortened probe/grace values and
+prove all three distinct cases: the unaffected direction carries traffic,
+exactly the expected close metric fires, the surviving member observes
+`PlayerLeft`, and a replacement member can join and receive relayed data. The
+same suite confirms that E4's probe bound supersedes the older activity-reaper
+estimate for these socket partitions.
 
 ## Related documents
 

@@ -232,6 +232,13 @@ Worked v3 sessions: [mesh + WebRTC](../scenarios/v3-mesh-webrtc.md),
   accountability can all produce the close.
 - **Keep the connection alive.** Send `Ping` on an interval or you will be
   dropped with `CONNECTION_IDLE_TIMEOUT`.
+- **Liveness is bidirectional.** Receiving room traffic does not prove that
+  your writes or automatic RFC 6455 Pong replies reach the server; sending
+  application `Ping` does not prove that the server-to-client path drains.
+  Keep reading and writing the socket, let the WebSocket stack answer protocol
+  Pings, and treat close `4002 slow_consumer` or `4003 activity_timeout` as a
+  terminal physical connection that must be reconnected. See the
+  [directional partition table](../architecture/scaling.md#directional-partition-detection).
 - **Authenticate first.** Any other message before `Authenticate` is an error.
 - **Rejoining by code re-creates a vanished room — carry your original
   `max_players`.** If a room no longer exists (the server restarted, or every
@@ -266,6 +273,10 @@ A client is conformant when it passes these scenarios:
       [error code reference](../reference/error-codes.md).
 - [ ] **Heartbeat:** the connection survives an idle period because `Ping` is
       sent.
+- [ ] **Directional liveness:** independently block client → server and server
+      → client traffic; confirm the unaffected direction can still carry data,
+      then surface `4003 activity_timeout` or `4002 slow_consumer` and reconnect
+      instead of treating one-way progress as a healthy connection.
 - [ ] **Reconnect (if implemented):** drop and `Reconnect` with the join
       `auth_token`, replay control-only `missed_events`, resync gameplay state
       at the application layer, and for v3 apply `sender_watermarks` as

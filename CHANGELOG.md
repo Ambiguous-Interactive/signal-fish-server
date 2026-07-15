@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Document bidirectional WebSocket liveness under symmetric and one-way
+  partitions. The client and operator guides now distinguish reliable-delivery
+  close `4002 slow_consumer` from transport-liveness close `4003
+  activity_timeout`, describe the default protocol-Ping detection bound, and
+  require clients to reconnect instead of treating one-way progress as a
+  healthy connection. Real-socket fault experiments pin both close mechanisms
+  and prove room relay recovery after each eviction.
 - Add a harness-only native reference-client success barrier and a nightly
   16-player WebRTC mesh experiment. The client can emit
   `success_criteria_met` and remain connected until a release file appears,
