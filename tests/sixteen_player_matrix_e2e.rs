@@ -491,6 +491,7 @@ async fn run_cell(
 
     let origin = Instant::now();
     let first_send = origin + Duration::from_millis(50);
+    let cell_deadline = first_send + CELL_DEADLINE;
     let expected_per_receiver = (cell.players - 1)
         * usize::try_from(traffic.messages_per_sender).expect("message count fits usize");
 
@@ -532,11 +533,10 @@ async fn run_cell(
         let reader_auditor = Arc::clone(&auditor);
         let reader_label = cell_label.clone();
         readers.push(tokio::spawn(async move {
-            let deadline = Instant::now() + FRAME_DEADLINE;
             let mut delivered = 0usize;
             let mut latencies_micros = Vec::with_capacity(expected_per_receiver);
             while delivered < expected_per_receiver {
-                let frame = tokio::time::timeout_at(deadline, stream.next())
+                let frame = tokio::time::timeout_at(cell_deadline, stream.next())
                     .await
                     .unwrap_or_else(|_| {
                         panic!(
@@ -598,7 +598,7 @@ async fn run_cell(
     exercise_fault_profile(profile, &proxies, &completed_senders, cell.players).await;
 
     let (sinks, streams, mut latencies, sender_completed_at) =
-        tokio::time::timeout(CELL_DEADLINE, async {
+        tokio::time::timeout_at(cell_deadline, async {
             let mut sinks = Vec::with_capacity(cell.players);
             let mut streams = Vec::with_capacity(cell.players);
             let mut latencies = Vec::with_capacity(cell.players * expected_per_receiver);
