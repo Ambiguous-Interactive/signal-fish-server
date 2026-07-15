@@ -113,6 +113,10 @@ overlapping history fails closed instead of becoming a false TLC divergence.
 The inverse observation race is rejected too: if Tokio has freed a physical
 slot but the writer has not yet recorded the dequeue, a successful enqueue
 cannot be projected onto the still-full model queue.
+Queue closure uses the same fail-closed boundary: because the physical
+receiver closes just before the finalizer records `QueueClose`, producer
+outcomes observed on the wrong side of that recorded event emit `Unsupported`
+instead of violating the model's `queueOpen` guard.
 Any direct/untraced v2 queue item also emits `Unsupported`: hidden occupancy
 would otherwise change FIFO capacity and make a valid `SendFull` look invalid
 to the projected model.

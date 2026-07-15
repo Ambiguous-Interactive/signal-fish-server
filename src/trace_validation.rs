@@ -9,6 +9,8 @@
 //! recorded events a total order; if a
 //! dequeue overlaps the producer's post-send observation, the trace is marked
 //! `Unsupported` instead of pretending that observation order was queue order.
+//! The same fail-closed rule applies when a producer outcome overlaps the
+//! finalizer's `QueueClose` observation.
 
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -180,6 +182,37 @@ impl DeliveryTraceRecorder {
         // is intentionally omitted; disconnect-race delivery attempts remain
         // visible as SendChannelClosed/ParkedChannelClosed.
         if state.projection_closed && action == DeliveryTraceAction::LifecycleClose {
+            return;
+        }
+        // The receiver closes the physical channel before the socket task can
+        // record QueueClose. Concurrent producers can therefore observe either
+        // side of that boundary in the opposite order from this mutex's event
+        // order. Every producer transition has a queueOpen guard in TLA+;
+        // reject the overlap instead of turning scheduler timing into a false
+        // replay divergence.
+        let requires_open_queue = matches!(
+            action,
+            DeliveryTraceAction::SendFast
+                | DeliveryTraceAction::SendFull
+                | DeliveryTraceAction::ParkedEnqueue
+                | DeliveryTraceAction::GraceExpired
+        );
+        let requires_closed_queue = matches!(
+            action,
+            DeliveryTraceAction::SendChannelClosed | DeliveryTraceAction::ParkedChannelClosed
+        );
+        if (state.queue_closed && requires_open_queue)
+            || (!state.queue_closed && requires_closed_queue)
+        {
+            push_event(
+                &mut state,
+                DeliveryTraceAction::Unsupported,
+                delivery_id,
+                Some("queue-close-observation-order-race"),
+            );
+            if let Some(delivery_id) = delivery_id {
+                remove_attempt(&mut state, delivery_id);
+            }
             return;
         }
         // Tokio frees channel capacity in the receiver poll before the socket
@@ -540,6 +573,65 @@ mod tests {
             assert!(output.contains("enqueue-completed-before-dequeue-observed"));
             assert_eq!(output.matches("\"action\":\"SendFast\"").count(), 1);
             assert!(!output.contains("ParkedEnqueue"));
+        }
+    }
+
+    #[test]
+    fn recorder_rejects_open_queue_outcomes_observed_after_queue_close() {
+        for action in [
+            DeliveryTraceAction::SendFast,
+            DeliveryTraceAction::SendFull,
+            DeliveryTraceAction::ParkedEnqueue,
+            DeliveryTraceAction::GraceExpired,
+        ] {
+            let recorder =
+                DeliveryTraceRecorder::new("late-open-outcome", 2).expect("valid recorder");
+            let message = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let delivery = recorder.begin_delivery(&message);
+            if matches!(
+                action,
+                DeliveryTraceAction::ParkedEnqueue | DeliveryTraceAction::GraceExpired
+            ) {
+                recorder.record(DeliveryTraceAction::SendFull, Some(delivery), None);
+            }
+            recorder.record(DeliveryTraceAction::LifecycleClose, None, None);
+            recorder.queue_closed();
+            recorder.record(action, Some(delivery), None);
+
+            let state = recorder
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let last = state.events.last().expect("race marker");
+            assert_eq!(last.action, DeliveryTraceAction::Unsupported);
+            assert_eq!(last.detail, Some("queue-close-observation-order-race"));
+            assert!(!state.attempt_messages.contains_key(&delivery));
+        }
+    }
+
+    #[test]
+    fn recorder_rejects_closed_queue_outcomes_observed_before_queue_close() {
+        for action in [
+            DeliveryTraceAction::SendChannelClosed,
+            DeliveryTraceAction::ParkedChannelClosed,
+        ] {
+            let recorder =
+                DeliveryTraceRecorder::new("early-closed-outcome", 2).expect("valid recorder");
+            let message = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let delivery = recorder.begin_delivery(&message);
+            if action == DeliveryTraceAction::ParkedChannelClosed {
+                recorder.record(DeliveryTraceAction::SendFull, Some(delivery), None);
+            }
+            recorder.record(action, Some(delivery), None);
+
+            let state = recorder
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let last = state.events.last().expect("race marker");
+            assert_eq!(last.action, DeliveryTraceAction::Unsupported);
+            assert_eq!(last.detail, Some("queue-close-observation-order-race"));
+            assert!(!state.attempt_messages.contains_key(&delivery));
         }
     }
 
