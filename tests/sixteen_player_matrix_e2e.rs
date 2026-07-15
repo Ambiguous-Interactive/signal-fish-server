@@ -623,6 +623,11 @@ async fn run_cell(
         })
         .await
         .unwrap_or_else(|_| panic!("{cell_label}: cell exceeded {CELL_DEADLINE:?}"));
+    // Capture performance observations at the delivery barrier. Conformance
+    // polling and percentile sorting below validate/describe the completed
+    // cell but must not inflate its measured wall time or RSS.
+    let delivery_completed_at = origin.elapsed();
+    let rss_kib = resident_set_kib();
 
     let expectations: Vec<_> = (0..cell.players)
         .map(|receiver| ReceiverExpectation {
@@ -679,7 +684,7 @@ async fn run_cell(
     let sender_completion = sender_completed_at.saturating_sub(Duration::from_millis(50));
     let ingress_messages = cell.players as f64 * traffic.messages_per_sender as f64;
     let achieved_ingress_messages_per_second = ingress_messages / sender_completion.as_secs_f64();
-    let completion = origin.elapsed().saturating_sub(Duration::from_millis(50));
+    let completion = delivery_completed_at.saturating_sub(Duration::from_millis(50));
     let observed_deliveries_per_second = expected_samples as f64 / completion.as_secs_f64();
     let target_deliveries_per_second = cell
         .players
@@ -687,7 +692,6 @@ async fn run_cell(
         .saturating_mul(
             usize::try_from(traffic.target_sender_rate_hz).expect("sender rate fits usize"),
         );
-    let rss_kib = resident_set_kib();
     eprintln!(
         "matrix cell {cell_label}: target_deliveries_per_second={target_deliveries_per_second} \
          completed_deliveries={expected_samples} \
