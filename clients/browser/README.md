@@ -113,7 +113,8 @@ Byte-identical to the native client's for the shared CLI surface — see the
 [canonical contract](../native/README.md#jsonl-event-contract) and
 [exit codes](../native/README.md#exit-codes). The same Rust harness asserts over native and browser
 processes interchangeably. The native-only `--drop-ice-from` fault may additionally emit
-`ice_candidate_dropped`; browser/shared-flag runs never do. EPIPE handling matches too: a failed stdout write is logged to stderr once and
+`ice_candidate_dropped`; browser/shared-flag runs never do. EPIPE handling matches too: a failed stdout
+write is logged to stderr once and
 latches suppression; the run continues to its bounded exit. Usage errors exit `2` before the event stream
 starts (no `exiting` event), matching the documented clap behavior.
 
