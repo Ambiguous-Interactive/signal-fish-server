@@ -1069,6 +1069,11 @@ test('unsupported advisory requires a prior report but not adjacency', () => {
   });
   rollover.observeServerMessage(true);
 
+  const roomReset = joinedState();
+  roomReset.recordReport(report);
+  roomReset.resetRoom();
+  expectViolation(() => roomReset.observeServerMessage(true), 'lacked a prior causal');
+
   const terminal = joinedState();
   terminal.recordReport(report);
   terminal.observeTerminal();

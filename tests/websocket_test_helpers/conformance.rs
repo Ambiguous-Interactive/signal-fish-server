@@ -748,6 +748,7 @@ impl ConformanceAuditor {
         receiver_state.senders.clear();
         receiver_state.membership_history.clear();
         receiver_state.pending_gaps.clear();
+        receiver_state.unadvised_unsupported_gap = None;
         for player in current_players {
             assert!(
                 receiver_state.membership_history.insert(player.id),
@@ -813,6 +814,7 @@ impl ConformanceAuditor {
         receiver_state.senders.clear();
         receiver_state.membership_history.clear();
         receiver_state.pending_gaps.clear();
+        receiver_state.unadvised_unsupported_gap = None;
     }
 
     fn record_lifecycle_epoch(

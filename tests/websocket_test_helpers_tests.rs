@@ -2117,6 +2117,27 @@ fn conformance_unsupported_advisory_requires_prior_report_but_not_adjacency() {
         },
     );
     deferred.record_close("receiver", 4002, "slow_consumer");
+
+    let room_reset = ConformanceAuditor::new(ReceiverProtocolMode::V3);
+    room_reset.record_message("receiver", &room_joined(sender, 1));
+    room_reset.record_message(
+        "receiver",
+        &delivery_report(
+            counters,
+            [DeliveryGap {
+                from_player: sender,
+                epoch: 1,
+                from_seq: 1,
+                to_seq: 1,
+                reason: DeliveryGapReason::UnsupportedFormat,
+            }],
+        ),
+    );
+    room_reset.record_message("receiver", &ServerMessage::RoomLeft);
+    assert!(
+        panics(|| room_reset.record_message("receiver", &format_error())),
+        "an advisory cannot use a report from a prior room lifecycle"
+    );
 }
 
 #[test]

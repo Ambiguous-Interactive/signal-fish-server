@@ -83,6 +83,7 @@ export class DeliveryAccountability {
     this.staleSenders.clear();
     this.departedSenders.clear();
     this.pendingGaps.clear();
+    this.unadvisedUnsupportedGap = null;
   }
 
   /** Start accountability for a new physical connection. */

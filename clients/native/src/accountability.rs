@@ -79,6 +79,7 @@ impl DeliveryAccountability {
         self.stale_senders.clear();
         self.departed_senders.clear();
         self.pending_gaps.clear();
+        self.unadvised_unsupported_gap = None;
     }
 
     /// Start accountability for a new physical connection.
@@ -1579,6 +1580,12 @@ mod tests {
             })
             .unwrap();
         rollover.observe_server_message(true).unwrap();
+
+        let mut room_reset = DeliveryAccountability::default();
+        room_reset.note_player_joined(&player(sender, 1)).unwrap();
+        room_reset.record_report(&report).unwrap();
+        room_reset.reset_room();
+        assert!(room_reset.observe_server_message(true).is_err());
 
         let mut terminal = DeliveryAccountability::default();
         terminal.note_player_joined(&player(sender, 1)).unwrap();
