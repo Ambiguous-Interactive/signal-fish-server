@@ -1094,6 +1094,31 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let barrier_started = tokio::time::Instant::now();
     let barrier_deadline = barrier_started + SUCCESS_BARRIER_DEADLINE;
     let netem_drops = if scenario.uses_netem() {
+        // Prove that every planned pair formed while loss is still active.
+        // Do not keep netem installed while waiting for the terminal local ICE
+        // gathering callback: a dropped mDNS packet can leave gathering open
+        // after every data channel is already connected, deadlocking the
+        // exchange gate without disproving connectivity under loss.
+        let connected_statuses = join_all(clients.iter_mut().map(|client| {
+            client.await_event(
+                "transport_status_sent",
+                barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+        }))
+        .await;
+        for (client, status) in clients.iter().zip(&connected_statuses) {
+            assert_eq!(
+                status.get("connected").and_then(Value::as_bool),
+                Some(true),
+                "{}: netem connectivity barrier must report a fully connected topology: {status}",
+                client.name
+            );
+        }
+        let guard = netem_guard
+            .take()
+            .expect("netem scenario owns an active qdisc guard");
+        guard.verify_active();
+        let drops = guard.release();
         join_all(clients.iter_mut().map(|client| {
             client.await_event_count(
                 "exchange_ready",
@@ -1102,11 +1127,6 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             )
         }))
         .await;
-        let guard = netem_guard
-            .take()
-            .expect("netem scenario owns an active qdisc guard");
-        guard.verify_active();
-        let drops = guard.release();
         std::fs::write(
             exchange_release_file
                 .as_ref()
