@@ -118,8 +118,11 @@ The generated module supplies concrete traces to
 `DeliveryContractTrace.tla`. Each delivery call becomes a one-message model
 sender. `WriterStart` moves the queue head to an explicit `inFlight` slot when
 the real writer frees queue capacity; `WriterDrain` resolves it only after a
-successful socket write, while `CloseFinish` accounts an interrupted in-flight
-item with the closing connection. `QueueClose` separately marks the point at
+successful socket write. The slot also records its `Live` or `CloseFlush`
+phase, and both the strict generator and TLA guard require the matching drain;
+a hostile trace cannot relabel a forbidden live drain as a close-flush drain.
+`CloseFinish` accounts an interrupted in-flight item with the closing
+connection. `QueueClose` separately marks the point at
 which new sends begin returning channel-closed, and slow-consumer closes may
 never take the healthy lifecycle close-flush path. TLC chooses every captured trace and permits
 only event `i`; a false guard is therefore a deadlock whose state names both

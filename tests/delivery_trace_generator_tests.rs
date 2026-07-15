@@ -125,6 +125,11 @@ fn malformed_or_out_of_domain_traces_fail_closed() {
             "outside v2_legacy_reliable_fifo",
         ),
         (
+            "mismatched write phase",
+            VALID_TRACE.replace("WriterDrain", "CloseFlushDrain"),
+            "started by CloseFlushStart",
+        ),
+        (
             "sequence gap",
             VALID_TRACE.replacen("\"seq\":2", "\"seq\":9", 1),
             "seq must be contiguous",

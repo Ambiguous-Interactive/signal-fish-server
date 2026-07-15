@@ -196,11 +196,16 @@ def parse_corpus(path: Path) -> list[Trace]:
                         raise TraceInputError(
                             f"{context}: {action} requires a queued delivery_id"
                         )
-                    active_attempts[delivery_id] = "in_flight"
+                    active_attempts[delivery_id] = f"in_flight:{action}"
                 elif action in WRITE_FINISH_ACTIONS:
-                    if active_attempts.get(delivery_id) != "in_flight":
+                    expected_start = {
+                        "WriterDrain": "WriterStart",
+                        "CloseFlushDrain": "CloseFlushStart",
+                    }[action]
+                    if active_attempts.get(delivery_id) != f"in_flight:{expected_start}":
                         raise TraceInputError(
-                            f"{context}: {action} requires an in-flight delivery_id"
+                            f"{context}: {action} requires an in-flight delivery_id "
+                            f"started by {expected_start}"
                         )
                     active_attempts[delivery_id] = "resolved:written"
 

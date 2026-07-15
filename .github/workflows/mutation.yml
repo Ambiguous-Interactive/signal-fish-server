@@ -154,8 +154,8 @@ jobs:
         # Enforced by test_mutation_shard_matrix_is_complete_contiguous_partition.
         # N=36: --in-place runs each shard's mutants SERIALLY. Measured shard 22,
         # the worst 12-mutant shard, took 310.12s (25.843s/mutant). Adding ~10%
-        # headroom and rounding up gives a 29s/mutant budget. With 352 mutants,
-        # ceil(352/36) = 10 mutants/shard and the modeled worst shard is
+        # headroom and rounding up gives a 29s/mutant budget. With 354 mutants,
+        # ceil(354/36) = 10 mutants/shard and the modeled worst shard is
         # 10 * 29s = 290s, under the 5-minute target. The feasibility
         # of {mutant-count, N, per-mutant budget, timeout} is asserted by
         # test_mutation_shard_budget_is_feasible_vs_timeout.

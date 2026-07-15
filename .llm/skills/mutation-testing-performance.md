@@ -63,7 +63,7 @@ cancelled**. Three compounding causes:
    previous one — incremental compilation never gets locality and per-mutant cost
    grew (measured ~55s and climbing).
 3. **Per-mutant relink.** Every mutant relinks the crate; a slow linker multiplies
-   that across 352 mutants × N shards.
+   that across 354 mutants × N shards.
 
 Net effect: each shard paid a full cold build before testing a single mutant, so
 the 20-min timeout fired before any shard finished.
@@ -105,7 +105,7 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
    the test, so the build no longer compiles ~20 integration-test binaries per
    mutant. **Rule:** keep `--lib` in `additional_cargo_args` (not
    `additional_cargo_test_args`); never re-add `--all-features` — the scoped
-   modules have zero feature gates, so `cargo mutants --list` stays 352 either way.
+   modules have zero feature gates, so `cargo mutants --list` stays 354 either way.
 6. **Process-isolated nextest oracle (`test_tool = "nextest"`).** A mutation
    that removes a progress guard can hang one unit test. Fail-fast alone does
    not terminate a sibling that is already running, so the dedicated
@@ -118,7 +118,7 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
 7. **Shard count sized for serial execution.** `--in-place` runs each shard's
    mutants SERIALLY (one source tree, no `-j`). Measured CI shard 22, the worst
    12-mutant shard, took 310.12s (25.843s/mutant). Adding ~10% headroom and
-   rounding up gives a 29s/mutant budget. Resharded to **36**: 352 mutants ÷ 36
+   rounding up gives a 29s/mutant budget. Resharded to **36**: 354 mutants ÷ 36
    rounds up to 10/shard × 29s = 290s/shard; `timeout-minutes: 10`. **Rule:**
    when the mutant count or per-mutant cost changes, re-size N so each serial
    shard still finishes under the 5-minute target with measured headroom.
@@ -131,7 +131,7 @@ Treat these four quantities as one interlocked budget — changing any one witho
 re-checking the others can silently reintroduce the cancellation:
 
 ```text
-{ mutant-count (352), shard-count N, per-shard timeout, per-mutant budget }
+{ mutant-count (354), shard-count N, per-shard timeout, per-mutant budget }
 ```
 
 - **Per-shard target: < 5 min.** `ceil(mutant-count / N) × per-mutant-budget`
@@ -147,7 +147,7 @@ re-checking the others can silently reintroduce the cancellation:
 Measured in CI: shard 22, the worst 12-mutant shard, took 310.12s, or
 25.843s/mutant. Adding ~10% headroom and rounding up gives a conservative
 29s/mutant budget. Using 36 shards caps the modeled largest shard at
-`ceil(352/36) × 29s = 10 × 29s = 290s`, below the 5-minute target. The
+`ceil(354/36) × 29s = 10 × 29s = 290s`, below the 5-minute target. The
 10-minute `timeout-minutes` retains headroom for runner variance or an
 occasional cache miss.
 

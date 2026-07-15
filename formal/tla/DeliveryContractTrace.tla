@@ -11,18 +11,19 @@
 (* concrete than DeliveryContract.tla: the real socket task removes an    *)
 (* item from queue capacity before its write future resolves. The item    *)
 (* remains accountable in inFlight until a matching drain completes or   *)
-(* CloseFinish abandons it with the connection.                            *)
+(* CloseFinish abandons it with the connection. inFlightPhase prevents a  *)
+(* hostile trace from relabeling a live drain as a close-flush drain.      *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, GeneratedDeliveryContractTrace
 
 CONSTANT TraceActionBug
 ASSUME TraceActionBug \in BOOLEAN
 
-VARIABLES traceId, i, queue, inFlight, senderState, sent, written, dropped,
-          chClosed, queueOpen, connState, closeReason
+VARIABLES traceId, i, queue, inFlight, inFlightPhase, senderState, sent,
+          written, dropped, chClosed, queueOpen, connState, closeReason
 
-vars == <<traceId, i, queue, inFlight, senderState, sent, written, dropped,
-          chClosed, queueOpen, connState, closeReason>>
+vars == <<traceId, i, queue, inFlight, inFlightPhase, senderState, sent,
+          written, dropped, chClosed, queueOpen, connState, closeReason>>
 
 Senders == TraceSenders[traceId]
 QueueCapacity == TraceCapacity[traceId]
@@ -35,6 +36,7 @@ Init ==
     /\ i = 1
     /\ queue = <<>>
     /\ inFlight = <<>>
+    /\ inFlightPhase = "None"
     /\ senderState = [s \in Senders |-> "Idle"]
     /\ sent = [s \in Senders |-> 0]
     /\ written = [s \in Senders |-> 0]
@@ -53,7 +55,7 @@ SendFast(s) ==
     /\ Len(queue) < QueueCapacity
     /\ queue' = Append(queue, s)
     /\ sent' = [sent EXCEPT ![s] = 1]
-    /\ UNCHANGED <<inFlight, senderState, written, dropped, chClosed,
+    /\ UNCHANGED <<inFlight, inFlightPhase, senderState, written, dropped, chClosed,
                     queueOpen, connState, closeReason>>
 
 SendFull(s) ==
@@ -62,7 +64,7 @@ SendFull(s) ==
     /\ Len(queue) = QueueCapacity
     /\ sent' = [sent EXCEPT ![s] = 1]
     /\ senderState' = [senderState EXCEPT ![s] = "Parked"]
-    /\ UNCHANGED <<queue, inFlight, written, dropped, chClosed,
+    /\ UNCHANGED <<queue, inFlight, inFlightPhase, written, dropped, chClosed,
                     queueOpen, connState, closeReason>>
 
 SendChannelClosed(s) ==
@@ -70,7 +72,7 @@ SendChannelClosed(s) ==
     /\ ~queueOpen
     /\ sent' = [sent EXCEPT ![s] = 1]
     /\ chClosed' = [chClosed EXCEPT ![s] = 1]
-    /\ UNCHANGED <<queue, inFlight, senderState, written, dropped,
+    /\ UNCHANGED <<queue, inFlight, inFlightPhase, senderState, written, dropped,
                     queueOpen, connState, closeReason>>
 
 ParkedEnqueue(s) ==
@@ -79,7 +81,7 @@ ParkedEnqueue(s) ==
     /\ Len(queue) < QueueCapacity
     /\ queue' = Append(queue, s)
     /\ senderState' = [senderState EXCEPT ![s] = "Idle"]
-    /\ UNCHANGED <<inFlight, sent, written, dropped, chClosed,
+    /\ UNCHANGED <<inFlight, inFlightPhase, sent, written, dropped, chClosed,
                     queueOpen, connState, closeReason>>
 
 ParkedChannelClosed(s) ==
@@ -87,7 +89,7 @@ ParkedChannelClosed(s) ==
     /\ ~queueOpen
     /\ chClosed' = [chClosed EXCEPT ![s] = @ + 1]
     /\ senderState' = [senderState EXCEPT ![s] = "Idle"]
-    /\ UNCHANGED <<queue, inFlight, sent, written, dropped,
+    /\ UNCHANGED <<queue, inFlight, inFlightPhase, sent, written, dropped,
                     queueOpen, connState, closeReason>>
 
 GraceExpired(s) ==
@@ -97,35 +99,37 @@ GraceExpired(s) ==
     /\ senderState' = [senderState EXCEPT ![s] = "Idle"]
     /\ connState' = "CloseRequested"
     /\ RequestClose("SlowConsumer")
-    /\ UNCHANGED <<queue, inFlight, sent, written, chClosed, queueOpen>>
+    /\ UNCHANGED <<queue, inFlight, inFlightPhase, sent, written, chClosed, queueOpen>>
 
 LifecycleClose ==
     /\ connState = "Open"
     /\ connState' = "CloseRequested"
     /\ RequestClose("Lifecycle")
-    /\ UNCHANGED <<queue, inFlight, senderState, sent, written, dropped,
+    /\ UNCHANGED <<queue, inFlight, inFlightPhase, senderState, sent, written, dropped,
                     chClosed, queueOpen>>
 
 QueueClose ==
     /\ connState = "CloseRequested" /\ queueOpen
     /\ queueOpen' = FALSE
-    /\ UNCHANGED <<queue, inFlight, senderState, sent, written, dropped,
+    /\ UNCHANGED <<queue, inFlight, inFlightPhase, senderState, sent, written, dropped,
                     chClosed, connState, closeReason>>
 
 WriterStart(s) ==
     /\ connState = "Open" /\ inFlight = <<>> /\ queue # <<>>
     /\ s = Head(queue)
     /\ inFlight' = <<Head(queue)>>
+    /\ inFlightPhase' = "Live"
     /\ queue' = Tail(queue)
     /\ UNCHANGED <<senderState, sent, written, dropped, chClosed,
                     queueOpen, connState, closeReason>>
 
 WriterDrain(s) ==
     /\ connState \in {"Open", "CloseRequested"} /\ queueOpen
-    /\ inFlight # <<>>
+    /\ inFlight # <<>> /\ inFlightPhase = "Live"
     /\ s = Head(inFlight)
     /\ written' = [written EXCEPT ![Head(inFlight)] = @ + 1]
     /\ inFlight' = <<>>
+    /\ inFlightPhase' = "None"
     /\ UNCHANGED <<queue, senderState, sent, dropped, chClosed,
                     queueOpen, connState, closeReason>>
 
@@ -134,15 +138,18 @@ CloseFlushStart(s) ==
     /\ ~queueOpen /\ inFlight = <<>> /\ queue # <<>>
     /\ s = Head(queue)
     /\ inFlight' = <<Head(queue)>>
+    /\ inFlightPhase' = "CloseFlush"
     /\ queue' = Tail(queue)
     /\ UNCHANGED <<senderState, sent, written, dropped, chClosed,
                     queueOpen, connState, closeReason>>
 
 CloseFlushDrain(s) ==
     /\ connState = "CloseRequested" /\ closeReason = "Lifecycle"
-    /\ ~queueOpen /\ inFlight # <<>> /\ s = Head(inFlight)
+    /\ ~queueOpen /\ inFlight # <<>> /\ inFlightPhase = "CloseFlush"
+    /\ s = Head(inFlight)
     /\ written' = [written EXCEPT ![Head(inFlight)] = @ + 1]
     /\ inFlight' = <<>>
+    /\ inFlightPhase' = "None"
     /\ UNCHANGED <<queue, senderState, sent, dropped, chClosed,
                     queueOpen, connState, closeReason>>
 
@@ -151,7 +158,7 @@ CloseFinish ==
     /\ connState' = "Closed"
     /\ dropped' = [s \in Senders |->
                       dropped[s] + Occ(queue, s) + Occ(inFlight, s)]
-    /\ queue' = <<>> /\ inFlight' = <<>>
+    /\ queue' = <<>> /\ inFlight' = <<>> /\ inFlightPhase' = "None"
     /\ UNCHANGED <<senderState, sent, written, chClosed, queueOpen, closeReason>>
 
 EventAction(event) ==
@@ -185,6 +192,8 @@ TypeOK ==
     /\ traceId \in TraceIds /\ i \in 1..(Len(CurrentTrace) + 1)
     /\ queue \in Seq(Senders) /\ Len(queue) <= QueueCapacity
     /\ inFlight \in Seq(Senders) /\ Len(inFlight) <= 1
+    /\ inFlightPhase \in {"None", "Live", "CloseFlush"}
+    /\ (inFlight = <<>>) = (inFlightPhase = "None")
     /\ senderState \in [Senders -> {"Idle", "Parked"}]
     /\ sent \in [Senders -> 0..1]
     /\ written \in [Senders -> 0..1]
