@@ -118,18 +118,18 @@ runner (server plus all 16 load clients):
 
 | Target per player | Writer completion | Observed deliveries | p99 latency | Queue backpressure | RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 30 msg/s | 1.001 s | 6,882/s | 42 ms | 0 | 22.8 MiB |
-| 60 msg/s | 1.008 s | 13,663/s | 43 ms | 0 | 23.1 MiB |
-| 120 msg/s | 1.019 s | 27,005/s | 30 ms | 0 | 24.0 MiB |
-| 240 msg/s | 1.459 s | 29,080/s | 569 ms | 0 | 25.5 MiB |
-| 480 msg/s | 1.692 s | 34,032/s | 1,720 ms | 0 | 28.6 MiB |
+| 30 msg/s | 1.001 s | 6,874/s | 45 ms | 0 | 22.8 MiB |
+| 60 msg/s | 1.018 s | 13,505/s | 54 ms | 0 | 23.1 MiB |
+| 120 msg/s | 1.591 s | 16,965/s | 149 ms | 0 | 24.2 MiB |
+| 240 msg/s | 2.525 s | 17,818/s | 851 ms | 0 | 26.1 MiB |
+| 480 msg/s | 3.334 s | 19,595/s | 2,722 ms | 0 | 28.2 MiB |
 
 Every one of the 223,200 sweep deliveries was exact and no client was evicted.
 The observed knee lies between the 120 and 240 msg/s targets: doubling offered
-fan-out from 28,800/s to 57,600/s increased completed throughput by only 7.7%,
-writer completion slipped beyond the scheduled second, and p99 rose from 30 ms
-to 569 ms without filling the server's outbound queues. At the 480 target p99
-reached 1.72 seconds. On this shared-process experiment the load clients/socket
+fan-out from 28,800/s to 57,600/s increased completed throughput by only 5.0%,
+writer completion slipped beyond the scheduled second, and p99 rose from 149 ms
+to 851 ms without filling the server's outbound queues. At the 480 target p99
+reached 2.72 seconds. On this shared-process experiment the load clients/socket
 ingress became the limiting boundary before the delivery queue. It does
 **not** establish a standalone server maximum.
 
