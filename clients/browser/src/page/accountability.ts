@@ -68,7 +68,7 @@ export class DeliveryAccountability {
   private readonly staleSenders = new Set<string>();
   private readonly departedSenders = new Map<string, Map<number, DepartedSender>>();
   private readonly pendingGaps = new Map<string, ParsedGap[]>();
-  private pendingUnsupportedError: ParsedGap | null = null;
+  private unadvisedUnsupportedGap: ParsedGap | null = null;
   private counters: number[] | null = null;
   private lastRelayStats: RelayStatsSnapshot | null = null;
 
@@ -88,7 +88,7 @@ export class DeliveryAccountability {
   /** Start accountability for a new physical connection. */
   resetConnection(): void {
     this.resetRoom();
-    this.pendingUnsupportedError = null;
+    this.unadvisedUnsupportedGap = null;
     this.counters = null;
     this.lastRelayStats = null;
   }
@@ -235,26 +235,16 @@ export class DeliveryAccountability {
     if (!this.protocolV3) {
       return;
     }
-    if (this.pendingUnsupportedError !== null) {
-      if (isUnsupportedFormatError) {
-        this.pendingUnsupportedError = null;
-        return;
-      }
-      const gap = this.pendingUnsupportedError;
-      violation(
-        `unsupported-format report for ${gap.fromPlayer} epoch ${gap.epoch}, seq ` +
-          `${gap.fromSeq} was not immediately followed by Error(UnsupportedGameDataFormat)`,
-      );
-    }
     if (isUnsupportedFormatError) {
-      violation(
-        'Error(UnsupportedGameDataFormat) lacked an immediately preceding causal DeliveryReport',
-      );
+      if (this.unadvisedUnsupportedGap === null) {
+        violation('Error(UnsupportedGameDataFormat) lacked a prior causal DeliveryReport');
+      }
+      this.unadvisedUnsupportedGap = null;
     }
   }
 
   observeTerminal(): void {
-    this.pendingUnsupportedError = null;
+    this.unadvisedUnsupportedGap = null;
   }
 
   /** Validate one connection-cumulative relay statistics snapshot. */
@@ -335,11 +325,6 @@ export class DeliveryAccountability {
   recordReport(reportValue: unknown): void {
     if (!this.protocolV3) {
       violation('v2 connection received DeliveryReport');
-    }
-    if (this.pendingUnsupportedError !== null) {
-      violation(
-        'unsupported-format DeliveryReport was not immediately followed by its supplemental Error',
-      );
     }
     const report = asRecord(reportValue, 'DeliveryReport.data');
     const nextCounters = parseCounters(report['per_class']);
@@ -424,7 +409,7 @@ export class DeliveryAccountability {
       this.pendingGaps.set(key, pending);
     }
     if (unsupportedSeen) {
-      this.pendingUnsupportedError = gaps[0] ?? null;
+      this.unadvisedUnsupportedGap = gaps[0] ?? null;
     }
     this.counters = nextCounters;
     for (const gap of gaps) {

@@ -68,7 +68,9 @@ before applying relayed data. It retains ranges across bounded rollover reports
 only when their non-overlapping, causally prior union covers every missing
 sequence. `RelayStats`, totals, and supplemental errors are diagnostics only.
 RelayStats snapshots are checked for a positive stable interval and monotonic
-cumulative counters. V2 mode remains reliable FIFO, and raw binary data is
+cumulative counters. Unsupported-format errors are optional rate-limited
+advisories: when present they require a prior causal exact report, but need not
+be adjacent to it. V2 mode remains reliable FIFO, and raw binary data is
 always reliable. This runtime negotiates `game_data_format: "json"`, so an
 incoming binary frame or text `GameDataBinary` is a protocol error. The strict
 MessagePack decoder is kept as a tested protocol utility for binary-capable

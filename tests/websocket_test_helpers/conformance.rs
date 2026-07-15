@@ -693,9 +693,9 @@ impl ConformanceAuditor {
                 .or_insert(self.default_mode);
             let receiver_state = state.receivers.entry(receiver.to_string()).or_default();
             Self::assert_receiver_active(receiver, receiver_state);
-            // The report is the causal accountability record. A failed write
-            // of the supplemental Error may terminate the socket immediately;
-            // only a continuing stream must show Error as its next frame.
+            // The report is the causal accountability record. The supplemental
+            // Error is optional and may be absent when rate-limited or when
+            // its write is overtaken by terminal disconnect.
             receiver_state.unadvised_unsupported_gap = None;
             receiver_state.disconnect_cause = Some(cause);
         }
