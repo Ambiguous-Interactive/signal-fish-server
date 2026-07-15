@@ -29,7 +29,6 @@ const GAME: &str = "partition_scenarios";
 struct CloseObservation {
     code: Option<u16>,
     reason: Option<String>,
-    saw_application_pong: bool,
     #[cfg(windows)]
     transport_reset_after_cause: bool,
 }
@@ -266,13 +265,6 @@ async fn observe_until_close(ws: &mut WsStream) -> CloseObservation {
                 return observation;
             }
             Message::Close(None) => panic!("partitioned connection received a bare close frame"),
-            Message::Text(text) => {
-                let message: ServerMessage =
-                    serde_json::from_str(&text).expect("decode partition server message");
-                if matches!(message, ServerMessage::Pong) {
-                    observation.saw_application_pong = true;
-                }
-            }
             _ => {}
         }
     }
@@ -356,20 +348,6 @@ fn assert_close(observation: &CloseObservation, code: u16, reason: &str) {
     assert_eq!(observation.reason.as_deref(), Some(reason));
 }
 
-fn assert_application_pong_or_windows_reset(observation: &CloseObservation) {
-    #[cfg(windows)]
-    assert!(
-        observation.saw_application_pong || observation.transport_reset_after_cause,
-        "the processed application Ping must either yield its Pong or hit the documented \
-         Windows teardown reset: {observation:?}"
-    );
-    #[cfg(not(windows))]
-    assert!(
-        observation.saw_application_pong,
-        "a Pong queued before eviction must prove client-to-server traffic stayed live"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn symmetric_blackhole_closes_4003_and_room_heals() {
@@ -433,6 +411,10 @@ async fn server_to_client_blackhole_closes_4002_while_inbound_ping_is_live() {
         server.metrics().heartbeat_updates.load(Ordering::Relaxed) > heartbeat_before
     })
     .await;
+    // This server-side counter advances while routing the decoded inbound
+    // Ping, before pressure begins. Do not require its application Pong: that
+    // reply uses the deliberately blocked server-to-client queue and may be
+    // abandoned when SlowConsumer eviction wins.
 
     let padding = "x".repeat(32 * 1_024);
     let pressure = async {
@@ -460,7 +442,6 @@ async fn server_to_client_blackhole_closes_4002_while_inbound_ping_is_live() {
 
     let observation = observe_until_close(&mut partitioned).await;
     assert_close(&observation, 4002, "slow_consumer");
-    assert_application_pong_or_windows_reset(&observation);
     assert_eq!(
         server
             .metrics()
