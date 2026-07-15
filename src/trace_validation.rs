@@ -2,9 +2,11 @@
 //!
 //! The module exists only with the internal `trace-validation` feature. Merely
 //! enabling that feature is inert: a test or diagnostic harness must explicitly
-//! attach a [`DeliveryTraceRecorder`] to one connection. Keeping the recorder
-//! per connection avoids global-state contamination when Rust tests run in
-//! parallel. The recorder's mutex gives recorded events a total order; if a
+//! attach a
+//! [`DeliveryTraceRecorder`](crate::trace_validation::DeliveryTraceRecorder)
+//! to one connection. Keeping the recorder per connection avoids global-state
+//! contamination when Rust tests run in parallel. The recorder's mutex gives
+//! recorded events a total order; if a
 //! dequeue overlaps the producer's post-send observation, the trace is marked
 //! `Unsupported` instead of pretending that observation order was queue order.
 
