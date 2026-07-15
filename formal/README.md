@@ -110,6 +110,9 @@ production writer/finalizer hooks. Harness-only receiver mutations stop the
 producer projection rather than inventing socket events. A dequeue that races
 ahead of its post-send enqueue record is explicitly `Unsupported`, so an
 overlapping history fails closed instead of becoming a false TLC divergence.
+The inverse observation race is rejected too: if Tokio has freed a physical
+slot but the writer has not yet recorded the dequeue, a successful enqueue
+cannot be projected onto the still-full model queue.
 Any direct/untraced v2 queue item also emits `Unsupported`: hidden occupancy
 would otherwise change FIFO capacity and make a valid `SendFull` look invalid
 to the projected model.

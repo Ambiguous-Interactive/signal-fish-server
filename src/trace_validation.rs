@@ -182,6 +182,29 @@ impl DeliveryTraceRecorder {
         if state.projection_closed && action == DeliveryTraceAction::LifecycleClose {
             return;
         }
+        // Tokio frees channel capacity in the receiver poll before the socket
+        // task can call start_write. If a producer fills that physical slot
+        // and records its success first, the projected queue is still full:
+        // emitting SendFast/ParkedEnqueue would create a false TLC divergence.
+        // Reject this observation-order overlap just like the inverse overlap
+        // handled by start_write, rather than pretending either order is the
+        // physical FIFO transition order.
+        if matches!(
+            action,
+            DeliveryTraceAction::SendFast | DeliveryTraceAction::ParkedEnqueue
+        ) && state.recorded_queue.len() >= self.queue_capacity
+        {
+            push_event(
+                &mut state,
+                DeliveryTraceAction::Unsupported,
+                delivery_id,
+                Some("enqueue-completed-before-dequeue-observed"),
+            );
+            if let Some(delivery_id) = delivery_id {
+                remove_attempt(&mut state, delivery_id);
+            }
+            return;
+        }
         push_event(&mut state, action, delivery_id, detail);
         match action {
             DeliveryTraceAction::SendFast | DeliveryTraceAction::ParkedEnqueue => {
@@ -482,6 +505,42 @@ mod tests {
         let output = String::from_utf8(bytes).expect("UTF-8 trace");
         assert!(output.contains("overlapping-enqueue-dequeue"));
         assert!(!output.contains("WriterStart"));
+    }
+
+    #[test]
+    fn recorder_rejects_enqueue_observed_before_capacity_freeing_dequeue() {
+        for parked in [false, true] {
+            let recorder =
+                DeliveryTraceRecorder::new(if parked { "late-parked" } else { "late-fast" }, 1)
+                    .expect("valid recorder");
+            let first = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let first_delivery = recorder.begin_delivery(&first);
+            recorder.record(DeliveryTraceAction::SendFast, Some(first_delivery), None);
+
+            let second = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let second_delivery = recorder.begin_delivery(&second);
+            if parked {
+                recorder.record(DeliveryTraceAction::SendFull, Some(second_delivery), None);
+            }
+            recorder.record(
+                if parked {
+                    DeliveryTraceAction::ParkedEnqueue
+                } else {
+                    DeliveryTraceAction::SendFast
+                },
+                Some(second_delivery),
+                None,
+            );
+
+            let mut bytes = Vec::new();
+            recorder
+                .write_jsonl_to(&mut bytes)
+                .expect("serialize trace");
+            let output = String::from_utf8(bytes).expect("UTF-8 trace");
+            assert!(output.contains("enqueue-completed-before-dequeue-observed"));
+            assert_eq!(output.matches("\"action\":\"SendFast\"").count(), 1);
+            assert!(!output.contains("ParkedEnqueue"));
+        }
     }
 
     #[test]
