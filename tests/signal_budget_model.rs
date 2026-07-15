@@ -2,8 +2,9 @@
 //! default per-connection signal rate limit.
 //!
 //! Falsification experiment H8. Pre-registered prediction: at N=16 players in a
-//! full mesh with K=10 trickle-ICE candidates per peer, each player SENDS ~165
-//! `Signal` messages during formation, well under the default `max_signals`
+//! full mesh with K=10 trickle-ICE candidates per peer, each player consumes 166
+//! control-plane slots during formation (165 `Signal` messages plus its one
+//! `TransportStatus` report), well under the default `max_signals`
 //! budget (600 per `time_window`), i.e. ≈3.6× headroom.
 //!
 //! This is a MODEL — arithmetic over the protocol's signaling rules — not a live
@@ -25,9 +26,10 @@ use signal_fish_server::rate_limit::RateLimitConfig;
 ///   player emits one SDP message toward each of its peers — plus
 /// - `k` ICE candidates per peer (trickle),
 ///
-/// across its `n - 1` peers ⇒ `(n - 1) * (1 + k)`.
-fn mesh_signals_sent_per_player(n: u32, k: u32) -> u32 {
-    (n - 1) * (1 + k)
+/// across its `n - 1` peers, plus the one accepted `TransportStatus` state
+/// change that shares the same rate-limit bucket ⇒ `(n - 1) * (1 + k) + 1`.
+fn mesh_formation_control_messages_per_player(n: u32, k: u32) -> u32 {
+    (n - 1) * (1 + k) + 1
 }
 
 /// Representative trickle-ICE candidate count per peer for the model (host +
@@ -38,15 +40,17 @@ const TYPICAL_ICE_CANDIDATES_PER_PEER: u32 = 10;
 fn mesh_signal_budget_model_holds_and_default_config_accommodates_sixteen_players() {
     // Pin the model at representative points so any change to the formula (or to
     // the glare rule's one-SDP-per-peer assumption) is caught explicitly.
-    // (n, k, expected signals sent per player)
+    // (n, k, expected rate-limited control messages per player)
     for (n, k, expected) in [
-        (2, TYPICAL_ICE_CANDIDATES_PER_PEER, 11), // the two-player floor
-        (8, TYPICAL_ICE_CANDIDATES_PER_PEER, 77),
-        (16, TYPICAL_ICE_CANDIDATES_PER_PEER, 165), // the 16-player target
-        (16, 0, 15),                                // SDP-only (no trickle)
+        (2, TYPICAL_ICE_CANDIDATES_PER_PEER, 12), // the two-player floor
+        (8, TYPICAL_ICE_CANDIDATES_PER_PEER, 78),
+        (16, TYPICAL_ICE_CANDIDATES_PER_PEER, 166), // the 16-player target
+        (16, 0, 16),                                // SDP-only (no trickle)
+        (16, 38, 586),                              // last in-budget integer K
+        (16, 39, 601),                              // first over-budget integer K
     ] {
         assert_eq!(
-            mesh_signals_sent_per_player(n, k),
+            mesh_formation_control_messages_per_player(n, k),
             expected,
             "mesh signal model mismatch at N={n}, K={k}"
         );
@@ -69,7 +73,8 @@ fn mesh_signal_budget_model_holds_and_default_config_accommodates_sixteen_player
         budget,
         "the in-process and config-layer default max_signals must stay in sync"
     );
-    let per_player = mesh_signals_sent_per_player(16, TYPICAL_ICE_CANDIDATES_PER_PEER);
+    let per_player =
+        mesh_formation_control_messages_per_player(16, TYPICAL_ICE_CANDIDATES_PER_PEER);
 
     assert!(
         per_player < budget,
@@ -85,6 +90,6 @@ fn mesh_signal_budget_model_holds_and_default_config_accommodates_sixteen_player
 
     // Documented failure edge (comment, not a brittle assertion coupled to the
     // exact default): a 16-player mesh only exceeds the budget once trickle-ICE
-    // candidates reach K≈40 — 15*(1+K) > 600 ⇒ K ≥ 40 at today's default 600. The
-    // headroom assertion above is the robust guard; this notes where it runs out.
+    // candidates reach K≈39 — 15*(1+K)+1 > 600 ⇒ K ≥ 39 at today's default 600.
+    // The headroom assertion above is the robust guard; this notes where it runs out.
 }

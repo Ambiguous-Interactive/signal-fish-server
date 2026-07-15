@@ -23,8 +23,8 @@
 #     + REAL client processes with OS faults (SIGSTOP/SIGKILL); the two
 #     ignored child-process tests need the pre-built native reference client
 #     (SIGNAL_FISH_CLIENT_BIN), which is why they are nightly-only.
-#     The same job runs the H8 empirical 16-client WebRTC clean-budget and
-#     crippled-ICE fallback proofs.
+#     The same job runs the clean WebRTC {mesh,host} x {2,8,16} matrix and the
+#     H8 16-client crippled-ICE fallback proof.
 #   - starved-runtime: clients/native/tests/starved_runtime_e2e.rs — the
 #     --runtime current / --tick-stall-ms conformance matrix pinning the
 #     documented "continuously drive your runtime" requirement.
@@ -239,10 +239,12 @@ jobs:
   multiprocess-delivery:
     name: Multi-Process Delivery Faults
     runs-on: ubuntu-latest
-    # Generous floor: the native reference client build (full webrtc
-    # dependency graph) dominates a cold run; a too-tight timeout cancels a
-    # healthy-but-loaded build (zero-flakiness policy).
-    timeout-minutes: 60
+    # Generous floor: after the native reference client build, seven WebRTC
+    # cells run serially in the process-spawning group. Each cell has a 600s
+    # nextest ceiling above its 540s child watchdog, so the job ceiling keeps
+    # principled headroom for all cells plus the delivery-fault suite and cold
+    # compilation (zero-flakiness policy).
+    timeout-minutes: 120
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.0
@@ -290,7 +292,7 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test multiprocess_delivery_e2e --run-ignored all \
             --success-output final 2>&1 | tee multiprocess-output.txt
-      - name: Run 16-player WebRTC mesh budget experiments
+      - name: Run WebRTC topology and size matrix
         shell: bash
         env:
           SIGNAL_FISH_CLIENT_BIN: ${{ github.workspace }}/clients/native/target/debug/signal-fish-reference-native
@@ -298,7 +300,7 @@ jobs:
           set -o pipefail
           cargo nextest run --profile ci --locked --all-features \
             --test webrtc_mesh_budget_e2e --run-ignored all \
-            --success-output final 2>&1 | tee webrtc-mesh-budget-output.txt
+            --success-output final 2>&1 | tee webrtc-matrix-output.txt
       - name: Report multi-process results to job summary
         if: always()
         shell: bash
@@ -310,10 +312,10 @@ jobs:
             tail -n 60 multiprocess-output.txt 2>/dev/null || echo "no multiprocess output captured"
             echo '```'
             echo
-            echo "### H8 16-player WebRTC mesh budget and fallback"
+            echo "### WebRTC clean topology/size matrix and H8 fallback"
             echo
             echo '```text'
-            tail -n 160 webrtc-mesh-budget-output.txt 2>/dev/null || echo "no WebRTC mesh budget output captured"
+            tail -n 260 webrtc-matrix-output.txt 2>/dev/null || echo "no WebRTC matrix output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

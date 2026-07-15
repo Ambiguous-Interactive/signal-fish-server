@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WebSocket relay-floor ledger. Terminal peer-connection generations count as
   signal-settled for the harness barrier because they can emit no later ICE
   candidates; live generations still require their end-of-gathering marker.
+  The same held real-process harness now covers the complete clean
+  `{mesh, host} x {2, 8, 16}` topology/size grid with exact plan, signaling,
+  channel, room-wide transport-status, and relay-floor ledgers. The signal
+  budget guard accounts for the accepted `TransportStatus` report that shares
+  the 600-message control-plane bucket with WebRTC signals.
 - Add canonical release identity across the annotated Git tag, crates.io,
   GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
   container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and
