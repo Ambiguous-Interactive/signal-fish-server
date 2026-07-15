@@ -39,6 +39,10 @@
 #   - split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
 #     server processes pin the unsupported multi-instance failure catalog used
 #     by the deployment doctrine.
+#   - trace-validation: P10.D7 captures deterministic paused-clock producer
+#     traces plus a real-socket writer/finalizer trace, compiles them into TLA+,
+#     replays them with TLC, and proves three negative oracles. Informational
+#     initially.
 #
 # All targeted tests are `#[ignore]`d in-tree (a scheduling decision, not a
 # flakiness mask) and activated here with `--run-ignored all`. Job timeouts
@@ -58,6 +62,15 @@ on:
     paths:
       - "src/coordination/**"
       - "src/websocket/**"
+      - "Cargo.toml"
+      - "formal/tla/DeliveryContractTrace.tla"
+      - "formal/traces/**"
+      - "scripts/generate-delivery-contract-trace.py"
+      - "scripts/run-delivery-trace-validation.sh"
+      - "scripts/run-tla-model-check.sh"
+      - "tests/delivery_trace_generator_tests.rs"
+      - "tests/e2e_tests.rs"
+      - "tests/model_based_state_machines.rs"
       - "src/server/connection_manager.rs"
       - "tests/relay_delivery_soak.rs"
       - "tests/delivery_concurrency_stress.rs"
@@ -530,3 +543,71 @@ jobs:
         run: |
           cargo nextest run --profile ci --locked --all-features \
             --test split_brain_two_instances_e2e --run-ignored all
+
+  trace-validation:
+    name: Delivery Contract Trace Replay (informational)
+    if: github.event_name != 'pull_request'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install Java runtime
+        uses: actions/setup-java@v5.5.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Cache TLA+ tools jar
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/signal-fish/tla
+          key: tla2tools-${{ hashFiles('scripts/run-tla-model-check.sh') }}
+      - name: Capture deterministic model-based delivery traces
+        shell: bash
+        env:
+          PROPTEST_CASES: "32"
+          # proptest 1.11 parses this setting as a decimal u64.
+          PROPTEST_RNG_SEED: "131045"
+          SIGNAL_FISH_DELIVERY_TRACE_PATH: ${{ runner.temp }}/delivery-contract.jsonl
+        run: |
+          : > "${SIGNAL_FISH_DELIVERY_TRACE_PATH}"
+          cargo test --locked --features trace-validation \
+            --test model_based_state_machines \
+            delivery_contract_matches_reference_ledger -- --exact
+          cargo test --locked --features trace-validation \
+            --test e2e_tests test_websocket_connection -- --exact
+      - name: Compile and replay traces with TLC
+        shell: bash
+        run: |
+          bash scripts/run-delivery-trace-validation.sh \
+            "${{ runner.temp }}/delivery-contract.jsonl" \
+            "${{ runner.temp }}/delivery-trace-validation"
+      - name: Upload trace-validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: delivery-contract-trace-validation
+          path: |
+            ${{ runner.temp }}/delivery-contract.jsonl
+            ${{ runner.temp }}/delivery-trace-validation
+          if-no-files-found: warn
+          retention-days: 14

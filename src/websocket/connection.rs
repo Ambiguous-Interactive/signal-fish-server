@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::Instant;
 
-use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError};
+use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
 use super::sending::send_immediate_server_message;
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
 use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
@@ -133,10 +133,19 @@ async fn enqueue_connection_message(
 /// advisory. The send task's final drain flushes it when the queue has room.
 fn enqueue_farewell_message(
     tx: &OutboundSender,
+    close_signal: &ConnectionCloseSignal,
     player_id: &PlayerId,
     message: ServerMessage,
     context: &'static str,
 ) {
+    #[cfg(feature = "trace-validation")]
+    close_signal.record_trace(
+        crate::trace_validation::DeliveryTraceAction::Unsupported,
+        None,
+        Some("direct-v2-farewell-enqueue"),
+    );
+    #[cfg(not(feature = "trace-validation"))]
+    let _ = close_signal;
     match tx.try_enqueue_control(Arc::new(message)) {
         Ok(_) => {}
         Err(TryEnqueueError::Full(_)) => {
@@ -205,10 +214,23 @@ async fn finalize_closed_connection(
     close_signal: &ConnectionCloseSignal,
     max_sojourn: Duration,
 ) {
+    #[cfg(feature = "trace-validation")]
+    if reason.is_none() {
+        // Dropping every delivery handle closes the receiver without an
+        // explicit watch reason. The trace abstraction makes that implicit
+        // Open -> CloseRequested boundary visible before replaying teardown.
+        close_signal.record_trace(
+            crate::trace_validation::DeliveryTraceAction::LifecycleClose,
+            None,
+            Some("implicit-unregistration"),
+        );
+    }
     // Freeze the producer set before inspecting or draining queued state. A
     // stale routing snapshot may still hold a sender clone, but it can no
     // longer enqueue behind the teardown's final accounting snapshot.
     rx.close();
+    #[cfg(feature = "trace-validation")]
+    close_signal.record_trace_queue_closed();
 
     match reason {
         Some(CloseReason::SlowConsumer) => {
@@ -279,6 +301,7 @@ async fn finalize_closed_connection(
                             server,
                             close_signal,
                             max_sojourn,
+                            WritePhase::CloseFlush,
                         )
                         .await?;
                     }
@@ -297,6 +320,7 @@ async fn finalize_closed_connection(
                                     server,
                                     close_signal,
                                     max_sojourn,
+                                    WritePhase::CloseFlush,
                                 )
                                 .await?;
                             }
@@ -376,6 +400,13 @@ async fn finalize_closed_connection(
             tracing::debug!(%player_id, "Timed out closing WebSocket sink");
         }
     }
+
+    #[cfg(feature = "trace-validation")]
+    close_signal.record_trace(
+        crate::trace_validation::DeliveryTraceAction::CloseFinish,
+        None,
+        None,
+    );
 }
 
 fn record_abandoned_by_class(rx: &OutboundReceiver, batcher: &MessageBatcher) {
@@ -476,6 +507,26 @@ pub(super) async fn handle_socket(
     // through its registered handle (slow consumer) or via unregistration;
     // both socket tasks listen and tear the connection down (as does the
     // optional RelayStats ticker spawned below).
+    #[cfg(feature = "trace-validation")]
+    let trace_output =
+        std::env::var_os("SIGNAL_FISH_DELIVERY_TRACE_PATH").map(std::path::PathBuf::from);
+    #[cfg(feature = "trace-validation")]
+    let trace = trace_output.as_ref().map(|_| {
+        Arc::new(
+            crate::trace_validation::DeliveryTraceRecorder::new(
+                crate::trace_validation::DeliveryTraceRecorder::next_trace_id("socket"),
+                queue_capacity,
+            )
+            .expect("socket trace recorder configuration must be valid"),
+        )
+    });
+    #[cfg(feature = "trace-validation")]
+    let (close_signal, close_listener) = if let Some(trace) = &trace {
+        ConnectionCloseSignal::channel_with_trace(Arc::clone(trace))
+    } else {
+        ConnectionCloseSignal::channel()
+    };
+    #[cfg(not(feature = "trace-validation"))]
     let (close_signal, close_listener) = ConnectionCloseSignal::channel();
     let mut send_task_close = close_listener.clone();
     let stats_task_close = close_listener.clone();
@@ -872,6 +923,10 @@ pub(super) async fn handle_socket(
     let effective_player_id_for_send = Arc::clone(&effective_player_id);
     let lifecycle_for_send = Arc::clone(&connection_lifecycle);
     let send_task_close_signal = close_signal.clone();
+    #[cfg(feature = "trace-validation")]
+    let trace_for_output = trace;
+    #[cfg(feature = "trace-validation")]
+    let trace_output_for_send = trace_output;
     let mut send_task = tokio::spawn(async move {
         let config = server_clone.config();
         let batching_enabled = config.websocket_config.enable_batching;
@@ -960,6 +1015,7 @@ pub(super) async fn handle_socket(
                                     &server_clone,
                                     &send_task_close_signal,
                                     max_sojourn,
+                                    WritePhase::Live,
                                 )
                                 .await
                                 .is_err()
@@ -985,6 +1041,7 @@ pub(super) async fn handle_socket(
                                     &server_clone,
                                     &send_task_close_signal,
                                     max_sojourn,
+                                    WritePhase::Live,
                                 )
                                 .await
                                 .is_err()
@@ -1045,6 +1102,14 @@ pub(super) async fn handle_socket(
         server_clone
             .unregister_client_with_lifecycle(lifecycle_for_send)
             .await;
+        #[cfg(feature = "trace-validation")]
+        if let (Some(trace), Some(path)) = (trace_for_output, trace_output_for_send) {
+            if trace.has_delivery_attempts() {
+                trace
+                    .append_jsonl(path)
+                    .expect("append production socket delivery trace");
+            }
+        }
     });
 
     // Handle incoming messages
@@ -1116,6 +1181,7 @@ pub(super) async fn handle_socket(
                             // reclassify the close as a slow-consumer one.
                             enqueue_farewell_message(
                                 &tx_clone,
+                                &close_signal,
                                 &active_player_id,
                                 ServerMessage::Error {
                                     message: format!(
@@ -1158,6 +1224,7 @@ pub(super) async fn handle_socket(
                         tracing::warn!(%active_player_id, timeout_secs = auth_timeout_secs, "Authentication timeout, closing connection");
                         enqueue_farewell_message(
                             &tx_clone,
+                            &close_signal,
                             &active_player_id,
                             ServerMessage::Error {
                                 message: format!(
@@ -1223,6 +1290,7 @@ pub(super) async fn handle_socket(
                                 // never wait or escalate on a full queue.
                                 enqueue_farewell_message(
                                     &tx_clone,
+                                    &close_signal,
                                     &active_player_id,
                                     ServerMessage::Error {
                                         message: err.user_message().to_string(),
@@ -1506,6 +1574,7 @@ pub(super) async fn handle_socket(
                                     // is advisory and must not wait/escalate.
                                     enqueue_farewell_message(
                                         &tx_clone,
+                                        &close_signal,
                                         &active_player_id,
                                         ServerMessage::AuthenticationError {
                                             error: format!("{e:?}"),
@@ -1525,6 +1594,7 @@ pub(super) async fn handle_socket(
                                 // Farewell semantics: closing immediately.
                                 enqueue_farewell_message(
                                     &tx_clone,
+                                    &close_signal,
                                     &active_player_id,
                                     ServerMessage::Error {
                                         message: "Authentication required".to_string(),
@@ -1573,6 +1643,7 @@ pub(super) async fn handle_socket(
                         // Farewell semantics: closing immediately.
                         enqueue_farewell_message(
                             &tx_clone,
+                            &close_signal,
                             &active_player_id,
                             ServerMessage::Error {
                                 message: "Authentication required before sending binary data"

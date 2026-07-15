@@ -112,6 +112,7 @@ pub(super) async fn send_batch(
     server: &Arc<EnhancedGameServer>,
     close_signal: &ConnectionCloseSignal,
     max_sojourn: Duration,
+    write_phase: WritePhase,
 ) -> Result<(), QueueWriteError> {
     let mut batch_size = 0_usize;
     while !batcher.is_empty() {
@@ -127,11 +128,18 @@ pub(super) async fn send_batch(
                         server,
                         close_signal,
                         max_sojourn,
+                        write_phase,
                     )
                     .await?;
                 }
                 Ok(None) => break,
                 Err(TryReceiveError::AccountabilityFailed) => {
+                    #[cfg(feature = "trace-validation")]
+                    close_signal.record_trace(
+                        crate::trace_validation::DeliveryTraceAction::Unsupported,
+                        None,
+                        Some("writer-accountability-failed"),
+                    );
                     if close_signal.request_close(CloseReason::SlowConsumer) {
                         server
                             .metrics()
@@ -155,6 +163,7 @@ pub(super) async fn send_batch(
             server,
             close_signal,
             max_sojourn,
+            write_phase,
         )
         .await?;
         batch_size += 1;
@@ -172,6 +181,14 @@ pub(super) enum QueueWriteError {
     AccountabilityFailed,
 }
 
+/// Whether a queued item belongs to the live writer loop or the bounded final
+/// flush after a close request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WritePhase {
+    Live,
+    CloseFlush,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_queued(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -182,7 +199,17 @@ pub(super) async fn send_queued(
     server: &Arc<EnhancedGameServer>,
     close_signal: &ConnectionCloseSignal,
     max_sojourn: Duration,
+    write_phase: WritePhase,
 ) -> Result<(), QueueWriteError> {
+    #[cfg(not(feature = "trace-validation"))]
+    let _ = write_phase;
+    #[cfg(feature = "trace-validation")]
+    let trace_write = match &queued.payload {
+        OutboundPayload::Message(message) => {
+            close_signal.start_trace_write(message, write_phase == WritePhase::CloseFlush)
+        }
+        OutboundPayload::DeliveryReport(_) => None,
+    };
     let class = queued.class();
     let metadata = queued.metadata;
     let oldest = receiver
@@ -216,6 +243,12 @@ pub(super) async fn send_queued(
         match tokio::time::timeout_at(deadline, write).await {
             Ok(result) => result.map_err(|()| QueueWriteError::SocketClosed),
             Err(_) => {
+                #[cfg(feature = "trace-validation")]
+                close_signal.record_trace(
+                    crate::trace_validation::DeliveryTraceAction::Unsupported,
+                    None,
+                    Some("writer-sojourn-expired"),
+                );
                 let initiated_close = close_signal.request_close(CloseReason::SlowConsumer);
                 if initiated_close {
                     server
@@ -235,6 +268,17 @@ pub(super) async fn send_queued(
     let disposition = result?;
     if disposition == SendDisposition::Written {
         accounting.complete_written();
+        #[cfg(feature = "trace-validation")]
+        if let Some(delivery_id) = trace_write {
+            close_signal.finish_trace_write(delivery_id, write_phase == WritePhase::CloseFlush);
+        }
+    } else {
+        #[cfg(feature = "trace-validation")]
+        close_signal.record_trace(
+            crate::trace_validation::DeliveryTraceAction::Unsupported,
+            None,
+            Some("writer-accounted-drop"),
+        );
     }
     Ok(())
 }

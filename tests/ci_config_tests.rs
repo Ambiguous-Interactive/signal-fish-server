@@ -20430,9 +20430,10 @@ fn test_cargo_deny_check_advisories_passes() {
 const OPTIONAL_FEATURE_MATRIX_CASES: &[(&str, &str)] = &[
     ("TLS support", "tls"),
     ("Legacy full-mesh compatibility", "legacy-fullmesh"),
+    ("Delivery trace validation", "trace-validation"),
     (
         "Combined optional feature compatibility",
-        "tls,legacy-fullmesh",
+        "tls,legacy-fullmesh,trace-validation",
     ),
 ];
 

@@ -58,6 +58,10 @@ pub mod rkyv_utils;
 /// TLS and crypto utilities
 pub mod security;
 
+/// Feature-gated delivery-contract trace capture for formal replay.
+#[cfg(feature = "trace-validation")]
+pub mod trace_validation;
+
 /// Main server orchestration
 pub mod server;
 
