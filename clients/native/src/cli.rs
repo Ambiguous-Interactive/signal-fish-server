@@ -97,6 +97,12 @@ pub struct Cli {
     #[arg(long)]
     pub cripple_ice: bool,
 
+    /// FAULT INJECTION (matrix harness only): discard inbound trickle-ICE
+    /// candidates from the planned peer named `cNN`, where NN is this ordinal.
+    /// Offer/answer signaling, other peer links, and the relay floor stay live.
+    #[arg(long)]
+    pub drop_ice_from: Option<usize>,
+
     /// Seconds allowed for WebRTC pair establishment before the overall
     /// transport status resolves (true iff >= 1 pair connected at resolution).
     #[arg(long, default_value_t = 15)]
@@ -274,6 +280,7 @@ mod tests {
         assert_eq!(cli.runtime, RuntimeFlavor::Multi);
         assert_eq!(cli.runtime.as_str(), "multi");
         assert_eq!(cli.tick_stall_ms, 0, "fault injection is off by default");
+        assert_eq!(cli.drop_ice_from, None);
         assert_eq!(cli.success_release_file, None);
         assert_eq!(cli.exchange_release_file, None);
         assert_eq!(
@@ -347,6 +354,19 @@ mod tests {
         assert_eq!(cli.runtime, RuntimeFlavor::Current);
         assert_eq!(cli.runtime.as_str(), "current");
         assert_eq!(cli.tick_stall_ms, 750);
+    }
+
+    #[test]
+    fn per_peer_ice_fault_target_ordinal_parses() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--drop-ice-from",
+            "12",
+        ]);
+        assert_eq!(cli.drop_ice_from, Some(12));
     }
 
     #[test]

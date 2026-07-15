@@ -1,12 +1,15 @@
 //! P10.C empirical native WebRTC topology/size and H8 signal-budget experiments.
 //!
 //! The nightly real-process matrix covers clean mesh and host topologies at
-//! N=2/8/16 plus fail-loud 1% `tc netem` loss at N=2/8. Loss stays active
+//! N=2/8/16, one exact N=3 pairwise ICE partition, and fail-loud 1% `tc netem`
+//! loss at N=2/8. Loss stays active
 //! through ICE/channel formation; exact channel exchange is released only
 //! after fault lift. The H8 fault variant additionally proves a partial
 //! partition: one client with deterministic crippled ICE falls back to the
 //! WebSocket relay while the other 15 retain their exact 105-edge WebRTC
-//! submesh. Every cell stays under the production 600-signal per-connection
+//! submesh. The pairwise cell removes only one edge while all three clients
+//! retain WebRTC connectivity and the complete relay floor. Every cell stays
+//! under the production 600-signal per-connection
 //! budget and preserves exact WebRTC-channel and relay-floor ledgers. The tests
 //! are ignored because running real webrtc-rs stacks and privileged network
 //! faults is intentionally outside the PR machine's cheap local test budget.
@@ -47,6 +50,12 @@ enum MatrixTopology {
     Host,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ConnectivityFault<'a> {
+    crippled_id: Option<&'a str>,
+    partition_pair: Option<(&'a str, &'a str)>,
+}
+
 impl MatrixTopology {
     const fn label(self) -> &'static str {
         match self {
@@ -61,6 +70,7 @@ struct WebRtcScenario {
     topology: MatrixTopology,
     players: usize,
     crippled_ordinal: Option<usize>,
+    partition_pair: Option<(usize, usize)>,
     netem_loss: bool,
 }
 
@@ -70,6 +80,7 @@ impl WebRtcScenario {
             topology,
             players,
             crippled_ordinal: None,
+            partition_pair: None,
             netem_loss: false,
         }
     }
@@ -79,6 +90,17 @@ impl WebRtcScenario {
             topology: MatrixTopology::Mesh,
             players,
             crippled_ordinal: Some(ordinal),
+            partition_pair: None,
+            netem_loss: false,
+        }
+    }
+
+    const fn pairwise_partition_mesh(players: usize, left: usize, right: usize) -> Self {
+        Self {
+            topology: MatrixTopology::Mesh,
+            players,
+            crippled_ordinal: None,
+            partition_pair: Some((left, right)),
             netem_loss: false,
         }
     }
@@ -88,11 +110,19 @@ impl WebRtcScenario {
             topology,
             players,
             crippled_ordinal: None,
+            partition_pair: None,
             netem_loss: true,
         }
     }
 
     fn label(self) -> String {
+        if let Some((left, right)) = self.partition_pair {
+            return format!(
+                "{}-n{}-partition-c{left:02}-c{right:02}",
+                self.topology.label(),
+                self.players
+            );
+        }
         let fault = if self.crippled_ordinal.is_some() {
             "one-crippled"
         } else if self.netem_loss {
@@ -107,12 +137,16 @@ impl WebRtcScenario {
         self.crippled_ordinal
     }
 
+    const fn partition_pair(self) -> Option<(usize, usize)> {
+        self.partition_pair
+    }
+
     const fn uses_netem(self) -> bool {
         self.netem_loss
     }
 
     const fn p2p_timeout_secs(self) -> u64 {
-        if self.crippled_ordinal.is_some() {
+        if self.crippled_ordinal.is_some() || self.partition_pair.is_some() {
             30
         } else {
             180
@@ -122,7 +156,7 @@ impl WebRtcScenario {
     const fn run_for_secs(self) -> u64 {
         if self.netem_loss {
             480
-        } else if self.crippled_ordinal.is_some() {
+        } else if self.crippled_ordinal.is_some() || self.partition_pair.is_some() {
             90
         } else {
             240
@@ -211,6 +245,18 @@ fn client_args(
     ];
     if scenario.crippled_ordinal() == Some(ordinal) {
         args.push("--cripple-ice".to_string());
+    }
+    if let Some((left, right)) = scenario.partition_pair() {
+        let target = if ordinal == left {
+            Some(right)
+        } else if ordinal == right {
+            Some(left)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            args.extend(["--drop-ice-from".to_string(), target.to_string()]);
+        }
     }
     if let Some(path) = exchange_release_file {
         args.extend([
@@ -626,6 +672,58 @@ fn assert_exact_signal_ledger(
     }
 }
 
+fn assert_pairwise_candidate_drop_ledger(
+    clients: &[NativeClientProcess],
+    ids: &[String],
+    pair: (usize, usize),
+) {
+    for (ordinal, client) in clients.iter().enumerate() {
+        let expected_from = if ordinal == pair.0 {
+            Some(ids[pair.1].as_str())
+        } else if ordinal == pair.1 {
+            Some(ids[pair.0].as_str())
+        } else {
+            None
+        };
+        let window = held_window(&client.events, &client.name);
+        let dropped = events_named(window, "ice_candidate_dropped");
+        match expected_from {
+            Some(expected_from) => {
+                assert!(
+                    !dropped.is_empty(),
+                    "{}: candidate fault was vacuous",
+                    client.name
+                );
+                assert!(
+                    dropped.iter().all(|event| {
+                        string_field(event, "from", &client.name) == expected_from
+                    }),
+                    "{}: candidate drop escaped the selected edge: {dropped:?}",
+                    client.name
+                );
+                let received_from_target = events_named(window, "signal_received")
+                    .into_iter()
+                    .filter(|event| {
+                        string_field(event, "from", &client.name) == expected_from
+                            && string_field(event, "kind", &client.name) == "ice_candidate"
+                    })
+                    .count();
+                assert_eq!(
+                    dropped.len(),
+                    received_from_target,
+                    "{}: every selected inbound candidate is dropped exactly once",
+                    client.name
+                );
+            }
+            None => assert!(
+                dropped.is_empty(),
+                "{}: uninvolved client must not drop ICE candidates: {dropped:?}",
+                client.name
+            ),
+        }
+    }
+}
+
 fn expected_planned_peers<'a>(
     player_id: &'a str,
     all_ids: &BTreeSet<&'a str>,
@@ -652,14 +750,20 @@ fn expected_connected_peers<'a>(
     all_ids: &BTreeSet<&'a str>,
     host_id: &'a str,
     topology: MatrixTopology,
-    crippled_id: Option<&'a str>,
+    fault: ConnectivityFault<'a>,
 ) -> BTreeSet<&'a str> {
-    if crippled_id == Some(player_id) {
+    if fault.crippled_id == Some(player_id) {
         return BTreeSet::new();
     }
     expected_planned_peers(player_id, all_ids, host_id, topology)
         .into_iter()
-        .filter(|candidate| Some(*candidate) != crippled_id)
+        .filter(|candidate| {
+            Some(*candidate) != fault.crippled_id
+                && !fault.partition_pair.is_some_and(|(left, right)| {
+                    (player_id == left && *candidate == right)
+                        || (player_id == right && *candidate == left)
+                })
+        })
         .collect()
 }
 
@@ -671,7 +775,7 @@ fn assert_client_barrier(
     signal_budget: usize,
     host_id: &str,
     scenario: WebRtcScenario,
-    crippled_id: Option<&str>,
+    fault: ConnectivityFault<'_>,
 ) -> usize {
     let who = &client.name;
     let window = held_window(&client.events, who);
@@ -682,7 +786,7 @@ fn assert_client_barrier(
         .collect();
     let expected_peers = expected_planned_peers(player_id, all_ids, host_id, scenario.topology);
     let expected_connections =
-        expected_connected_peers(player_id, all_ids, host_id, scenario.topology, crippled_id);
+        expected_connected_peers(player_id, all_ids, host_id, scenario.topology, fault);
     let expected_connected = !expected_connections.is_empty();
 
     let barrier_errors = events_named(window, "error");
@@ -806,8 +910,7 @@ fn assert_client_barrier(
         assert!(room_peers.contains(peer), "{who}: stray peer status {peer}");
         *peer_status_counts.entry(peer).or_default() += 1;
         let expected_peer_connected =
-            !expected_connected_peers(peer, all_ids, host_id, scenario.topology, crippled_id)
-                .is_empty();
+            !expected_connected_peers(peer, all_ids, host_id, scenario.topology, fault).is_empty();
         assert_eq!(
             peer_status.get("connected").and_then(Value::as_bool),
             Some(expected_peer_connected),
@@ -899,6 +1002,22 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
         assert!(
             ordinal < scenario.players,
             "crippled ordinal must name a client"
+        );
+    }
+    if let Some((left, right)) = scenario.partition_pair() {
+        assert!(
+            left < scenario.players,
+            "left partition ordinal must name a client"
+        );
+        assert!(
+            right < scenario.players,
+            "right partition ordinal must name a client"
+        );
+        assert_ne!(left, right, "pairwise partition endpoints must be distinct");
+        assert_eq!(
+            scenario.topology,
+            MatrixTopology::Mesh,
+            "pairwise partition is registered against the partial-mesh contract"
         );
     }
     assert!(
@@ -1034,6 +1153,13 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let crippled_id = scenario
         .crippled_ordinal()
         .map(|ordinal| ids[ordinal].as_str());
+    let partition_pair = scenario
+        .partition_pair()
+        .map(|(left, right)| (ids[left].as_str(), ids[right].as_str()));
+    let fault = ConnectivityFault {
+        crippled_id,
+        partition_pair,
+    };
     let host_id = ids[0].as_str();
 
     // Mesh clients already wait for every room peer's status because every
@@ -1094,7 +1220,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             signal_budget,
             host_id,
             scenario,
-            crippled_id,
+            fault,
         ));
     }
     assert_eq!(
@@ -1138,12 +1264,14 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     if crippled_id.is_none() {
         assert_exact_signal_ledger(&clients, &ids, &all_ids, host_id, scenario.topology);
     }
+    if let Some(pair) = scenario.partition_pair() {
+        assert_pairwise_candidate_drop_ledger(&clients, &ids, pair);
+    }
     let held_metrics = fetch_prometheus_text(server.port).await;
     let expected_connected_clients = ids
         .iter()
         .filter(|id| {
-            !expected_connected_peers(id, &all_ids, host_id, scenario.topology, crippled_id)
-                .is_empty()
+            !expected_connected_peers(id, &all_ids, host_id, scenario.topology, fault).is_empty()
         })
         .count();
     let expected_fallbacks = scenario.players - expected_connected_clients;
@@ -1236,9 +1364,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
 
     let directed_connected_edges: usize = ids
         .iter()
-        .map(|id| {
-            expected_connected_peers(id, &all_ids, host_id, scenario.topology, crippled_id).len()
-        })
+        .map(|id| expected_connected_peers(id, &all_ids, host_id, scenario.topology, fault).len())
         .sum();
     assert_eq!(
         directed_connected_edges % 2,
@@ -1264,28 +1390,64 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
 fn connectivity_oracle_preserves_mesh_and_host_graphs() {
     let all = BTreeSet::from(["a", "b", "c"]);
     assert_eq!(
-        expected_connected_peers("b", &all, "a", MatrixTopology::Mesh, None),
+        expected_connected_peers(
+            "b",
+            &all,
+            "a",
+            MatrixTopology::Mesh,
+            ConnectivityFault::default(),
+        ),
         BTreeSet::from(["a", "c"]),
         "clean mesh connects every other peer"
     );
+    let crippled = ConnectivityFault {
+        crippled_id: Some("c"),
+        partition_pair: None,
+    };
     assert_eq!(
-        expected_connected_peers("b", &all, "a", MatrixTopology::Mesh, Some("c")),
+        expected_connected_peers("b", &all, "a", MatrixTopology::Mesh, crippled),
         BTreeSet::from(["a"]),
         "healthy peer excludes the crippled member"
     );
     assert!(
-        expected_connected_peers("c", &all, "a", MatrixTopology::Mesh, Some("c")).is_empty(),
+        expected_connected_peers("c", &all, "a", MatrixTopology::Mesh, crippled).is_empty(),
         "crippled member forms no WebRTC edges"
     );
     assert_eq!(
-        expected_connected_peers("a", &all, "a", MatrixTopology::Host, None),
+        expected_connected_peers(
+            "a",
+            &all,
+            "a",
+            MatrixTopology::Host,
+            ConnectivityFault::default(),
+        ),
         BTreeSet::from(["b", "c"]),
         "host connects to every client"
     );
     assert_eq!(
-        expected_connected_peers("b", &all, "a", MatrixTopology::Host, None),
+        expected_connected_peers(
+            "b",
+            &all,
+            "a",
+            MatrixTopology::Host,
+            ConnectivityFault::default(),
+        ),
         BTreeSet::from(["a"]),
         "each client connects only to the host"
+    );
+    let pairwise = ConnectivityFault {
+        crippled_id: None,
+        partition_pair: Some(("a", "b")),
+    };
+    assert_eq!(
+        expected_connected_peers("a", &all, "a", MatrixTopology::Mesh, pairwise),
+        BTreeSet::from(["c"]),
+        "a pairwise partition removes only the selected edge"
+    );
+    assert_eq!(
+        expected_connected_peers("c", &all, "a", MatrixTopology::Mesh, pairwise),
+        BTreeSet::from(["a", "b"]),
+        "the uninvolved peer retains both mesh edges"
     );
 }
 
@@ -1303,6 +1465,12 @@ async fn one_crippled_ice_client_falls_back_without_breaking_healthy_submesh() {
         H8_PLAYERS - 1,
     ))
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "nightly-only (verification-nightly.yml): spawns 3 real webrtc-rs clients"]
+async fn pairwise_ice_partition_preserves_partial_mesh_and_relay_floor() {
+    run_webrtc_scenario(WebRtcScenario::pairwise_partition_mesh(3, 0, 1)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

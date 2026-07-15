@@ -776,6 +776,7 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
         "channel_open",
         "channel_message",
         "channel_message_sent",
+        "ice_candidate_dropped",
     ] {
         assert!(
             events_named(crippled_log, name).is_empty(),

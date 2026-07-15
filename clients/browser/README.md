@@ -87,7 +87,7 @@ accounting lifetime from `sender_watermarks`. Thus the shared
 
 ## CLI reference
 
-The flag surface mirrors the native client's ([canonical reference](../native/README.md#cli-reference)):
+The shared flag surface mirrors the native client's ([canonical reference](../native/README.md#cli-reference)):
 `--server-url`, `--create-room`/`--join-code`, `--peers`, `--expect-total-peers`, `--leave-on-game-start`,
 `--game-name`, `--player-name`, `--app-id`, `--platform`, `--exchange`, `--relay-payload`, `--cripple-ice`,
 `--p2p-timeout-secs`, `--run-for-secs`, `--max-runtime-secs`, `--protocol-version`,
@@ -103,15 +103,17 @@ Browser-specific additions and deviations:
 |-----------------|---------|
 | `--mdns-obfuscation` | Leave Chromium's DEFAULT mDNS host-candidate obfuscation ON (candidates become opaque `<uuid>.local` names — the PLAN P7 `.local` trap). Default OFF: Chromium is launched with `--disable-features=WebRtcHideLocalIpsWithMdns` for deterministic loopback host candidates |
 | `--cripple-ice` (browser flavor) | The browser cannot filter network interfaces the way the native engine does; determinism comes from dropping ALL outbound candidates AND ignoring all inbound ones (`signal_received` is still emitted). With zero remote candidates on both sides, no ICE check pair ever forms |
+| Native `--drop-ice-from` | Not exposed by the browser client. It is a native-only matrix-harness fault for isolating one webrtc-rs peer edge; shared interop and `--cripple-ice` behavior remain identical |
 | `--run-for-secs` measurement | The soft window still measures from PROCESS start: the CLI passes the Chromium-launch time already spent into the page engine, which subtracts it |
 | Chromium launch failure | Local infrastructure failures (browser launch, page bridge) exit `4`, mirroring the native client's runtime-start failure path |
 
 ## JSONL event contract and exit codes
 
-Byte-identical to the native client's — see the
+Byte-identical to the native client's for the shared CLI surface — see the
 [canonical contract](../native/README.md#jsonl-event-contract) and
 [exit codes](../native/README.md#exit-codes). The same Rust harness asserts over native and browser
-processes interchangeably. EPIPE handling matches too: a failed stdout write is logged to stderr once and
+processes interchangeably. The native-only `--drop-ice-from` fault may additionally emit
+`ice_candidate_dropped`; browser/shared-flag runs never do. EPIPE handling matches too: a failed stdout write is logged to stderr once and
 latches suppression; the run continues to its bounded exit. Usage errors exit `2` before the event stream
 starts (no `exiting` event), matching the documented clap behavior.
 
