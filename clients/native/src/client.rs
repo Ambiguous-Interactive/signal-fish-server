@@ -206,6 +206,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         exchange_ready_reported: false,
         exchange_release_poll_at: None,
         pending_signals: BTreeMap::new(),
+        drop_ice_from: None,
         run_deadline,
         linger_until: None,
         success_criteria_reported: false,
@@ -627,6 +628,9 @@ struct Orchestrator<'a> {
     /// Signals that arrived before their peer was paired (defensive: server
     /// FIFO ordering makes this unreachable in the documented flows).
     pending_signals: BTreeMap<PlayerId, VecDeque<serde_json::Value>>,
+    /// Runtime UUID resolved from the harness-only `--drop-ice-from` ordinal
+    /// when an authoritative plan supplies its `cNN` peer name.
+    drop_ice_from: Option<PlayerId>,
     /// `--run-for-secs` soft cap.
     run_deadline: Instant,
     /// Set once all criteria are met; exit 0 when it elapses.
@@ -1091,6 +1095,9 @@ impl Orchestrator<'_> {
             ServerMessage::SessionPlan(plan) => {
                 self.initial_session_plan_pending = false;
                 self.pending_membership_plans.clear();
+                self.drop_ice_from =
+                    resolve_drop_ice_from(self.cli.drop_ice_from, self.my_id, &plan.peers)
+                        .map_err(FatalError::protocol)?;
                 emit(&Event::SessionPlan {
                     topology: plan.topology,
                     transport: plan.transport,
@@ -1487,10 +1494,14 @@ impl Orchestrator<'_> {
                 None => Err(anyhow::anyhow!("Answer payload is not a string")),
             },
             SignalKind::IceCandidate => {
-                if self.cli.cripple_ice {
+                let pairwise_drop = self.drop_ice_from == Some(from);
+                if self.cli.cripple_ice || pairwise_drop {
                     // Belt and braces with the engine's interface filter:
-                    // inbound candidates are dropped, never applied.
-                    tracing::debug!(%from, "cripple-ice: dropping inbound candidate");
+                    // selected inbound candidates are dropped, never applied.
+                    tracing::debug!(%from, "fault injection: dropping inbound ICE candidate");
+                    if pairwise_drop {
+                        emit(&Event::IceCandidateDropped { from });
+                    }
                     Ok(())
                 } else {
                     match signal.get("IceCandidate").and_then(|c| c.as_str()) {
@@ -1773,6 +1784,35 @@ fn needs_ice_gathering_marker(is_current_generation: bool, gathering_complete: b
     is_current_generation && !gathering_complete
 }
 
+fn resolve_drop_ice_from(
+    ordinal: Option<usize>,
+    my_id: PlayerId,
+    peers: &[signal_fish_server::protocol::SessionPeer],
+) -> Result<Option<PlayerId>, String> {
+    let Some(ordinal) = ordinal else {
+        return Ok(None);
+    };
+    let target_name = format!("c{ordinal:02}");
+    let mut matches = peers
+        .iter()
+        .filter(|peer| peer.player_name == target_name)
+        .map(|peer| peer.player_id);
+    let target = matches.next().ok_or_else(|| {
+        format!("--drop-ice-from {ordinal} did not resolve to planned peer {target_name:?}")
+    })?;
+    if matches.next().is_some() {
+        return Err(format!(
+            "--drop-ice-from {ordinal} ambiguously matched multiple planned peers named {target_name:?}"
+        ));
+    }
+    if target == my_id {
+        return Err(format!(
+            "--drop-ice-from {ordinal} resolved to this client instead of a peer"
+        ));
+    }
+    Ok(Some(target))
+}
+
 fn harness_aware_base_wake(
     run_deadline: Instant,
     success_release_poll_at: Option<Instant>,
@@ -1806,10 +1846,10 @@ mod tests {
         connection_targets_for_plan, consume_join_accountability_preface, harness_aware_base_wake,
         is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
         next_handshake_message, require_finalized_membership_plan,
-        requires_authoritative_finalization_plan, restore_reconnected_member,
-        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
-        should_resolve_connected_pair, validate_json_negotiated_server_message,
-        EXIT_PROTOCOL_ERROR,
+        requires_authoritative_finalization_plan, resolve_drop_ice_from,
+        restore_reconnected_member, should_buffer_signal_for_unpaired_peer,
+        should_defer_success_at_run_deadline, should_resolve_connected_pair,
+        validate_json_negotiated_server_message, EXIT_PROTOCOL_ERROR,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -1834,6 +1874,42 @@ mod tests {
         assert!(!should_defer_success_at_run_deadline(false, true, false));
         assert!(!should_defer_success_at_run_deadline(true, false, false));
         assert!(!should_defer_success_at_run_deadline(false, false, true));
+    }
+
+    #[test]
+    fn per_peer_ice_fault_resolves_harness_ordinal_and_rejects_missing_target() {
+        let me = PlayerId::new_v4();
+        let target = PlayerId::new_v4();
+        let peers = vec![signal_fish_server::protocol::SessionPeer {
+            player_id: target,
+            player_name: "c01".to_string(),
+            is_authority: false,
+            initiate: true,
+        }];
+
+        assert_eq!(resolve_drop_ice_from(None, me, &peers), Ok(None));
+        assert_eq!(resolve_drop_ice_from(Some(1), me, &peers), Ok(Some(target)));
+        assert!(resolve_drop_ice_from(Some(2), me, &peers)
+            .expect_err("an absent target must fail loud")
+            .contains("did not resolve"));
+
+        let duplicate = signal_fish_server::protocol::SessionPeer {
+            player_id: PlayerId::new_v4(),
+            ..peers[0].clone()
+        };
+        assert!(
+            resolve_drop_ice_from(Some(1), me, &[peers[0].clone(), duplicate])
+                .expect_err("duplicate harness names must fail loud")
+                .contains("ambiguously matched")
+        );
+
+        let self_target = signal_fish_server::protocol::SessionPeer {
+            player_id: me,
+            ..peers[0].clone()
+        };
+        assert!(resolve_drop_ice_from(Some(1), me, &[self_target])
+            .expect_err("self-targeting must fail loud")
+            .contains("this client"));
     }
 
     #[test]

@@ -61,6 +61,9 @@ pub enum Event {
     SignalSent { to: PlayerId, kind: SignalKind },
     /// An inbound `Signal` envelope arrived from `from`.
     SignalReceived { from: PlayerId, kind: SignalKind },
+    /// A configured ICE fault discarded this peer's inbound candidate after
+    /// the signaling envelope was observed.
+    IceCandidateDropped { from: PlayerId },
     /// RTCPeerConnection state transition (`new`/`connecting`/`connected`/...).
     PcState { peer: PlayerId, state: String },
     /// One data channel reached the open state.
@@ -351,5 +354,14 @@ mod tests {
             SignalKind::Other
         );
         assert_eq!(SignalKind::classify(&json!({})), SignalKind::Other);
+    }
+
+    #[test]
+    fn candidate_drop_event_names_the_faulted_sender() {
+        let from = PlayerId::new_v4();
+        let value = serde_json::to_value(Event::IceCandidateDropped { from })
+            .expect("event serialization succeeds");
+        assert_eq!(value["event"], "ice_candidate_dropped");
+        assert_eq!(value["from"], from.to_string());
     }
 }

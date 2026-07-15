@@ -59,6 +59,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--exchange-release-file <PATH>` | — | Test harness only; requires `--exchange`. Establish every planned pair and finish local ICE gathering, emit `exchange_ready`, then hold the exact channel exchange until PATH exists. Normal exchange behavior is unchanged when omitted |
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
 | `--cripple-ice` | off | Deterministically break ICE: reject every interface during gathering AND drop all outbound/inbound `IceCandidate` signals (SDP offer/answer still flows). Forces the relay fallback |
+| `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
 | `--p2p-timeout-secs <S>` | `15` | Window for WebRTC pair establishment before the overall transport status resolves |
 | `--run-for-secs <S>` | `30` | Soft cap: exit 1 if the flag-driven success criteria are still unmet |
 | `--max-runtime-secs <S>` | `60` | Hard watchdog: abort with exit 4 no matter what (the no-hang guarantee) |
@@ -121,6 +122,7 @@ process continues to its normal bounded exit.
 | `new_peer` | `peer_id`, `you_initiate` | Compatible incremental pairing directive (the universal server uses full plans) |
 | `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`other`) |
 | `signal_received` | `from`, `kind` | Inbound `Signal` arrived (emitted even when `--cripple-ice` then drops it) |
+| `ice_candidate_dropped` | `from` | Native-only `--drop-ice-from` discarded this peer's inbound candidate after `signal_received` made the signaling hop observable. The older shared `--cripple-ice` contract remains unchanged and does not emit this event |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
 | `channel_open` | `peer`, `label` | One data channel reached open (`label` ∈ `reliable`/`unreliable`) |
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
@@ -194,6 +196,7 @@ client processes (loopback only; the interop server config disables TURN with ze
 | Mesh N=3 full WebRTC + live relay floor | ✅ `mesh_n3_full_webrtc_session_with_live_relay_floor` | ✅ `mixed_mesh_n3_full_webrtc_with_browser` |
 | Host star N=3 | ✅ `host_star_n3_webrtc` | ✅ `host_star_n3_browser_client` |
 | Crippled-ICE relay fallback | ✅ `mesh_n3_partial_ice_cripple_relay_fallback` | ✅ `mesh_n3_browser_crippled_ice_fallback` |
+| Pairwise ICE partition with healthy partial mesh + relay floor | ✅ nightly `pairwise_ice_partition_preserves_partial_mesh_and_relay_floor` | — |
 | Late join (authoritative full-plan seat fill) | ✅ `late_join_authoritative_replan_real_webrtc_n3` | — (native-only cell) |
 | Mixed v2/v3 relay floor | ✅ `mixed_v2_v3_n3_relay_floor_with_reference_client` | ✅ `mixed_v2_browser_v3_native_relay_floor` |
 | Browser ↔ browser mesh (Chromium↔Chromium pair) | n/a | ✅ `browser_pair_mesh_n3` |
