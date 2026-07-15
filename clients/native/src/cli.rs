@@ -97,6 +97,12 @@ pub struct Cli {
     #[arg(long)]
     pub cripple_ice: bool,
 
+    /// TEST HARNESS ONLY: disable multicast-DNS host-candidate obfuscation.
+    /// Packet-loss tests use raw loopback host candidates so the injected
+    /// unicast loss cannot deadlock ICE gathering on mDNS discovery traffic.
+    #[arg(long)]
+    pub disable_mdns: bool,
+
     /// FAULT INJECTION (matrix harness only): discard inbound trickle-ICE
     /// candidates from the planned peer named `cNN`, where NN is this ordinal.
     /// Offer/answer signaling, other peer links, and the relay floor stay live.
@@ -281,6 +287,7 @@ mod tests {
         assert_eq!(cli.runtime.as_str(), "multi");
         assert_eq!(cli.tick_stall_ms, 0, "fault injection is off by default");
         assert_eq!(cli.drop_ice_from, None);
+        assert!(!cli.disable_mdns);
         assert_eq!(cli.success_release_file, None);
         assert_eq!(cli.exchange_release_file, None);
         assert_eq!(
@@ -367,6 +374,18 @@ mod tests {
             "12",
         ]);
         assert_eq!(cli.drop_ice_from, Some(12));
+    }
+
+    #[test]
+    fn harness_can_disable_mdns_candidate_obfuscation() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--disable-mdns",
+        ]);
+        assert!(cli.disable_mdns);
     }
 
     #[test]

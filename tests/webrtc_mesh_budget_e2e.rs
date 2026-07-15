@@ -246,6 +246,9 @@ fn client_args(
     if scenario.crippled_ordinal() == Some(ordinal) {
         args.push("--cripple-ice".to_string());
     }
+    if scenario.uses_netem() {
+        args.push("--disable-mdns".to_string());
+    }
     if let Some((left, right)) = scenario.partition_pair() {
         let target = if ordinal == left {
             Some(right)

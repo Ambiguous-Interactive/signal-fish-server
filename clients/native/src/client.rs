@@ -157,7 +157,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
 
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-    let engine = Engine::new(cli.cripple_ice, engine_tx)
+    let engine = Engine::new(cli.cripple_ice, cli.disable_mdns, engine_tx)
         .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
     present.insert(my_id);
