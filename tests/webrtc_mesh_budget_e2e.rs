@@ -120,7 +120,9 @@ impl WebRtcScenario {
     }
 
     const fn run_for_secs(self) -> u64 {
-        if self.crippled_ordinal.is_some() {
+        if self.netem_loss {
+            480
+        } else if self.crippled_ordinal.is_some() {
             90
         } else {
             240
@@ -874,6 +876,13 @@ fn assert_client_exit(client: &NativeClientProcess, status: &std::process::ExitS
 
 async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let total_started = tokio::time::Instant::now();
+    if scenario.uses_netem() {
+        let maximum_pre_success_wait = EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE;
+        assert!(
+            Duration::from_secs(scenario.run_for_secs()) > maximum_pre_success_wait,
+            "loss-client soft deadline must exceed room creation plus the shared fault-formation/recovery barrier"
+        );
+    }
     let maximum_bounded_host_release_wait =
         EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE + EVENT_DEADLINE + CLIENT_EXIT_DEADLINE;
     assert!(
