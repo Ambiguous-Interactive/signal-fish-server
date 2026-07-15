@@ -100,19 +100,20 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
 4. **`[profile.mutants]`.** Inherits `dev` with `debug=0` and `incremental=true`.
    **Rule:** use `profile.mutants`, NOT `profile.ci` — `profile.ci` sets
    `incremental=false`, which defeats lever 2.
-5. **`--lib`-only oracle via `.cargo/mutants.toml`
-   (`additional_cargo_args = ["--lib"]`).** This applies `--lib` to the BUILD and
-   the test, so the build no longer compiles ~20 integration-test binaries per
-   mutant. **Rule:** keep `--lib` in `additional_cargo_args` (not
-   `additional_cargo_test_args`); never re-add `--all-features` — the scoped
-   modules have zero feature gates, so `cargo mutants --list` stays 356 either way.
+5. **`--lib`-only, minimal-feature oracle via `.cargo/mutants.toml`
+   (`additional_cargo_args = ["--lib", "--features", "trace-validation"]`).**
+   This applies the target and feature to both BUILD and test, so the build does
+   not compile ~20 integration-test binaries per mutant while the scoped
+   coordination trace adapters remain observable. **Rule:** keep these flags in
+   `additional_cargo_args` (not `additional_cargo_test_args`); never re-add
+   `--all-features` — TLS and legacy-fullmesh add cost without mutation signal.
 6. **Process-isolated nextest oracle (`test_tool = "nextest"`).** A mutation
    that removes a progress guard can hang one unit test. Fail-fast alone does
    not terminate a sibling that is already running, so the dedicated
    `[profile.mutants]` also sets a 10-second per-test termination. **Rule:** both
    the baseline and every mutant shard must install `cargo-nextest` and select
    that profile. The baseline must run the exact unmutated oracle:
-   `cargo nextest run --lib --cargo-profile mutants --profile mutants --locked`.
+   `cargo nextest run --lib --features trace-validation --cargo-profile mutants --profile mutants --locked`.
    It also installs `cargo-mutants` and runs the inventory guard, ensuring the
    measured mutant count cannot silently skip in CI.
 7. **Shard count sized for serial execution.** `--in-place` runs each shard's
@@ -182,8 +183,8 @@ Two pre-existing **free guards** also cover this workflow without new code:
   script CI (`mutation.yml`) and local devs both invoke
   (`bash scripts/run-mutants.sh --shard <k>/<N>` or `--warm`).
 - **Scope / oracle / feature set:** `.cargo/mutants.toml` (`examine_globs`,
-  `additional_cargo_args = ["--lib"]`, `test_tool = "nextest"`, mutation
-  nextest profile selection).
+  `additional_cargo_args = ["--lib", "--features", "trace-validation"]`,
+  `test_tool = "nextest"`, mutation nextest profile selection).
 
 Do not duplicate flags into the workflow YAML or a developer's shell history;
 change them once in the script (or the toml) so every runner stays in lockstep.

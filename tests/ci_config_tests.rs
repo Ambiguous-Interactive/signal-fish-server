@@ -21925,7 +21925,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
     }
 
     let exact_warm_command =
-        "CMD=(cargo nextest run --lib --cargo-profile \"$MUTANTS_PROFILE\" --profile \
+        "CMD=(cargo nextest run --lib --features trace-validation --cargo-profile \"$MUTANTS_PROFILE\" --profile \
          \"$MUTANTS_PROFILE\" --locked)";
     if !script_live
         .lines()
@@ -21933,8 +21933,9 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
     {
         violations.push(
             "scripts/run-mutants.sh warm command must be exactly `cargo nextest run --lib \
-             --cargo-profile mutants --profile mutants --locked`: --cargo-profile selects the \
-             Cargo build profile while --profile selects nextest's 10s per-test policy."
+             --features trace-validation --cargo-profile mutants --profile mutants --locked`: \
+             the minimal feature exposes the scoped trace adapters, --cargo-profile selects the \
+             Cargo build profile, and --profile selects nextest's 10s per-test policy."
                 .to_string(),
         );
     }
@@ -22331,10 +22332,10 @@ fn test_mutation_shard_budget_is_feasible_vs_timeout() {
 
 #[test]
 fn test_mutation_oracle_does_not_use_all_features() {
-    // The fast oracle is the in-crate `--lib` unit tests with NO --all-features:
-    // the scoped modules have zero feature gates, so --all-features cannot change
-    // the mutant set or the catch outcome — it only drags tls / legacy-fullmesh
-    // into every per-mutant relink. Lock that in both config surfaces.
+    // The fast oracle is the in-crate `--lib` unit tests with only the minimal
+    // trace-validation feature needed by scoped coordination adapters.
+    // --all-features only drags tls / legacy-fullmesh into every per-mutant
+    // relink. Lock that in both config surfaces.
 
     let mutants_toml = read_file(&repo_root().join(".cargo/mutants.toml"));
     let script = read_run_mutants_script();
@@ -22361,8 +22362,8 @@ fn test_mutation_oracle_does_not_use_all_features() {
     let script_active = strip_comment_lines(&script);
     if mutants_toml_active.contains("--all-features") {
         violations.push(
-            ".cargo/mutants.toml must NOT contain `--all-features`: the scoped modules have no \
-             feature gates, so it only slows every per-mutant build."
+            ".cargo/mutants.toml must NOT contain `--all-features`: the scoped oracle needs \
+             only trace-validation, so extra features only slow every per-mutant build."
                 .to_string(),
         );
     }
@@ -22373,11 +22374,14 @@ fn test_mutation_oracle_does_not_use_all_features() {
     }
 
     // The oracle key must be present, correctly named, and exactly scoped to the
-    // library target. Extra target/feature flags silently expand every mutant build.
-    if cargo_args != ["--lib"] {
+    // library target plus its one required feature. Extra target/feature flags
+    // silently expand every mutant build.
+    if cargo_args != ["--lib", "--features", "trace-validation"] {
         violations.push(format!(
-            "`additional_cargo_args` in .cargo/mutants.toml must be exactly `[\"--lib\"]` (the \
-             fast unit-test oracle applied to BOTH build and test). Parsed: {cargo_args:?}."
+            "`additional_cargo_args` in .cargo/mutants.toml must be exactly \
+             `[\"--lib\", \"--features\", \"trace-validation\"]` (the fast unit-test oracle \
+             and its scoped adapter feature, applied to BOTH build and test). Parsed: \
+             {cargo_args:?}."
         ));
     }
     let test_tool_assignments: Vec<_> = mutants_toml_active
@@ -22417,11 +22421,13 @@ fn test_mutation_oracle_does_not_use_all_features() {
     assert!(
         violations.is_empty(),
         "Mutation oracle scope policy violations:\n\n{}\n\n\
-         Why this matters: `--lib` (via additional_cargo_args, not additional_cargo_test_args) \
-         keeps the oracle to fast in-crate unit tests and avoids building ~20 integration-test \
-         binaries per mutant; --all-features would only add heavy optional deps with no signal. \
+         Why this matters: `--lib` plus the exact trace-validation feature (via \
+         additional_cargo_args, not additional_cargo_test_args) keeps the oracle to fast \
+         in-crate unit tests, exercises the scoped trace adapters, and avoids building ~20 \
+         integration-test binaries per mutant; --all-features adds heavy deps with no signal. \
          See .llm/skills/mutation-testing-performance.md.\n\
-         Fix: keep `additional_cargo_args = [\"--lib\"]`, `test_tool = \"nextest\"`, and \
+         Fix: keep `additional_cargo_args = [\"--lib\", \"--features\", \
+         \"trace-validation\"]`, `test_tool = \"nextest\"`, and \
          remove any --all-features from .cargo/mutants.toml and scripts/run-mutants.sh.\n\
          Verify: cargo test --test ci_config_tests test_mutation_oracle_does_not_use_all_features",
         violations.join("\n")

@@ -128,7 +128,7 @@ if [ "$MODE" = "warm" ]; then
     # unmutated run of the exact nextest oracle used by cargo-mutants. Both
     # profile flags matter: --cargo-profile selects target/mutants/, while
     # --profile selects nextest's per-test 10s termination policy.
-    CMD=(cargo nextest run --lib --cargo-profile "$MUTANTS_PROFILE" --profile "$MUTANTS_PROFILE" --locked)
+    CMD=(cargo nextest run --lib --features trace-validation --cargo-profile "$MUTANTS_PROFILE" --profile "$MUTANTS_PROFILE" --locked)
 else
     # shard mode: validate the k/N form before doing anything expensive.
     if ! printf '%s' "$SHARD" | grep -Eq '^[0-9]+/[0-9]+$'; then
