@@ -405,9 +405,19 @@ impl ConnectionCloseSignal {
                     #[cfg(feature = "trace-validation")]
                     if trace_lifecycle {
                         self.record_trace(
-                            crate::trace_validation::DeliveryTraceAction::LifecycleClose,
+                            if reason == CloseReason::SlowConsumer {
+                                // Modeled delivery-grace expiration uses the
+                                // dedicated request_delivery_timeout_close
+                                // path. Every other slow-consumer source
+                                // (accountability, sojourn, reservation, etc.)
+                                // is outside the pilot and must fail closed.
+                                crate::trace_validation::DeliveryTraceAction::Unsupported
+                            } else {
+                                crate::trace_validation::DeliveryTraceAction::LifecycleClose
+                            },
                             None,
-                            None,
+                            (reason == CloseReason::SlowConsumer)
+                                .then_some("unmodeled-slow-consumer-close"),
                         );
                     }
                     *current = Some(reason);
@@ -3109,6 +3119,19 @@ mod tests {
                 "ParkedChannelClosed"
             ]
         );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn trace_rejects_generic_slow_consumer_close_as_out_of_model() {
+        let trace = Arc::new(
+            crate::trace_validation::DeliveryTraceRecorder::new("generic-slow-close", 1)
+                .expect("valid delivery trace recorder"),
+        );
+        let (close, _listener) = ConnectionCloseSignal::channel_with_trace(Arc::clone(&trace));
+
+        assert!(close.request_close(CloseReason::SlowConsumer));
+        assert_eq!(trace_actions(&trace), vec!["Unsupported"]);
     }
 
     #[cfg(feature = "trace-validation")]
