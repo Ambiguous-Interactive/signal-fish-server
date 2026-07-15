@@ -80,6 +80,12 @@ pub struct Cli {
     #[arg(long)]
     pub exchange: bool,
 
+    /// Test-harness coordination: when --exchange is enabled, wait until this
+    /// path exists before sending the exact per-channel exchange. Channel and
+    /// pair establishment continue while held.
+    #[arg(long, requires = "exchange")]
+    pub exchange_release_file: Option<PathBuf>,
+
     /// After GameStarting (plus a short settle), send one GameData message with
     /// payload {"relay_msg": <text>} over the WebSocket relay floor.
     #[arg(long)]
@@ -269,6 +275,7 @@ mod tests {
         assert_eq!(cli.runtime.as_str(), "multi");
         assert_eq!(cli.tick_stall_ms, 0, "fault injection is off by default");
         assert_eq!(cli.success_release_file, None);
+        assert_eq!(cli.exchange_release_file, None);
         assert_eq!(
             cli.topologies(),
             vec![Topology::Relay, Topology::Host, Topology::Mesh]
@@ -355,6 +362,37 @@ mod tests {
         assert_eq!(
             cli.success_release_file.as_deref(),
             Some(std::path::Path::new("/tmp/signal-fish-release"))
+        );
+    }
+
+    #[test]
+    fn exchange_release_file_parses() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--exchange",
+            "--exchange-release-file",
+            "/tmp/signal-fish-exchange-release",
+        ]);
+        assert!(cli.exchange);
+        assert_eq!(
+            cli.exchange_release_file.as_deref(),
+            Some(std::path::Path::new("/tmp/signal-fish-exchange-release"))
+        );
+
+        let without_exchange = Cli::try_parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--exchange-release-file",
+            "/tmp/signal-fish-exchange-release",
+        ]);
+        assert!(
+            without_exchange.is_err(),
+            "the exchange gate is meaningless without --exchange"
         );
     }
 

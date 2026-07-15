@@ -1,13 +1,15 @@
 //! P10.C empirical native WebRTC topology/size and H8 signal-budget experiments.
 //!
 //! The nightly real-process matrix covers clean mesh and host topologies at
-//! N=2/8/16. The H8 fault variant additionally proves a partial partition: one
-//! client with deterministic crippled ICE falls back to the WebSocket relay
-//! while the other 15 retain their exact 105-edge WebRTC submesh. Every cell
-//! stays under the production 600-signal per-connection budget and preserves
-//! exact WebRTC-channel and relay-floor ledgers. The tests are ignored because
-//! running up to 16 real webrtc-rs stacks is intentionally outside the PR
-//! machine's cheap local test budget.
+//! N=2/8/16 plus fail-loud 1% `tc netem` loss at N=2/8. Loss stays active
+//! through ICE/channel formation; exact channel exchange is released only
+//! after fault lift. The H8 fault variant additionally proves a partial
+//! partition: one client with deterministic crippled ICE falls back to the
+//! WebSocket relay while the other 15 retain their exact 105-edge WebRTC
+//! submesh. Every cell stays under the production 600-signal per-connection
+//! budget and preserves exact WebRTC-channel and relay-floor ledgers. The tests
+//! are ignored because running real webrtc-rs stacks and privileged network
+//! faults is intentionally outside the PR machine's cheap local test budget.
 
 #![cfg(unix)]
 
@@ -17,6 +19,7 @@ mod websocket_test_helpers;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use futures_util::future::join_all;
@@ -58,6 +61,7 @@ struct WebRtcScenario {
     topology: MatrixTopology,
     players: usize,
     crippled_ordinal: Option<usize>,
+    netem_loss: bool,
 }
 
 impl WebRtcScenario {
@@ -66,6 +70,7 @@ impl WebRtcScenario {
             topology,
             players,
             crippled_ordinal: None,
+            netem_loss: false,
         }
     }
 
@@ -74,12 +79,24 @@ impl WebRtcScenario {
             topology: MatrixTopology::Mesh,
             players,
             crippled_ordinal: Some(ordinal),
+            netem_loss: false,
+        }
+    }
+
+    const fn netem_loss(topology: MatrixTopology, players: usize) -> Self {
+        Self {
+            topology,
+            players,
+            crippled_ordinal: None,
+            netem_loss: true,
         }
     }
 
     fn label(self) -> String {
         let fault = if self.crippled_ordinal.is_some() {
             "one-crippled"
+        } else if self.netem_loss {
+            "loss-1pct"
         } else {
             "clean"
         };
@@ -88,6 +105,10 @@ impl WebRtcScenario {
 
     const fn crippled_ordinal(self) -> Option<usize> {
         self.crippled_ordinal
+    }
+
+    const fn uses_netem(self) -> bool {
+        self.netem_loss
     }
 
     const fn p2p_timeout_secs(self) -> u64 {
@@ -99,7 +120,9 @@ impl WebRtcScenario {
     }
 
     const fn run_for_secs(self) -> u64 {
-        if self.crippled_ordinal.is_some() {
+        if self.netem_loss {
+            480
+        } else if self.crippled_ordinal.is_some() {
             90
         } else {
             240
@@ -159,6 +182,7 @@ fn client_args(
     name: &str,
     room_code: Option<&str>,
     success_release_file: &Path,
+    exchange_release_file: Option<&Path>,
     scenario: WebRtcScenario,
     ordinal: usize,
 ) -> Vec<String> {
@@ -188,11 +212,169 @@ fn client_args(
     if scenario.crippled_ordinal() == Some(ordinal) {
         args.push("--cripple-ice".to_string());
     }
+    if let Some(path) = exchange_release_file {
+        args.extend([
+            "--exchange-release-file".to_string(),
+            path.to_string_lossy().into_owned(),
+        ]);
+    }
     match room_code {
         Some(code) => args.extend(["--join-code".to_string(), code.to_string()]),
         None => args.push("--create-room".to_string()),
     }
     args
+}
+
+struct NetemGuard {
+    active: bool,
+    baseline_drops: u64,
+}
+
+impl NetemGuard {
+    fn activate() -> Self {
+        assert_eq!(
+            std::env::var("SF_NETEM_ACTIVE").as_deref(),
+            Ok("1"),
+            "netem loss cells require SF_NETEM_ACTIVE=1; refusing to run a silent clean substitute"
+        );
+
+        Self::replace_loss("100%");
+        Self::assert_loss("100%");
+        let before = Self::dropped_packets();
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0")
+            .expect("bind deterministic netem probe receiver");
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind netem probe sender");
+        for _ in 0..8 {
+            sender
+                .send_to(
+                    b"signal-fish-netem-probe",
+                    receiver.local_addr().expect("probe addr"),
+                )
+                .expect("send deterministic netem probe");
+        }
+        let after = Self::dropped_packets();
+        assert!(
+            after > before,
+            "100% netem probe did not increment qdisc drops (before={before}, after={after}); packet fault injection is not operational"
+        );
+
+        Self::replace_loss("1%");
+        Self::assert_loss("1%");
+        Self {
+            active: true,
+            baseline_drops: Self::dropped_packets(),
+        }
+    }
+
+    fn verify_active(&self) {
+        assert!(self.active, "netem guard was already released");
+        Self::assert_loss("1%");
+    }
+
+    fn release(mut self) -> u64 {
+        self.verify_active();
+        let drops = Self::dropped_packets().saturating_sub(self.baseline_drops);
+        Self::delete();
+        self.active = false;
+        let qdisc = Self::show(false);
+        assert!(
+            !qdisc.contains("netem"),
+            "netem remained active after fault lift: {qdisc}"
+        );
+        drops
+    }
+
+    fn replace_loss(loss: &str) {
+        let output = Command::new("sudo")
+            .args([
+                "-n", "tc", "qdisc", "replace", "dev", "lo", "root", "netem", "loss", "random",
+                loss,
+            ])
+            .output()
+            .expect("execute sudo tc netem setup");
+        assert!(
+            output.status.success(),
+            "failed to install netem loss {loss}; status={} stdout={} stderr={} (the runner needs passwordless sudo/CAP_NET_ADMIN)",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn delete() {
+        let output = Command::new("sudo")
+            .args(["-n", "tc", "qdisc", "del", "dev", "lo", "root"])
+            .output()
+            .expect("execute sudo tc netem cleanup");
+        assert!(
+            output.status.success(),
+            "failed to remove netem qdisc; status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_loss(expected: &str) {
+        let qdisc = Self::show(false);
+        assert!(
+            qdisc.contains("qdisc netem") && qdisc.contains(&format!("loss {expected}")),
+            "requested netem loss {expected} is absent: {qdisc}"
+        );
+    }
+
+    fn dropped_packets() -> u64 {
+        let qdisc = Self::show(true);
+        let marker = "dropped ";
+        let start = qdisc
+            .find(marker)
+            .unwrap_or_else(|| panic!("tc statistics lack dropped counter: {qdisc}"))
+            + marker.len();
+        let digits: String = qdisc[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits
+            .parse()
+            .unwrap_or_else(|error| panic!("invalid tc dropped counter {digits:?}: {error}"))
+    }
+
+    fn show(statistics: bool) -> String {
+        let mut command = Command::new("tc");
+        if statistics {
+            command.arg("-s");
+        }
+        let output = command
+            .args(["qdisc", "show", "dev", "lo"])
+            .output()
+            .expect("inspect loopback qdisc");
+        assert!(
+            output.status.success(),
+            "tc qdisc inspection failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("tc qdisc output is UTF-8")
+    }
+}
+
+impl Drop for NetemGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let output = Command::new("sudo")
+                .args(["-n", "tc", "qdisc", "del", "dev", "lo", "root"])
+                .output();
+            if let Err(error) = output {
+                eprintln!("failed to execute emergency netem cleanup: {error}");
+            } else if let Ok(output) = output {
+                if !output.status.success() {
+                    eprintln!(
+                        "emergency netem cleanup failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn server_config(topology: MatrixTopology) -> Value {
@@ -514,6 +696,11 @@ fn assert_client_barrier(
         usize::from(!expected_connected),
         "{who}: fallback count must match its WebRTC connectivity"
     );
+    assert_eq!(
+        events_named(window, "exchange_ready").len(),
+        usize::from(scenario.uses_netem()),
+        "{who}: fault-gated exchange barrier count"
+    );
     let plan = single_event(window, "session_plan", who);
     assert_eq!(
         string_field(plan, "topology", who),
@@ -689,6 +876,13 @@ fn assert_client_exit(client: &NativeClientProcess, status: &std::process::ExitS
 
 async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let total_started = tokio::time::Instant::now();
+    if scenario.uses_netem() {
+        let maximum_pre_success_wait = EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE;
+        assert!(
+            Duration::from_secs(scenario.run_for_secs()) > maximum_pre_success_wait,
+            "loss-client soft deadline must exceed room creation plus the shared fault-formation/recovery barrier"
+        );
+    }
     let maximum_bounded_host_release_wait =
         EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE + EVENT_DEADLINE + CLIENT_EXIT_DEADLINE;
     assert!(
@@ -728,9 +922,27 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             .collect(),
     };
     assert!(success_release_files.iter().all(|path| !path.exists()));
+    let exchange_release_file = scenario
+        .uses_netem()
+        .then(|| workdir.path().join("release-exchange-after-netem"));
+    assert!(
+        exchange_release_file
+            .as_ref()
+            .is_none_or(|path| !path.exists()),
+        "exchange fault-release path must start absent"
+    );
+    let mut netem_guard = scenario.uses_netem().then(NetemGuard::activate);
     let mut creator = spawn_native_client(
         "c00",
-        &client_args(&server, "c00", None, &success_release_files[0], scenario, 0),
+        &client_args(
+            &server,
+            "c00",
+            None,
+            &success_release_files[0],
+            exchange_release_file.as_deref(),
+            scenario,
+            0,
+        ),
         workdir.path(),
     );
     let created = creator.await_event("room_created", EVENT_DEADLINE).await;
@@ -747,6 +959,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
                 &name,
                 Some(&room_code),
                 success_release_file,
+                exchange_release_file.as_deref(),
                 scenario,
                 ordinal,
             ),
@@ -760,8 +973,38 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let rss_task = tokio::spawn(sample_peak_rss(pids, stop_rx));
     let barrier_started = tokio::time::Instant::now();
+    let barrier_deadline = barrier_started + SUCCESS_BARRIER_DEADLINE;
+    let netem_drops = if scenario.uses_netem() {
+        join_all(clients.iter_mut().map(|client| {
+            client.await_event_count(
+                "exchange_ready",
+                1,
+                barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+        }))
+        .await;
+        let guard = netem_guard
+            .take()
+            .expect("netem scenario owns an active qdisc guard");
+        guard.verify_active();
+        let drops = guard.release();
+        std::fs::write(
+            exchange_release_file
+                .as_ref()
+                .expect("netem scenario owns an exchange release file"),
+            b"release",
+        )
+        .expect("release exact data-channel exchange after lifting netem");
+        Some(drops)
+    } else {
+        None
+    };
     join_all(clients.iter_mut().map(|client| {
-        client.await_event_count("success_criteria_met", 1, SUCCESS_BARRIER_DEADLINE)
+        client.await_event_count(
+            "success_criteria_met",
+            1,
+            barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
     }))
     .await;
     let barrier_elapsed = barrier_started.elapsed();
@@ -1004,7 +1247,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     );
     let connected_pairs = directed_connected_edges / 2;
     println!(
-        "WebRTC matrix cell complete: scenario={} players={} connected_pairs={connected_pairs} total_signals={total_signals} signals_per_client={per_client_signals:?} signal_p50={signal_p50} signal_p99={signal_p99} all_clients_at_success_barrier={barrier_elapsed:?} total_elapsed={total_elapsed:?} coordinated_teardown_drops={} post_spawn_server_peak_rss_kib={} post_spawn_client_peak_rss_kib={:?}",
+        "WebRTC matrix cell complete: scenario={} players={} connected_pairs={connected_pairs} netem_qdisc_drops={netem_drops:?} total_signals={total_signals} signals_per_client={per_client_signals:?} signal_p50={signal_p50} signal_p99={signal_p99} all_clients_at_success_barrier={barrier_elapsed:?} total_elapsed={total_elapsed:?} coordinated_teardown_drops={} post_spawn_server_peak_rss_kib={} post_spawn_client_peak_rss_kib={:?}",
         scenario.label(),
         scenario.players,
         counters
@@ -1090,4 +1333,28 @@ async fn clean_host_n8_has_exact_graph_and_ledgers() {
 #[ignore = "nightly-only (verification-nightly.yml): spawns 16 real webrtc-rs clients"]
 async fn clean_host_n16_has_exact_graph_and_ledgers() {
     run_webrtc_scenario(WebRtcScenario::clean(MatrixTopology::Host, 16)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "nightly-only (verification-nightly.yml): requires privileged tc netem"]
+async fn one_percent_loss_mesh_n2_recovers_exact_ledgers_after_fault_lift() {
+    run_webrtc_scenario(WebRtcScenario::netem_loss(MatrixTopology::Mesh, 2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "nightly-only (verification-nightly.yml): requires privileged tc netem"]
+async fn one_percent_loss_mesh_n8_recovers_exact_ledgers_after_fault_lift() {
+    run_webrtc_scenario(WebRtcScenario::netem_loss(MatrixTopology::Mesh, 8)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "nightly-only (verification-nightly.yml): requires privileged tc netem"]
+async fn one_percent_loss_host_n2_recovers_exact_ledgers_after_fault_lift() {
+    run_webrtc_scenario(WebRtcScenario::netem_loss(MatrixTopology::Host, 2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "nightly-only (verification-nightly.yml): requires privileged tc netem"]
+async fn one_percent_loss_host_n8_recovers_exact_ledgers_after_fault_lift() {
+    run_webrtc_scenario(WebRtcScenario::netem_loss(MatrixTopology::Host, 8)).await;
 }

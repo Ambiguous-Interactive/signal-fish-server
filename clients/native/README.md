@@ -56,6 +56,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--app-id <ID>` | `reference-native-app` | `Authenticate.app_id` (interop servers run with WebSocket auth disabled) |
 | `--platform <P>` | `reference-native` | `Authenticate.platform` |
 | `--exchange` | off | When a P2P pair fully opens, send exactly one text message per channel and require the symmetric receives (see success criteria) |
+| `--exchange-release-file <PATH>` | — | Test harness only; requires `--exchange`. Establish every planned pair and finish local ICE gathering, emit `exchange_ready`, then hold the exact channel exchange until PATH exists. Normal exchange behavior is unchanged when omitted |
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
 | `--cripple-ice` | off | Deterministically break ICE: reject every interface during gathering AND drop all outbound/inbound `IceCandidate` signals (SDP offer/answer still flows). Forces the relay fallback |
 | `--p2p-timeout-secs <S>` | `15` | Window for WebRTC pair establishment before the overall transport status resolves |
@@ -123,6 +124,7 @@ process continues to its normal bounded exit.
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
+| `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out (Appendix G) |
 | `peer_transport_status` | `peer`, `transport`, `connected` | A same-room peer's reported state changed (server fan-out) |
 | `game_data_sent` | — | The `--relay-payload` GameData was sent |
