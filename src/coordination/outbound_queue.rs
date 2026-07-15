@@ -365,9 +365,10 @@ impl UnsupportedNoticeLimiter {
                 .senders
                 .iter()
                 .min_by_key(|(_, state)| state.last_emitted)
-                .map(|(sender, _)| *sender)
-                .expect("nonempty limiter at capacity");
-            self.senders.remove(&oldest);
+                .map(|(sender, _)| *sender);
+            if let Some(oldest) = oldest {
+                self.senders.remove(&oldest);
+            }
         }
         self.senders.insert(
             sender,
