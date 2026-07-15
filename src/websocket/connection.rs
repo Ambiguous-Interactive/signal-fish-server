@@ -511,15 +511,20 @@ pub(super) async fn handle_socket(
     let trace_output =
         std::env::var_os("SIGNAL_FISH_DELIVERY_TRACE_PATH").map(std::path::PathBuf::from);
     #[cfg(feature = "trace-validation")]
-    let trace = trace_output.as_ref().map(|_| {
-        Arc::new(
-            crate::trace_validation::DeliveryTraceRecorder::new(
-                crate::trace_validation::DeliveryTraceRecorder::next_trace_id("socket"),
-                queue_capacity,
-            )
-            .expect("socket trace recorder configuration must be valid"),
-        )
-    });
+    let trace = if trace_output.is_some() {
+        match crate::trace_validation::DeliveryTraceRecorder::new(
+            crate::trace_validation::DeliveryTraceRecorder::next_trace_id("socket"),
+            queue_capacity,
+        ) {
+            Ok(trace) => Some(Arc::new(trace)),
+            Err(error) => {
+                tracing::error!(%error, "Unable to initialize delivery trace recorder");
+                return;
+            }
+        }
+    } else {
+        None
+    };
     #[cfg(feature = "trace-validation")]
     let (close_signal, close_listener) = if let Some(trace) = &trace {
         ConnectionCloseSignal::channel_with_trace(Arc::clone(trace))
@@ -1105,9 +1110,13 @@ pub(super) async fn handle_socket(
         #[cfg(feature = "trace-validation")]
         if let (Some(trace), Some(path)) = (trace_for_output, trace_output_for_send) {
             if trace.has_delivery_attempts() {
-                trace
-                    .append_jsonl(path)
-                    .expect("append production socket delivery trace");
+                if let Err(error) = trace.append_jsonl(&path) {
+                    tracing::error!(
+                        %error,
+                        path = %path.display(),
+                        "Unable to append production socket delivery trace"
+                    );
+                }
             }
         }
     });
