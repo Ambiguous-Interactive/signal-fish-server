@@ -104,9 +104,16 @@ async fn read_server_message(ws: &mut WsStream, context: &str) -> ServerMessage 
             .unwrap_or_else(|_| panic!("{context}: timed out waiting for server message"))
             .unwrap_or_else(|| panic!("{context}: connection closed"))
             .unwrap_or_else(|error| panic!("{context}: websocket read failed: {error}"));
-        if let Message::Text(text) = frame {
-            return serde_json::from_str(&text)
-                .unwrap_or_else(|error| panic!("{context}: invalid server message: {error}"));
+        match frame {
+            Message::Ping(payload) => ws
+                .send(Message::Pong(payload))
+                .await
+                .unwrap_or_else(|error| panic!("{context}: failed to answer server Ping: {error}")),
+            Message::Text(text) => {
+                return serde_json::from_str(&text)
+                    .unwrap_or_else(|error| panic!("{context}: invalid server message: {error}"));
+            }
+            _ => {}
         }
     }
 }
@@ -190,6 +197,39 @@ async fn wait_for_marker(ws: &mut WsStream, marker: &str) {
     }
 }
 
+async fn service_healthy_frame(
+    healthy: &mut WsStream,
+    frame: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    context: &str,
+) {
+    match frame {
+        Some(Ok(Message::Ping(payload))) => healthy
+            .send(Message::Pong(payload))
+            .await
+            .unwrap_or_else(|error| panic!("{context}: failed to answer healthy Ping: {error}")),
+        Some(Ok(Message::Close(frame))) => {
+            panic!("{context}: healthy peer closed during recovery: {frame:?}")
+        }
+        Some(Ok(_)) => {}
+        Some(Err(error)) => panic!("{context}: healthy peer websocket failed: {error}"),
+        None => panic!("{context}: healthy peer ended during recovery"),
+    }
+}
+
+async fn complete_while_servicing_healthy<T>(
+    healthy: &mut WsStream,
+    operation: impl std::future::Future<Output = T>,
+    context: &str,
+) -> T {
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            output = &mut operation => return output,
+            frame = healthy.next() => service_healthy_frame(healthy, frame, context).await,
+        }
+    }
+}
+
 async fn observe_until_close(ws: &mut WsStream) -> CloseObservation {
     let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
     let mut observation = CloseObservation::default();
@@ -251,8 +291,16 @@ async fn assert_room_healed(
         .await;
     }
 
-    let mut replacement = connect(server_addr).await;
-    let snapshot = join_room(&mut replacement, room, "Replacement").await;
+    let replacement = connect(server_addr);
+    let mut replacement =
+        complete_while_servicing_healthy(healthy, replacement, "connecting replacement").await;
+    let replacement_join = join_room(&mut replacement, room, "Replacement");
+    let snapshot = complete_while_servicing_healthy(
+        healthy,
+        replacement_join,
+        "joining replacement to healed room",
+    )
+    .await;
     assert!(
         snapshot
             .current_players
@@ -271,18 +319,22 @@ async fn assert_room_healed(
         },
     )
     .await;
-    loop {
-        if let ServerMessage::GameData {
-            from_player, data, ..
-        } = read_server_message(&mut replacement, "proving healed room relay").await
-        {
-            if from_player == healthy_id
-                && data.get("marker").and_then(serde_json::Value::as_str) == Some(marker.as_str())
+    let relay_proof = async {
+        loop {
+            if let ServerMessage::GameData {
+                from_player, data, ..
+            } = read_server_message(&mut replacement, "proving healed room relay").await
             {
-                break;
+                if from_player == healthy_id
+                    && data.get("marker").and_then(serde_json::Value::as_str)
+                        == Some(marker.as_str())
+                {
+                    break;
+                }
             }
         }
-    }
+    };
+    complete_while_servicing_healthy(healthy, relay_proof, "proving healed room relay").await;
 }
 
 fn assert_close(observation: &CloseObservation, code: u16, reason: &str) {
@@ -298,6 +350,20 @@ fn assert_close(observation: &CloseObservation, code: u16, reason: &str) {
         "partition close must use semantic code {code}: {observation:?}"
     );
     assert_eq!(observation.reason.as_deref(), Some(reason));
+}
+
+fn assert_application_pong_or_windows_reset(observation: &CloseObservation) {
+    #[cfg(windows)]
+    assert!(
+        observation.saw_application_pong || observation.transport_reset_after_cause,
+        "the processed application Ping must either yield its Pong or hit the documented \
+         Windows teardown reset: {observation:?}"
+    );
+    #[cfg(not(windows))]
+    assert!(
+        observation.saw_application_pong,
+        "a Pong queued before eviction must prove client-to-server traffic stayed live"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -390,10 +456,7 @@ async fn server_to_client_blackhole_closes_4002_while_inbound_ping_is_live() {
 
     let observation = observe_until_close(&mut partitioned).await;
     assert_close(&observation, 4002, "slow_consumer");
-    assert!(
-        observation.saw_application_pong,
-        "a Pong queued before eviction must prove client-to-server traffic stayed live"
-    );
+    assert_application_pong_or_windows_reset(&observation);
     assert_eq!(
         server
             .metrics()
