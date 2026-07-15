@@ -32,7 +32,8 @@
 #     --run-ignored all — the PR-lane traffic profiles plus the nightly-only
 #     backgrounded-tab profile (multi-second absorbed pauses + eviction).
 #     The same job runs tests/sixteen_player_matrix_e2e.rs, adding the twelve
-#     per-client jitter/throttle and burst-pause relay matrix cells.
+#     per-client jitter/throttle and burst-pause relay matrix cells plus the
+#     H2 16-player throughput/latency knee sweep.
 #     It also runs the H14 mixed-encoding amplification experiment: exact
 #     unsupported-format reports under a bandwidth-constrained JSON fallback.
 #   - split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
@@ -457,7 +458,7 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test scenario_realworld_e2e --run-ignored all \
             --success-output final 2>&1 | tee scenario-output.txt
-      - name: Run 16-player relay matrix
+      - name: Run 16-player relay matrix and knee sweep
         shell: bash
         run: |
           set -o pipefail
@@ -482,7 +483,7 @@ jobs:
             tail -n 60 scenario-output.txt 2>/dev/null || echo "no scenario output captured"
             echo '```'
             echo
-            echo "### 16-player relay matrix"
+            echo "### 16-player relay matrix and knee sweep"
             echo
             echo '```text'
             tail -n 60 relay-matrix-output.txt 2>/dev/null || echo "no relay matrix output captured"

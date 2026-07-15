@@ -141,9 +141,13 @@ pub struct Engine {
 
 impl Engine {
     /// Build the engine: default `MediaEngine` codecs + default interceptor
-    /// registry; the `SettingEngine` is default unless `crippled`, in which
-    /// case the ICE interface filter rejects every interface.
-    pub fn new(crippled: bool, events: mpsc::UnboundedSender<EngineEvent>) -> Result<Self> {
+    /// registry; the `SettingEngine` is default unless a harness requests an
+    /// ICE fault mode or raw host candidates.
+    pub fn new(
+        crippled: bool,
+        disable_mdns: bool,
+        events: mpsc::UnboundedSender<EngineEvent>,
+    ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_default_codecs()
@@ -154,6 +158,10 @@ impl Engine {
         if crippled {
             // Reject every interface: no host candidates are ever gathered.
             setting_engine.set_interface_filter(Box::new(|_interface: &str| false));
+        }
+        if disable_mdns {
+            setting_engine
+                .set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
         }
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
@@ -562,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn pairing_is_idempotent_and_initiator_offers() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(false, tx).expect("engine builds");
+        let mut engine = Engine::new(false, false, tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xb);
 
         let offer = tokio::time::timeout(
@@ -646,7 +654,7 @@ mod tests {
     #[test]
     fn note_channel_open_fires_pair_connected_exactly_once() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(false, tx).expect("engine builds");
+        let mut engine = Engine::new(false, false, tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xc);
         // Unknown peer: never connected.
         assert!(!engine.note_channel_open(peer, RELIABLE_LABEL));

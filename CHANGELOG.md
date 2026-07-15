@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add data-backed relay-floor sizing guidance for fan-out bandwidth, queue-fill
+  and fail-loud timing, batching latency, and directional partitions. A nightly
+  exact-ledger 16-player rate sweep reports the GitHub runner's achieved
+  ingress, delivery throughput, latency quantiles, backpressure, and RSS so
+  operators can compare their own deployment benchmark without treating CI
+  hardware as a portable capacity guarantee.
 - Document bidirectional WebSocket liveness under symmetric and one-way
   partitions. The client and operator guides now distinguish reliable-delivery
   close `4002 slow_consumer` from transport-liveness close `4003
@@ -50,12 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loopback packet loss, then lift the fault before releasing the exact channel
   exchange. The native client's new harness-only exchange release file emits
   `exchange_ready` after pair formation and ICE gathering; ordinary exchange
-  behavior remains unchanged when the flag is omitted. A final N=3 pairwise
-  partition cell reciprocally drops ICE candidates on exactly one planned edge,
-  proves the other two WebRTC edges and the all-to-all WebSocket relay floor
-  remain complete, and records every injected drop in the client's JSONL event
-  stream. Normal candidate handling is unchanged unless the harness-only
-  `--drop-ice-from` flag is supplied.
+  behavior remains unchanged when the flag is omitted. Loss cells use a
+  harness-only `--disable-mdns` mode so netem faults unicast ICE rather than the
+  local candidate-discovery control plane; normal mDNS candidate privacy is
+  unchanged. A final N=3 pairwise partition cell reciprocally drops ICE
+  candidates on exactly one planned edge, proves the other two WebRTC edges and
+  the all-to-all WebSocket relay floor remain complete, and records every
+  injected drop in the client's JSONL event stream. Normal candidate handling
+  is unchanged unless a harness-only fault flag is supplied.
 - Add canonical release identity across the annotated Git tag, crates.io,
   GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
   container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and

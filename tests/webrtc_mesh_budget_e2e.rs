@@ -246,6 +246,9 @@ fn client_args(
     if scenario.crippled_ordinal() == Some(ordinal) {
         args.push("--cripple-ice".to_string());
     }
+    if scenario.uses_netem() {
+        args.push("--disable-mdns".to_string());
+    }
     if let Some((left, right)) = scenario.partition_pair() {
         let target = if ordinal == left {
             Some(right)
@@ -1094,10 +1097,20 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let barrier_started = tokio::time::Instant::now();
     let barrier_deadline = barrier_started + SUCCESS_BARRIER_DEADLINE;
     let netem_drops = if scenario.uses_netem() {
-        join_all(clients.iter_mut().map(|client| {
+        // Prove that every planned pair formed while loss is still active.
+        // Do not keep netem installed while waiting for the terminal local ICE
+        // gathering callback: a dropped mDNS packet can leave gathering open
+        // after every data channel is already connected, deadlocking the
+        // exchange gate without disproving connectivity under loss.
+        join_all(clients.iter_mut().enumerate().map(|(ordinal, client)| {
+            let expected_pairs = match scenario.topology {
+                MatrixTopology::Mesh => scenario.players - 1,
+                MatrixTopology::Host if ordinal == 0 => scenario.players - 1,
+                MatrixTopology::Host => 1,
+            };
             client.await_event_count(
-                "exchange_ready",
-                1,
+                "p2p_pair_connected",
+                expected_pairs,
                 barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
             )
         }))
@@ -1107,6 +1120,14 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             .expect("netem scenario owns an active qdisc guard");
         guard.verify_active();
         let drops = guard.release();
+        join_all(clients.iter_mut().map(|client| {
+            client.await_event_count(
+                "exchange_ready",
+                1,
+                barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+        }))
+        .await;
         std::fs::write(
             exchange_release_file
                 .as_ref()
