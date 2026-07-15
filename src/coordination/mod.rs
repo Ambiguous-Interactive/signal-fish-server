@@ -394,43 +394,40 @@ impl ConnectionCloseSignal {
     fn request_close_inner(&self, reason: CloseReason, trace_lifecycle: bool) -> bool {
         #[cfg(not(feature = "trace-validation"))]
         let _ = trace_lifecycle;
-        #[cfg(feature = "trace-validation")]
-        let mut opened_close = false;
-        let modified = self
-            .tx
+        self.tx
             .send_if_modified(|current| match (*current, reason) {
                 (None, _) => {
-                    *current = Some(reason);
+                    // Record the lifecycle transition while the watch value is
+                    // still exclusively borrowed. This preserves the same
+                    // total order in the trace as competing close requests;
+                    // recording after send_if_modified can invert a lifecycle
+                    // winner with a delivery timeout that observed it.
                     #[cfg(feature = "trace-validation")]
-                    {
-                        opened_close = true;
+                    if trace_lifecycle {
+                        self.record_trace(
+                            crate::trace_validation::DeliveryTraceAction::LifecycleClose,
+                            None,
+                            None,
+                        );
                     }
+                    *current = Some(reason);
                     true
                 }
                 (Some(CloseReason::Shutdown), _) => false,
                 (Some(_), CloseReason::Shutdown) => {
+                    #[cfg(feature = "trace-validation")]
+                    if trace_lifecycle {
+                        self.record_trace(
+                            crate::trace_validation::DeliveryTraceAction::Unsupported,
+                            None,
+                            Some("shutdown-close-reason-upgrade"),
+                        );
+                    }
                     *current = Some(CloseReason::Shutdown);
                     true
                 }
                 (Some(_), _) => false,
-            });
-        #[cfg(feature = "trace-validation")]
-        if modified && trace_lifecycle {
-            self.record_trace(
-                if opened_close {
-                    crate::trace_validation::DeliveryTraceAction::LifecycleClose
-                } else {
-                    crate::trace_validation::DeliveryTraceAction::Unsupported
-                },
-                None,
-                if opened_close {
-                    None
-                } else {
-                    Some("shutdown-close-reason-upgrade")
-                },
-            );
-        }
-        modified
+            })
     }
 
     #[cfg(feature = "trace-validation")]
@@ -477,6 +474,40 @@ impl ConnectionCloseSignal {
         }
     }
 
+    #[cfg(feature = "trace-validation")]
+    pub(crate) fn record_trace_grace_expired(
+        &self,
+        delivery_id: Option<u64>,
+        initiated_close: bool,
+    ) {
+        self.record_trace(
+            crate::trace_validation::DeliveryTraceAction::GraceExpired,
+            delivery_id,
+            Some(if initiated_close {
+                "initiated-slow-consumer-close"
+            } else {
+                "close-already-requested"
+            }),
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    fn request_delivery_timeout_close(&self, delivery_id: Option<u64>) -> bool {
+        self.tx.send_if_modified(|current| {
+            let initiated_close = current.is_none();
+            // Serialize the timeout action under the same watch-state borrow
+            // as the first-reason decision. Otherwise two racing timeouts (or
+            // a lifecycle request) can observe one order in production and
+            // acquire the trace recorder in the opposite order.
+            self.record_trace_grace_expired(delivery_id, initiated_close);
+            if initiated_close {
+                *current = Some(CloseReason::SlowConsumer);
+            }
+            initiated_close
+        })
+    }
+
+    #[cfg(not(feature = "trace-validation"))]
     fn request_delivery_timeout_close(&self) -> bool {
         self.request_close_inner(CloseReason::SlowConsumer, false)
     }
@@ -1179,6 +1210,11 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             // one that actually initiates the close counts a disconnect, so
             // the metric tallies connections rather than delivery attempts.
             // Every abandoned message counts as dropped regardless.
+            #[cfg(feature = "trace-validation")]
+            let initiated_close = handle
+                .close
+                .request_delivery_timeout_close(trace_delivery_id);
+            #[cfg(not(feature = "trace-validation"))]
             let initiated_close = handle.close.request_delivery_timeout_close();
             if initiated_close {
                 metrics.increment_websocket_slow_consumer_disconnects();
@@ -1195,12 +1231,6 @@ pub(crate) async fn deliver_or_disconnect_in_room(
                 initiated_close,
                 "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
                  instead of silently dropping messages"
-            );
-            #[cfg(feature = "trace-validation")]
-            handle.close.record_trace(
-                crate::trace_validation::DeliveryTraceAction::GraceExpired,
-                trace_delivery_id,
-                None,
             );
             DeliveryOutcome::SlowConsumer
         }
@@ -3077,6 +3107,62 @@ mod tests {
                 "LifecycleClose",
                 "QueueClose",
                 "ParkedChannelClosed"
+            ]
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[tokio::test(start_paused = true)]
+    async fn trace_retains_lifecycle_close_flush_when_parked_timeout_loses_race() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let (handle, mut rx, _listener, trace) = traced_delivery_handle(1, "lifecycle-timeout");
+        assert_eq!(
+            deliver_or_disconnect(
+                &metrics,
+                Duration::from_millis(10),
+                &test_player(),
+                &handle,
+                test_message(),
+            )
+            .await,
+            DeliveryOutcome::Delivered
+        );
+
+        let delivery = spawn_delivery(&metrics, &handle);
+        let metrics_for_wait = Arc::clone(&metrics);
+        yield_until("traced delivery must park", move || {
+            metrics_for_wait
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        })
+        .await;
+
+        assert!(handle.close.request_close(CloseReason::Unregistered));
+        assert_eq!(
+            delivery.await.expect("delivery task must not panic"),
+            DeliveryOutcome::SlowConsumer,
+            "the parked delivery still expires even though lifecycle close won"
+        );
+        handle.close.record_trace_queue_closed();
+
+        let prefilled = rx.recv().await.expect("drain prefilled item");
+        let write_id = handle
+            .close
+            .start_trace_write(&prefilled, true)
+            .expect("lifecycle close must retain its bounded final flush");
+        handle.close.finish_trace_write(write_id, true);
+
+        assert_eq!(
+            trace_actions(&trace),
+            vec![
+                "SendFast",
+                "SendFull",
+                "LifecycleClose",
+                "GraceExpired",
+                "QueueClose",
+                "CloseFlushStart",
+                "CloseFlushDrain",
             ]
         );
     }

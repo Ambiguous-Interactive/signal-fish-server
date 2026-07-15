@@ -190,7 +190,11 @@ impl DeliveryTraceRecorder {
             }
             DeliveryTraceAction::GraceExpired => {
                 state.close_requested = true;
-                state.slow_consumer_close = true;
+                // Grace expiration always abandons this delivery, but it only
+                // makes the connection a slow-consumer close when this timeout
+                // won the first-reason race. A prior lifecycle close retains
+                // its healthy final-flush behavior in both Rust and TLA+.
+                state.slow_consumer_close |= detail != Some("close-already-requested");
                 if let Some(delivery_id) = delivery_id {
                     remove_attempt(&mut state, delivery_id);
                 }
