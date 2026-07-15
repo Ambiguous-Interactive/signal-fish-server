@@ -78,6 +78,18 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 **Zero warnings policy** -- all linters enforce strict compliance.
 
+### GitHub Access (Required Fallback)
+
+- Use local `git` for branch management, staging, commits, and pushes.
+- Prefer the connected VS Code GitHub extension / GitHub app for pull-request
+  creation, metadata, comments, reviewer requests, and review inspection.
+- Do not block repository delivery solely because `gh auth status` is
+  unauthenticated when the connected GitHub extension/app is available and the
+  Git remote can push successfully.
+- Use `gh` only for capabilities the connector cannot supply (notably detailed
+  GitHub Actions logs or GraphQL review-thread operations), and only when an
+  authenticated CLI session is available.
+
 ### Hook Reliability Rules (Required)
 
 - Git hooks are last-resort guards and must stay cross-platform (`pwsh` + `git` only) and sub-second.

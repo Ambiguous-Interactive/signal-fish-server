@@ -730,7 +730,7 @@ fn conformance_modes_enforce_delivery_class_key_and_epoch_shapes() {
 }
 
 #[test]
-fn conformance_gap_counters_are_causal_and_unsupported_error_is_adjacent() {
+fn conformance_gap_counters_are_causal_with_rate_limited_unsupported_advisories() {
     type Mutate = fn(&mut DeliveryCountersByClass);
     let mismatches: &[(&str, DeliveryGapReason, Mutate)] = &[
         (
@@ -778,12 +778,12 @@ fn conformance_gap_counters_are_causal_and_unsupported_error_is_adjacent() {
         );
     }
 
-    let out_of_order = ConformanceAuditor::new(ReceiverProtocolMode::V3);
+    let deferred = ConformanceAuditor::new(ReceiverProtocolMode::V3);
     let sender = id(72);
-    out_of_order.record_message("receiver", &room_joined(sender, 1));
+    deferred.record_message("receiver", &room_joined(sender, 1));
     let mut counters = DeliveryCountersByClass::default();
     counters.reliable.unsupported_format = 1;
-    out_of_order.record_message(
+    deferred.record_message(
         "receiver",
         &delivery_report(
             counters,
@@ -796,9 +796,8 @@ fn conformance_gap_counters_are_causal_and_unsupported_error_is_adjacent() {
             }],
         ),
     );
-    assert!(panics(
-        || out_of_order.record_message("receiver", &ServerMessage::Pong)
-    ));
+    deferred.record_message("receiver", &ServerMessage::Pong);
+    deferred.record_message("receiver", &format_error());
 
     let terminal = ConformanceAuditor::new(ReceiverProtocolMode::V3);
     terminal.record_message("receiver", &room_joined(sender, 1));
@@ -2042,7 +2041,7 @@ fn conformance_v3_rejects_unenveloped_binary_passthrough() {
 }
 
 #[test]
-fn conformance_binary_entrypoints_cannot_bypass_report_error_adjacency() {
+fn conformance_binary_entrypoints_allow_rate_limited_advisory_after_exact_report() {
     let sender = id(95);
     for encoding in [
         GameDataEncoding::Json,
@@ -2074,13 +2073,50 @@ fn conformance_binary_entrypoints_cannot_bypass_report_error_adjacency() {
             epoch: 1,
         };
         let wire = rmp_serde::to_vec_named(&fixture).expect("serialize binary frame");
-        assert!(
-            panics(|| {
-                auditor.record_binary_frame("receiver", &wire);
-            }),
+        assert_eq!(
+            auditor.record_binary_frame("receiver", &wire),
+            fixture,
             "encoding={encoding:?}"
         );
+        auditor.record_message("receiver", &format_error());
     }
+}
+
+#[test]
+fn conformance_unsupported_advisory_requires_prior_report_but_not_adjacency() {
+    let sender = id(96);
+    let unmatched = ConformanceAuditor::new(ReceiverProtocolMode::V3);
+    unmatched.record_message("receiver", &room_joined(sender, 1));
+    assert!(
+        panics(|| unmatched.record_message("receiver", &format_error())),
+        "an unsupported-format advisory cannot invent an omission"
+    );
+
+    let deferred = ConformanceAuditor::new(ReceiverProtocolMode::V3);
+    deferred.record_message("receiver", &room_joined(sender, 1));
+    let mut counters = DeliveryCountersByClass::default();
+    counters.reliable.unsupported_format = 1;
+    deferred.record_message(
+        "receiver",
+        &delivery_report(
+            counters,
+            [DeliveryGap {
+                from_player: sender,
+                epoch: 1,
+                from_seq: 1,
+                to_seq: 1,
+                reason: DeliveryGapReason::UnsupportedFormat,
+            }],
+        ),
+    );
+    deferred.record_message(
+        "receiver",
+        &ServerMessage::Error {
+            message: "terminal delivery failure".to_string(),
+            error_code: Some(ErrorCode::SlowConsumer),
+        },
+    );
+    deferred.record_close("receiver", 4002, "slow_consumer");
 }
 
 #[test]

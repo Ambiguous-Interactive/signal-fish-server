@@ -33,6 +33,8 @@
 #     backgrounded-tab profile (multi-second absorbed pauses + eviction).
 #     The same job runs tests/sixteen_player_matrix_e2e.rs, adding the twelve
 #     per-client jitter/throttle and burst-pause relay matrix cells.
+#     It also runs the H14 mixed-encoding amplification experiment: exact
+#     unsupported-format reports under a bandwidth-constrained JSON fallback.
 #   - split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
 #     server processes pin the unsupported multi-instance failure catalog used
 #     by the deployment doctrine.
@@ -63,6 +65,7 @@ on:
       - "tests/webrtc_mesh_budget_e2e.rs"
       - "tests/scenario_realworld_e2e.rs"
       - "tests/sixteen_player_matrix_e2e.rs"
+      - "tests/mixed_encoding_relay_e2e.rs"
       - "tests/split_brain_two_instances_e2e.rs"
       - "tests/websocket_test_helpers/**"
       - "clients/native/**"
@@ -461,6 +464,13 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test sixteen_player_matrix_e2e --run-ignored all \
             --success-output final 2>&1 | tee relay-matrix-output.txt
+      - name: Run mixed-encoding amplification experiment
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test mixed_encoding_relay_e2e --run-ignored ignored-only \
+            --success-output final 2>&1 | tee mixed-encoding-output.txt
       - name: Report scenario results to job summary
         if: always()
         shell: bash
@@ -476,6 +486,12 @@ jobs:
             echo
             echo '```text'
             tail -n 60 relay-matrix-output.txt 2>/dev/null || echo "no relay matrix output captured"
+            echo '```'
+            echo
+            echo "### Mixed-encoding amplification"
+            echo
+            echo '```text'
+            tail -n 60 mixed-encoding-output.txt 2>/dev/null || echo "no mixed-encoding output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

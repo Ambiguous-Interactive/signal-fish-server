@@ -1715,9 +1715,12 @@ Gap-bearing reports are event-driven even when
 `websocket.delivery_stats_interval_secs` is zero. Queue-policy reports for
 `latest` / `volatile` travel on the active generation's strict-priority control
 lane and are committed atomically with the omission. An unsupported-format
-report is written inline immediately before the server attempts its best-effort
-supplemental `Error`. Both paths publish the exact range before later data can
-reveal the gap; if a supplemental error write fails, the stream disconnects.
+report is written inline before later data can reveal the gap. The supplemental
+`UNSUPPORTED_GAME_DATA_FORMAT` prose `Error` is rate-limited to at most one per
+sender per second for each recipient; a later notice reports how many similar
+advisories were suppressed. Clients MUST use the unthrottled exact reports—not
+advisory errors—to account sequence gaps. If either an exact report or a chosen
+supplemental error write fails, the stream disconnects.
 Counter-only snapshots may be periodic. If exact reporting cannot be preserved,
 the server closes the connection with `4002 slow_consumer` before exposing
 later data.

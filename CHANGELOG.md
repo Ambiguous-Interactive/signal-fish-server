@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rate-limit protocol-v3 unsupported-format advisory errors per sender and
+  recipient while preserving an exact `DeliveryReport` for every omitted
+  sequence. Mixed-encoding malformed payloads can no longer double each relay
+  into an unbounded report/error stream; later advisories include the number
+  suppressed since the prior notice.
+
 ### Added
 
 - Add a harness-only native reference-client success barrier and a nightly
