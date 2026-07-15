@@ -1102,21 +1102,19 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
         // gathering callback: a dropped mDNS packet can leave gathering open
         // after every data channel is already connected, deadlocking the
         // exchange gate without disproving connectivity under loss.
-        let connected_statuses = join_all(clients.iter_mut().map(|client| {
-            client.await_event(
-                "transport_status_sent",
+        join_all(clients.iter_mut().enumerate().map(|(ordinal, client)| {
+            let expected_pairs = match scenario.topology {
+                MatrixTopology::Mesh => scenario.players - 1,
+                MatrixTopology::Host if ordinal == 0 => scenario.players - 1,
+                MatrixTopology::Host => 1,
+            };
+            client.await_event_count(
+                "p2p_pair_connected",
+                expected_pairs,
                 barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
             )
         }))
         .await;
-        for (client, status) in clients.iter().zip(&connected_statuses) {
-            assert_eq!(
-                status.get("connected").and_then(Value::as_bool),
-                Some(true),
-                "{}: netem connectivity barrier must report a fully connected topology: {status}",
-                client.name
-            );
-        }
         let guard = netem_guard
             .take()
             .expect("netem scenario owns an active qdisc guard");
