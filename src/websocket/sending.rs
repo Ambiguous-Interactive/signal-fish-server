@@ -294,6 +294,10 @@ impl<'a> SendAccounting<'a> {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
+
+    fn unsupported_notice(&self, sender: PlayerId) -> Option<u64> {
+        self.receiver.unsupported_notice(sender)
+    }
 }
 
 impl Drop for SendAccounting<'_> {
@@ -380,15 +384,22 @@ async fn notify_or_close_on_fallback_failure(
                 let report = ServerMessage::DeliveryReport(Box::new(report));
                 send_text_message(sender, &report, player_id).await?;
             }
-            let notice = ServerMessage::Error {
-                message: format!(
-                    "Undeliverable game data from player {from_player} \
-                     ({} payload cannot be converted for this connection): {reason}",
-                    encoding.as_wire_str()
-                ),
-                error_code: Some(ErrorCode::UnsupportedGameDataFormat),
-            };
-            send_text_message(sender, &notice, player_id).await?;
+            if let Some(suppressed) = accounting.unsupported_notice(from_player) {
+                let suppressed = if suppressed == 0 {
+                    String::new()
+                } else {
+                    format!("; {suppressed} similar advisories suppressed since the last notice")
+                };
+                let notice = ServerMessage::Error {
+                    message: format!(
+                        "Undeliverable game data from player {from_player} \
+                         ({} payload cannot be converted for this connection): {reason}{suppressed}",
+                        encoding.as_wire_str()
+                    ),
+                    error_code: Some(ErrorCode::UnsupportedGameDataFormat),
+                };
+                send_text_message(sender, &notice, player_id).await?;
+            }
             Ok(SendDisposition::AccountedDrop)
         }
     }

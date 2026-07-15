@@ -590,6 +590,12 @@ tag for the payload bytes. The server advertises its accepted formats in
 `UNSUPPORTED_GAME_DATA_FORMAT` and falls back to JSON. V2 binary wire shapes
 remain byte-identical and unstamped.
 
+If an opaque binary payload cannot be converted for a differently encoded
+recipient, protocol v3 emits an exact `DeliveryReport` for every omitted
+sequence. Supplemental `UNSUPPORTED_GAME_DATA_FORMAT` prose errors are limited
+to one per sender per second so a malformed stream cannot amplify advisory
+traffic; clients use the reports, not those advisory errors, for gap accounting.
+
 ## CORS Support
 
 Configure allowed origins:

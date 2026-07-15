@@ -965,6 +965,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rate-limit protocol-v3 unsupported-format advisory errors per sender and
+  recipient while preserving an exact `DeliveryReport` for every omitted
+  sequence. Mixed-encoding malformed payloads can no longer double each relay
+  into an unbounded report/error stream; later advisories include the number
+  suppressed since the prior notice.
 - **Consolidated the pre-release protocol into a single v3.** The
   delivery-reliability features that were briefly developed behind a separate
   `protocol_version: 4` (server-stamped `GameData.seq` + incarnation `epoch`, and

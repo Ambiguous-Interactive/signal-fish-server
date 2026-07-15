@@ -1051,18 +1051,28 @@ test('snapshot baseline validates only the recipient-visible tail', () => {
   );
 });
 
-test('unsupported report requires its immediate error or a terminal close', () => {
+test('unsupported advisory requires a prior report but not adjacency', () => {
   const report = { per_class: countersWithUnsupported(1), gaps: [unsupportedGap(1)] };
 
   const paired = joinedState();
   paired.recordReport(report);
+  paired.observeServerMessage(false);
   paired.observeServerMessage(true);
   paired.observeServerMessage(false);
-  expectViolation(() => paired.observeServerMessage(true), 'lacked an immediately preceding');
+  expectViolation(() => paired.observeServerMessage(true), 'lacked a prior causal');
 
-  const missing = joinedState();
-  missing.recordReport(report);
-  expectViolation(() => missing.observeServerMessage(false), 'not immediately followed');
+  const rollover = joinedState();
+  rollover.recordReport(report);
+  rollover.recordReport({
+    per_class: countersWithUnsupported(2),
+    gaps: [unsupportedGap(2)],
+  });
+  rollover.observeServerMessage(true);
+
+  const roomReset = joinedState();
+  roomReset.recordReport(report);
+  roomReset.resetRoom();
+  expectViolation(() => roomReset.observeServerMessage(true), 'lacked a prior causal');
 
   const terminal = joinedState();
   terminal.recordReport(report);
@@ -1268,7 +1278,7 @@ test('the JSON-negotiated runtime rejects physical and text GameDataBinary frame
   }
 });
 
-test('binary envelopes are strict and retain arrival-order adjacency', () => {
+test('binary envelopes are strict and preserve deferred advisory accountability', () => {
   const report = {
     type: 'DeliveryReport',
     data: { per_class: countersWithUnsupported(1), gaps: [unsupportedGap(1)] },
@@ -1287,10 +1297,8 @@ test('binary envelopes are strict and retain arrival-order adjacency', () => {
   }
   const buffered = joinedState();
   dispatchClassifiedFrame(buffered, handoff[0] as ServerFrame);
-  expectViolation(
-    () => dispatchClassifiedFrame(buffered, handoff[1] as ServerFrame),
-    'not immediately followed',
-  );
+  dispatchClassifiedFrame(buffered, handoff[1] as ServerFrame);
+  dispatchClassifiedFrame(buffered, handoff[2] as ServerFrame);
 
   const binary = encode({
     from_player: BINARY_SENDER_BYTES,
@@ -1309,10 +1317,8 @@ test('binary envelopes are strict and retain arrival-order adjacency', () => {
   }
   const live = joinedState();
   dispatchClassifiedFrame(live, liveFrames[0] as ServerFrame);
-  expectViolation(
-    () => dispatchClassifiedFrame(live, liveFrames[1] as ServerFrame),
-    'not immediately followed',
-  );
+  dispatchClassifiedFrame(live, liveFrames[1] as ServerFrame);
+  dispatchClassifiedFrame(live, liveFrames[2] as ServerFrame);
 
   const canonicalEntries = binaryEnvelopeEntries();
   const canonical = encodeMessagePackMap(canonicalEntries);

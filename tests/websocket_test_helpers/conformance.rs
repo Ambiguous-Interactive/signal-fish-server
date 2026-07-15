@@ -54,7 +54,7 @@ struct ReceiverState {
     last_delivery_counters: Option<DeliveryCountersByClass>,
     disconnect_cause: Option<ReceiverDisconnectCause>,
     last_relay_stats: Option<RelayStatsSnapshot>,
-    pending_unsupported_error: Option<DeliveryGap>,
+    unadvised_unsupported_gap: Option<DeliveryGap>,
     ledger_payloads: u64,
     observed_delivered: DeliveryCountersByClass,
     abandoned_requires_disconnect: bool,
@@ -533,10 +533,6 @@ impl ConformanceAuditor {
             let state = self.state.lock().expect("conformance auditor poisoned");
             for (receiver, receiver_state) in &state.receivers {
                 assert!(
-                    receiver_state.pending_unsupported_error.is_none(),
-                    "{receiver}: DeliveryReport was not followed by its unsupported-format Error"
-                );
-                assert!(
                     !receiver_state.abandoned_requires_disconnect
                         || receiver_state.disconnect_cause.is_some(),
                     "{receiver}: DeliveryReport exposed abandoned deliveries but the stream continued without a terminal disconnect"
@@ -566,30 +562,6 @@ impl ConformanceAuditor {
         let receiver_state = state.receivers.entry(receiver.to_string()).or_default();
         Self::assert_receiver_active(receiver, receiver_state);
 
-        if let Some(gap) = receiver_state.pending_unsupported_error.take() {
-            assert!(
-                matches!(
-                    message,
-                    ServerMessage::Error {
-                        error_code: Some(signal_fish_server::protocol::ErrorCode::UnsupportedGameDataFormat),
-                        ..
-                    }
-                ),
-                "{receiver} <- {}: unsupported-format DeliveryReport for epoch {}, seq {} must be immediately followed by Error(UnsupportedGameDataFormat), got {message:?}",
-                gap.from_player,
-                gap.epoch,
-                gap.from_seq
-            );
-            if receiver_state.abandoned_requires_disconnect {
-                assert!(
-                    !receiver_state.abandoned_advisory_seen,
-                    "{receiver}: unsupported-format Error duplicated the terminal advisory after abandoned deliveries"
-                );
-                receiver_state.abandoned_advisory_seen = true;
-            }
-            return;
-        }
-
         if receiver_state.abandoned_requires_disconnect {
             assert!(
                 !receiver_state.abandoned_advisory_seen
@@ -599,16 +571,20 @@ impl ConformanceAuditor {
             receiver_state.abandoned_advisory_seen = true;
         }
 
-        assert!(
-            !matches!(
-                message,
-                ServerMessage::Error {
-                    error_code: Some(signal_fish_server::protocol::ErrorCode::UnsupportedGameDataFormat),
-                    ..
-                }
-            ),
-            "{receiver}: unsupported-format Error lacked an immediately preceding causal DeliveryReport"
-        );
+        if matches!(
+            message,
+            ServerMessage::Error {
+                error_code: Some(
+                    signal_fish_server::protocol::ErrorCode::UnsupportedGameDataFormat
+                ),
+                ..
+            }
+        ) {
+            assert!(
+                receiver_state.unadvised_unsupported_gap.take().is_some(),
+                "{receiver}: unsupported-format Error lacked a prior causal DeliveryReport"
+            );
+        }
 
         if mode == ReceiverProtocolMode::V2 {
             assert!(
@@ -626,10 +602,6 @@ impl ConformanceAuditor {
             .or_insert(self.default_mode);
         let receiver_state = state.receivers.entry(receiver.to_string()).or_default();
         Self::assert_receiver_active(receiver, receiver_state);
-        assert!(
-            receiver_state.pending_unsupported_error.is_none(),
-            "{receiver}: unsupported-format DeliveryReport must be followed by Error, not {frame}"
-        );
         assert!(
             !receiver_state.abandoned_requires_disconnect,
             "{receiver}: {frame} continued after DeliveryReport exposed abandoned deliveries"
@@ -721,10 +693,10 @@ impl ConformanceAuditor {
                 .or_insert(self.default_mode);
             let receiver_state = state.receivers.entry(receiver.to_string()).or_default();
             Self::assert_receiver_active(receiver, receiver_state);
-            // The report is the causal accountability record. A failed write
-            // of the supplemental Error may terminate the socket immediately;
-            // only a continuing stream must show Error as its next frame.
-            receiver_state.pending_unsupported_error = None;
+            // The report is the causal accountability record. The supplemental
+            // Error is optional and may be absent when rate-limited or when
+            // its write is overtaken by terminal disconnect.
+            receiver_state.unadvised_unsupported_gap = None;
             receiver_state.disconnect_cause = Some(cause);
         }
         self.ledger
@@ -776,6 +748,7 @@ impl ConformanceAuditor {
         receiver_state.senders.clear();
         receiver_state.membership_history.clear();
         receiver_state.pending_gaps.clear();
+        receiver_state.unadvised_unsupported_gap = None;
         for player in current_players {
             assert!(
                 receiver_state.membership_history.insert(player.id),
@@ -841,6 +814,7 @@ impl ConformanceAuditor {
         receiver_state.senders.clear();
         receiver_state.membership_history.clear();
         receiver_state.pending_gaps.clear();
+        receiver_state.unadvised_unsupported_gap = None;
     }
 
     fn record_lifecycle_epoch(
@@ -1270,7 +1244,9 @@ impl ConformanceAuditor {
             "{receiver}: unsupported-format counter delta must equal newly reported exact gaps"
         );
 
-        receiver_state.pending_unsupported_error = unsupported_gap;
+        if unsupported_gap.is_some() {
+            receiver_state.unadvised_unsupported_gap = unsupported_gap;
+        }
         receiver_state.abandoned_requires_disconnect = report.per_class.reliable.abandoned > 0
             || report.per_class.latest.abandoned > 0
             || report.per_class.volatile.abandoned > 0;
@@ -1732,7 +1708,7 @@ fn receiver_state_is_reconnect_preface(state: &ReceiverState) -> bool {
         && state.last_relay_stats.is_none_or(|stats| {
             stats.sent_to_you == 0 && stats.dropped_for_you == 0 && stats.backpressure_events == 0
         })
-        && state.pending_unsupported_error.is_none()
+        && state.unadvised_unsupported_gap.is_none()
         && state.ledger_payloads == 0
         && state.observed_delivered == DeliveryCountersByClass::default()
         && !state.abandoned_requires_disconnect

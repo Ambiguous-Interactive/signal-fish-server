@@ -45,7 +45,7 @@ pub struct DeliveryAccountability {
     stale_senders: BTreeSet<PlayerId>,
     departed_senders: BTreeMap<(PlayerId, u32), DepartedSender>,
     pending_gaps: BTreeMap<(PlayerId, u32), Vec<DeliveryGap>>,
-    pending_unsupported_error: Option<DeliveryGap>,
+    unadvised_unsupported_gap: Option<DeliveryGap>,
     counters: Option<DeliveryCountersByClass>,
     last_relay_stats: Option<RelayStatsSnapshot>,
 }
@@ -65,7 +65,7 @@ impl DeliveryAccountability {
             stale_senders: BTreeSet::new(),
             departed_senders: BTreeMap::new(),
             pending_gaps: BTreeMap::new(),
-            pending_unsupported_error: None,
+            unadvised_unsupported_gap: None,
             counters: None,
             last_relay_stats: None,
         }
@@ -79,12 +79,13 @@ impl DeliveryAccountability {
         self.stale_senders.clear();
         self.departed_senders.clear();
         self.pending_gaps.clear();
+        self.unadvised_unsupported_gap = None;
     }
 
     /// Start accountability for a new physical connection.
     pub fn reset_connection(&mut self) {
         self.reset_room();
-        self.pending_unsupported_error = None;
+        self.unadvised_unsupported_gap = None;
         self.counters = None;
         self.last_relay_stats = None;
     }
@@ -306,8 +307,9 @@ impl DeliveryAccountability {
         self.try_retire_departed(player_id, epoch)
     }
 
-    /// Enforce the inline unsupported-format replacement pair on the next
-    /// server frame. The boolean identifies Error(UnsupportedGameDataFormat).
+    /// Accept an optional rate-limited unsupported-format advisory only after
+    /// a causal exact report. The boolean identifies
+    /// Error(UnsupportedGameDataFormat).
     pub fn observe_server_message(
         &mut self,
         is_unsupported_format_error: bool,
@@ -315,27 +317,16 @@ impl DeliveryAccountability {
         if !self.protocol_v3 {
             return Ok(());
         }
-        match (
-            self.pending_unsupported_error.as_ref(),
-            is_unsupported_format_error,
-        ) {
-            (Some(_gap), true) => {
-                self.pending_unsupported_error = None;
-                Ok(())
-            }
-            (Some(gap), false) => Err(format!(
-                "delivery accountability violation: unsupported-format report for {} epoch {}, seq {} was not immediately followed by Error(UnsupportedGameDataFormat)",
-                gap.from_player, gap.epoch, gap.from_seq
-            )),
-            (None, true) => Err("delivery accountability violation: Error(UnsupportedGameDataFormat) lacked an immediately preceding causal DeliveryReport".to_string()),
-            (None, false) => Ok(()),
+        if is_unsupported_format_error && self.unadvised_unsupported_gap.take().is_none() {
+            return Err("delivery accountability violation: Error(UnsupportedGameDataFormat) lacked a prior causal DeliveryReport".to_string());
         }
+        Ok(())
     }
 
     /// A terminal socket outcome ends the observable stream, so no
     /// supplemental error is required after the final report.
     pub fn observe_terminal(&mut self) {
-        self.pending_unsupported_error = None;
+        self.unadvised_unsupported_gap = None;
     }
 
     pub fn record_relay_stats(
@@ -448,9 +439,6 @@ impl DeliveryAccountability {
                     .to_string(),
             );
         }
-        if self.pending_unsupported_error.is_some() {
-            return Err("delivery accountability violation: unsupported-format DeliveryReport was not immediately followed by its supplemental Error".to_string());
-        }
         if report.gaps.len() > DELIVERY_REPORT_MAX_GAPS {
             return Err(format!(
                 "delivery accountability violation: DeliveryReport contains {} gap ranges, limit is {DELIVERY_REPORT_MAX_GAPS}",
@@ -547,7 +535,7 @@ impl DeliveryAccountability {
             gaps.sort_unstable_by_key(|candidate| candidate.from_seq);
         }
         if unsupported_seen {
-            self.pending_unsupported_error = report.gaps.first().cloned();
+            self.unadvised_unsupported_gap = report.gaps.first().cloned();
         }
         self.counters = Some(report.per_class);
         for gap in &report.gaps {
@@ -1567,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_report_requires_the_immediate_error_or_terminal() {
+    fn unsupported_advisory_requires_a_prior_report_but_not_adjacency() {
         let sender = id(9);
         let report = DeliveryReportPayload {
             per_class: counters_with_unsupported(1),
@@ -1577,14 +1565,27 @@ mod tests {
         let mut paired = DeliveryAccountability::default();
         paired.note_player_joined(&player(sender, 1)).unwrap();
         paired.record_report(&report).unwrap();
+        paired.observe_server_message(false).unwrap();
         paired.observe_server_message(true).unwrap();
         paired.observe_server_message(false).unwrap();
         assert!(paired.observe_server_message(true).is_err());
 
-        let mut missing = DeliveryAccountability::default();
-        missing.note_player_joined(&player(sender, 1)).unwrap();
-        missing.record_report(&report).unwrap();
-        assert!(missing.observe_server_message(false).is_err());
+        let mut rollover = DeliveryAccountability::default();
+        rollover.note_player_joined(&player(sender, 1)).unwrap();
+        rollover.record_report(&report).unwrap();
+        rollover
+            .record_report(&DeliveryReportPayload {
+                per_class: counters_with_unsupported(2),
+                gaps: vec![unsupported_gap(sender, 2)],
+            })
+            .unwrap();
+        rollover.observe_server_message(true).unwrap();
+
+        let mut room_reset = DeliveryAccountability::default();
+        room_reset.note_player_joined(&player(sender, 1)).unwrap();
+        room_reset.record_report(&report).unwrap();
+        room_reset.reset_room();
+        assert!(room_reset.observe_server_message(true).is_err());
 
         let mut terminal = DeliveryAccountability::default();
         terminal.note_player_joined(&player(sender, 1)).unwrap();

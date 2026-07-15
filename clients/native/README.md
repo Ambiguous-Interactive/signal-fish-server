@@ -78,7 +78,9 @@ retains ranges across reports (one frame carries at most 256) until their
 non-overlapping union covers a later sequence hole. Aggregate counters,
 `RelayStats`, and supplemental errors never authorize a gap. RelayStats
 snapshots are checked for a positive stable interval and monotonic cumulative
-counters. V2 mode rejects all v3 stamps/reports and remains reliable FIFO; raw
+counters. Unsupported-format errors are optional rate-limited advisories: when
+present they require a prior causal exact report, but need not be adjacent to
+it. V2 mode rejects all v3 stamps/reports and remains reliable FIFO; raw
 binary game data is always reliable. This runtime negotiates
 `game_data_format: "json"`, so an incoming binary frame or text
 `GameDataBinary` is a protocol error. The strict MessagePack decoder remains a

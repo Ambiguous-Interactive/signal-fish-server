@@ -6,12 +6,12 @@
 //! capacity before changing the data queue, so every observable sequence gap
 //! has a causally prior exact report.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::Notify;
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 
 use crate::protocol::{
     DeliveryClass, DeliveryCountersByClass, DeliveryGap, DeliveryGapReason, DeliveryReportPayload,
@@ -328,9 +328,57 @@ struct SharedQueue {
     capacity_available: Notify,
     protocol_version: AtomicU16,
     game_data_format: AtomicU8,
+    unsupported_notices: Mutex<UnsupportedNoticeLimiter>,
     data_capacity: usize,
     control_capacity: usize,
     metrics: Option<Arc<crate::metrics::ServerMetrics>>,
+}
+
+const UNSUPPORTED_NOTICE_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_UNSUPPORTED_NOTICE_SENDERS: usize = 256;
+
+#[derive(Debug, Default)]
+struct UnsupportedNoticeLimiter {
+    senders: BTreeMap<PlayerId, UnsupportedNoticeState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnsupportedNoticeState {
+    last_emitted: Instant,
+    suppressed: u64,
+}
+
+impl UnsupportedNoticeLimiter {
+    fn observe(&mut self, sender: PlayerId, now: Instant) -> Option<u64> {
+        if let Some(state) = self.senders.get_mut(&sender) {
+            if now.duration_since(state.last_emitted) < UNSUPPORTED_NOTICE_INTERVAL {
+                state.suppressed = state.suppressed.saturating_add(1);
+                return None;
+            }
+            let suppressed = std::mem::take(&mut state.suppressed);
+            state.last_emitted = now;
+            return Some(suppressed);
+        }
+
+        if self.senders.len() >= MAX_UNSUPPORTED_NOTICE_SENDERS {
+            let oldest = self
+                .senders
+                .iter()
+                .min_by_key(|(_, state)| state.last_emitted)
+                .map(|(sender, _)| *sender);
+            if let Some(oldest) = oldest {
+                self.senders.remove(&oldest);
+            }
+        }
+        self.senders.insert(
+            sender,
+            UnsupportedNoticeState {
+                last_emitted: now,
+                suppressed: 0,
+            },
+        );
+        Some(0)
+    }
 }
 
 impl SharedQueue {
@@ -475,6 +523,7 @@ fn channel_inner(
         capacity_available: Notify::new(),
         protocol_version: AtomicU16::new(crate::config::SERVER_MIN_PROTOCOL_VERSION),
         game_data_format: AtomicU8::new(encoding_tag(GameDataEncoding::Json)),
+        unsupported_notices: Mutex::new(UnsupportedNoticeLimiter::default()),
         data_capacity,
         control_capacity,
         metrics,
@@ -1221,6 +1270,17 @@ impl OutboundReceiver {
 
     pub(crate) fn game_data_format(&self) -> GameDataEncoding {
         encoding_from_tag(self.shared.game_data_format.load(Ordering::Acquire))
+    }
+
+    /// Decide whether this recipient should receive the supplemental
+    /// unsupported-format advisory for `sender`. Exact `DeliveryReport` gaps
+    /// are never throttled; only the redundant prose `Error` is rate-limited.
+    pub(crate) fn unsupported_notice(&self, sender: PlayerId) -> Option<u64> {
+        self.shared
+            .unsupported_notices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(sender, Instant::now())
     }
 
     /// Receive the next item. Pre-v3 traffic stays FIFO; after v3 negotiation,
@@ -2766,6 +2826,42 @@ mod tests {
         assert_eq!(
             report.gaps,
             vec![metadata.gap(DeliveryGapReason::UnsupportedFormat)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unsupported_notice_limiter_is_per_sender_and_reports_suppression() {
+        let (_tx, rx) = channel(1, 1);
+        let first = PlayerId::from_u128(1);
+        let second = PlayerId::from_u128(2);
+
+        assert_eq!(rx.unsupported_notice(first), Some(0));
+        assert_eq!(rx.unsupported_notice(first), None);
+        assert_eq!(rx.unsupported_notice(second), Some(0));
+        tokio::time::advance(UNSUPPORTED_NOTICE_INTERVAL - Duration::from_millis(1)).await;
+        assert_eq!(rx.unsupported_notice(first), None);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(rx.unsupported_notice(first), Some(2));
+        assert_eq!(rx.unsupported_notice(first), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unsupported_notice_limiter_bounds_sender_state() {
+        let (_tx, rx) = channel(1, 1);
+        for ordinal in 0..=MAX_UNSUPPORTED_NOTICE_SENDERS {
+            assert_eq!(
+                rx.unsupported_notice(PlayerId::from_u128(ordinal as u128 + 1)),
+                Some(0)
+            );
+        }
+        assert_eq!(
+            rx.shared
+                .unsupported_notices
+                .lock()
+                .expect("notice limiter poisoned")
+                .senders
+                .len(),
+            MAX_UNSUPPORTED_NOTICE_SENDERS
         );
     }
 }
