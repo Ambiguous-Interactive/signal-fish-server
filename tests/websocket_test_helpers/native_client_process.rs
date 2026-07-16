@@ -206,15 +206,32 @@ impl NativeClientProcess {
             .count()
     }
 
+    /// Continuously consume JSONL events until one shared observation deadline.
+    ///
+    /// This is useful while a harness intentionally waits on external state:
+    /// keeping the pipe drained prevents a verbose child from blocking on a
+    /// full stdout buffer. EOF before the deadline remains a loud failure.
+    pub async fn drain_until(&mut self, deadline: tokio::time::Instant) {
+        loop {
+            match self.try_next_event_before(deadline).await {
+                Ok(Some(_event)) => {}
+                Ok(None) => panic!(
+                    "client {}: stdout ended during observation window;\n{}",
+                    self.name,
+                    self.diagnostics()
+                ),
+                Err(_elapsed) => return,
+            }
+        }
+    }
+
     async fn next_event_before(
         &mut self,
         deadline: tokio::time::Instant,
         context: &str,
     ) -> Option<Value> {
-        let mut bytes = Vec::new();
-        let read =
-            tokio::time::timeout_at(deadline, self.stdout.read_until(b'\n', &mut bytes)).await;
-        let bytes_read = read
+        self.try_next_event_before(deadline)
+            .await
             .unwrap_or_else(|_elapsed| {
                 panic!(
                     "client {}: timed out {context};\n{}",
@@ -222,15 +239,25 @@ impl NativeClientProcess {
                     self.diagnostics()
                 )
             })
-            .unwrap_or_else(|error| {
-                panic!(
-                    "client {}: stdout read error: {error};\n{}",
-                    self.name,
-                    self.diagnostics()
-                )
-            });
+    }
+
+    async fn try_next_event_before(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<Value>, tokio::time::error::Elapsed> {
+        let mut bytes = Vec::new();
+        let bytes_read =
+            tokio::time::timeout_at(deadline, self.stdout.read_until(b'\n', &mut bytes))
+                .await?
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "client {}: stdout read error: {error};\n{}",
+                        self.name,
+                        self.diagnostics()
+                    )
+                });
         if bytes_read == 0 {
-            return None;
+            return Ok(None);
         }
         let terminated = bytes.ends_with(b"\n");
         if terminated {
@@ -247,7 +274,7 @@ impl NativeClientProcess {
                     "client {}: ignoring trailing non-UTF-8 stdout fragment after signal: {error}",
                     self.name
                 );
-                return None;
+                return Ok(None);
             }
             Err(error) => panic!(
                 "client {}: stdout line is not UTF-8 ({error});\n{}",
@@ -262,7 +289,7 @@ impl NativeClientProcess {
                     "client {}: ignoring trailing partial JSONL after signal: {line}",
                     self.name
                 );
-                return None;
+                return Ok(None);
             }
             Err(error) => panic!(
                 "client {}: stdout line is not a JSON event ({error}): {line}",
@@ -270,7 +297,7 @@ impl NativeClientProcess {
             ),
         };
         self.events.push(event.clone());
-        Some(event)
+        Ok(Some(event))
     }
 
     fn child_exited_by_signal(&mut self) -> bool {

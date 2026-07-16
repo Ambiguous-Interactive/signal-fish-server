@@ -1108,16 +1108,20 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
         // complete graph before lifting a stochastic fault made recovery
         // unreachable when a single DCEP/channel-open exchange remained
         // wedged under loss.
-        tokio::time::sleep(NETEM_FORMATION_WINDOW).await;
+        let loss_window_deadline = tokio::time::Instant::now() + NETEM_FORMATION_WINDOW;
+        join_all(
+            clients
+                .iter_mut()
+                .map(|client| client.drain_until(loss_window_deadline)),
+        )
+        .await;
         let guard = netem_guard
             .take()
             .expect("netem scenario owns an active qdisc guard");
         guard.verify_active();
         let drops = guard.release();
 
-        // The event readers deliberately start after fault lift. Events
-        // already emitted during the loss window remain buffered, while any
-        // incomplete pair must now recover on the clean loopback path.
+        // Any incomplete pair must now recover on the clean loopback path.
         join_all(clients.iter_mut().enumerate().map(|(ordinal, client)| {
             let expected_pairs = match scenario.topology {
                 MatrixTopology::Mesh => scenario.players - 1,
