@@ -35,12 +35,13 @@ Production Rust commit path:
 - explicit `panic!`/`todo!`/`unimplemented!`/`unreachable!` macro additions in
   production Rust source, excluding test-only files and `#[cfg(test)]` ranges
 
-Non-production-Rust metadata path:
+Metadata path:
 
-- `.llm/skills/index.md` freshness with auto-repair
-- staged `.llm/*.md` line-count limit
+- selected documentation version synchronization
 - README badge style
 - hook speed policy
+
+Agent Skill validation remains in local and hosted CI to preserve the hook's sub-second budget.
 
 ## Pre-Push Checks
 

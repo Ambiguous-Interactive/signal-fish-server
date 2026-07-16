@@ -36,13 +36,13 @@ signal-fish-server = { version = "0.1.1", features = ["tls"] }
             .to_string(),
         ),
         (
-            ".llm/context.md",
+            "AGENTS.md",
             r#"# Context
 
 - **Version:** 0.1.1
 
-[v2 client sample](code-samples/protocol/v2-client-messages.jsonl)
-[v2 server sample](code-samples/protocol/v2-server-messages.jsonl)
+[v2 client sample](.agents/skills/websocket-protocol/references/v2-client-messages.jsonl)
+[v2 server sample](.agents/skills/websocket-protocol/references/v2-server-messages.jsonl)
 "#
             .to_string(),
         ),
@@ -50,20 +50,20 @@ signal-fish-server = { version = "0.1.1", features = ["tls"] }
             "README.md",
             r#"# README
 
-[v2 client sample](.llm/code-samples/protocol/v2-client-messages.jsonl)
-[v2 server sample](.llm/code-samples/protocol/v2-server-messages.jsonl)
+[v2 client sample](.agents/skills/websocket-protocol/references/v2-client-messages.jsonl)
+[v2 server sample](.agents/skills/websocket-protocol/references/v2-server-messages.jsonl)
 "#
             .to_string(),
         ),
         (
-            ".llm/code-samples/protocol/v2-client-messages.jsonl",
+            ".agents/skills/websocket-protocol/references/v2-client-messages.jsonl",
             r#"{"type":"Authenticate","data":{"app_id":"...","sdk_version":"1.2.3","platform":"unity"}}
 {"type":"JoinRoom","data":{"game_name":"...","player_name":"Player1","room_code":"ABC123"}}
 "#
             .to_string(),
         ),
         (
-            ".llm/code-samples/protocol/v2-server-messages.jsonl",
+            ".agents/skills/websocket-protocol/references/v2-server-messages.jsonl",
             r#"{"type":"Authenticated","data":{"app_name":"my-game","rate_limits":{"per_minute":60}}}
 {"type":"ProtocolInfo","data":{"capabilities":["reconnection"],"game_data_formats":["json"]}}
 "#
@@ -317,26 +317,29 @@ fn test_markdown_discovery_prunes_generated_trees_at_any_depth() {
 }
 
 #[test]
-fn test_markdown_discovery_keeps_llm_guidance_in_version_sync_scope() {
-    let stale_llm_doc =
+fn test_markdown_discovery_keeps_agent_skill_guidance_in_version_sync_scope() {
+    let stale_agent_skill_doc =
         "# Agent Guidance\n\n```toml\n[dependencies]\nsignal-fish-server = \"0.0.9\"\n```\n";
 
     let (exit_code, output) = run_checker_with_fixture(
         &[],
-        &[(".llm/skills/dependency-example.md", stale_llm_doc)],
+        &[(
+            ".agents/skills/dependency-example.md",
+            stale_agent_skill_doc,
+        )],
         &[],
     );
 
     assert_eq!(
         exit_code, 1,
-        "First-party .llm Markdown guidance that quotes the crate dependency \
+        "First-party .agents/skills Markdown guidance that quotes the crate dependency \
          must remain in version-sync scope.\nOutput:\n{output}"
     );
     assert!(
         output.contains(
-            ".llm/skills/dependency-example.md has stale signal-fish-server version '0.0.9'"
+            ".agents/skills/dependency-example.md has stale signal-fish-server version '0.0.9'"
         ),
-        "The stale .llm dependency example should be reported explicitly.\nOutput:\n{output}"
+        "The stale .agents/skills dependency example should be reported explicitly.\nOutput:\n{output}"
     );
 }
 
@@ -371,12 +374,12 @@ fn test_doc_consistency_script_data_driven_cases() {
         ScriptCase {
             name: "fails_on_stale_context_version",
             overrides: vec![(
-                ".llm/context.md",
-                "# Context\n\n- **Version:** 0.0.9\n\n[v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\n[v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n",
+                "AGENTS.md",
+                "# Context\n\n- **Version:** 0.0.9\n\n[v2 client sample](.agents/skills/websocket-protocol/references/v2-client-messages.jsonl)\n[v2 server sample](.agents/skills/websocket-protocol/references/v2-server-messages.jsonl)\n",
             )],
             args: vec![],
             expected_exit: 1,
-            must_contain: vec![".llm/context.md must contain exact line"],
+            must_contain: vec!["AGENTS.md must contain exact line"],
             must_not_contain: vec![],
         },
         // Superset coverage: the scan validates EVERY doc that quotes the crate
@@ -423,13 +426,13 @@ fn test_doc_consistency_script_data_driven_cases() {
         ScriptCase {
             name: "passes_context_version_check_with_crlf_line_endings",
             overrides: vec![(
-                ".llm/context.md",
-                "# Context\r\n\r\n- **Version:** 0.1.1\r\n\r\n[v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\r\n[v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\r\n",
+                "AGENTS.md",
+                "# Context\r\n\r\n- **Version:** 0.1.1\r\n\r\n[v2 client sample](.agents/skills/websocket-protocol/references/v2-client-messages.jsonl)\r\n[v2 server sample](.agents/skills/websocket-protocol/references/v2-server-messages.jsonl)\r\n",
             )],
             args: vec![],
             expected_exit: 0,
-            must_contain: vec![".llm/context.md version line matches Cargo.toml"],
-            must_not_contain: vec![".llm/context.md must contain exact line"],
+            must_contain: vec!["AGENTS.md version line matches Cargo.toml"],
+            must_not_contain: vec!["AGENTS.md must contain exact line"],
         },
         // ---------------------------------------------------------------
         // Changelog format checks (gate 2)
@@ -519,7 +522,7 @@ fn test_doc_consistency_script_data_driven_cases() {
         ScriptCase {
             name: "fails_on_stale_protocol_token_in_sample_file",
             overrides: vec![(
-                ".llm/code-samples/protocol/v2-server-messages.jsonl",
+                ".agents/skills/websocket-protocol/references/v2-server-messages.jsonl",
                 "{\"type\":\"Authenticated\",\"data\":{\"server_version\":\"2.0.0\"}}\n",
             )],
             args: vec![],
@@ -579,12 +582,12 @@ pub enum GameDataEncoding {
         },
         ScriptCase {
             name: "fails_when_context_omits_canonical_sample_references",
-            overrides: vec![(".llm/context.md", "# Context\n\n- **Version:** 0.1.1\n")],
+            overrides: vec![("AGENTS.md", "# Context\n\n- **Version:** 0.1.1\n")],
             args: vec![],
             expected_exit: 1,
             must_contain: vec![
-                ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v2-client-messages.jsonl",
-                ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v2-server-messages.jsonl",
+                "AGENTS.md must reference canonical protocol sample: .agents/skills/websocket-protocol/references/v2-client-messages.jsonl",
+                "AGENTS.md must reference canonical protocol sample: .agents/skills/websocket-protocol/references/v2-server-messages.jsonl",
             ],
             must_not_contain: vec![],
         },
@@ -760,9 +763,9 @@ pub enum GameDataEncoding {
             must_not_contain: vec!["[ERROR]"],
         },
         ScriptCase {
-            name: "deep_nested_llm_is_internal",
+            name: "deep_nested_agent_skill_is_internal",
             overrides: vec![],
-            args: vec!["--changed-files", ".llm/skills/sub/deep/file.md"],
+            args: vec!["--changed-files", ".agents/skills/sub/deep/file.md"],
             expected_exit: 0,
             must_contain: vec!["No non-internal changed files detected"],
             must_not_contain: vec!["[ERROR]"],

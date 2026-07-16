@@ -47,7 +47,7 @@ valid structures and mutates outward:
 ```bash
 mkdir -p corpus/decode_protocol
 i=0
-for f in ../.llm/code-samples/protocol/*.jsonl; do
+for f in ../.agents/skills/websocket-protocol/references/*.jsonl; do
   while IFS= read -r line; do
     printf '%s' "$line" > "corpus/decode_protocol/seed_$i"
     i=$((i + 1))

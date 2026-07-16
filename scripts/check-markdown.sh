@@ -192,7 +192,7 @@ MARKDOWNLINT_INPUTS=()
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     while IFS= read -r -d '' markdown_file; do
         case "$markdown_file" in
-            target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*)
+            target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*|.agents/skills/*/references/*)
                 continue
                 ;;
         esac

@@ -319,5 +319,5 @@ Or feed the self-contained `components/schemas` subtree to any JSON-Schema model
 generator (quicktype, `json-schema-to-typescript`, schemafy, …). The spec's
 header comment lists concrete invocations. The canonical wire examples to test
 your generated types against live in
-[`.llm/code-samples/protocol/`](https://github.com/Ambiguous-Interactive/signal-fish-server/tree/main/.llm/code-samples/protocol)
+[`.agents/skills/websocket-protocol/references/`](https://github.com/Ambiguous-Interactive/signal-fish-server/tree/main/.agents/skills/websocket-protocol/references)
 and the full prose reference is [Protocol Reference](../protocol.md).

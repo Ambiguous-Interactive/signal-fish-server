@@ -1,10 +1,6 @@
-# Claude AI - Repository Guidelines
+# Claude Code Instructions
 
-See [`.llm/context.md`](.llm/context.md) for all AI agent guidelines.
+Follow [`AGENTS.md`](AGENTS.md) for always-on repository policy.
 
-For GitHub work, use local `git` for branches, commits, and pushes, and use the
-connected VS Code GitHub extension / GitHub app for PRs, comments, reviewers,
-review state, and other supported GitHub operations. Fall back to an
-authenticated `gh` CLI only when the extension/app does not expose a required
-capability (for example, detailed Actions logs). An unauthenticated `gh` CLI
-must not block the workflow when the extension/app and Git remote are available.
+Reusable workflows follow [`.agents/skills/`](.agents/skills/). Select the narrowest package,
+read its `SKILL.md`, and load only the references it routes for the current task.

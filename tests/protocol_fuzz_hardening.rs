@@ -79,7 +79,7 @@
 //!
 //! Inputs: arbitrary byte slices; structured single-byte mutations,
 //! truncations, and duplications of the canonical v3 protocol samples
-//! (.llm/code-samples/protocol/v3-*.jsonl); deep-nesting bombs (10k-deep
+//! (.agents/skills/websocket-protocol/references/v3-*.jsonl); deep-nesting bombs (10k-deep
 //! arrays in the opaque `signal` field for JSON, 100k-deep MessagePack array
 //! headers); oversized strings; out-of-range numbers; invalid UTF-8.
 //!
@@ -254,8 +254,8 @@ proptest! {
         // Client and server samples are mutated and fed to BOTH enums via
         // assert_decoders_return: cross-feeding (a server frame into the
         // client decoder) is itself a hostile input worth probing.
-        let client_lines = sample_lines(".llm/code-samples/protocol/v3-client-messages.jsonl");
-        let server_lines = sample_lines(".llm/code-samples/protocol/v3-server-messages.jsonl");
+        let client_lines = sample_lines(".agents/skills/websocket-protocol/references/v3-client-messages.jsonl");
+        let server_lines = sample_lines(".agents/skills/websocket-protocol/references/v3-server-messages.jsonl");
         let all_lines: Vec<&Vec<u8>> = client_lines.iter().chain(server_lines.iter()).collect();
         let line = all_lines[line_choice.index(all_lines.len())];
 

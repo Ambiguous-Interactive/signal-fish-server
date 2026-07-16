@@ -122,14 +122,14 @@ where
 #[test]
 fn v3_client_message_samples_deserialize_into_client_message() {
     assert_samples_deserialize::<ClientMessage>(
-        ".llm/code-samples/protocol/v3-client-messages.jsonl",
+        ".agents/skills/websocket-protocol/references/v3-client-messages.jsonl",
     );
 }
 
 #[test]
 fn v3_server_message_samples_deserialize_into_server_message() {
     assert_samples_deserialize::<ServerMessage>(
-        ".llm/code-samples/protocol/v3-server-messages.jsonl",
+        ".agents/skills/websocket-protocol/references/v3-server-messages.jsonl",
     );
 }
 
@@ -149,7 +149,7 @@ fn assert_runtime_v3_snapshot_epochs(players: &[PlayerInfo], line_no: usize, kin
 /// snapshot invariant explicitly so canonical v3 examples cannot omit epochs.
 #[test]
 fn v3_server_snapshot_samples_include_runtime_epochs() {
-    let relative = ".llm/code-samples/protocol/v3-server-messages.jsonl";
+    let relative = ".agents/skills/websocket-protocol/references/v3-server-messages.jsonl";
     let mut saw_room_joined = false;
 
     for (line_no, line) in numbered_nonblank_lines(relative) {

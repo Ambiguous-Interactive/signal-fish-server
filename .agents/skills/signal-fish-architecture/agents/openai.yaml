@@ -1,0 +1,4 @@
+interface:
+  display_name: "Signal Fish Architecture"
+  short_description: "Navigate Signal Fish architecture and invariants"
+  default_prompt: "Use $signal-fish-architecture to locate the right components and preserve architectural invariants."

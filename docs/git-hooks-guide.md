@@ -20,7 +20,7 @@ local CI, or GitHub CI.
   `git cat-file --batch`; avoid per-file `git show` loops in hooks.
 - Batched blob reads cap aggregate bytes before loading content.
 - Safe deterministic recovery is allowed. The pre-commit hook regenerates
-  `.llm/skills/index.md` when skill inputs changed, mirrors it to the worktree
+  `.agents/skills/index.md` when skill inputs changed, mirrors it to the worktree
   when there are no unstaged edits, then verifies the repaired index entry by
   Git object id.
 
@@ -67,13 +67,14 @@ Production `.expect()` and `.unwrap()` policy is enforced by
 `scripts/check-no-panics.sh` in agent workflow, local CI, and CI, not by the git
 hook.
 
-When matching paths changed, it also checks lightweight repository metadata
-guards, even in mixed Rust/metadata commits:
+When matching paths change, it also checks lightweight repository guards:
 
-- generated skills index freshness when skill inputs changed, with auto-repair
-- staged `.llm/*.md` files stay at or below 300 lines
+- Cargo version synchronization in selected docs
 - README Shields.io badges use `style=for-the-badge`
 - hook source does not reintroduce slow semantic or install commands
+
+Agent Skill structure, size, and catalog freshness run in local and hosted CI,
+not in the sub-second git hook.
 
 ### Pre-Push
 
@@ -101,7 +102,7 @@ policy paths. If a staged policy path differs from the worktree, the preflight
 fails closed because the real git hook validates the staged snapshot.
 
 `scripts/run-local-ci.sh` owns slower policy checks including hook readiness,
-worktree hook preflights, LLM file-size/example policies, markdownlint,
+worktree hook preflights, Agent Skill package policies, markdownlint,
 workflow hygiene, doc/changelog consistency, doc policy tests, Dockerfile
 portability, advisory checks, and README badge checks.
 

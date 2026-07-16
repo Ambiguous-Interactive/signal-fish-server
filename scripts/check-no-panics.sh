@@ -145,7 +145,7 @@ print_summary() {
         echo "  - Remove todo!(), unimplemented!(), panic!() macros"
         echo "  - Use .get() instead of [index] for array access"
         echo ""
-        echo "See .llm/context.md 'Defensive Programming' section for patterns."
+        echo "See AGENTS.md 'Defensive Programming' section for patterns."
     fi
     echo "========================================"
 }

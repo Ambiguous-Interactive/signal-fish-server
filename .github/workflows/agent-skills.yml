@@ -1,0 +1,59 @@
+# Agent Skills Validation
+#
+# Validates that .agents/skills/ documentation files stay within the 300-line limit.
+# This workflow prevents AI context files from growing too large, which
+# degrades agent performance and increases token costs.
+#
+# Runs on:
+#   - Push to main branch (only for .agents/skills/** or script changes)
+#   - Pull requests to main (only for .agents/skills/** or script changes)
+
+name: Agent Skills Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".agents/skills/**"
+      - "scripts/check-agent-skill-files.sh"
+      - "scripts/validate-agent-skills.sh"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".agents/skills/**"
+      - "scripts/check-agent-skill-files.sh"
+      - "scripts/validate-agent-skills.sh"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  agent-skills:
+    name: Validate Agent Skills
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Check skill file sizes
+        run: bash scripts/check-agent-skill-files.sh
+
+      - name: Validate skill packages
+        run: bash scripts/validate-agent-skills.sh
+
+      - name: Check generated skill catalog
+        run: bash scripts/generate-skills-index.sh --check
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Agent Skills validation completed."
+          echo ""
+          echo "This check validates:"
+          echo "  - All .agents/skills/ files are within the 300-line limit"
+          echo "  - SKILL.md frontmatter and package metadata are valid"
+          echo "  - Detailed references are directly routed by each skill"

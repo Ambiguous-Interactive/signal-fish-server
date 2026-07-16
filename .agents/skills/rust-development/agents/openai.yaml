@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust Development"
+  short_description: "Implement safe, idiomatic, fast Rust changes"
+  default_prompt: "Use $rust-development to implement this Rust change with repository conventions."

@@ -12,7 +12,7 @@
 # so the survivors are triaged deliberately.
 #
 # PERFORMANCE (each shard must finish <5 min — see
-# .llm/skills/mutation-testing-performance.md). cargo-mutants builds in a /tmp
+# .agents/skills/testing-rust/references/mutation-testing-performance.md). cargo-mutants builds in a /tmp
 # scratch dir and excludes ./target from its copy, so without help every shard
 # recompiles ALL dependencies from scratch — that cold build alone blew the old
 # 20-min timeout and got every shard cancelled. The fix, all centralised in

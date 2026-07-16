@@ -29,7 +29,7 @@ FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS chef
 # `warning: edition is set on library/binary/benchmark ... which is deprecated`
 # lines under cargo 1.89. These come from the cargo-chef skeleton's target
 # tables, NOT our Cargo.toml (which sets `edition` only in [package]); the build
-# succeeds regardless. See .llm/context-docs-and-ci-pitfalls.md.
+# succeeds regardless. See .agents/skills/documentation-quality/references/project-docs-and-ci-pitfalls.md.
 RUN cargo install cargo-chef --version 0.1.77 --locked
 WORKDIR /app
 

@@ -112,7 +112,7 @@ fn test_run_mutants_print_cmd_uses_mold_in_place_slice() {
             "scripts/run-mutants.sh --shard 0/16 --print-cmd output is missing `{needle}`.\n\
              This is a performance/correctness lever from the mutation-speed contract\n\
              (mold linker + --in-place + slice sharding + mutants profile + --baseline=skip +\n\
-             --locked). See .llm/skills/mutation-testing-performance.md.\n\
+             --locked). See .agents/skills/testing-rust/references/mutation-testing-performance.md.\n\
              Fix: restore `{needle}` to the shard command in scripts/run-mutants.sh.\n\
              Verify: bash scripts/run-mutants.sh --shard 0/16 --print-cmd\n\
              Full output:\n{stdout}"

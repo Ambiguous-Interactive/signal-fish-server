@@ -159,7 +159,7 @@ provides better message continuity.
 
 ## References
 
-- [WebSocket Protocol Patterns](../../.llm/skills/websocket-protocol-patterns.md)
+- [WebSocket Protocol Patterns](../../.agents/skills/websocket-protocol/references/websocket-protocol-patterns.md)
 - Implementation: `src/reconnection.rs`
 - Configuration: `src/config/server.rs` (enable_reconnection, reconnection_window)
 - Metrics: `src/metrics.rs` (ReconnectionMetrics)

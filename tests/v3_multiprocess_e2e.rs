@@ -74,7 +74,7 @@ const APP_ID: &str = "multiprocess-conformance-app";
 /// How long a client socket may take to observe the death of the server.
 ///
 /// A saturation-tolerant CEILING, not an expected wait (zero-flakiness policy,
-/// .llm/context-testing.md): the happy path returns the instant the close is
+/// .agents/skills/testing-rust/references/project-testing.md): the happy path returns the instant the close is
 /// observed, so the large ceiling never slows a passing run and only bites
 /// under pathological load. (The server-spawn / connect / health ceilings live
 /// with the harness in `websocket_test_helpers::server_process`.)

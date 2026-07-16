@@ -59,7 +59,7 @@ use serde_json::{json, Value};
 /// How long a client socket may take to connect to the spawned binary.
 ///
 /// A saturation-tolerant CEILING, not an expected wait (zero-flakiness policy,
-/// .llm/context-testing.md). Each test spawns/drives a REAL child server
+/// .agents/skills/testing-rust/references/project-testing.md). Each test spawns/drives a REAL child server
 /// process; on an oversubscribed runner the child can be CPU-starved and merely
 /// slow, so the deadline is generous enough that a starved-but-progressing
 /// child still completes. It only bites under pathological load — the happy

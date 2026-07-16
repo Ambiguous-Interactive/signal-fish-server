@@ -1,0 +1,4 @@
+interface:
+  display_name: "WebSocket Protocol"
+  short_description: "Evolve Signal Fish protocol and session behavior"
+  default_prompt: "Use $websocket-protocol to change protocol or session behavior without compatibility drift."

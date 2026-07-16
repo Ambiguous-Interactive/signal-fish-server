@@ -2113,7 +2113,7 @@ mod tests {
         });
 
         // Poll the server until it accepts a WebSocket connection, rather than a
-        // fixed startup sleep (zero-flakiness policy, .llm/context-testing.md): a
+        // fixed startup sleep (zero-flakiness policy, .agents/skills/testing-rust/references/project-testing.md): a
         // fixed sleep flakes when an oversubscribed runner has not bound the
         // listener yet. The happy path connects on the first attempt (typically
         // within a few ms of the spawn); the generous deadline only bites under

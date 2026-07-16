@@ -1,0 +1,4 @@
+interface:
+  display_name: "Toolchain Management"
+  short_description: "Manage Rust MSRV and pinned toolchains"
+  default_prompt: "Use $toolchain-management to update Rust toolchain policy and validate parity."

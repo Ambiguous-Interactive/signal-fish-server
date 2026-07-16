@@ -10,7 +10,7 @@
 //! parse must additionally survive re-serialization to both wire encodings.
 //!
 //! The property is the absence of a crash: libFuzzer treats any panic/abort as
-//! a finding. Seed the corpus from `.llm/code-samples/protocol/*.jsonl` (see
+//! a finding. Seed the corpus from `.agents/skills/websocket-protocol/references/*.jsonl` (see
 //! fuzz/README.md). Run via the nightly `fuzz` CI job, never on stable.
 use libfuzzer_sys::fuzz_target;
 use signal_fish_server::protocol::{ClientMessage, ServerMessage};

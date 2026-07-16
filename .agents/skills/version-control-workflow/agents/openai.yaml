@@ -1,0 +1,4 @@
+interface:
+  display_name: "Version Control Workflow"
+  short_description: "Use Git and repository hooks safely"
+  default_prompt: "Use $version-control-workflow to perform this Git or hook change safely."

@@ -136,7 +136,7 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         "scripts/*",
         "tests/*",
         "test-fixtures/*",
-        ".llm/*",
+        ".agents/skills/*",
         "target/*",
         "progress/*",
     ];
@@ -216,7 +216,7 @@ fn test_pre_commit_doc_version_sync_sites_match_checker() {
     // (auto-fix one file, gate another), which is the exact fragility this
     // automation exists to prevent. Lock the shared sites and markers here so
     // the fixer can never cover less than the checker validates.
-    let version_sync_sites = ["docs/library-usage.md", ".llm/context.md"];
+    let version_sync_sites = ["docs/library-usage.md", "AGENTS.md"];
     for site in version_sync_sites {
         assert!(
             hook.contains(site),
@@ -245,7 +245,7 @@ fn test_pre_commit_doc_version_sync_sites_match_checker() {
     // fewer files than the checker validates.
     assert!(
         hook.contains(
-            "$script:DocVersionSyncFiles = @(\"docs/library-usage.md\", \".llm/context.md\")"
+            "$script:DocVersionSyncFiles = @(\"docs/library-usage.md\", \"AGENTS.md\")"
         ),
         "pre-commit.ps1 must declare $script:DocVersionSyncFiles with both canonical version-sync sites."
     );
@@ -291,17 +291,17 @@ fn test_protocol_docs_reference_canonical_samples_data_driven() {
     let root = repo_root();
     let cases = [
         ProtocolReferenceCase {
-            file: ".llm/context.md",
+            file: "AGENTS.md",
             required_references: &[
-                "code-samples/protocol/v2-client-messages.jsonl",
-                "code-samples/protocol/v2-server-messages.jsonl",
+                ".agents/skills/websocket-protocol/references/v2-client-messages.jsonl",
+                ".agents/skills/websocket-protocol/references/v2-server-messages.jsonl",
             ],
         },
         ProtocolReferenceCase {
             file: "README.md",
             required_references: &[
-                ".llm/code-samples/protocol/v2-client-messages.jsonl",
-                ".llm/code-samples/protocol/v2-server-messages.jsonl",
+                ".agents/skills/websocket-protocol/references/v2-client-messages.jsonl",
+                ".agents/skills/websocket-protocol/references/v2-server-messages.jsonl",
             ],
         },
     ];
@@ -331,12 +331,12 @@ fn test_protocol_sample_files_are_present_and_valid_data_driven() {
     let root = repo_root();
     let cases = [
         ProtocolSampleCase {
-            file: ".llm/code-samples/protocol/v2-client-messages.jsonl",
+            file: ".agents/skills/websocket-protocol/references/v2-client-messages.jsonl",
             required_tokens: &["\"Authenticate\"", "\"JoinRoom\""],
             forbidden_tokens: &["server_version", "CreateRoom", "SetReady"],
         },
         ProtocolSampleCase {
-            file: ".llm/code-samples/protocol/v2-server-messages.jsonl",
+            file: ".agents/skills/websocket-protocol/references/v2-server-messages.jsonl",
             required_tokens: &["\"app_name\"", "\"rate_limits\"", "\"ProtocolInfo\""],
             forbidden_tokens: &["server_version", "RoomCreated", "AuthorityGranted"],
         },

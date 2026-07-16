@@ -88,7 +88,7 @@ type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 
 const GAME_NAME: &str = "mp-delivery";
 
-// Saturation-tolerant ceilings (zero-flakiness policy, .llm/context-testing.md):
+// Saturation-tolerant ceilings (zero-flakiness policy, .agents/skills/testing-rust/references/project-testing.md):
 // every wait below polls real state and returns the instant it holds; these
 // only bite when something is genuinely broken, so their size never slows a
 // passing run. (The server-spawn / connect / health ceilings live with the

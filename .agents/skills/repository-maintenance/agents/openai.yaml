@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repository Maintenance"
+  short_description: "Maintain repository policy and validation tools"
+  default_prompt: "Use $repository-maintenance to update this repository policy or validation mechanism."

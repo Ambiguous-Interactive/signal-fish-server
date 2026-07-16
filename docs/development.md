@@ -521,7 +521,7 @@ When a dependency requires a newer Rust version, follow the MSRV update checklis
    - Update `CHANGELOG.md`
    - Document reason for MSRV bump in commit message
 
-See [MSRV Management](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/skills/msrv-management.md)
+See [MSRV Management](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.agents/skills/toolchain-management/references/msrv-management.md)
 for comprehensive MSRV management guidance.
 
 ## Continuous Integration
@@ -565,7 +565,7 @@ typos
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
 
-# Canonical local preflight, including hook readiness, LLM policy checks, markdown,
+# Canonical local preflight, including hook readiness, Agent Skill checks, markdown,
 # workflow hygiene, docs/changelog consistency, and policy test suites.
 ./scripts/run-local-ci.sh
 

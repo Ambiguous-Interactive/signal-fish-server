@@ -1332,8 +1332,8 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
         "Advanced safety analysis (Miri, AddressSanitizer — staged)",
     ),
     (
-        "llm-file-sizes.yml",
-        "LLM skill file size enforcement (max 300 lines per .llm/ file)",
+        "agent-skills.yml",
+        "Agent Skill file size enforcement (max 300 lines per .agents/skills/ file)",
     ),
     (
         "docker-publish.yml",
@@ -2412,7 +2412,7 @@ fn test_markdown_files_have_language_identifiers() {
             "third_party",
             "node_modules",
             "test-fixtures",
-            ".llm",
+            ".agents",
         ],
     );
 
@@ -3061,8 +3061,8 @@ fn test_markdown_guidance_avoids_stale_md060_references() {
     // instruct contributors to rely on MD060 behavior.
     let root = repo_root();
     let guidance_files = [
-        ".llm/skills/markdown-best-practices-linting.md",
-        ".llm/skills/ci-cd-troubleshooting-linting.md",
+        ".agents/skills/documentation-quality/references/markdown-best-practices-linting.md",
+        ".agents/skills/ci-troubleshooting/references/ci-cd-troubleshooting-linting.md",
         "docs/development.md",
         "docs/adr/ci-cd-preventative-measures.md",
         "scripts/check-markdown.sh",
@@ -3292,7 +3292,7 @@ fn test_markdownlint_install_guidance_includes_local_and_global_options() {
         "scripts/check-markdown.sh",
         "scripts/enable-hooks.sh",
         "docs/git-hooks-guide.md",
-        ".llm/skills/markdown-best-practices-linting.md",
+        ".agents/skills/documentation-quality/references/markdown-best-practices-linting.md",
     ];
 
     let mut missing_local = Vec::new();
@@ -3356,7 +3356,8 @@ fn test_enable_hooks_helper_fails_closed_and_points_to_powershell_repair() {
 #[test]
 fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
     let root = repo_root();
-    let guidance_path = root.join(".llm/skills/git-hooks-checks.md");
+    let guidance_path =
+        root.join(".agents/skills/version-control-workflow/references/git-hooks-checks.md");
     let content = read_file(&guidance_path);
 
     assert!(
@@ -3377,14 +3378,15 @@ fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
 #[test]
 fn test_git_hook_skill_external_code_sample_links_exist() {
     let root = repo_root();
-    let skill_path = root.join(".llm/skills/git-hooks-checks.md");
+    let skill_path =
+        root.join(".agents/skills/version-control-workflow/references/git-hooks-checks.md");
     let content = read_file(&skill_path);
 
     let sample_files = [
-        ".llm/code-samples/git-hooks/pre-commit-fast.sh",
-        ".llm/code-samples/git-hooks/performance-patterns.sh",
-        ".llm/code-samples/git-hooks/ci-hook-validation-tests.rs",
-        ".llm/code-samples/git-hooks/debugging-snippets.sh",
+        ".agents/skills/version-control-workflow/references/pre-commit-fast.sh",
+        ".agents/skills/version-control-workflow/references/performance-patterns.sh",
+        ".agents/skills/version-control-workflow/references/ci-hook-validation-tests.rs",
+        ".agents/skills/version-control-workflow/references/debugging-snippets.sh",
     ];
 
     let mut issues = Vec::new();
@@ -3398,8 +3400,11 @@ fn test_git_hook_skill_external_code_sample_links_exist() {
             ));
         }
 
-        let markdown_link = sample.replacen(".llm/", "../", 1);
-        if !content.contains(&markdown_link) {
+        let markdown_link = std::path::Path::new(sample)
+            .file_name()
+            .expect("sample basename")
+            .to_string_lossy();
+        if !content.contains(markdown_link.as_ref()) {
             issues.push(format!(
                 "{} does not reference expected link target: {}",
                 skill_path.display(),
@@ -4240,7 +4245,8 @@ fn test_release_retries_reuse_digest_and_record_verification() {
 #[test]
 fn test_permissions_guidance_avoids_incorrect_default_claim() {
     let root = repo_root();
-    let skill_path = root.join(".llm/skills/github-actions-workflow-config.md");
+    let skill_path =
+        root.join(".agents/skills/ci-troubleshooting/references/github-actions-workflow-config.md");
     let content = read_file(&skill_path);
 
     assert!(
@@ -4251,12 +4257,13 @@ fn test_permissions_guidance_avoids_incorrect_default_claim() {
 }
 
 #[test]
-fn test_skill_trigger_lines_do_not_form_accidental_setext_headings() {
-    // Regression guard: a Trigger line immediately followed by `---` is parsed
-    // as a setext heading, causing markdownlint MD003/MD026 failures.
+fn test_standardized_skill_entrypoints_have_no_legacy_trigger_headers() {
     let root = repo_root();
-    let skills_dir = root.join(".llm/skills");
-    let files = find_files_with_extension(&skills_dir, "md", &[]);
+    let skills_dir = root.join(".agents/skills");
+    let files = find_files_with_extension(&skills_dir, "md", &[])
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "SKILL.md"))
+        .collect::<Vec<_>>();
     assert!(
         !files.is_empty(),
         "Expected at least one markdown skill file in {}",
@@ -4266,26 +4273,18 @@ fn test_skill_trigger_lines_do_not_form_accidental_setext_headings() {
     let mut violations = Vec::new();
     for file in files {
         let content = read_file(&file);
-        let lines: Vec<&str> = content.lines().collect();
-
-        for idx in 0..lines.len().saturating_sub(1) {
-            let current = lines[idx].trim_start();
-            let next = lines[idx + 1].trim();
-            if current.starts_with("**Trigger**:") && next == "---" {
-                violations.push(format!(
-                    "{}:{}: `**Trigger**:` is immediately followed by `---`.\n\
-                     Add a blank line between them to avoid accidental setext headings.",
-                    file.display(),
-                    idx + 1
-                ));
-            }
+        if content.contains("# Skill:") || content.contains("**Trigger**:") {
+            violations.push(format!(
+                "{} contains a legacy pseudo-skill header",
+                file.display()
+            ));
         }
     }
 
     assert!(
         violations.is_empty(),
-        "Skill trigger formatting violations detected:\n\n{}\n\n\
-         Fix by adding a blank line between `**Trigger**:` and a subsequent `---` separator.",
+        "Legacy skill formatting detected:\n\n{}\n\n\
+         Keep trigger scope in SKILL.md frontmatter descriptions.",
         violations.join("\n\n")
     );
 }
@@ -4293,7 +4292,8 @@ fn test_skill_trigger_lines_do_not_form_accidental_setext_headings() {
 #[test]
 fn test_link_hook_snippet_initializes_failures_and_matches_behavior() {
     let root = repo_root();
-    let skill_path = root.join(".llm/skills/markdown-best-practices-links.md");
+    let skill_path = root
+        .join(".agents/skills/documentation-quality/references/markdown-best-practices-links.md");
     let content = read_file(&skill_path);
 
     assert!(
@@ -4317,8 +4317,8 @@ fn test_async_network_skills_avoid_unwrap_in_server_startup_examples() {
     // Prevent panic-prone patterns in best-practice guidance snippets.
     let root = repo_root();
     let files = [
-        ".llm/skills/async-rust-best-practices.md",
-        ".llm/skills/graceful-degradation-deployment.md",
+        ".agents/skills/rust-development/references/async-rust-best-practices.md",
+        ".agents/skills/deployment-operations/references/graceful-degradation-deployment.md",
     ];
 
     let panic_patterns = [
@@ -6170,10 +6170,11 @@ fn test_no_actual_placeholder_urls_in_docs() {
     //
     // Scope: Only checks non-code content (code blocks and inline code are excluded
     // because example/tutorial docs legitimately show placeholder patterns).
-    // The .llm/ directory is excluded because it documents CI patterns themselves.
+    // The .agents/ directory is excluded because it contains agent-only reference material.
 
     let root = repo_root();
-    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party", ".llm"]);
+    let markdown_files =
+        find_files_with_extension(&root, "md", &["target", "third_party", ".agents"]);
 
     // Patterns that indicate a placeholder URL in prose text
     let suspicious_patterns: &[(&str, &str)] = &[
@@ -6361,7 +6362,8 @@ fn test_markdown_no_capitalized_filenames_in_links() {
     // - [link](Docs/Config.md) when path is docs/config.md
 
     let root = repo_root();
-    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+    let markdown_files =
+        find_files_with_extension(&root, "md", &["target", "third_party", ".agents"]);
 
     let mut violations = Vec::new();
 
@@ -6469,7 +6471,8 @@ fn test_markdown_technical_terms_consistency() {
         })
         .collect();
 
-    let markdown_files = find_files_with_extension(&root, "md", &["target", "third_party"]);
+    let markdown_files =
+        find_files_with_extension(&root, "md", &["target", "third_party", ".agents"]);
     let mut violations = Vec::new();
 
     // Compile URL-stripping and HTML-stripping regexes outside all loops to avoid
@@ -7623,9 +7626,9 @@ fn test_workflow_hygiene_requirements() {
 // ============================================================================
 // Markdown Relative Link Validation Tests
 // ============================================================================
-// These tests prevent broken relative links in docs/ that reference .llm/ or
+// These tests prevent broken relative links in docs/ that reference .agents/skills/ or
 // other directories without the correct ../ prefix. This was a real CI issue:
-// docs used `.llm/skills/...` instead of `../.llm/skills/...`, causing broken
+// docs used `.agents/skills/...` instead of `../.agents/skills/...`, causing broken
 // links that passed local editing but failed link validation in CI.
 
 /// Extract all markdown link URLs from content.
@@ -7654,11 +7657,11 @@ fn extract_markdown_links(content: &str) -> Vec<(usize, String, String)> {
 }
 
 #[test]
-fn test_docs_relative_links_to_llm_use_parent_prefix() {
+fn test_docs_relative_links_to_agent_skills_use_parent_prefix() {
     // This test prevents the broken relative link issue where docs/ files
-    // linked to .llm/skills/... instead of ../.llm/skills/...
+    // linked to .agents/skills/... instead of ../.agents/skills/...
     //
-    // Since docs/ is one level deep, any link to .llm/ must go up one
+    // Since docs/ is one level deep, any link to .agents/skills/ must go up one
     // directory first with ../ prefix.
 
     let root = repo_root();
@@ -7686,9 +7689,9 @@ fn test_docs_relative_links_to_llm_use_parent_prefix() {
                 continue;
             }
 
-            // Check for .llm/ links missing the ../ prefix
-            // From docs/, the correct path to .llm/ is ../.llm/
-            if url.starts_with(".llm/") {
+            // Check for .agents/skills/ links missing the ../ prefix
+            // From docs/, the correct path to .agents/skills/ is ../.agents/skills/
+            if url.starts_with(".agents/skills/") {
                 violations.push(format!(
                     "{}:{}: Link '{}' should be '../{}'",
                     relative_path.display(),
@@ -7702,12 +7705,12 @@ fn test_docs_relative_links_to_llm_use_parent_prefix() {
 
     if !violations.is_empty() {
         panic!(
-            "Docs files contain relative links to .llm/ without required ../ prefix:\n\n{}\n\n\
+            "Docs files contain relative links to .agents/skills/ without required ../ prefix:\n\n{}\n\n\
              Why this matters:\n\
              - Files in docs/ are one directory level deep\n\
-             - Links to .llm/ must go up one level first: ../.llm/\n\
-             - Using .llm/skills/... instead of ../.llm/skills/... creates broken links\n\n\
-             Fix: Change '.llm/' to '../.llm/' in the links listed above.\n\
+             - Links to .agents/skills/ must go up one level first: ../.agents/skills/\n\
+             - Using .agents/skills/... instead of ../.agents/skills/... creates broken links\n\n\
+             Fix: Change '.agents/skills/' to '../.agents/skills/' in the links listed above.\n\
              Verify: ./scripts/validate-ci.sh --links",
             violations.join("\n")
         );
@@ -16087,7 +16090,7 @@ test-group = 'powershell-subprocess'",
 
 #[test]
 fn test_nextest_config_no_retries_by_default() {
-    // Project policy: zero tolerance for flaky tests (see .llm/context.md).
+    // Project policy: zero tolerance for flaky tests (see AGENTS.md).
     // The nextest config must NOT enable blanket retries, which would mask
     // real test failures as flakes.
 
@@ -16369,69 +16372,20 @@ fn test_pre_commit_hook_delegates_to_fast_powershell_runner() {
 }
 
 #[test]
-fn test_pre_commit_runner_auto_repairs_skills_index() {
+fn test_agent_skills_catalog_validation_stays_out_of_fast_hook() {
     let root = repo_root();
-    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
-
+    let content = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
     assert!(
-        hook_path.exists(),
-        "scripts/hooks/pre-commit.ps1 must exist to enforce local quality gates"
-    );
-
-    // Presence-only structural check; assert against the live view so a
-    // commented-out function/marker cannot satisfy the guard.
-    let content = read_live_file(&hook_path);
-
-    assert!(
-        content.contains("Repair-SkillsIndexIfNeeded"),
-        "pre-commit runner must include generated skills-index freshness logic."
+        !content.contains("Repair-SkillsIndexIfNeeded")
+            && !content.contains("New-SkillsIndexContent")
+            && !content.contains("Skills index freshness"),
+        "standardized skill discovery must not require generated-index repair in the sub-second hook"
     );
     assert!(
         content.contains("SIGNAL_FISH_HOOK_PROFILE")
             && content.contains("Write-Profile")
             && content.contains("Invoke-Check"),
-        "pre-commit runner must keep opt-in per-check timing diagnostics so \
-         >1s hook regressions can be investigated without editing hook code."
-    );
-
-    assert!(
-        content.contains("New-SkillsIndexContent")
-            && content.contains(".llm/skills/index.md")
-            && content.contains("Set-IndexText")
-            && content.contains("Set-WorktreeText")
-            && content.contains("Test-WorktreeTextMatchesIndexText")
-            && content.contains("unstaged edits")
-            && content.contains("update-index")
-            && content.contains("Get-IndexObjectId"),
-        "skills index drift must be auto-repaired in the Git index and safely \
-         mirrored to the worktree when there are no unstaged edits, then verified by object id."
-    );
-
-    assert!(
-        content.contains("Get-IndexSkillFileObjectIds")
-            && content.contains("cat-file")
-            && content.contains("--batch")
-            && content.contains("--batch-check=%(objectname) %(objecttype) %(objectsize)")
-            && content.contains("IndexTextCache")
-            && content.contains("MaxBatchedBlobBytes")
-            && content.contains("PreloadBatchThreshold")
-            && content.contains("PreloadError")
-            && content.contains("Test-SkillsIndexCoversChangedSkills")
-            && content.contains("git cat-file --batch returned"),
-        "skills index generation must batch staged Git index reads, cap aggregate blob size, verify batch object ids, and cache staged text with graceful preload failure handling; broad per-file git show fanout makes hooks too slow, while tiny preload sets should avoid unnecessary batch setup."
-    );
-
-    let metadata_trigger_gate = content
-        .find("$metadataPolicyTriggered")
-        .expect("pre-commit must compute whether metadata policy paths changed");
-    let metadata_preload = content
-        .rfind("Add-StagedContentPreload")
-        .expect("pre-commit must keep metadata preload logic");
-    assert!(
-        metadata_trigger_gate < metadata_preload
-            && content[metadata_trigger_gate..metadata_preload].contains("Complete-PreCommit"),
-        "metadata and generated-file guards must run for mixed Rust/context commits, \
-         while ordinary Rust-only commits still exit before metadata preload."
+        "the remaining fast hook checks must retain profiling diagnostics"
     );
 }
 
@@ -16658,7 +16612,7 @@ fn test_pre_commit_doc_version_sync_logic_when_pwsh_available() {
                 # 3) context.md metadata line rewritten exactly; CRLF preserved
                 #    (this branch uses a different regex than library-usage).
                 $ctx = "# Title`r`n- **Version:** 0.2.0`r`n- **Code name:** Signal Fish`r`n"
-                $ctxOut = Get-DocVersionSyncedContent -Path ".llm/context.md" -Content $ctx -Version "0.3.0"
+                $ctxOut = Get-DocVersionSyncedContent -Path "AGENTS.md" -Content $ctx -Version "0.3.0"
                 Assert ($ctxOut.Contains("- **Version:** 0.3.0")) "context.md version line must be synced"
                 Assert (-not $ctxOut.Contains("0.2.0")) "no stale context.md version must remain"
                 Assert ($ctxOut.Contains("- **Version:** 0.3.0`r`n")) "context.md CRLF line endings must be preserved"
@@ -16682,8 +16636,8 @@ fn test_pre_commit_doc_version_sync_logic_when_pwsh_available() {
                 Assert ($null -ne (Get-DocVersionResidualProblem -Path "docs/library-usage.md" -Content "signal-fish-server = { path = `"../..`" }" -Version "0.3.0")) "a version-less signal-fish-server dependency must be flagged unfixable"
                 Assert ($null -ne (Get-DocVersionResidualProblem -Path "docs/library-usage.md" -Content "signal-fish-server = { git = `"https://x`", tag = `"0.3.0`" }" -Version "0.3.0")) "a version-less dep that merely mentions the crate version elsewhere (git tag) must still be flagged"
                 Assert ($null -eq (Get-DocVersionResidualProblem -Path "docs/library-usage.md" -Content $libOut -Version "0.3.0")) "fully-synced library-usage content must have no residual problem"
-                Assert ($null -ne (Get-DocVersionResidualProblem -Path ".llm/context.md" -Content "# Title`nno version line here`n" -Version "0.3.0")) "a missing context.md version line must be flagged unfixable"
-                Assert ($null -eq (Get-DocVersionResidualProblem -Path ".llm/context.md" -Content $ctxOut -Version "0.3.0")) "synced context.md content must have no residual problem"
+                Assert ($null -ne (Get-DocVersionResidualProblem -Path "AGENTS.md" -Content "# Title`nno version line here`n" -Version "0.3.0")) "a missing context.md version line must be flagged unfixable"
+                Assert ($null -eq (Get-DocVersionResidualProblem -Path "AGENTS.md" -Content $ctxOut -Version "0.3.0")) "synced context.md content must have no residual problem"
             "##,
         ])
         .current_dir(&root)
@@ -16739,7 +16693,7 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
         &dir.join("docs/library-usage.md"),
         "signal-fish-server = \"0.2.0\"\nsignal-fish-server = { version = \"0.2.0\", features = [\"tls\"] }\n",
     );
-    write_file(&dir.join(".llm/context.md"), "- **Version:** 0.2.0\n");
+    write_file(&dir.join("AGENTS.md"), "- **Version:** 0.2.0\n");
     assert!(git(&["add", "-A"]).unwrap().status.success());
     assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
         .unwrap()
@@ -16789,7 +16743,7 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
         !lib.contains("0.2.0"),
         "no stale version may remain in the staged docs, got:\n{lib}"
     );
-    let ctx = staged(".llm/context.md");
+    let ctx = staged("AGENTS.md");
     assert!(
         ctx.contains("- **Version:** 0.9.9"),
         "context.md version line must be re-staged at 0.9.9, got:\n{ctx}"
@@ -17331,38 +17285,16 @@ fn test_powershell_hooks_do_not_use_synchronous_process_stream_reads() {
 }
 
 #[test]
-fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
+fn test_agent_skills_catalog_freshness_runs_outside_git_hooks() {
     let root = repo_root();
-    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
-    let content = read_file(&hook_path);
-    let content_live = strip_comment_lines(&content);
-
+    let hook = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let local_ci = read_live_file(&root.join("scripts/run-local-ci.sh"));
+    let workflow = read_live_file(&root.join(".github/workflows/agent-skills.yml"));
     assert!(
-        content_live.contains(
-            "\"diff\", \"--cached\", \"--name-only\", \"-z\", \"--diff-filter=ACDMR\", \"--\""
-        ),
-        "pre-commit runner should discover staged paths with NUL-delimited git diff output, \
-         including deletions so generated indexes are refreshed."
-    );
-
-    for required_trigger in [
-        "scripts/generate-skills-index.sh",
-        ":(glob).llm/skills/*.md",
-    ] {
-        assert!(
-            content_live.contains(required_trigger),
-            "skills index trigger list must include: {required_trigger}"
-        );
-    }
-    assert!(
-        !content.contains("$_ -eq \".llm/context.md\""),
-        ".llm/context.md edits must not trigger skills index regeneration; \
-         the generated index is derived only from .llm/skills/*.md and the generator script."
-    );
-
-    assert!(
-        content_live.contains("Skip \"Skills index freshness\""),
-        "skills index check should skip cleanly when no skills/index inputs are staged."
+        !hook.contains("generate-skills-index.sh")
+            && local_ci.contains("generate-skills-index.sh --check")
+            && workflow.contains("generate-skills-index.sh --check"),
+        "catalog freshness belongs in local and hosted CI, not the sub-second git hook"
     );
 }
 
@@ -17546,8 +17478,7 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
             && content.contains("Get-WorktreeRustPanicMacroCandidates")
             && content.contains("HookPolicyChangedFiles")
             && content.contains("Hook speed policy")
-            && content.contains("New-WorktreeSkillsIndexContent")
-            && content.contains("WriteAllText($indexPath, $expected")
+            && content.contains("Test-WorktreeMatchesIndexForPaths")
             && content.contains("Running fast worktree preflight checks"),
         "pre-commit runner must expose a worktree preflight mode so agents can run \
          the same cheap policies before handoff without staging files, while also \
@@ -17992,54 +17923,50 @@ fn test_git_hook_cargo_test_invocations_use_locked_and_separator() {
 }
 
 #[test]
-fn test_pre_commit_hook_includes_llm_file_size_check_18() {
+fn test_agent_skill_file_checks_stay_outside_pre_commit_hook() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     assert!(hook_path.exists(), ".githooks/pre-commit must exist");
     let content = read_live_file(&hook_path);
     assert!(
-        content.contains("Test-LlmFileSizes"),
-        "Pre-commit runner must define a fast LLM file size check."
+        !content.contains("Test-AgentSkillFileSizes")
+            && !content.contains("Agent Skill file sizes")
+            && !content.contains(".agents/skills/"),
+        "Agent Skill checks are too broad for the sub-second pre-commit hook"
     );
     assert!(
-        content.contains("Get-IndexText"),
-        "Pre-commit runner must validate staged content from the Git index, not working-tree files."
-    );
-    assert!(
-        content.contains("Fail \"LLM file sizes\"") && content.contains("300 lines or fewer"),
-        "LLM file size check must fail with actionable remediation guidance."
+        read_live_file(&root.join("scripts/run-local-ci.sh"))
+            .contains("check-agent-skill-files.sh")
+            && read_live_file(&root.join(".github/workflows/agent-skills.yml"))
+                .contains("check-agent-skill-files.sh"),
+        "Agent Skill size validation must run in local and hosted CI"
     );
 }
 
 #[test]
-fn test_pre_commit_hook_llm_file_size_triggers_cover_llm_paths() {
+fn test_agent_skill_structure_checks_run_in_local_and_hosted_ci() {
     let root = repo_root();
-    let hook_path = root.join("scripts/hooks/pre-commit.ps1");
-    let content = read_live_file(&hook_path);
+    let hook = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let local_ci = read_live_file(&root.join("scripts/run-local-ci.sh"));
+    let workflow = read_live_file(&root.join(".github/workflows/agent-skills.yml"));
     assert!(
-        content.contains("$script:StagedFiles")
-            && content.contains("$_.StartsWith(\".llm/\")")
-            && content.contains("$_.EndsWith(\".md\")")
-            && content.contains("$_ -ne \".llm/skills/index.md\""),
-        "LLM file size check must scope itself to staged .llm/**/*.md files \
-         while exempting the generated skills index, matching scripts/check-llm-file-sizes.sh."
-    );
-    assert!(
-        content.contains("Skip \"LLM file sizes\""),
-        "LLM file size check should skip cleanly when no .llm/*.md files are staged."
+        !hook.contains("validate-agent-skills.sh")
+            && local_ci.contains("validate-agent-skills.sh")
+            && workflow.contains("validate-agent-skills.sh"),
+        "structural skill validation belongs in local and hosted CI, not git hooks"
     );
 }
 
 #[test]
-fn test_pre_commit_hook_includes_llm_example_extraction_policy_check() {
+fn test_pre_commit_hook_keeps_agent_skill_structure_validation_outside_hook() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
 
     assert!(
-        !content.contains("scripts/check-llm-example-files.sh"),
+        !content.contains("scripts/validate-agent-skills.sh"),
         "Pre-commit hooks must not delegate to slower shell policy scripts. \
-         Inline example extraction remains in local CI and agent verification."
+         Agent Skill structure validation remains in local CI and agent verification."
     );
 }
 
@@ -18093,7 +18020,7 @@ fn test_run_local_ci_includes_readme_badge_style_check() {
 }
 
 #[test]
-fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
+fn test_run_local_ci_includes_hook_preflight_and_agent_skill_policy_checks() {
     let root = repo_root();
     let script_path = root.join("scripts/run-local-ci.sh");
     let content = read_file(&script_path);
@@ -18114,11 +18041,11 @@ fn test_run_local_ci_includes_hook_preflight_and_llm_policy_checks() {
     );
 
     assert!(
-        content_live.contains("scripts/check-llm-file-sizes.sh")
-            && content_live.contains("scripts/check-llm-example-files.sh")
-            && content_live.contains("llm-file-sizes")
-            && content_live.contains("llm-example-files"),
-        "run-local-ci.sh must include the LLM policies that CI already runs; \
+        content_live.contains("scripts/check-agent-skill-files.sh")
+            && content_live.contains("scripts/validate-agent-skills.sh")
+            && content_live.contains("agent-skill-files")
+            && content_live.contains("agent-skills"),
+        "run-local-ci.sh must include the Agent Skills policies that CI already runs; \
          they stay out of git hooks but must not first fail in GitHub CI."
     );
 
@@ -19314,7 +19241,7 @@ const SPELLING_SCAN_TARGETS: &[(&str, &str)] = &[
     ("src", "rs"),
     ("tests", "rs"),
     (".github/workflows", "yml"),
-    (".llm", "md"),
+    (".agents/skills", "md"),
     ("docs", "md"),
 ];
 
@@ -19611,10 +19538,10 @@ fn test_bash_code_blocks_contain_bash_syntax() {
             "third_party",
             "node_modules",
             "test-fixtures",
-            // .llm/skills/ files may contain intentionally mixed-syntax blocks
+            // .agents/ files may contain intentionally mixed-syntax blocks
             // for educational/reference purposes. CI's doc-validation.yml still
             // validates these, so regressions are caught in CI.
-            ".llm",
+            ".agents",
         ],
     );
 
@@ -20576,7 +20503,7 @@ fn test_deny_toml_bans_known_problematic_crates() {
         "deny.toml is missing [[bans.deny]] entries for known-problematic crates:\n\
          {}\n\n\
          Add [[bans.deny]] entries with name and reason fields for each.\n\
-         See .llm/skills/supply-chain-audit-policy.md for the proactive ban list policy.",
+         See .agents/skills/dependency-supply-chain/references/supply-chain-audit-policy.md for the proactive ban list policy.",
         missing
             .iter()
             .map(|c| format!("  - {c}"))
@@ -20830,7 +20757,7 @@ fn test_check_outdated_script_is_executable() {
 // ---------------------------------------------------------------------------
 // Skill Documentation Sync Tests
 //
-// Data-driven tests ensuring that LLM skill files contain required sections
+// Data-driven tests ensuring that Agent Skill files contain required sections
 // and that documentation stays in sync with tooling and policy.
 // ---------------------------------------------------------------------------
 
@@ -20875,7 +20802,10 @@ const REQUIRED_AUDIT_SKILL_SECTIONS: &[(&str, &str)] = &[
 #[test]
 fn test_dep_skill_contains_watch_list_section() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+    let content =
+        read_file(&root.join(
+            ".agents/skills/dependency-supply-chain/references/dependency-management-cargo.md",
+        ));
 
     let mut missing = Vec::new();
     for &(section, desc) in REQUIRED_DEP_SKILL_SECTIONS {
@@ -20903,7 +20833,10 @@ fn test_dep_skill_contains_watch_list_section() {
 #[test]
 fn test_dep_skill_contains_ban_policy_referencing_deny_toml() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+    let content =
+        read_file(&root.join(
+            ".agents/skills/dependency-supply-chain/references/dependency-management-cargo.md",
+        ));
 
     assert!(
         content.contains("deny.toml"),
@@ -20921,7 +20854,10 @@ fn test_dep_skill_contains_ban_policy_referencing_deny_toml() {
 #[test]
 fn test_dep_skill_watch_list_references_real_crates() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+    let content =
+        read_file(&root.join(
+            ".agents/skills/dependency-supply-chain/references/dependency-management-cargo.md",
+        ));
 
     let mut missing = Vec::new();
     let mut not_in_table = Vec::new();
@@ -20961,7 +20897,10 @@ fn test_dep_skill_watch_list_references_real_crates() {
 #[test]
 fn test_audit_skill_contains_monitoring_obligations() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/supply-chain-audit-policy.md"));
+    let content = read_file(
+        &root
+            .join(".agents/skills/dependency-supply-chain/references/supply-chain-audit-policy.md"),
+    );
 
     let mut missing = Vec::new();
     for &(section, desc) in REQUIRED_AUDIT_SKILL_SECTIONS {
@@ -20982,7 +20921,10 @@ fn test_audit_skill_contains_monitoring_obligations() {
 #[test]
 fn test_audit_skill_monitoring_references_tools() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/supply-chain-audit-policy.md"));
+    let content = read_file(
+        &root
+            .join(".agents/skills/dependency-supply-chain/references/supply-chain-audit-policy.md"),
+    );
 
     let required_tool_refs = [
         ("cargo deny check", "primary policy gate"),
@@ -21090,10 +21032,7 @@ fn test_agent_github_access_policy_is_extension_first() {
     let root = repo_root();
     let policy_files = [
         "AGENTS.md",
-        "CLAUDE.md",
-        ".github/copilot-instructions.md",
-        ".llm/context.md",
-        ".llm/skills/mandatory-workflow.md",
+        ".agents/skills/repository-maintenance/references/mandatory-workflow.md",
     ];
 
     for relative_path in policy_files {
@@ -21124,6 +21063,14 @@ fn test_agent_github_access_policy_is_extension_first() {
             "{relative_path} must limit gh fallback to capabilities the extension/app cannot perform"
         );
     }
+
+    for relative_path in ["CLAUDE.md", ".github/copilot-instructions.md"] {
+        let policy = read_file(&root.join(relative_path));
+        assert!(
+            policy.contains("AGENTS.md") && policy.contains("always-on repository policy"),
+            "{relative_path} must delegate always-on GitHub policy to AGENTS.md"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -21151,7 +21098,7 @@ const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
     "scripts/*",
     "tests/*",
     "test-fixtures/*",
-    ".llm/*",
+    ".agents/skills/*",
     "target/*",
     "progress/*",
     "src/*_tests.rs",
@@ -21286,7 +21233,7 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
     ),
     ("Cargo.lock", true, "lockfile changes are internal"),
     ("deny.toml", true, "deny.toml is internal tooling config"),
-    (".llm/context.md", true, "LLM context files are internal"),
+    ("AGENTS.md", true, "Agent guidance files are internal"),
     (
         ".markdownlint.yaml",
         true,
@@ -21711,7 +21658,7 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 //
 // These tests lock the mutation-testing-speed configuration in place forever so
 // the per-shard wall-clock stays well under the timeout. The full rationale and
-// the measured numbers live in .llm/skills/mutation-testing-performance.md; the
+// the measured numbers live in .agents/skills/testing-rust/references/mutation-testing-performance.md; the
 // machinery is split across:
 //   - .cargo/mutants.toml          (oracle: --lib, no --all-features; scope)
 //   - Cargo.toml [profile.mutants] (debug=0, incremental=true, inherits dev)
@@ -21724,7 +21671,7 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // ===========================================================================
 
 // Mutation-speed budget constants. These are the CONTRACT from
-// .llm/skills/mutation-testing-performance.md. Treat them as a unit: changing
+// .agents/skills/testing-rust/references/mutation-testing-performance.md. Treat them as a unit: changing
 // one without re-measuring the others can make a shard exceed its timeout.
 //
 // Total mutants generated by `cargo mutants --list` over the scoped modules in
@@ -22082,7 +22029,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         violations.is_empty(),
         "Mutation-testing fast-linker / in-place policy violations:\n\n{}\n\n\
          Why this matters: each shard must finish well under its timeout; mold + --in-place + \
-         slice sharding are the measured levers (see .llm/skills/mutation-testing-performance.md), \
+         slice sharding are the measured levers (see .agents/skills/testing-rust/references/mutation-testing-performance.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
          Verify: bash scripts/run-mutants.sh --shard 0/36 --print-cmd",
@@ -22181,7 +22128,7 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
         violations.is_empty(),
         "Mutation-testing build-profile policy violations:\n\n{}\n\n\
          Why this matters: the per-mutant build/relink cost dominates the 343-mutant run; this \
-         profile (see .llm/skills/mutation-testing-performance.md) trims it. \n\
+         profile (see .agents/skills/testing-rust/references/mutation-testing-performance.md) trims it. \n\
          Fix: restore the listed fields to [profile.mutants] in Cargo.toml.\n\
          Verify: cargo test --test ci_config_tests test_mutation_workflow_uses_optimized_build_profile",
         violations.join("\n")
@@ -22294,7 +22241,7 @@ fn test_mutation_shard_matrix_is_complete_contiguous_partition() {
 fn test_mutation_shard_budget_is_feasible_vs_timeout() {
     // Keep {mutant-count, shard-count N, per-mutant budget, per-shard timeout}
     // feasible TOGETHER. The constants above are the contract from
-    // .llm/skills/mutation-testing-performance.md.
+    // .agents/skills/testing-rust/references/mutation-testing-performance.md.
 
     let workflow = read_mutation_workflow();
     let shards = parse_mutation_shard_matrix(&workflow);
@@ -22364,7 +22311,7 @@ fn test_mutation_shard_budget_is_feasible_vs_timeout() {
          ceil({MUTATION_TOTAL_MUTANTS}/{n})={mutants_per_shard} mutants ≈ {worst_shard_secs}s; it must be \
          <= {MUTATION_TARGET_SECS}s (soft target) AND <= {timeout_minutes}*60={timeout_secs}s (hard \
          timeout), with the timeout in [{MUTATION_TIMEOUT_FLOOR_MIN}, {MUTATION_TIMEOUT_CEILING_MIN}] min.\n\
-         These constants are the contract in .llm/skills/mutation-testing-performance.md; \
+         These constants are the contract in .agents/skills/testing-rust/references/mutation-testing-performance.md; \
          re-measure before changing them.\n\
          Fix: adjust the shard count / timeout in .github/workflows/mutation.yml.\n\
          Verify: cargo test --test ci_config_tests test_mutation_shard_budget_is_feasible_vs_timeout",
@@ -22467,7 +22414,7 @@ fn test_mutation_oracle_does_not_use_all_features() {
          additional_cargo_args, not additional_cargo_test_args) keeps the oracle to fast \
          in-crate unit tests, exercises the scoped trace adapters, and avoids building ~20 \
          integration-test binaries per mutant; --all-features adds heavy deps with no signal. \
-         See .llm/skills/mutation-testing-performance.md.\n\
+         See .agents/skills/testing-rust/references/mutation-testing-performance.md.\n\
          Fix: keep `additional_cargo_args = [\"--lib\", \"--features\", \
          \"trace-validation\"]`, `test_tool = \"nextest\"`, and \
          remove any --all-features from .cargo/mutants.toml and scripts/run-mutants.sh.\n\
@@ -22870,7 +22817,7 @@ fn test_mutation_total_mutants_constant_matches_list() {
          per-shard timeout in .github/workflows/mutation.yml may need to change to keep each \
          shard <5 min.\n\
          3. Re-measure MUTATION_PER_MUTANT_BUDGET_SECS if the scope change altered build cost.\n\
-         See .llm/skills/mutation-testing-performance.md (the feasibility contract).\n\
+         See .agents/skills/testing-rust/references/mutation-testing-performance.md (the feasibility contract).\n\
          Verify: cargo mutants --list | grep -c ."
     );
 }

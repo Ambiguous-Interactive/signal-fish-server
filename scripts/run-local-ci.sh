@@ -268,23 +268,32 @@ else
     FAILED_CHECKS+=("markdown")
 fi
 
-# Check 14: LLM context and skill policy
-if [ -f scripts/check-llm-file-sizes.sh ]; then
-    run_check_quiet "llm-file-sizes" "Checking LLM context file sizes" \
-        scripts/check-llm-file-sizes.sh
+# Check 14: Agent Skills package policy
+if [ -f scripts/check-agent-skill-files.sh ]; then
+    run_check_quiet "agent-skill-files" "Checking Agent Skill file sizes" \
+        scripts/check-agent-skill-files.sh
 else
-    echo -e "${RED}✗ FAIL${NC}: llm-file-sizes (scripts/check-llm-file-sizes.sh not found)"
+    echo -e "${RED}✗ FAIL${NC}: agent-skill-files (scripts/check-agent-skill-files.sh not found)"
     echo ""
-    FAILED_CHECKS+=("llm-file-sizes")
+    FAILED_CHECKS+=("agent-skill-files")
 fi
 
-if [ -f scripts/check-llm-example-files.sh ]; then
-    run_check_quiet "llm-example-files" "Checking extracted LLM skill examples" \
-        scripts/check-llm-example-files.sh
+if [ -f scripts/validate-agent-skills.sh ]; then
+    run_check_quiet "agent-skills" "Validating Agent Skills packages" \
+        scripts/validate-agent-skills.sh
 else
-    echo -e "${RED}✗ FAIL${NC}: llm-example-files (scripts/check-llm-example-files.sh not found)"
+    echo -e "${RED}✗ FAIL${NC}: agent-skills (scripts/validate-agent-skills.sh not found)"
     echo ""
-    FAILED_CHECKS+=("llm-example-files")
+    FAILED_CHECKS+=("agent-skills")
+fi
+
+if [ -f scripts/generate-skills-index.sh ]; then
+    run_check_quiet "agent-skills-index" "Checking Agent Skills catalog freshness" \
+        scripts/generate-skills-index.sh --check
+else
+    echo -e "${RED}✗ FAIL${NC}: agent-skills-index (scripts/generate-skills-index.sh not found)"
+    echo ""
+    FAILED_CHECKS+=("agent-skills-index")
 fi
 
 # Check 15: README Badge Style Consistency

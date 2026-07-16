@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Service Security"
+  short_description: "Harden WebSocket service security and abuse controls"
+  default_prompt: "Use $web-service-security to threat-model and harden this service change."

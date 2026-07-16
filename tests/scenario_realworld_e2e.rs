@@ -27,7 +27,7 @@
 //! SHAPE (what a 60Hz game loop / a flaky wifi link / a backgrounded tab
 //! does), never synchronization: every assertion waits on ledger counts,
 //! metrics, or socket events under generous ceilings (zero-flakiness policy,
-//! `.llm/context-testing.md`). Every test carries `#[serial_test::serial]`
+//! `.agents/skills/testing-rust/references/project-testing.md`). Every test carries `#[serial_test::serial]`
 //! like the sibling flood suites, so plain `cargo test` never co-schedules
 //! two floods in one process (under nextest each test is its own process and
 //! the lock is a no-op).

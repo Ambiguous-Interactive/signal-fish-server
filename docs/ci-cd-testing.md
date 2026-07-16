@@ -223,7 +223,7 @@ Tests that validate CI runtime optimizations and flake prevention measures:
 
 #### 7. Skill Documentation Sync Tests
 
-Tests that ensure LLM skill files stay in sync with tooling and policy:
+Tests that ensure Agent Skill files stay in sync with tooling and policy:
 
 | Test | Purpose | What It Catches |
 |------|---------|-----------------|
@@ -246,12 +246,13 @@ For production Rust commits:
 1. **Explicit panic-macro additions** in staged `src/**/*.rs` files, excluding
    test-only files and staged test-code ranges
 
-For commits without production Rust files staged:
+For metadata changes:
 
 1. **Hook speed policy** for hook runner source files
-2. **Generated skills index freshness** with deterministic index auto-repair
-3. **Staged `.llm/*.md` file size policy**
-4. **README badge style policy**
+2. **Documentation version synchronization**
+3. **README badge style policy**
+
+Agent Skill structure, file size, and generated catalog freshness are local/hosted CI checks.
 
 ### Installation
 
@@ -915,5 +916,5 @@ This testing infrastructure provides defense in depth against CI/CD issues:
 
 - [Lychee Configuration Documentation](https://github.com/lycheeverse/lychee#configuration)
 - [Markdownlint Rules](https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md)
-- [GitHub Actions Workflow Config](../.llm/skills/github-actions-workflow-config.md)
-- [CI CD Troubleshooting Categories](../.llm/skills/ci-cd-troubleshooting-categories.md)
+- [GitHub Actions Workflow Config](../.agents/skills/ci-troubleshooting/references/github-actions-workflow-config.md)
+- [CI CD Troubleshooting Categories](../.agents/skills/ci-troubleshooting/references/ci-cd-troubleshooting-categories.md)

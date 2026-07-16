@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shell Scripting"
+  short_description: "Write portable Bash and AWK automation"
+  default_prompt: "Use $shell-scripting to implement and validate this portable shell automation."

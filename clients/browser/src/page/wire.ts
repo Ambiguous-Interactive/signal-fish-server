@@ -1,6 +1,6 @@
 // WebSocket wire layer: JSON text frames carrying the server's
 // `{type, data}` message envelope (docs/protocol.md; canonical samples in
-// .llm/code-samples/protocol/). Unlike the native client, which consumes the
+// .agents/skills/websocket-protocol/references/). Unlike the native client, which consumes the
 // server crate's serde types via a path dependency, the browser client
 // hand-models only the envelope fields it actually reads — drift is caught by
 // the interop suite, which drives this client against the real server binary.

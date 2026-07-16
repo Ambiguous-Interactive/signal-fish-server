@@ -91,7 +91,7 @@ is_reference_documentation_file() {
     normalized=$(normalize_repo_path "$1")
 
     case "$normalized" in
-        ./.llm/skills/*)
+        ./.agents/skills/*)
             return 0
             ;;
         *)

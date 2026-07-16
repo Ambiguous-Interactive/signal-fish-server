@@ -33,7 +33,7 @@ Updated `.githooks/pre-commit` to keep only sub-second, staged-file guards:
 - Staged whitespace checks
 - Panic-prone production Rust addition detection
 - Metadata guards for non-production-Rust commits: generated skills-index
-  freshness with auto-repair, `.llm` file size, README badge, and hook speed
+  Agent Skill package validation, README badge, and hook speed
   policy checks
 
 ### 4. Comprehensive Documentation

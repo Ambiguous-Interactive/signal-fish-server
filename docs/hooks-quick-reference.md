@@ -17,7 +17,7 @@ multiple file contents.
 
 | Hook | Fast Checks |
 |------|-------------|
-| pre-commit | production Rust commits: explicit panic-macro additions only (`panic!`, `todo!`, `unimplemented!`, `unreachable!`) with test-code ranges excluded; matching metadata paths always trigger skills index auto-repair, `.llm` file size, README badge style, and hook speed policy |
+| pre-commit | production Rust commits: explicit panic-macro additions only (`panic!`, `todo!`, `unimplemented!`, `unreachable!`) with test-code ranges excluded; matching metadata paths trigger documentation version sync, README badge style, and hook speed policy |
 | pre-push | pushed-file discovery, workflow direct-script invocation policy, hook speed policy |
 
 ## Required Agent Checks

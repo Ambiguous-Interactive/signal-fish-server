@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dependency and Supply Chain"
+  short_description: "Manage Rust dependencies and supply-chain risk"
+  default_prompt: "Use $dependency-supply-chain to assess and implement this dependency change safely."

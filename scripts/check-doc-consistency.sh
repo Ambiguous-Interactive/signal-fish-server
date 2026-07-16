@@ -5,7 +5,7 @@
 # 1) Selected project version references are synchronized with Cargo.toml package version.
 # 2) CHANGELOG.md follows Keep a Changelog structure and link conventions.
 # 3) Non-internal changed files are accompanied by a CHANGELOG.md update.
-# 4) README/.llm protocol quick references do not drift to removed message shapes.
+# 4) README/.agents/skills protocol quick references do not drift to removed message shapes.
 #
 # Usage:
 #   ./scripts/check-doc-consistency.sh
@@ -205,7 +205,7 @@ validate_signal_fish_dependency_versions() {
 # treats `-Z` as zgrep (decompress), not GNU's --null -- the same portable idiom
 # used by check-internal-links.sh.
 #
-# `.llm` is intentionally NOT pruned: it is first-party agent guidance, and a
+# `.agents/skills` is intentionally NOT pruned: it is first-party agent guidance, and a
 # dependency example there should drift-fail just like docs/ or README.md.
 find_markdown_docs() {
     find . \
@@ -243,15 +243,15 @@ if [ -n "$CARGO_VERSION" ]; then
         action_error "version scan did not discover $CANONICAL_USAGE_DOC despite its dependency example; doc discovery is broken"
     fi
 
-    if [ ! -f ".llm/context.md" ]; then
-        action_error "Missing required file: .llm/context.md"
+    if [ ! -f "AGENTS.md" ]; then
+        action_error "Missing required file: AGENTS.md"
     else
         expected_context_line="- **Version:** $CARGO_VERSION"
-        context_without_cr=$(tr -d '\r' < .llm/context.md)
+        context_without_cr=$(tr -d '\r' < AGENTS.md)
         if grep -Fqx -- "$expected_context_line" <<< "$context_without_cr"; then
-            action_ok ".llm/context.md version line matches Cargo.toml"
+            action_ok "AGENTS.md version line matches Cargo.toml"
         else
-            action_error ".llm/context.md must contain exact line: $expected_context_line"
+            action_error "AGENTS.md must contain exact line: $expected_context_line"
             VERSION_DRIFT=1
         fi
     fi
@@ -271,7 +271,7 @@ validate_changelog() {
     # instead of the raw file. `$`-anchored patterns (e.g. '^## \[Unreleased\]$')
     # would otherwise fail to match a CRLF-checked-out CHANGELOG (Windows/WSL2
     # under `* text=auto`), and we must not depend on a particular grep build's
-    # platform-specific CRLF handling. Mirrors the .llm/context.md check above.
+    # platform-specific CRLF handling. Mirrors the AGENTS.md check above.
     local changelog
     changelog="$(tr -d '\r' < "$file")"
 
@@ -495,15 +495,15 @@ validate_rust_client_game_data_formats() {
     done <<< "$diagnostics"
 }
 
-PROTOCOL_SAMPLE_CLIENT=".llm/code-samples/protocol/v2-client-messages.jsonl"
-PROTOCOL_SAMPLE_SERVER=".llm/code-samples/protocol/v2-server-messages.jsonl"
+PROTOCOL_SAMPLE_CLIENT=".agents/skills/websocket-protocol/references/v2-client-messages.jsonl"
+PROTOCOL_SAMPLE_SERVER=".agents/skills/websocket-protocol/references/v2-server-messages.jsonl"
 PROTOCOL_SAMPLE_FILES=(
     "$PROTOCOL_SAMPLE_CLIENT"
     "$PROTOCOL_SAMPLE_SERVER"
 )
 
 validate_protocol_stale_tokens "README.md"
-validate_protocol_stale_tokens ".llm/context.md"
+validate_protocol_stale_tokens "AGENTS.md"
 
 for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
     validate_protocol_stale_tokens "$sample_file"
@@ -514,7 +514,7 @@ validate_rust_client_game_data_formats
 
 for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
     validate_protocol_sample_reference "README.md" "$sample_file"
-    validate_protocol_sample_reference ".llm/context.md" "${sample_file#.llm/}"
+    validate_protocol_sample_reference "AGENTS.md" "$sample_file"
 done
 
 # ---------------------------------------------------------------------------
@@ -532,7 +532,7 @@ is_internal_path() {
         .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*)
             return 0
             ;;
-        scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*)
+        scripts/*|tests/*|test-fixtures/*|.agents/skills/*|target/*|progress/*)
             return 0
             ;;
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs)

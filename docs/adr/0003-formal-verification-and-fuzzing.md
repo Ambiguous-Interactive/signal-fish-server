@@ -210,7 +210,7 @@ routine correct over all inputs); this layer is not that.
   reachability-probe evidence, and the "not modeled" boundary.
 - The formal-verification workflow's path filter forces a TLC run whenever the
   modeled source changes.
-- The fuzz suite seeds from the canonical `.llm/code-samples/protocol/v3-*.jsonl`
+- The fuzz suite seeds from the canonical `.agents/skills/websocket-protocol/references/v3-*.jsonl`
   samples, so it tracks the documented wire shapes.
 
 ## Alternatives Considered
@@ -259,7 +259,7 @@ clearly separate from the required checks)." That is precisely what was built:
 - An **out-of-workspace** crate ([`fuzz/`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/fuzz/README.md))
   with an empty `[workspace]` table, so it never perturbs the pinned-stable build.
 - Targets `decode_protocol` and `validate_inputs`, mirroring the stable
-  proptest surfaces, seeded from the canonical `.llm/code-samples/protocol/*.jsonl`.
+  proptest surfaces, seeded from the canonical `.agents/skills/websocket-protocol/references/*.jsonl`.
 - A **nightly-only** CI job (`.github/workflows/fuzz.yml`) on a pinned nightly,
   separate from the required stable checks. The stable proptest suite remains the
   always-on gate; any reproducible fuzz finding is added back to

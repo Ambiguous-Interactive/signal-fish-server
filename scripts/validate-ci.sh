@@ -8,7 +8,7 @@
 # Validates:
 #   1. AWK files (.awk) parse correctly
 #   2. Shell scripts pass shellcheck
-#   3. Markdown relative links from docs/ to .llm/ use ../ prefix
+#   3. Markdown relative links from docs/ to .agents/skills/ use ../ prefix
 #   4. GitHub Actions scripts (.github/scripts/) are valid
 #   5. CI/devcontainer tooling parity stays synchronized
 #

@@ -613,9 +613,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   glare/offerer rule, ICE/TURN credentials, and mesh + host sequence diagrams) and a new
   `docs/architecture/handoff-and-topologies.md` covering the finalization handoff seam and the three
   topologies. Added canonical v3 wire samples
-  (`.llm/code-samples/protocol/v3-client-messages.jsonl`,
-  `.llm/code-samples/protocol/v3-server-messages.jsonl`) referenced from `README.md`,
-  `.llm/context.md`, and `.llm/context-protocol-and-scenarios.md`, plus a `tests/v3_protocol_samples.rs`
+  (`.agents/skills/websocket-protocol/references/v3-client-messages.jsonl`,
+  `.agents/skills/websocket-protocol/references/v3-server-messages.jsonl`) referenced from `README.md`,
+  `AGENTS.md`, and `.agents/skills/websocket-protocol/references/protocol-and-scenarios.md`, plus a `tests/v3_protocol_samples.rs`
   test that deserializes every sample line into the real `ClientMessage` / `ServerMessage` types and
   asserts the `type` tag round-trips — the enforceable proof that the samples match the wire.
 - Added mid-session re-planning for protocol v3 sessions (host failover + stored-plan consistency).
@@ -904,7 +904,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same slug.
 - Fixed CI reliability by normalizing all workflow `actions/checkout` pins to `v6.0.3`, making the
   browser interop Chromium teardown check tolerant of process-name/topology drift with better
-  `/proc` diagnostics, and allowing doc-consistency version checks to read CRLF `.llm/context.md`
+  `/proc` diagnostics, and allowing doc-consistency version checks to read CRLF `AGENTS.md`
   lines correctly.
 - Fixed the creator's stored `is_authority` flag so it matches `authority_player` in rooms created
   with `supports_authority: false`. `create_room` previously seeded the creator's `PlayerInfo` with

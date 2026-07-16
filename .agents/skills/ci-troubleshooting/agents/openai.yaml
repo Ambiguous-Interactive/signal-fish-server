@@ -1,0 +1,4 @@
+interface:
+  display_name: "CI Troubleshooting"
+  short_description: "Diagnose and prevent CI workflow failures"
+  default_prompt: "Use $ci-troubleshooting to diagnose this CI failure and add a regression guard."

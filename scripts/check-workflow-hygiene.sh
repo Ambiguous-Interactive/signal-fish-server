@@ -181,7 +181,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
             if [ "$AGE_DAYS" -gt "$NIGHTLY_STALENESS_ERROR_DAYS" ]; then
                 error "$WORKFLOW_NAME: Nightly toolchain is over 1 year old ($AGE_DAYS days)"
                 error "  Update toolchain to nightly-$(date +%Y-%m-%d -d '1 month ago')"
-                error "  See .llm/skills/msrv-management.md for update procedure"
+                error "  See .agents/skills/toolchain-management/references/msrv-management.md for update procedure"
             elif [ "$AGE_DAYS" -gt "$NIGHTLY_STALENESS_WARN_DAYS" ]; then
                 warn "$WORKFLOW_NAME: Nightly toolchain is over 6 months old ($AGE_DAYS days)"
                 warn "  Consider updating to nightly-$(date +%Y-%m-%d -d '1 month ago')"

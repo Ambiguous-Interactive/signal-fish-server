@@ -102,7 +102,7 @@ extra:
 
 # Validation settings for strict mode.
 # Internal-only docs (CI guides, hook references, etc.) are intentionally excluded from nav
-# but contain links to files outside docs/ (e.g., .llm/skills/, tests/). These links are
+# but contain links to files outside docs/ (e.g., .agents/skills/, tests/). These links are
 # valid in the repo context but unresolvable by MkDocs. Downgrade to info to avoid blocking
 # the build while keeping strict mode for our public documentation pages.
 validation:

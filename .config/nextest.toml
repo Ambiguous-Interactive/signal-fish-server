@@ -7,7 +7,7 @@
 # CI workflows (ci.yml nextest job) inherit these settings.
 
 # Concurrency-isolated test groups (zero-flakiness policy: isolate resource-heavy
-# tests rather than retry them — see .llm/context-testing.md). The true
+# tests rather than retry them — see .agents/skills/testing-rust/references/project-testing.md). The true
 # multi-process suite (`tests/v3_multiprocess_e2e.rs`) spawns the real
 # `signal-fish-server` binary as child OS processes that bind ports and compete
 # for CPU; on an oversubscribed runner that starvation could push a child past
@@ -34,7 +34,7 @@ failure-output = "immediate-final"
 success-output = "never"
 
 # No automatic retries. Every test failure is treated as a real bug per
-# project policy (see .llm/context-testing.md: "Zero-Flakiness Policy").
+# project policy (see .agents/skills/testing-rust/references/project-testing.md: "Zero-Flakiness Policy").
 # Flakes are fixed deterministically (root-caused) or isolated via test-groups
 # below — never masked with blanket retries.
 

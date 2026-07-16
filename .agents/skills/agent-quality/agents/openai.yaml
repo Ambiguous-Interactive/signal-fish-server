@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Quality"
+  short_description: "Review and verify agent-authored changes"
+  default_prompt: "Use $agent-quality to review and verify this change before handoff."

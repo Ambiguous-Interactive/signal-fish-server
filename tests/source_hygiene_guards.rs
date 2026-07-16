@@ -521,7 +521,7 @@ fn scripts_install_python_packages_via_python_m_pip() {
 
 /// Operational shell scripts (the ones CI/devcontainer actually execute).
 /// Excludes vendored (`node_modules`), build (`target`), and illustrative
-/// `.llm/code-samples` scripts.
+/// `.agents/skills/*/references` scripts.
 fn operational_shell_scripts() -> Vec<PathBuf> {
     let root = repo_root();
     let mut files = Vec::new();

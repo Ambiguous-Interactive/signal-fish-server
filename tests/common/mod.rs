@@ -2,7 +2,7 @@
 //!
 //! Centralizes helpers that were previously duplicated across multiple test
 //! files (doc_consistency_script_tests, doc_consistency_policy_tests,
-//! workflow_hygiene_script_tests, llm_file_size_script_tests, ci_config_tests).
+//! workflow_hygiene_script_tests, agent_skill_file_script_tests, ci_config_tests).
 //!
 //! Not every test crate uses every helper, so unused-function warnings are
 //! expected and suppressed at the module level.

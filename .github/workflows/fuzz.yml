@@ -64,7 +64,7 @@ jobs:
       #     - If cargo-fuzz/libFuzzer requires newer nightly sanitizer features
       #     - If the nightly version becomes unavailable or broken
       #
-      #   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
+      #   See also: .agents/skills/toolchain-management/references/msrv-management.md (Nightly-Only CI Tools section)
       - name: Install nightly Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -91,7 +91,7 @@ jobs:
         run: |
           mkdir -p fuzz/corpus/decode_protocol
           i=0
-          for f in .llm/code-samples/protocol/*.jsonl; do
+          for f in .agents/skills/websocket-protocol/references/*.jsonl; do
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               printf '%s' "$line" > "fuzz/corpus/decode_protocol/seed_$i"

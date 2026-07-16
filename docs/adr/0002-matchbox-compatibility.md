@@ -90,7 +90,7 @@ substantially cutting that cost.
 ### Mitigations
 
 - Document the shape in `docs/protocol.md` (v3 additions) and ship canonical
-  samples under `.llm/code-samples/protocol/` (P6).
+  samples under `.agents/skills/websocket-protocol/references/` (P6).
 - Keep the server assertion that `signal` is opaque covered by tests (a signal
   with arbitrary JSON must round-trip byte-preserved through the relay).
 

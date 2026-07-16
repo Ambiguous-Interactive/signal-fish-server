@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust Testing"
+  short_description: "Design deterministic high-value Rust tests"
+  default_prompt: "Use $testing-rust to design and implement comprehensive regression tests for this change."

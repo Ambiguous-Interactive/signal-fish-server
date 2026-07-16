@@ -1,0 +1,4 @@
+interface:
+  display_name: "Documentation Quality"
+  short_description: "Create accurate docs and changelog entries"
+  default_prompt: "Use $documentation-quality to update and validate the affected documentation."

@@ -281,8 +281,8 @@ The workflow ensures:
 ## References
 
 - Workflow definition: `.github/workflows/doc-validation.yml`
-- Project guidelines: `.llm/context.md`
-- Testing standards: `.llm/skills/testing-core-patterns.md`
+- Project guidelines: `AGENTS.md`
+- Testing standards: `.agents/skills/testing-rust/references/testing-core-patterns.md`
 
 ## License
 

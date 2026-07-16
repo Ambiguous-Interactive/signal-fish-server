@@ -1133,8 +1133,8 @@ behavior.
 
 Canonical wire samples for this section:
 
-- [v3 client messages](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-client-messages.jsonl)
-- [v3 server messages](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl)
+- [v3 client messages](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.agents/skills/websocket-protocol/references/v3-client-messages.jsonl)
+- [v3 server messages](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.agents/skills/websocket-protocol/references/v3-server-messages.jsonl)
 
 See also the [Transport Fallback Contract](architecture/transport-fallback.md) (client-side state machine and the
 relay-floor guarantee) and [Handoff and Topologies](architecture/handoff-and-topologies.md) (mesh / host / relay
@@ -1502,7 +1502,7 @@ Every WebRTC `SessionPlan` carries an `ice_servers` list:
   `"<expiry-unix>:<player-uuid>"` and `credential` is the base64 of `HMAC-SHA1(static_auth_secret, username)`
   (the coturn REST scheme). The static auth secret is **never** sent to clients. The `username` / `credential`
   values in the
-  [v3 server-message samples](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl)
+  [v3 server-message samples](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.agents/skills/websocket-protocol/references/v3-server-messages.jsonl)
   are **illustrative placeholders, not a real credential** (the sample `credential` is not the actual HMAC of the
   shown `username`).
 

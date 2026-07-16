@@ -6,7 +6,7 @@ what each side does next.
 
 These scenarios complement the [Protocol Reference](../protocol.md) (which documents every message shape in
 isolation) and the canonical wire samples in
-[`.llm/code-samples/protocol/`](https://github.com/Ambiguous-Interactive/signal-fish-server/tree/main/.llm/code-samples/protocol).
+[`.agents/skills/websocket-protocol/references/`](https://github.com/Ambiguous-Interactive/signal-fish-server/tree/main/.agents/skills/websocket-protocol/references).
 The reference tells you what a `SessionPlan` looks like; these pages show you when one arrives and what to do with
 it.
 

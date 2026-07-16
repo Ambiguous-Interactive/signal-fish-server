@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deployment Operations"
+  short_description: "Build, deploy, and operate Signal Fish safely"
+  default_prompt: "Use $deployment-operations to design and verify this deployment change."

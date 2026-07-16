@@ -327,8 +327,8 @@ relay-floor client walkthrough.
 
 ### Client Messages
 
-Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/code-samples/protocol/v2-client-messages.jsonl)
-(v3 additions: [.llm/code-samples/protocol/v3-client-messages.jsonl](.llm/code-samples/protocol/v3-client-messages.jsonl))
+Canonical sample: [v2 client messages](.agents/skills/websocket-protocol/references/v2-client-messages.jsonl)
+(v3 additions: [v3 client messages](.agents/skills/websocket-protocol/references/v3-client-messages.jsonl))
 
 | Message            | Description                                                                      |
 | ------------------ | -------------------------------------------------------------------------------- |
@@ -369,8 +369,8 @@ existing room, current members also receive `PlayerJoined`.
 
 ### Server Messages
 
-Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](.llm/code-samples/protocol/v2-server-messages.jsonl)
-(v3 additions: [.llm/code-samples/protocol/v3-server-messages.jsonl](.llm/code-samples/protocol/v3-server-messages.jsonl))
+Canonical sample: [v2 server messages](.agents/skills/websocket-protocol/references/v2-server-messages.jsonl)
+(v3 additions: [v3 server messages](.agents/skills/websocket-protocol/references/v3-server-messages.jsonl))
 
 | Message              | Description                                              |
 | -------------------- | -------------------------------------------------------- |

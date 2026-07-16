@@ -1,0 +1,81 @@
+# Architecture and File Reference
+
+See [Detailed File Tables](file-reference.md) for full file tables.
+
+## Architecture At-a-Glance
+
+```text
++-----------------------------------------------------+
+|  CLIENTS: Game Engines | Browser WebRTC | Custom    |
++------------------------+----------------------------+
+                         |
+                         v
++-----------------------------------------------------+
+|  SIGNAL FISH SERVER (Rust) -- axum + tokio          |
+|  WebSocket(/v2/ws) | Health(/v2/health) | Metrics   |
+|  EnhancedGameServer (Room/Player/Authority Mgmt)    |
+|  Storage: In-Memory Only                            |
++-----------------------------------------------------+
+```
+
+## Key Files at a Glance
+
+`src/main.rs` (entry), `src/server.rs` (room/player logic),
+`src/websocket/` (WS lifecycle), `src/protocol/` (messages and types),
+`src/config/` (all config structs), `src/auth/` (auth and rate limiting).
+
+`clients/` holds reference clients as standalone packages OUTSIDE the root
+package (own lockfile/deny.toml; outside the root cargo build/test/coverage
+gates, though the root panic/timeout policy scans do walk its sources and
+`scripts/check-msrv-consistency.sh` pins `clients/native/Cargo.toml` to the
+root MSRV). `clients/native/` is the webrtc-rs reference client +
+multi-process interop suite (run via `scripts/run-webrtc-interop.sh`; see
+`clients/native/README.md` and ADR-0004). `clients/browser/` is the
+TypeScript browser reference client (real headless-Chromium
+`RTCPeerConnection` via playwright-core, own `package-lock.json`); its
+browser↔native interop cells live in the native crate behind the
+`browser-interop` cargo feature and run via `scripts/run-browser-interop.sh`
+(see `clients/browser/README.md` and ADR-0005). Both clients share one JSONL
+stdout event contract and exit codes (the native README is canonical).
+
+## Architectural Invariants
+
+Protocol v3 routing invariant: `websocket::create_router()` is nest-safe and
+must not expose `/v3/ws` by itself; production mounts it under `/v2` and adds
+top-level `/v3/ws` separately. Standalone/library servers that serve Signal Fish
+at the HTTP root should use `websocket::create_standalone_router()` when they
+want both `/ws` and `/v3/ws`.
+
+Signaling rate limits are split intentionally: `max_signals` counts validated
+WebRTC `Signal` dispatch attempts, while `max_signal_errors` counts rejected
+`Signal` attempts. Do not move target/transport validation in a way that lets
+invalid traffic avoid `max_signal_errors` or consume the valid ICE budget.
+
+Room finalization: borrow one player snapshot for peers, then move it into
+`FinalizedRoom`; no deep clone. In-memory room-operation locks are operation
+guards, not timing budgets; release them on success/error paths.
+
+Reconnection claims are intentionally two-phase: `claim_reconnection` reserves
+the pending record to prevent duplicate winners, but only successful reconnects
+remove it. Every post-claim failure path must release the claim and roll back
+room-side restoration so clients can retry with the same token until the
+reconnection window expires. Do not make active claims stealable or reusable
+while the original reconnect task can still continue. `handle_reconnect` uses
+a drop guard to release abandoned claims and completes the claim as soon as
+connection reassignment succeeds.
+
+Session-plan topology/transport selection invariants are documented in
+[Protocol v3 Session-Plan Selection](../../websocket-protocol/references/protocol-v3-session-plan.md).
+
+Protocol v3 `TransportStatus` is informational, but still a negotiated-capability
+boundary: accept reports only from v3 connections and only for transports present
+in that connection's negotiated transport set. Invalid reports must not update
+stored per-connection status or transport metrics. An accepted state change
+(never a duplicate) fans out to the sender's room as `PeerTransportStatus` —
+per-recipient v3-gated like every v3-only message, but deliberately NOT gated on
+the recipient's transport capabilities (peer status is useful to any v3 client).
+
+`ProvideConnectionInfo` / `GameStarting.peer_connections` is legacy,
+self-declared metadata for the v2 handoff surface. It is preserved for backward
+compatibility and must not be treated as proof of negotiated v3 `direct` or
+`webrtc` transport capability.

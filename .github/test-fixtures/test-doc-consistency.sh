@@ -126,7 +126,7 @@ INTERNAL_PATHS=(
     "scripts/check-foo.sh"
     "tests/unit_test.rs"
     "test-fixtures/data.json"
-    ".llm/skills/foo.md"
+    ".agents/skills/foo.md"
     "target/debug/binary"
     "progress/notes.md"
     # Standalone internal files
@@ -253,7 +253,7 @@ echo -e "${YELLOW}--- Edge cases ---${NC}"
 # Deeply nested internal paths.
 assert_gate_passes "Deep nested .github" ".github/workflows/deep/nested.yml"
 assert_gate_passes "Deep nested scripts" "scripts/sub/dir/deep.sh"
-assert_gate_passes "Deep nested .llm" ".llm/skills/sub/deep/file.md"
+assert_gate_passes "Deep nested .agents/skills" ".agents/skills/sub/deep/file.md"
 assert_gate_passes "Deep nested tests" "tests/integration/sub/test.rs"
 assert_gate_passes "Deep nested target" "target/release/build/dep/out"
 assert_gate_passes "Deep nested .devcontainer" ".devcontainer/features/some-feature/install.sh"
