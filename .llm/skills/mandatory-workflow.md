@@ -109,15 +109,15 @@ complete workflow after confirming the intended diff:
    changes.
 2. Create a terse, intentional commit.
 3. Push the current topic branch with local `git`.
-4. Create and inspect the pull request with an available GitHub or VS Code
-   connector.
+4. Create and inspect the pull request with the connected VS Code GitHub
+   extension / GitHub app.
 5. Monitor required checks and continue fixing in-scope failures until the PR is
    green.
 
 GitHub CLI (`gh`) is an optional fallback, not a prerequisite. Its absence is not
-a blocker when the Git remote accepts pushes and an authenticated connector can
-create and inspect pull requests and checks. Use `gh` only when the connector
-cannot perform a required operation.
+a blocker when the Git remote accepts pushes and the connected VS Code GitHub
+extension / GitHub app can perform the operation. Use an authenticated `gh` only
+when the extension/app cannot perform a required operation.
 
 Suggested commit message format:
 
