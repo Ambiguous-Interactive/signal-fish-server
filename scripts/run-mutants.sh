@@ -2,7 +2,7 @@
 # run-mutants.sh - Single source of truth for running cargo-mutants fast.
 #
 # WHY THIS SCRIPT EXISTS
-#   Mutation testing rebuilds the crate once per mutant (319 mutants). Naively,
+#   Mutation testing rebuilds the crate once per mutant (343 mutants). Naively,
 #   cargo-mutants also recompiles every dependency from scratch in a /tmp scratch
 #   dir (it excludes ./target from its copy), so each CI shard paid a full cold
 #   dependency build -> every shard blew the 20-min timeout and was cancelled.
@@ -37,7 +37,7 @@
 # Usage:
 #   bash scripts/run-mutants.sh --shard <k>/<N>       # run one shard (CI + local)
 #   bash scripts/run-mutants.sh --warm                # warm build + green-gate
-#   bash scripts/run-mutants.sh --shard 0/32 --print-cmd   # print, do not run
+#   bash scripts/run-mutants.sh --shard 0/36 --print-cmd   # print, do not run
 #
 # Env:
 #   MUTANTS_DRY_RUN   set to 1 for the same effect as --print-cmd
@@ -128,11 +128,11 @@ if [ "$MODE" = "warm" ]; then
     # unmutated run of the exact nextest oracle used by cargo-mutants. Both
     # profile flags matter: --cargo-profile selects target/mutants/, while
     # --profile selects nextest's per-test 10s termination policy.
-    CMD=(cargo nextest run --lib --cargo-profile "$MUTANTS_PROFILE" --profile "$MUTANTS_PROFILE" --locked)
+    CMD=(cargo nextest run --lib --features trace-validation --cargo-profile "$MUTANTS_PROFILE" --profile "$MUTANTS_PROFILE" --locked)
 else
     # shard mode: validate the k/N form before doing anything expensive.
     if ! printf '%s' "$SHARD" | grep -Eq '^[0-9]+/[0-9]+$'; then
-        echo "ERROR: --shard must be <k>/<N> (e.g. 0/32), got: '${SHARD}'" >&2
+        echo "ERROR: --shard must be <k>/<N> (e.g. 0/36), got: '${SHARD}'" >&2
         exit 2
     fi
     # --in-place: build in ./target (warmed by rust-cache) so deps are reused, not

@@ -7,11 +7,12 @@ lives in [ADR-0003](../adr/0003-formal-verification-and-fuzzing.md); the
 spec ⇄ code correspondence table lives in
 [`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md).
 
-## The five layers
+## The six layers
 
 | Layer                      | Verifies                                                         | Artifact                                                          |
 | -------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------- |
 | TLC model checking         | The session **state machine** (protocol contract, all interleavings) | `formal/tla/SignalFishSession.tla` + four `.cfg` models     |
+| Trace refinement (pilot)   | Captured reliable-queue **Rust transitions** satisfy their TLA action guards | `DeliveryContractTrace.tla` + nightly generated JSONL      |
 | proptest invariants        | **Real-code** selection / election / peer-list / TURN invariants | `src/server/session_policy_tests.rs::properties`                 |
 | proptest wire round-trips  | v3 **wire** encode/decode fidelity (JSON + MessagePack)         | `tests/v3_wire_properties.rs`                                     |
 | proptest fuzz hardening    | **Parser robustness** — no panic on hostile bytes               | `tests/protocol_fuzz_hardening.rs`                                |
@@ -66,6 +67,29 @@ stored and every v3 publication is an explicit relay reset); observed state spac
 ~17k–151k distinct states, ~2–7 s each. CI runs the same script via
 `.github/workflows/formal-verification.yml`.
 
+### Trace refinement — captured Rust transitions
+
+The P10.D7 pilot connects a real-code property corpus and a v2 real-socket case
+back to TLC. The feature-gated recorder captures paused-clock
+`deliver_or_disconnect` decisions plus production dequeue, write, queue-close,
+and finalization transitions as ordered, payload-free JSONL. A strict generator
+accepts only the v2 reliable single-FIFO projection, compiles each delivery
+attempt into a one-message model sender, and replays every action through
+`DeliveryContractTrace.tla`. If event `i` is not enabled by the current model
+state, TLC deadlocks with that trace id and index. An explicit in-flight slot
+preserves dequeue-before-write-completion, while `QueueClose` separates the
+channel's send-rejection boundary from final socket teardown.
+
+The daily job is initially informational while this technique is piloted; PRs
+still gate the feature build, recorder/action tests, and generator rejection
+tests. The nightly wrapper also replaces the first action with an impossible
+`WriterDrain` and requires TLC to deadlock at `i = 1`, proving the replay oracle
+is not vacuous; a second negative proves slow-consumer close-flush is rejected.
+The projection intentionally rejects overlapping enqueue/dequeue capture,
+hidden untraced v2 queue occupancy, delivery classes,
+generation cancellation, writer sojourn eviction, and shutdown-priority close
+upgrades; the exact boundary and commands are in `formal/README.md`.
+
 ### proptest — real-code invariants
 
 `session_policy_tests::properties` drives randomized member sets (capability
@@ -109,6 +133,7 @@ cargo-fuzz here).
 | Layer            | Catches                                                              | Does **not** catch                                                  |
 | ---------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | TLC              | Contract violations across any event interleaving in the bounded model | Bugs outside the model boundary (rate limits, ICE minting, the actual Rust); behavior beyond the player/churn bounds |
+| trace refinement | Spec↔code action/guard divergence in captured reliable-queue executions | Uncaptured schedules; classified/lossy queues and other declared out-of-model branches |
 | proptest invariants | Logic bugs in the real selection/election/peer-list/TURN code      | Orderings/interleavings (single-call properties); unsampled inputs   |
 | proptest wire    | Encode/decode fidelity drift; optional-field wire regressions       | Semantic bugs above the wire; float exactness on the JSON path (documented bounded drift) |
 | fuzz hardening   | Decoder panics/overflows on hostile input                           | Semantically wrong parses that still return `Ok`; coverage-guided deep paths |

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an opt-in delivery trace-refinement pilot for the reliable v2 FIFO.
+  Feature-gated per-connection JSONL capture now replays producer, writer,
+  queue-close, and finalization transitions against TLA+, rejects unsupported
+  projections and mismatched write phases, and retains deterministic nightly
+  evidence. The feature is inert in default builds and does not change the
+  public protocol or normal runtime behavior.
 - Add data-backed relay-floor sizing guidance for fan-out bandwidth, queue-fill
   and fail-loud timing, batching latency, and directional partitions. A nightly
   exact-ledger 16-player rate sweep reports the GitHub runner's achieved

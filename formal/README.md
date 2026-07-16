@@ -32,6 +32,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | ----------------------------- | --------------------------------------------------------------------------------- |
 | `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late-join, reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor`) |
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
+| `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
 | `tla/ReconnectReplay.tla`     | v3 reconnect replay: faithful replay, honest status + the split-brain theorem      |
@@ -40,6 +41,8 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/ControlPriorityDelivery.tla` | Spec-first for v3/P10.E2: control-priority queue split + sojourn eviction (liveness) |
 | `tla/DeliveryClasses.tla`     | Spec-first for v3/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
 | `tla/EndToEndGapAccountability.tla` | Flagship v3/P10.D4 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal (validates E5); exhaustive `_Small` + simulation `_Sim` |
+| `traces/slow-consumer-close-flush-invalid.jsonl` | Checked-in negative proving a slow-consumer close cannot enter the healthy lifecycle close-flush path |
+| `traces/post-queue-close-live-drain-invalid.jsonl` | Checked-in negative proving a canceled live writer cannot drain after finalization closes the queue |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
 
 This directory holds **two complementary** formal checks:
@@ -63,6 +66,16 @@ bash scripts/run-tla-model-check.sh
 bash scripts/run-tla-model-check.sh --config Mesh
 bash scripts/run-tla-model-check.sh --config Host --verbose
 
+# P10.D7: capture the paused-clock delivery property corpus, then replay it.
+: > /tmp/delivery.jsonl
+SIGNAL_FISH_DELIVERY_TRACE_PATH=/tmp/delivery.jsonl PROPTEST_CASES=32 \
+  cargo test --locked --features trace-validation \
+  --test model_based_state_machines delivery_contract_matches_reference_ledger -- --exact
+SIGNAL_FISH_DELIVERY_TRACE_PATH=/tmp/delivery.jsonl \
+  cargo test --locked --features trace-validation \
+  --test e2e_tests test_websocket_connection -- --exact
+bash scripts/run-delivery-trace-validation.sh /tmp/delivery.jsonl
+
 # Z3: all SMT proofs (needs the python `z3` module — `python3-z3` or `pip install z3-solver`):
 bash scripts/run-z3-proofs.sh
 ```
@@ -72,6 +85,72 @@ version **and** SHA256 into `${XDG_CACHE_HOME:-~/.cache}/signal-fish/tla` (overr
 `SIGNAL_FISH_TLA_CACHE_DIR`) and re-verifies the checksum on every run, so a corrupted or
 tampered jar never executes. CI runs both scripts via
 `.github/workflows/formal-verification.yml` (a `tlc` job and a `z3` job).
+
+## Delivery trace validation (P10.D7)
+
+The trace pilot closes one deliberately narrow spec-to-code loop. With the
+internal `trace-validation` Cargo feature, a harness can attach one
+`DeliveryTraceRecorder` to a `ConnectionCloseSignal`. The exact
+`deliver_or_disconnect` result arms, writer write/finalize points, queue-close,
+and close transition then append ordered, payload-free events under one
+per-connection mutex. It is inert unless explicitly attached or the feature
+build is run with `SIGNAL_FISH_DELIVERY_TRACE_PATH`; that environment variable
+attaches it to real v2 socket tasks for the nightly E2E acceptance trace.
+
+`scripts/generate-delivery-contract-trace.py` accepts only the declared
+`v2_legacy_reliable_fifo` projection: one bounded v2 FIFO, reliable messages,
+and no generation cancellation, lossy class, or sojourn-only outcome. V3
+classified
+`AccountedDrop`/`Canceled` and fail-closed metadata/accountability branches emit
+`Unsupported`, which the generator rejects rather than relabeling. Shutdown's
+priority upgrade over an earlier close reason is also outside the base model's
+strict first-reason abstraction. This scope matches the existing paused-clock
+model-based producer property plus the real-socket v2 E2E case that drives the
+production writer/finalizer hooks. Harness-only receiver mutations stop the
+producer projection rather than inventing socket events. A dequeue that races
+ahead of its post-send enqueue record is explicitly `Unsupported`, so an
+overlapping history fails closed instead of becoming a false TLC divergence.
+The inverse observation race is rejected too: if Tokio has freed a physical
+slot but the writer has not yet recorded the dequeue, a successful enqueue
+cannot be projected onto the still-full model queue.
+Queue closure uses the same fail-closed boundary: because the physical
+receiver closes just before the finalizer records `QueueClose`, producer
+outcomes observed on the wrong side of that recorded event emit `Unsupported`
+instead of violating the model's `queueOpen` guard.
+A lifecycle close can also cancel the live socket-write future after
+`WriterStart`. Because the pilot does not model partially written frames, the
+recorder emits `Unsupported` at `QueueClose` when that in-flight write has no
+matching `WriterDrain`; this rejects the trace before a later
+`CloseFlushStart` can masquerade as a TLC divergence.
+Any direct/untraced v2 queue item also emits `Unsupported`: hidden occupancy
+would otherwise change FIFO capacity and make a valid `SendFull` look invalid
+to the projected model.
+
+The generated module supplies concrete traces to
+`DeliveryContractTrace.tla`. Each delivery call becomes a one-message model
+sender. `WriterStart` moves the queue head to an explicit `inFlight` slot when
+the real writer frees queue capacity; `WriterDrain` resolves it only after a
+successful socket write. The slot also records its `Live` or `CloseFlush`
+phase, and both the strict generator and TLA guard require the matching drain;
+a hostile trace cannot relabel a forbidden live drain as a close-flush drain.
+`CloseFinish` accounts an interrupted in-flight item with the closing
+connection. `QueueClose` separately marks the point at
+which new sends begin returning channel-closed, and slow-consumer closes may
+never take the healthy lifecycle close-flush path. TLC chooses every captured trace and permits
+only event `i`; a false guard is therefore a deadlock whose state names both
+`traceId` and `i`. The wrapper also generates a seeded-negative bundle that
+substitutes `WriterDrain` at `i = 1`; the empty initial queue must deadlock, and
+the wrapper fails if TLC either accepts it or fails for another reason.
+It also replays a checked-in negative trace proving
+`GraceExpired -> QueueClose -> CloseFlushStart` deadlocks at the flush action.
+Another proves a live `WriterDrain` may complete during close-request overlap,
+but never after the finalizer has emitted `QueueClose`.
+
+The daily `verification-nightly.yml` job is initially informational
+(`continue-on-error: true`). It uses a fixed proptest seed, retains the JSONL
+and TLC evidence, and runs only for schedule/manual dispatch—not PRs. Parser,
+schema, feature compilation, action emission, and positive generator tests
+remain ordinary PR gates.
 
 ## Z3 proofs
 

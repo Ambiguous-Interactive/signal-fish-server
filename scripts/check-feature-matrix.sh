@@ -11,7 +11,8 @@ cd "$REPO_ROOT"
 FEATURE_CASES=(
     "TLS support|tls"
     "Legacy full-mesh compatibility|legacy-fullmesh"
-    "Combined optional feature compatibility|tls,legacy-fullmesh"
+    "Delivery trace validation|trace-validation"
+    "Combined optional feature compatibility|tls,legacy-fullmesh,trace-validation"
 )
 
 failures=0

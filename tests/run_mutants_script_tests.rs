@@ -130,13 +130,13 @@ fn test_run_mutants_print_cmd_omits_all_features() {
          stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    // The scoped mutation modules contain ZERO `#[cfg(feature = ...)]`, so
-    // --all-features cannot change the mutant set or the catch outcome; it only
-    // drags the heavy tls / legacy-fullmesh deps into every per-mutant relink.
+    // The oracle enables only trace-validation for the scoped coordination
+    // adapters. --all-features would additionally drag the heavy tls /
+    // legacy-fullmesh deps into every per-mutant relink without adding signal.
     assert!(
         !stdout.contains("--all-features"),
-        "scripts/run-mutants.sh must NOT pass --all-features: the scoped modules have no\n\
-         feature gates, so enabling tls/legacy-fullmesh only slows every per-mutant build\n\
+        "scripts/run-mutants.sh must NOT pass --all-features: the scoped oracle needs only\n\
+         trace-validation, while enabling tls/legacy-fullmesh slows every per-mutant build\n\
          without changing the mutant set or catch outcome.\n\
          Fix: remove --all-features from scripts/run-mutants.sh.\n\
          Verify: bash scripts/run-mutants.sh --shard 0/16 --print-cmd\n\
@@ -247,8 +247,8 @@ fn test_run_mutants_rejects_malformed_shard() {
 fn test_run_mutants_warm_mode_uses_exact_unmutated_oracle() {
     // The --warm mode is the baseline job's green-gate AND cache-warmer. It must
     // run the exact unmutated nextest oracle used by cargo-mutants: --lib scope,
-    // the Cargo `mutants` build profile, the nextest `mutants` runtime profile,
-    // and the locked dependency graph.
+    // the minimal trace-validation feature, the Cargo `mutants` build profile,
+    // the nextest `mutants` runtime profile, and the locked dependency graph.
     let (success, stdout, stderr) = run_mutants_script(&["--warm", "--print-cmd"]);
     assert!(
         success,
@@ -262,7 +262,7 @@ fn test_run_mutants_warm_mode_uses_exact_unmutated_oracle() {
         .collect();
     assert_eq!(
         cargo_lines,
-        ["cargo nextest run --lib --cargo-profile mutants --profile mutants --locked"],
+        ["cargo nextest run --lib --features trace-validation --cargo-profile mutants --profile mutants --locked"],
         "scripts/run-mutants.sh --warm --print-cmd must print exactly the unmutated \
          cargo-mutants oracle. `--cargo-profile mutants` selects the matching Cargo build \
          profile; `--profile mutants` selects nextest's per-test 10s termination policy.\n\

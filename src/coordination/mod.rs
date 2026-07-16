@@ -342,13 +342,38 @@ impl CloseReason {
 #[derive(Debug, Clone)]
 pub struct ConnectionCloseSignal {
     tx: tokio::sync::watch::Sender<Option<CloseReason>>,
+    #[cfg(feature = "trace-validation")]
+    trace: Option<Arc<crate::trace_validation::DeliveryTraceRecorder>>,
 }
 
 impl ConnectionCloseSignal {
     /// Create a connected signal/listener pair for one connection.
     pub fn channel() -> (Self, ConnectionCloseListener) {
         let (tx, rx) = tokio::sync::watch::channel(None);
-        (Self { tx }, ConnectionCloseListener { rx })
+        (
+            Self {
+                tx,
+                #[cfg(feature = "trace-validation")]
+                trace: None,
+            },
+            ConnectionCloseListener { rx },
+        )
+    }
+
+    /// Create a close channel instrumented for one formal-replay trace.
+    #[cfg(feature = "trace-validation")]
+    #[doc(hidden)]
+    pub fn channel_with_trace(
+        trace: Arc<crate::trace_validation::DeliveryTraceRecorder>,
+    ) -> (Self, ConnectionCloseListener) {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        (
+            Self {
+                tx,
+                trace: Some(trace),
+            },
+            ConnectionCloseListener { rx },
+        )
     }
 
     /// Create a signal whose listener side is discarded.
@@ -363,19 +388,137 @@ impl ConnectionCloseSignal {
     /// `Shutdown` may supersede any previous non-shutdown reason. Returns
     /// whether this call set or upgraded the reason.
     pub fn request_close(&self, reason: CloseReason) -> bool {
+        self.request_close_inner(reason, true)
+    }
+
+    fn request_close_inner(&self, reason: CloseReason, trace_lifecycle: bool) -> bool {
+        #[cfg(not(feature = "trace-validation"))]
+        let _ = trace_lifecycle;
         self.tx
             .send_if_modified(|current| match (*current, reason) {
                 (None, _) => {
+                    // Record the lifecycle transition while the watch value is
+                    // still exclusively borrowed. This preserves the same
+                    // total order in the trace as competing close requests;
+                    // recording after send_if_modified can invert a lifecycle
+                    // winner with a delivery timeout that observed it.
+                    #[cfg(feature = "trace-validation")]
+                    if trace_lifecycle {
+                        if reason == CloseReason::SlowConsumer {
+                            // Modeled delivery-grace expiration uses the
+                            // dedicated request_delivery_timeout_close path.
+                            // Every other slow-consumer source (accountability,
+                            // sojourn, reservation, etc.) is outside the pilot.
+                            self.record_trace(
+                                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                                None,
+                                Some("unmodeled-slow-consumer-close"),
+                            );
+                        } else {
+                            self.record_trace(
+                                crate::trace_validation::DeliveryTraceAction::LifecycleClose,
+                                None,
+                                None,
+                            );
+                        }
+                    }
                     *current = Some(reason);
                     true
                 }
                 (Some(CloseReason::Shutdown), _) => false,
                 (Some(_), CloseReason::Shutdown) => {
+                    #[cfg(feature = "trace-validation")]
+                    if trace_lifecycle {
+                        self.record_trace(
+                            crate::trace_validation::DeliveryTraceAction::Unsupported,
+                            None,
+                            Some("shutdown-close-reason-upgrade"),
+                        );
+                    }
                     *current = Some(CloseReason::Shutdown);
                     true
                 }
                 (Some(_), _) => false,
             })
+    }
+
+    #[cfg(feature = "trace-validation")]
+    pub(crate) fn begin_trace_delivery(&self, message: &Arc<ServerMessage>) -> Option<u64> {
+        self.trace
+            .as_ref()
+            .map(|trace| trace.begin_delivery(message))
+    }
+
+    #[cfg(feature = "trace-validation")]
+    pub(crate) fn record_trace(
+        &self,
+        action: crate::trace_validation::DeliveryTraceAction,
+        delivery_id: Option<u64>,
+        detail: Option<&'static str>,
+    ) {
+        if let Some(trace) = &self.trace {
+            trace.record(action, delivery_id, detail);
+        }
+    }
+
+    #[cfg(feature = "trace-validation")]
+    pub(crate) fn start_trace_write(
+        &self,
+        message: &Arc<ServerMessage>,
+        close_flush: bool,
+    ) -> Option<u64> {
+        self.trace
+            .as_ref()
+            .and_then(|trace| trace.start_write(message, close_flush))
+    }
+
+    #[cfg(feature = "trace-validation")]
+    pub(crate) fn finish_trace_write(&self, delivery_id: u64, close_flush: bool) {
+        if let Some(trace) = &self.trace {
+            trace.finish_write(delivery_id, close_flush);
+        }
+    }
+
+    #[cfg(feature = "trace-validation")]
+    pub(crate) fn record_trace_queue_closed(&self) {
+        if let Some(trace) = &self.trace {
+            trace.queue_closed();
+        }
+    }
+
+    #[cfg(feature = "trace-validation")]
+    pub(crate) fn record_trace_grace_expired(
+        &self,
+        delivery_id: Option<u64>,
+        initiated_close: bool,
+    ) {
+        self.record_trace(
+            crate::trace_validation::DeliveryTraceAction::GraceExpired,
+            delivery_id,
+            Some(if initiated_close {
+                "initiated-slow-consumer-close"
+            } else {
+                "close-already-requested"
+            }),
+        );
+    }
+
+    fn request_delivery_timeout_close(&self, delivery_id: Option<u64>) -> bool {
+        #[cfg(not(feature = "trace-validation"))]
+        let _ = delivery_id;
+        self.tx.send_if_modified(|current| {
+            let initiated_close = current.is_none();
+            // Serialize the timeout action under the same watch-state borrow
+            // as the first-reason decision. Otherwise two racing timeouts (or
+            // a lifecycle request) can observe one order in production and
+            // acquire the trace recorder in the opposite order.
+            #[cfg(feature = "trace-validation")]
+            self.record_trace_grace_expired(delivery_id, initiated_close);
+            if initiated_close {
+                *current = Some(CloseReason::SlowConsumer);
+            }
+            initiated_close
+        })
     }
 }
 
@@ -439,6 +582,14 @@ impl From<tokio::sync::mpsc::Sender<Arc<ServerMessage>>> for DeliverySender {
 }
 
 impl DeliverySender {
+    #[cfg(feature = "trace-validation")]
+    fn trace_projection_supported(&self) -> bool {
+        match &self.0 {
+            DeliverySenderKind::Legacy(_) => true,
+            DeliverySenderKind::Classified { sender, .. } => !sender.delivery_classes_enabled(),
+        }
+    }
+
     pub(crate) fn classified(sender: OutboundSender) -> Self {
         Self(DeliverySenderKind::Classified {
             sender,
@@ -875,6 +1026,16 @@ pub(crate) async fn deliver_or_disconnect_in_room(
     message: Arc<ServerMessage>,
     room_id: Option<RoomId>,
 ) -> DeliveryOutcome {
+    #[cfg(feature = "trace-validation")]
+    let trace_delivery_id = handle.close.begin_trace_delivery(&message);
+    #[cfg(feature = "trace-validation")]
+    if !handle.sender.trace_projection_supported() {
+        handle.close.record_trace(
+            crate::trace_validation::DeliveryTraceAction::Unsupported,
+            trace_delivery_id,
+            Some("v3-classified-queue"),
+        );
+    }
     // Conservation accounting: one attempt per call, resolved below as exactly
     // one of enqueued / channel-closed / slow-consumer drop, so the exported
     // counters can prove no delivery outcome went unrecorded.
@@ -887,9 +1048,29 @@ pub(crate) async fn deliver_or_disconnect_in_room(
     let offered_class = handle.sender.effective_data_class(message.as_ref());
     let message = match handle.sender.try_send(message, room_id) {
         Ok(outcome) => {
+            #[cfg(feature = "trace-validation")]
+            if trace_queue_outcome_supported(outcome) {
+                handle.close.record_trace(
+                    crate::trace_validation::DeliveryTraceAction::SendFast,
+                    trace_delivery_id,
+                    None,
+                );
+            } else {
+                handle.close.record_trace(
+                    crate::trace_validation::DeliveryTraceAction::Unsupported,
+                    trace_delivery_id,
+                    Some("classified-fast-path-outcome"),
+                );
+            }
             return record_queue_outcome(metrics, connection_stats.as_ref(), outcome);
         }
         Err(DeliveryTrySendError::Closed) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::SendChannelClosed,
+                trace_delivery_id,
+                None,
+            );
             if let Some(class) = offered_class {
                 handle.sender.record_rejected_with_close(class);
             }
@@ -900,8 +1081,22 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             );
             return DeliveryOutcome::ChannelClosed;
         }
-        Err(DeliveryTrySendError::Full(message)) => message,
+        Err(DeliveryTrySendError::Full(message)) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::SendFull,
+                trace_delivery_id,
+                None,
+            );
+            message
+        }
         Err(DeliveryTrySendError::AccountabilityUnavailable) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                trace_delivery_id,
+                Some("accountability-unavailable"),
+            );
             return fail_delivery_closed(
                 metrics,
                 connection_stats.as_ref(),
@@ -911,6 +1106,12 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             );
         }
         Err(DeliveryTrySendError::InvalidMetadata) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                trace_delivery_id,
+                Some("invalid-metadata"),
+            );
             if let Some(class) = offered_class {
                 handle.sender.record_rejected_with_close(class);
             }
@@ -933,8 +1134,30 @@ pub(crate) async fn deliver_or_disconnect_in_room(
     }
     let pending_class = offered_class;
     match tokio::time::timeout(slow_consumer_timeout, handle.sender.send(message, room_id)).await {
-        Ok(Ok(outcome)) => record_queue_outcome(metrics, connection_stats.as_ref(), outcome),
+        Ok(Ok(outcome)) => {
+            #[cfg(feature = "trace-validation")]
+            if trace_queue_outcome_supported(outcome) {
+                handle.close.record_trace(
+                    crate::trace_validation::DeliveryTraceAction::ParkedEnqueue,
+                    trace_delivery_id,
+                    None,
+                );
+            } else {
+                handle.close.record_trace(
+                    crate::trace_validation::DeliveryTraceAction::Unsupported,
+                    trace_delivery_id,
+                    Some("classified-parked-outcome"),
+                );
+            }
+            record_queue_outcome(metrics, connection_stats.as_ref(), outcome)
+        }
         Ok(Err(DeliveryTrySendError::Closed)) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::ParkedChannelClosed,
+                trace_delivery_id,
+                None,
+            );
             if let Some(class) = pending_class {
                 handle.sender.record_rejected_with_close(class);
             }
@@ -942,14 +1165,28 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             tracing::debug!(%player_id, "Recipient connection closed while backpressured");
             DeliveryOutcome::ChannelClosed
         }
-        Ok(Err(DeliveryTrySendError::AccountabilityUnavailable)) => fail_delivery_closed(
-            metrics,
-            connection_stats.as_ref(),
-            player_id,
-            handle,
-            "Delivery accountability queue exhausted while waiting; closing recipient",
-        ),
+        Ok(Err(DeliveryTrySendError::AccountabilityUnavailable)) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                trace_delivery_id,
+                Some("parked-accountability-unavailable"),
+            );
+            fail_delivery_closed(
+                metrics,
+                connection_stats.as_ref(),
+                player_id,
+                handle,
+                "Delivery accountability queue exhausted while waiting; closing recipient",
+            )
+        }
         Ok(Err(DeliveryTrySendError::InvalidMetadata)) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                trace_delivery_id,
+                Some("parked-invalid-metadata"),
+            );
             if let Some(class) = pending_class {
                 handle.sender.record_rejected_with_close(class);
             }
@@ -963,6 +1200,12 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             )
         }
         Ok(Err(DeliveryTrySendError::Full(_))) => {
+            #[cfg(feature = "trace-validation")]
+            handle.close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                trace_delivery_id,
+                Some("blocking-send-returned-full"),
+            );
             if let Some(class) = pending_class {
                 handle.sender.record_rejected_with_close(class);
             }
@@ -984,7 +1227,12 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             // one that actually initiates the close counts a disconnect, so
             // the metric tallies connections rather than delivery attempts.
             // Every abandoned message counts as dropped regardless.
-            let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
+            #[cfg(feature = "trace-validation")]
+            let initiated_close = handle
+                .close
+                .request_delivery_timeout_close(trace_delivery_id);
+            #[cfg(not(feature = "trace-validation"))]
+            let initiated_close = handle.close.request_delivery_timeout_close(None);
             if initiated_close {
                 metrics.increment_websocket_slow_consumer_disconnects();
             }
@@ -1004,6 +1252,11 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             DeliveryOutcome::SlowConsumer
         }
     }
+}
+
+#[cfg(feature = "trace-validation")]
+fn trace_queue_outcome_supported(outcome: QueueEnqueueOutcome) -> bool {
+    outcome.enqueued && outcome.losses == 0
 }
 
 pub(crate) fn record_queue_outcome(
@@ -1615,6 +1868,115 @@ mod tests {
             rx,
             listener,
         )
+    }
+
+    #[cfg(feature = "trace-validation")]
+    fn traced_delivery_handle(
+        capacity: usize,
+        trace_id: &str,
+    ) -> (
+        ClientDeliveryHandle,
+        tokio::sync::mpsc::Receiver<Arc<ServerMessage>>,
+        ConnectionCloseListener,
+        Arc<crate::trace_validation::DeliveryTraceRecorder>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        let trace = Arc::new(
+            crate::trace_validation::DeliveryTraceRecorder::new(trace_id, capacity)
+                .expect("valid delivery trace recorder"),
+        );
+        let (close, listener) = ConnectionCloseSignal::channel_with_trace(Arc::clone(&trace));
+        (
+            ClientDeliveryHandle {
+                sender: tx.into(),
+                close,
+            },
+            rx,
+            listener,
+            trace,
+        )
+    }
+
+    #[cfg(feature = "trace-validation")]
+    fn trace_actions(trace: &crate::trace_validation::DeliveryTraceRecorder) -> Vec<String> {
+        let mut bytes = Vec::new();
+        trace
+            .write_jsonl_to(&mut bytes)
+            .expect("serialize captured trace");
+        String::from_utf8(bytes)
+            .expect("trace JSONL is UTF-8")
+            .lines()
+            .filter_map(|line| {
+                let record: serde_json::Value =
+                    serde_json::from_str(line).expect("valid trace JSON record");
+                (record["kind"] == "event")
+                    .then(|| record["action"].as_str().expect("event action").to_string())
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn trace_projection_support_matches_queue_protocol() {
+        let (legacy, _receiver) = tokio::sync::mpsc::channel(1);
+        assert!(DeliverySender::from(legacy).trace_projection_supported());
+
+        let (classified, _receiver) = outbound_queue::channel(1, 1);
+        let delivery = DeliverySender::classified(classified.clone());
+        assert!(
+            delivery.trace_projection_supported(),
+            "the pre-v3 classified queue retains the legacy reliable FIFO projection"
+        );
+        classified.set_protocol_version(3);
+        assert!(
+            !delivery.trace_projection_supported(),
+            "negotiated delivery classes are outside the pilot projection"
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn trace_queue_outcome_support_requires_lossless_enqueue() {
+        for (outcome, expected) in [
+            (
+                QueueEnqueueOutcome {
+                    enqueued: true,
+                    losses: 0,
+                },
+                true,
+            ),
+            (
+                QueueEnqueueOutcome {
+                    enqueued: false,
+                    losses: 0,
+                },
+                false,
+            ),
+            (
+                QueueEnqueueOutcome {
+                    enqueued: true,
+                    losses: 1,
+                },
+                false,
+            ),
+        ] {
+            assert_eq!(trace_queue_outcome_supported(outcome), expected);
+        }
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn traced_delivery_timeout_reports_whether_it_won_first_reason() {
+        let trace = Arc::new(
+            crate::trace_validation::DeliveryTraceRecorder::new("timeout-winner", 1)
+                .expect("valid delivery trace recorder"),
+        );
+        let (close, listener) = ConnectionCloseSignal::channel_with_trace(Arc::clone(&trace));
+
+        assert!(close.request_delivery_timeout_close(None));
+        assert_eq!(listener.requested_reason(), Some(CloseReason::SlowConsumer));
+        assert!(!close.request_delivery_timeout_close(None));
+        assert_eq!(trace_actions(&trace), vec!["GraceExpired", "GraceExpired"]);
     }
 
     struct FallbackCoordinator {
@@ -2740,6 +3102,168 @@ mod tests {
             0
         );
         assert_conservation(&metrics);
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[tokio::test(start_paused = true)]
+    async fn trace_records_parked_enqueue_after_capacity_returns() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let (handle, mut rx, _listener, trace) = traced_delivery_handle(1, "parked-enqueue");
+        assert_eq!(
+            deliver_or_disconnect(
+                &metrics,
+                Duration::from_millis(10),
+                &test_player(),
+                &handle,
+                test_message(),
+            )
+            .await,
+            DeliveryOutcome::Delivered
+        );
+        let delivery = spawn_delivery(&metrics, &handle);
+        let metrics_for_wait = Arc::clone(&metrics);
+        yield_until("traced delivery must park", move || {
+            metrics_for_wait
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        })
+        .await;
+
+        let prefilled = rx.recv().await.expect("drain prefilled item");
+        let write_id = handle
+            .close
+            .start_trace_write(&prefilled, false)
+            .expect("prefilled delivery is correlated");
+        handle.close.finish_trace_write(write_id, false);
+        assert_eq!(
+            delivery.await.expect("delivery task must not panic"),
+            DeliveryOutcome::Delivered
+        );
+        assert_eq!(
+            trace_actions(&trace),
+            vec![
+                "SendFast",
+                "SendFull",
+                "WriterStart",
+                "WriterDrain",
+                "ParkedEnqueue"
+            ]
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[tokio::test(start_paused = true)]
+    async fn trace_records_parked_channel_close_when_receiver_disappears() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let (handle, rx, _listener, trace) = traced_delivery_handle(1, "parked-close");
+        assert_eq!(
+            deliver_or_disconnect(
+                &metrics,
+                Duration::from_millis(10),
+                &test_player(),
+                &handle,
+                test_message(),
+            )
+            .await,
+            DeliveryOutcome::Delivered
+        );
+        let delivery = spawn_delivery(&metrics, &handle);
+        let metrics_for_wait = Arc::clone(&metrics);
+        yield_until("traced delivery must park", move || {
+            metrics_for_wait
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        })
+        .await;
+
+        assert!(handle.close.request_close(CloseReason::Unregistered));
+        handle.close.record_trace_queue_closed();
+        drop(rx);
+        assert_eq!(
+            delivery.await.expect("delivery task must not panic"),
+            DeliveryOutcome::ChannelClosed
+        );
+        assert_eq!(
+            trace_actions(&trace),
+            vec![
+                "SendFast",
+                "SendFull",
+                "LifecycleClose",
+                "QueueClose",
+                "ParkedChannelClosed"
+            ]
+        );
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[test]
+    fn trace_rejects_generic_slow_consumer_close_as_out_of_model() {
+        let trace = Arc::new(
+            crate::trace_validation::DeliveryTraceRecorder::new("generic-slow-close", 1)
+                .expect("valid delivery trace recorder"),
+        );
+        let (close, _listener) = ConnectionCloseSignal::channel_with_trace(Arc::clone(&trace));
+
+        assert!(close.request_close(CloseReason::SlowConsumer));
+        assert_eq!(trace_actions(&trace), vec!["Unsupported"]);
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[tokio::test(start_paused = true)]
+    async fn trace_retains_lifecycle_close_flush_when_parked_timeout_loses_race() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let (handle, mut rx, _listener, trace) = traced_delivery_handle(1, "lifecycle-timeout");
+        assert_eq!(
+            deliver_or_disconnect(
+                &metrics,
+                Duration::from_millis(10),
+                &test_player(),
+                &handle,
+                test_message(),
+            )
+            .await,
+            DeliveryOutcome::Delivered
+        );
+
+        let delivery = spawn_delivery(&metrics, &handle);
+        let metrics_for_wait = Arc::clone(&metrics);
+        yield_until("traced delivery must park", move || {
+            metrics_for_wait
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        })
+        .await;
+
+        assert!(handle.close.request_close(CloseReason::Unregistered));
+        assert_eq!(
+            delivery.await.expect("delivery task must not panic"),
+            DeliveryOutcome::SlowConsumer,
+            "the parked delivery still expires even though lifecycle close won"
+        );
+        handle.close.record_trace_queue_closed();
+
+        let prefilled = rx.recv().await.expect("drain prefilled item");
+        let write_id = handle
+            .close
+            .start_trace_write(&prefilled, true)
+            .expect("lifecycle close must retain its bounded final flush");
+        handle.close.finish_trace_write(write_id, true);
+
+        assert_eq!(
+            trace_actions(&trace),
+            vec![
+                "SendFast",
+                "SendFull",
+                "LifecycleClose",
+                "GraceExpired",
+                "QueueClose",
+                "CloseFlushStart",
+                "CloseFlushDrain",
+            ]
+        );
     }
 
     /// (c) Full queue never drained: every racing delivery times out as a

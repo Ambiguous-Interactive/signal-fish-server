@@ -22,6 +22,8 @@ target
 # Build artifacts
 /target/
 /node_modules/
+**/__pycache__/
+*.pyc
 
 pre-commit.txt
 pre-push.txt

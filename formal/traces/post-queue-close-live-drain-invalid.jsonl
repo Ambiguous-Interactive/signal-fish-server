@@ -1,0 +1,7 @@
+{"kind":"header","schema":"signal-fish.delivery-contract/v1","trace_id":"negative-post-queue-close-drain","queue_kind":"v2_legacy_reliable_fifo","queue_capacity":1}
+{"kind":"event","schema":"signal-fish.delivery-contract/v1","trace_id":"negative-post-queue-close-drain","seq":1,"action":"SendFast","delivery_id":1}
+{"kind":"event","schema":"signal-fish.delivery-contract/v1","trace_id":"negative-post-queue-close-drain","seq":2,"action":"WriterStart","delivery_id":1}
+{"kind":"event","schema":"signal-fish.delivery-contract/v1","trace_id":"negative-post-queue-close-drain","seq":3,"action":"LifecycleClose"}
+{"kind":"event","schema":"signal-fish.delivery-contract/v1","trace_id":"negative-post-queue-close-drain","seq":4,"action":"QueueClose"}
+{"kind":"event","schema":"signal-fish.delivery-contract/v1","trace_id":"negative-post-queue-close-drain","seq":5,"action":"WriterDrain","delivery_id":1}
+{"kind":"footer","schema":"signal-fish.delivery-contract/v1","trace_id":"negative-post-queue-close-drain","event_count":5}

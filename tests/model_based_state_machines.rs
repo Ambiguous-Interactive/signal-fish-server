@@ -41,6 +41,8 @@ use signal_fish_server::coordination::{
 use signal_fish_server::metrics::ServerMetrics;
 use signal_fish_server::protocol::ServerMessage;
 use signal_fish_server::reconnection::{EventBuffer, ReconnectionManager};
+#[cfg(feature = "trace-validation")]
+use signal_fish_server::trace_validation::DeliveryTraceRecorder;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -360,6 +362,27 @@ proptest! {
             let metrics = ServerMetrics::new();
             let player_id = Uuid::from_u128(0xDE11);
             let (tx, rx) = mpsc::channel::<Arc<ServerMessage>>(capacity);
+            #[cfg(feature = "trace-validation")]
+            let trace_path = std::env::var_os("SIGNAL_FISH_DELIVERY_TRACE_PATH");
+            #[cfg(feature = "trace-validation")]
+            let trace = if trace_path.is_some() {
+                Some(Arc::new(
+                    DeliveryTraceRecorder::new(
+                        DeliveryTraceRecorder::next_trace_id("proptest"),
+                        capacity,
+                    )
+                        .expect("generated trace header must be valid"),
+                ))
+            } else {
+                None
+            };
+            #[cfg(feature = "trace-validation")]
+            let (close, mut listener) = if let Some(trace) = &trace {
+                ConnectionCloseSignal::channel_with_trace(Arc::clone(trace))
+            } else {
+                ConnectionCloseSignal::channel()
+            };
+            #[cfg(not(feature = "trace-validation"))]
             let (close, mut listener) = ConnectionCloseSignal::channel();
             let handle = ClientDeliveryHandle {
                 sender: tx.into(),
@@ -419,6 +442,15 @@ proptest! {
                         );
                     }
                     DeliveryOp::Drain => {
+                        #[cfg(feature = "trace-validation")]
+                        if let Some(trace) = &trace {
+                            // This property owns a raw mpsc receiver, not the
+                            // production socket task. Preserve the real
+                            // producer prefix and stop before the harness-only
+                            // consumer mutation; real writer/finalizer hooks
+                            // are exercised by the traced socket E2E case.
+                            trace.stop_projection();
+                        }
                         if let Some(rx) = rx.as_mut() {
                             match rx.try_recv() {
                                 Ok(message) => {
@@ -448,6 +480,10 @@ proptest! {
                         }
                     }
                     DeliveryOp::DropReceiver => {
+                        #[cfg(feature = "trace-validation")]
+                        if let Some(trace) = &trace {
+                            trace.stop_projection();
+                        }
                         if rx.take().is_some() {
                             model.receiver_alive = false;
                             // Queued messages die with the receiver; they were
@@ -514,6 +550,15 @@ proptest! {
                     Some(expected_reason),
                     "the close listener must observe the FIRST requested reason"
                 );
+            }
+
+            #[cfg(feature = "trace-validation")]
+            if let (Some(trace), Some(path)) = (&trace, trace_path) {
+                if trace.has_delivery_attempts() {
+                    trace
+                        .append_jsonl(path)
+                        .expect("append delivery-contract trace case");
+                }
             }
         });
     }

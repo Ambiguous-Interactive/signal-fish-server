@@ -19,6 +19,7 @@
 #   bash scripts/run-tla-model-check.sh                 # check every formal/tla/*.cfg
 #   bash scripts/run-tla-model-check.sh --config Mesh   # check one configuration
 #   bash scripts/run-tla-model-check.sh --verbose       # stream full TLC output
+#   bash scripts/run-tla-model-check.sh --tla-dir DIR   # check a generated bundle
 #
 # --config accepts a full cfg name (SignalFishSession_Mesh), a file name
 # (SignalFishSession_Mesh.cfg), or the scenario suffix alone (Mesh).
@@ -56,7 +57,7 @@ VERBOSE=false
 
 usage() {
     cat <<'USAGE'
-Usage: bash scripts/run-tla-model-check.sh [--config <name>] [--verbose]
+Usage: bash scripts/run-tla-model-check.sh [--config <name>] [--tla-dir <dir>] [--verbose]
 
 Options:
   --config <name>  Check a single configuration. <name> may be the scenario
@@ -64,6 +65,8 @@ Options:
                    name (SignalFishSession_Mesh, DeliveryContract_Small), or
                    the file name with .cfg. A bare suffix must match exactly
                    one configuration across all specs.
+  --tla-dir <dir>  Read modules/configurations from <dir> instead of formal/tla.
+                   Used by generated trace-validation bundles.
   --verbose        Stream full TLC output instead of a quiet summary.
   --help           Show this help.
 USAGE
@@ -77,6 +80,17 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             SELECTED_CONFIG="$2"
+            shift 2
+            ;;
+        --tla-dir)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --tla-dir requires an argument" >&2
+                exit 2
+            fi
+            TLA_DIR="$(cd "$2" 2>/dev/null && pwd)" || {
+                echo "ERROR: --tla-dir does not exist or is not accessible: $2" >&2
+                exit 2
+            }
             shift 2
             ;;
         --verbose|-v)

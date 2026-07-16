@@ -78,8 +78,10 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 **Zero warnings policy** -- all linters enforce strict compliance.
 
-### GitHub Access (Required Fallback)
+### GitHub Access (Required for All Agents)
 
+- This policy applies to every repository agent entrypoint (Codex, Claude, and
+  GitHub Copilot).
 - Use local `git` for branch management, staging, commits, and pushes.
 - Prefer the connected VS Code GitHub extension / GitHub app for pull-request
   creation, metadata, comments, reviewer requests, and review inspection.

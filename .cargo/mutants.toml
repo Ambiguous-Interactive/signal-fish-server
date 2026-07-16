@@ -17,7 +17,7 @@
 #       cargo mutants --list     (enumerate mutants without testing)
 # CI:   .github/workflows/mutation.yml (scheduled + workflow_dispatch)
 #       The baseline runs the exact unmutated oracle with:
-#       cargo nextest run --lib --cargo-profile mutants --profile mutants --locked
+#       cargo nextest run --lib --features trace-validation --cargo-profile mutants --profile mutants --locked
 
 # Only the in-crate unit tests are the oracle — fast and deterministic. Nextest
 # isolates them into processes, and the dedicated `mutants` nextest profile
@@ -35,18 +35,20 @@ additional_cargo_test_args = ["--profile", "mutants"]
 # applies `--lib` to BOTH the build and nextest run, so each mutant only rebuilds
 # the lib + its unit-test binary — integration suites are never built or run.
 #
-# We also deliberately do NOT pass `--all-features`: the scoped modules below
-# contain ZERO `#[cfg(feature = ...)]` (default features = []), so enabling `tls`
-# (rustls/axum-server) and `legacy-fullmesh` (matchbox_signaling) changes neither
-# the generated mutant set (`cargo mutants --list` stays 319) nor the catch
-# outcome — it only drags those heavy deps into every per-mutant build/relink.
+# We deliberately enable only `trace-validation`: `src/coordination/mod.rs`
+# contains feature-gated delivery-trace adapters whose mutants are otherwise
+# vacuously missed by the default-feature oracle. Do NOT pass `--all-features`:
+# enabling `tls` (rustls/axum-server) and `legacy-fullmesh`
+# (matchbox_signaling) changes neither the generated mutant set (`cargo mutants
+# --list` stays 343) nor the catch outcome; it only drags those heavy deps into
+# every per-mutant build/relink.
 #
 # Standing rules (enforced by tests/ci_config_tests.rs::
 # test_mutation_oracle_does_not_use_all_features): keep `--lib` in
 # `additional_cargo_args`; never re-add `--all-features`; if a scoped module ever
-# gains a feature gate, add the exact minimal feature here and to the test's
-# allowed set.
-additional_cargo_args = ["--lib"]
+# gains another feature gate, add only the exact minimal feature here and to the
+# test's allowed set.
+additional_cargo_args = ["--lib", "--features", "trace-validation"]
 
 # High-signal pure-logic modules, plus the delivery contract core.
 #
