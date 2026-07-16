@@ -163,3 +163,47 @@ pub async fn run_server(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_socket_inherits_listener_send_buffer() {
+        const REQUESTED_BYTES: u32 = 32 * 1_024;
+
+        // Kernels report SO_SNDBUF differently (Linux commonly doubles the
+        // request), so derive this platform's effective value from an
+        // otherwise identical socket instead of asserting a literal number.
+        let probe = TcpSocket::new_v4().expect("create send-buffer probe socket");
+        probe
+            .set_send_buffer_size(REQUESTED_BYTES)
+            .expect("set probe send buffer");
+        let expected = probe.send_buffer_size().expect("read probe send buffer");
+
+        let listener = bind_tcp_listener(
+            "127.0.0.1:0".parse().expect("parse loopback address"),
+            REQUESTED_BYTES,
+        )
+        .expect("bind bounded listener");
+        let addr = listener.local_addr().expect("read listener address");
+        let accept = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept loopback client");
+            let stream = stream.into_std().expect("convert accepted stream");
+            TcpSocket::from_std_stream(stream)
+                .send_buffer_size()
+                .expect("read accepted send buffer")
+        });
+
+        let client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect loopback client");
+        let accepted = accept.await.expect("accept task panicked");
+        drop(client);
+
+        assert_eq!(
+            accepted, expected,
+            "accepted socket must inherit the listener's effective SO_SNDBUF"
+        );
+    }
+}
