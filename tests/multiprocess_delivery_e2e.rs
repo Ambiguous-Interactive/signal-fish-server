@@ -59,6 +59,9 @@
 //! keeps plain `cargo test` from co-scheduling the floods in one process.
 #![cfg(unix)]
 
+// This shared harness also exposes WebRTC-only observation helpers. They are
+// intentionally unused by the delivery-fault consumer of the module.
+#[allow(dead_code)]
 #[path = "websocket_test_helpers/native_client_process.rs"]
 mod native_client_process;
 mod websocket_test_helpers;
