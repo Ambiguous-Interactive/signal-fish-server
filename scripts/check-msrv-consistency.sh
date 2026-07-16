@@ -135,7 +135,18 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Check 5: .devcontainer/Dockerfile (informational only - may use newer Rust)
+# Check 5: clients/fortress/Cargo.toml (standalone interoperability fixture)
+# This crate also runs under the repository toolchain in CI. Keep its declared
+# floor aligned so a server MSRV change cannot strand the issue-242 gate.
+if [ -f clients/fortress/Cargo.toml ]; then
+    FORTRESS_MSRV=$(bash scripts/read-toml-string.sh clients/fortress/Cargo.toml rust-version package || true)
+    check_file "clients/fortress/Cargo.toml" "$MSRV" "$FORTRESS_MSRV" "rust-version"
+else
+    check_missing "clients/fortress/Cargo.toml"
+    FAILED=$((FAILED + 1))
+fi
+
+# Check 6: .devcontainer/Dockerfile (informational only - may use newer Rust)
 if [ -f .devcontainer/Dockerfile ]; then
     # Extract MSRV comment if present
     if grep -q "# Project MSRV:" .devcontainer/Dockerfile; then
@@ -179,7 +190,10 @@ if [ "$FAILED" -ne 0 ]; then
     echo "4. Update clients/native/Cargo.toml:"
     echo "   rust-version = \"$MSRV\""
     echo ""
-    echo "5. Update .devcontainer/Dockerfile (optional):"
+    echo "5. Update clients/fortress/Cargo.toml:"
+    echo "   rust-version = \"$MSRV\""
+    echo ""
+    echo "6. Update .devcontainer/Dockerfile (optional):"
     echo "   # Project MSRV: $MSRV"
     echo ""
     echo "See .llm/skills/msrv-management.md for detailed guidance."
