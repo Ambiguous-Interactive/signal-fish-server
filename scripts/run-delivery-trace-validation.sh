@@ -31,6 +31,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+deadlock_reached_at_index() {
+    local log_path="$1"
+    local expected_index="$2"
+    awk -v expected="$expected_index" '
+        /^Error: Deadlock reached\.$/ { saw_deadlock = 1 }
+        saw_deadlock && /^\/\\ i = [0-9]+$/ { final_index = $4 }
+        END { exit !(saw_deadlock && final_index == expected) }
+    ' "$log_path"
+}
+
 python3 "$SCRIPT_DIR/generate-delivery-contract-trace.py" \
     --input "$TRACE_PATH" \
     --output-dir "$OUTPUT_DIR/positive" \
@@ -54,8 +64,7 @@ if [ "$negative_status" -eq 0 ]; then
     cat "$OUTPUT_DIR/seeded-negative.log" >&2
     exit 1
 fi
-if ! grep -qi "deadlock reached" "$OUTPUT_DIR/seeded-negative.log" || \
-   ! grep -q "i = 1" "$OUTPUT_DIR/seeded-negative.log"; then
+if ! deadlock_reached_at_index "$OUTPUT_DIR/seeded-negative.log" 1; then
     echo "ERROR: seeded trace failed for an unexpected reason" >&2
     cat "$OUTPUT_DIR/seeded-negative.log" >&2
     exit 1
@@ -72,8 +81,7 @@ bash "$SCRIPT_DIR/run-tla-model-check.sh" --tla-dir "$OUTPUT_DIR/slow-close-flus
 close_flush_status=$?
 set -e
 if [ "$close_flush_status" -eq 0 ] || \
-   ! grep -qi "deadlock reached" "$OUTPUT_DIR/slow-close-flush-negative.log" || \
-   ! grep -q "i = 5" "$OUTPUT_DIR/slow-close-flush-negative.log"; then
+   ! deadlock_reached_at_index "$OUTPUT_DIR/slow-close-flush-negative.log" 5; then
     echo "ERROR: slow-consumer close-flush trace did not deadlock at i = 5" >&2
     cat "$OUTPUT_DIR/slow-close-flush-negative.log" >&2
     exit 1
@@ -89,8 +97,7 @@ bash "$SCRIPT_DIR/run-tla-model-check.sh" --tla-dir "$OUTPUT_DIR/post-queue-clos
 post_close_drain_status=$?
 set -e
 if [ "$post_close_drain_status" -eq 0 ] || \
-   ! grep -qi "deadlock reached" "$OUTPUT_DIR/post-queue-close-drain-negative.log" || \
-   ! grep -q "i = 5" "$OUTPUT_DIR/post-queue-close-drain-negative.log"; then
+   ! deadlock_reached_at_index "$OUTPUT_DIR/post-queue-close-drain-negative.log" 5; then
     echo "ERROR: post-QueueClose live-drain trace did not deadlock at i = 5" >&2
     cat "$OUTPUT_DIR/post-queue-close-drain-negative.log" >&2
     exit 1
