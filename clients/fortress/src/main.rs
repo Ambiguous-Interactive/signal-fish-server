@@ -116,6 +116,27 @@ fn outbound_is_drained(
     pipeline_queue_depth == 0 && relay_frames_enqueued == client_game_data_sent
 }
 
+fn observe_running_phase(
+    target_reached: bool,
+    polling_callbacks: &mut u64,
+    finished_at: &mut Option<Instant>,
+    now: Instant,
+) {
+    if target_reached {
+        finished_at.get_or_insert(now);
+    } else {
+        *polling_callbacks = polling_callbacks.saturating_add(1);
+    }
+}
+
+fn running_elapsed(started_at: Option<Instant>, finished_at: Option<Instant>) -> Duration {
+    started_at
+        .zip(finished_at)
+        .map_or(Duration::ZERO, |(started, finished)| {
+            finished.saturating_duration_since(started)
+        })
+}
+
 fn build_session(
     local: Uuid,
     remote: Uuid,
@@ -179,6 +200,7 @@ async fn main() -> Result<(), String> {
     let mut relay_retries = 0u64;
     let mut recommended_skips = 0u32;
     let mut running_since = None;
+    let mut running_finished_at = None;
     let mut polling_callbacks_during_run = 0u64;
     let mut running_client_sent_baseline = 0u64;
     let mut running_relay_enqueued_baseline = 0u64;
@@ -285,8 +307,13 @@ async fn main() -> Result<(), String> {
                     running_client_sent_baseline = client.stats().game_data_sent;
                     running_relay_enqueued_baseline = relay.counters().enqueued_outbound;
                 }
-                polling_callbacks_during_run = polling_callbacks_during_run.saturating_add(1);
                 let target_reached = fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES;
+                observe_running_phase(
+                    target_reached,
+                    &mut polling_callbacks_during_run,
+                    &mut running_finished_at,
+                    Instant::now(),
+                );
                 if !target_reached && recommended_skips > 0 {
                     recommended_skips = recommended_skips.saturating_sub(1);
                 } else if !target_reached {
@@ -358,8 +385,8 @@ async fn main() -> Result<(), String> {
                     relay_encode_failures: relay_stats.encode_failures,
                     relay_completion_underflow: relay_stats.completion_underflow,
                     relay_send_retries: relay_retries,
-                    running_elapsed_ms: running_since
-                        .map_or(0, |started| started.elapsed().as_millis()),
+                    running_elapsed_ms: running_elapsed(running_since, running_finished_at)
+                        .as_millis(),
                     polling_callbacks_during_run,
                 };
                 println!(
@@ -398,7 +425,9 @@ async fn main() -> Result<(), String> {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::outbound_is_drained;
+    use std::time::{Duration, Instant};
+
+    use super::{observe_running_phase, outbound_is_drained, running_elapsed};
 
     #[test]
     fn drain_gate_waits_for_transport_accepted_frame_to_finish() {
@@ -408,5 +437,28 @@ mod tests {
             "an empty adapter FIFO does not prove its accepted send completed"
         );
         assert!(!outbound_is_drained(1, 1_200, 1_200));
+    }
+
+    #[test]
+    fn running_phase_metrics_freeze_before_post_target_drain() {
+        let started = Instant::now();
+        let target = started + Duration::from_secs(10);
+        let drained = target + Duration::from_secs(3);
+        let mut callbacks = 600;
+        let mut finished = None;
+
+        observe_running_phase(true, &mut callbacks, &mut finished, target);
+        observe_running_phase(true, &mut callbacks, &mut finished, drained);
+
+        assert_eq!(callbacks, 600, "drain callbacks are not active callbacks");
+        assert_eq!(
+            finished,
+            Some(target),
+            "the first target time is authoritative"
+        );
+        assert_eq!(
+            running_elapsed(Some(started), finished),
+            Duration::from_secs(10)
+        );
     }
 }
