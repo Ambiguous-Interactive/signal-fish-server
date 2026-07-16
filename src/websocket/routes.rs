@@ -169,6 +169,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn accepted_socket_preserves_listener_send_buffer_bound() {
         const REQUESTED_BYTES: u32 = 32 * 1_024;
         // Linux commonly reports exactly twice the request. macOS applies its
