@@ -511,6 +511,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("5"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES",
+        path: "websocket.socket_send_buffer_bytes",
+        default: Some("65536"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY",
         path: "websocket.send_queue_capacity",
         default: Some("1024"),
@@ -1041,6 +1046,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
         "control_queue_capacity",
         "slow_consumer_timeout_ms",
         "max_sojourn_ms",
+        "socket_send_buffer_bytes",
     ] {
         assert!(
             websocket.contains_key(key),
@@ -1049,6 +1055,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
     }
     assert_eq!(config.websocket.control_queue_capacity, 128);
     assert_eq!(config.websocket.max_sojourn_ms, 15_000);
+    assert_eq!(config.websocket.socket_send_buffer_bytes, 65_536);
     config
         .websocket
         .validate()
@@ -1370,6 +1377,7 @@ fn test_config_websocket_section() {
             "batch_size": 64,
             "batch_interval_ms": 50,
             "auth_timeout_secs": 15,
+            "socket_send_buffer_bytes": 65536,
             "control_queue_capacity": 32,
             "max_sojourn_ms": 1000
         }
@@ -1381,6 +1389,7 @@ fn test_config_websocket_section() {
     assert_eq!(config.websocket.batch_size, 64);
     assert_eq!(config.websocket.batch_interval_ms, 50);
     assert_eq!(config.websocket.auth_timeout_secs, 15);
+    assert_eq!(config.websocket.socket_send_buffer_bytes, 65_536);
     assert_eq!(config.websocket.control_queue_capacity, 32);
     assert_eq!(config.websocket.max_sojourn_ms, 1000);
 }

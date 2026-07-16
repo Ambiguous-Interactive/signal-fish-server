@@ -369,7 +369,9 @@ Within an active recipient generation, report and peer-lifecycle control has
 priority over data. Lifecycle control can therefore overtake queued old-epoch
 payloads: clients keep accounting for that tail but suppress it from application
 state after the lifecycle change. The recipient's own room/spectator transitions
-are generation barriers. See [Delivery semantics](protocol.md#delivery-semantics)
+are generation barriers. Accepted sockets use a bounded TCP send-buffer request
+so bytes already handed to the kernel cannot indefinitely bury later control.
+See [Delivery semantics](protocol.md#delivery-semantics)
 for conservation, close behavior, and reconnect rules.
 
 ## Message Batching
@@ -706,14 +708,16 @@ probes the underlying WebSocket transport independently:
 {
   "websocket": {
     "server_ping_interval_secs": 10,
-    "pong_timeout_secs": 5
+    "pong_timeout_secs": 5,
+    "socket_send_buffer_bytes": 65536
   }
 }
 
 ```
 
-The RFC 6455 Ping bypasses application queues. Compliant WebSocket stacks answer
-automatically; a missing matching Pong closes the socket with `4003
+The RFC 6455 Ping bypasses application queues; the bounded socket send buffer
+limits data already handed to TCP ahead of it. Compliant WebSocket stacks
+answer automatically; a missing matching Pong closes the socket with `4003
 activity_timeout`. Set `server_ping_interval_secs` to `0` to disable these
 server probes. Separately, the activity reaper disconnects clients that send no
 traffic for longer than `server.ping_timeout`.

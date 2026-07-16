@@ -75,8 +75,12 @@ impl MessageBatcher {
         self.pending.is_empty()
     }
 
-    pub(super) fn oldest_enqueued_at(&self) -> Option<Instant> {
-        self.pending.front().map(|message| message.enqueued_at)
+    pub(super) fn oldest_reliable_enqueued_at(&self) -> Option<Instant> {
+        self.pending
+            .iter()
+            .filter(|message| message.class() == Some(crate::protocol::DeliveryClass::Reliable))
+            .map(|message| message.enqueued_at)
+            .min()
     }
 
     pub(super) fn count_by_class(&self) -> [(crate::protocol::DeliveryClass, u64); 3] {
@@ -122,7 +126,7 @@ pub(super) async fn send_batch(
                     send_queued(
                         sender,
                         control,
-                        batcher.oldest_enqueued_at(),
+                        batcher.oldest_reliable_enqueued_at(),
                         receiver,
                         player_id,
                         server,
@@ -157,7 +161,7 @@ pub(super) async fn send_batch(
         send_queued(
             sender,
             message,
-            batcher.oldest_enqueued_at(),
+            batcher.oldest_reliable_enqueued_at(),
             receiver,
             player_id,
             server,
@@ -189,11 +193,41 @@ pub(super) enum WritePhase {
     CloseFlush,
 }
 
+fn queued_write_deadline(
+    queued: &QueuedOutbound,
+    oldest_reliable_batched: Option<Instant>,
+    receiver: &OutboundReceiver,
+    max_sojourn: Duration,
+    write_started_at: Instant,
+) -> Instant {
+    match queued.class() {
+        Some(crate::protocol::DeliveryClass::Reliable) => {
+            receiver
+                .oldest_reliable_enqueued_at()
+                .into_iter()
+                .chain(oldest_reliable_batched)
+                .chain(std::iter::once(queued.enqueued_at))
+                .min()
+                .unwrap_or(write_started_at)
+                + max_sojourn
+        }
+        // Control traffic owns its queue-age deadline. In particular, a fresh
+        // DeliveryReport must not inherit the age of stale lossy data.
+        None => queued.enqueued_at + max_sojourn,
+        // Latest/volatile queue age is resolved by their explicit loss policy.
+        // Once selected, retain a bounded write-progress budget so a peer that
+        // stops reading cannot wedge the sole socket writer forever.
+        Some(crate::protocol::DeliveryClass::Latest | crate::protocol::DeliveryClass::Volatile) => {
+            write_started_at + max_sojourn
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_queued(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     queued: QueuedOutbound,
-    oldest_batched: Option<Instant>,
+    oldest_reliable_batched: Option<Instant>,
     receiver: &OutboundReceiver,
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
@@ -212,12 +246,14 @@ pub(super) async fn send_queued(
     };
     let class = queued.class();
     let metadata = queued.metadata;
-    let oldest = receiver
-        .oldest_enqueued_at()
-        .into_iter()
-        .chain(oldest_batched)
-        .chain(std::iter::once(queued.enqueued_at))
-        .min();
+    let write_started_at = Instant::now();
+    let deadline = queued_write_deadline(
+        &queued,
+        oldest_reliable_batched,
+        receiver,
+        max_sojourn,
+        write_started_at,
+    );
     let message = match queued.payload {
         OutboundPayload::Message(message) => message,
         OutboundPayload::DeliveryReport(report) => {
@@ -239,7 +275,6 @@ pub(super) async fn send_queued(
     let result = if max_sojourn.is_zero() {
         write.await.map_err(|()| QueueWriteError::SocketClosed)
     } else {
-        let deadline = oldest.unwrap_or_else(Instant::now) + max_sojourn;
         match tokio::time::timeout_at(deadline, write).await {
             Ok(result) => result.map_err(|()| QueueWriteError::SocketClosed),
             Err(_) => {
@@ -286,6 +321,88 @@ pub(super) async fn send_queued(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::coordination::outbound_queue::{channel, DataDeliveryMetadata, OutboundData};
+    use crate::protocol::{DeliveryClass, RoomId};
+    use serde_json::json;
+
+    fn data(class: DeliveryClass, seq: u64) -> OutboundData {
+        let from_player = PlayerId::from_u128(1);
+        let room_id = RoomId::from_u128(2);
+        OutboundData::new(
+            Arc::new(ServerMessage::GameData {
+                from_player,
+                data: json!({ "seq": seq }),
+                seq: Some(seq),
+                epoch: Some(1),
+                class: Some(class),
+                key: None,
+            }),
+            DataDeliveryMetadata {
+                class,
+                key: None,
+                from_player,
+                room_id,
+                epoch: 1,
+                seq,
+            },
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn writer_deadlines_are_partitioned_by_delivery_class() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(DeliveryClass::Volatile, 1))
+            .expect("enqueue stale volatile data");
+        let stale_volatile_at = rx.oldest_enqueued_at().expect("volatile timestamp");
+        tokio::time::advance(Duration::from_secs(10)).await;
+
+        let control = QueuedOutbound::test_control(Arc::new(ServerMessage::RoomLeft));
+        let control_started_at = Instant::now();
+        assert_eq!(
+            queued_write_deadline(
+                &control,
+                None,
+                &rx,
+                Duration::from_secs(15),
+                control_started_at,
+            ),
+            control.enqueued_at + Duration::from_secs(15),
+            "fresh control must not inherit stale volatile age"
+        );
+
+        let volatile = rx.recv().await.expect("queue open").expect("volatile data");
+        let volatile_started_at = Instant::now();
+        assert_eq!(volatile.enqueued_at, stale_volatile_at);
+        assert_eq!(
+            queued_write_deadline(
+                &volatile,
+                None,
+                &rx,
+                Duration::from_secs(15),
+                volatile_started_at,
+            ),
+            volatile_started_at + Duration::from_secs(15),
+            "lossy queue age must not trigger recipient eviction"
+        );
+
+        tx.try_enqueue_data(data(DeliveryClass::Reliable, 2))
+            .expect("enqueue reliable data");
+        let reliable = rx.recv().await.expect("queue open").expect("reliable data");
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            queued_write_deadline(
+                &reliable,
+                None,
+                &rx,
+                Duration::from_secs(15),
+                Instant::now(),
+            ),
+            reliable.enqueued_at + Duration::from_secs(15),
+            "reliable delivery must retain its end-to-end sojourn ceiling"
+        );
+    }
 
     #[test]
     fn test_message_batcher_new() {

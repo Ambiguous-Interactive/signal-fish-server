@@ -385,8 +385,10 @@ Current ADRs:
 - Keep v3 control traffic on a bounded lane that has strict priority within the
   active recipient generation; use barriers for the recipient's own room and
   spectator transitions. If the server cannot publish exact accountability
-  before later data, or the oldest outbound item cannot complete its socket
-  write within `websocket.max_sojourn_ms`, fail closed with `4002 slow_consumer`
+  before later data, or reliable/control sojourn or a selected socket write
+  exceeds `websocket.max_sojourn_ms`, fail closed with `4002 slow_consumer`.
+  Bound accepted-socket kernel handoff with
+  `websocket.socket_send_buffer_bytes` so TCP cannot bury later priority frames
 - Timeout on slow operations
 
 ### Observable by Default

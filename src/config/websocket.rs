@@ -5,7 +5,7 @@ use super::defaults::{
     default_control_queue_capacity, default_delivery_stats_interval_secs, default_enable_batching,
     default_idle_timeout_secs, default_max_sojourn_ms, default_pong_timeout_secs,
     default_send_queue_capacity, default_server_ping_interval_secs,
-    default_slow_consumer_timeout_ms,
+    default_slow_consumer_timeout_ms, default_socket_send_buffer_bytes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,13 @@ pub struct WebSocketConfig {
     /// written. A miss closes the connection with `4003 activity_timeout`.
     #[serde(default = "default_pong_timeout_secs")]
     pub pong_timeout_secs: u64,
+    /// Requested TCP send-buffer size for accepted HTTP/WebSocket sockets.
+    ///
+    /// This bounds bytes the WebSocket writer can hand to the kernel ahead of
+    /// priority control traffic. Operating systems may clamp or account this
+    /// value differently; `0` opts out and keeps the platform default.
+    #[serde(default = "default_socket_send_buffer_bytes")]
+    pub socket_send_buffer_bytes: u32,
     /// Per-connection outbound message queue capacity.
     ///
     /// Bounds how many undelivered server messages may queue for one
@@ -67,8 +74,11 @@ pub struct WebSocketConfig {
     /// notified through the normal disconnect flow.
     #[serde(default = "default_slow_consumer_timeout_ms")]
     pub slow_consumer_timeout_ms: u64,
-    /// Maximum time any outbound item may remain unresolved, including queue
-    /// wait and socket write time, before the connection is closed as stale.
+    /// Maximum reliable/control queue sojourn and per-write progress time.
+    ///
+    /// Reliable traffic uses an end-to-end queue-plus-write deadline. Control
+    /// traffic uses its own enqueue age, while latest/volatile traffic uses
+    /// this only after selection so lossy queue age cannot evict a recipient.
     /// Expressed in milliseconds and must be nonzero.
     #[serde(default = "default_max_sojourn_ms")]
     pub max_sojourn_ms: u64,
@@ -93,6 +103,7 @@ impl Default for WebSocketConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             server_ping_interval_secs: default_server_ping_interval_secs(),
             pong_timeout_secs: default_pong_timeout_secs(),
+            socket_send_buffer_bytes: default_socket_send_buffer_bytes(),
             send_queue_capacity: default_send_queue_capacity(),
             control_queue_capacity: default_control_queue_capacity(),
             slow_consumer_timeout_ms: default_slow_consumer_timeout_ms(),
@@ -138,6 +149,13 @@ impl WebSocketConfig {
                 self.pong_timeout_secs
             );
         }
+        if self.socket_send_buffer_bytes > 16 * 1_024 * 1_024 {
+            anyhow::bail!(
+                "websocket.socket_send_buffer_bytes must not exceed 16777216 (16 MiB); \
+                 configured: {} (0 keeps the platform default)",
+                self.socket_send_buffer_bytes
+            );
+        }
         // When batching is enabled, `batch_interval_ms` is the flush
         // `tokio::time::interval` period; a zero period panics that timer (and
         // the per-connection send task with it), so reject it at startup. With
@@ -172,7 +190,7 @@ impl WebSocketConfig {
         if self.max_sojourn_ms == 0 {
             anyhow::bail!(
                 "websocket.max_sojourn_ms must be greater than 0; \
-                 it bounds how long an outbound item may remain unresolved"
+                 it bounds reliable/control sojourn and socket write progress"
             );
         }
         // A sojourn ceiling at or below the normal batch-flush interval
@@ -257,6 +275,18 @@ mod tests {
                 mutate: |config| config.pong_timeout_secs = 3_601,
                 expect_ok: false,
                 expect_error_containing: "pong_timeout_secs must not exceed 3600",
+            },
+            Case {
+                name: "platform socket send buffer accepted",
+                mutate: |config| config.socket_send_buffer_bytes = 0,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "socket send buffer above ceiling",
+                mutate: |config| config.socket_send_buffer_bytes = 16 * 1_024 * 1_024 + 1,
+                expect_ok: false,
+                expect_error_containing: "socket_send_buffer_bytes must not exceed",
             },
             Case {
                 name: "defaults are valid",

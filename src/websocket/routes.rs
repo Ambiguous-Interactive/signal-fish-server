@@ -4,9 +4,41 @@ use axum::extract::State;
 use axum::routing::get;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpSocket};
 
 use super::handler::{websocket_handler, websocket_handler_v3};
 use super::metrics::{metrics_handler, prometheus_metrics_handler};
+
+const LISTENER_BACKLOG: u32 = 1_024;
+
+/// Bind a TCP listener whose accepted sockets inherit a bounded send buffer.
+///
+/// A bounded kernel handoff is part of the WebSocket control-priority
+/// contract: once a data frame has been accepted by TCP, application-level
+/// queue priority cannot move a later Ping or delivery report ahead of it.
+pub fn bind_tcp_listener(
+    addr: SocketAddr,
+    socket_send_buffer_bytes: u32,
+) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    if socket_send_buffer_bytes > 0 {
+        socket.set_send_buffer_size(socket_send_buffer_bytes)?;
+    }
+    let effective_send_buffer_bytes = socket.send_buffer_size()?;
+    socket.bind(addr)?;
+    let listener = socket.listen(LISTENER_BACKLOG)?;
+    tracing::info!(
+        requested_send_buffer_bytes = socket_send_buffer_bytes,
+        effective_send_buffer_bytes,
+        "Bound TCP listener with bounded WebSocket kernel handoff"
+    );
+    Ok(listener)
+}
 
 /// Create the nestable Axum router with WebSocket support.
 ///
@@ -84,6 +116,7 @@ pub async fn run_server(
     server_config: ServerConfig,
     cors_origins: String,
 ) -> anyhow::Result<()> {
+    let socket_send_buffer_bytes = server_config.websocket_config.socket_send_buffer_bytes;
     // Create storage configuration
     let database_config = DatabaseConfig::from_env()?;
 
@@ -112,7 +145,7 @@ pub async fn run_server(
     let app = create_standalone_router(&cors_origins).with_state(game_server);
 
     // Start server
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = bind_tcp_listener(addr, socket_send_buffer_bytes)?;
     tracing::info!(%addr, "Starting enhanced Signal Fish server");
     tracing::info!(
         deployment_mode = "single_instance",

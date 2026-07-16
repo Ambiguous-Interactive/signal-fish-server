@@ -282,7 +282,9 @@ async fn main() -> anyhow::Result<()> {
             tls_shutdown_handle.graceful_shutdown(None);
         });
 
-        let serve_result = axum_server::bind_rustls(addr, tls_config)
+        let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?
+            .into_std()?;
+        let serve_result = axum_server::from_tcp_rustls(listener, tls_config)?
             .handle(tls_handle)
             .serve(make_service)
             .await;
@@ -294,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start the server over plain TCP (typically behind a reverse proxy).
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
     tracing::info!(
         %addr,
         cors_origins = %cfg.security.cors_origins,

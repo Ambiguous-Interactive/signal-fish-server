@@ -199,10 +199,11 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
 | `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Cadence for server-initiated RFC 6455 Ping frames (`0` disables; must be ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS` | `websocket.pong_timeout_secs` | `5` | Seconds allowed for the matching Pong before close `4003 activity_timeout` (must be > `0` and ≤ `3600`) |
+| `SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES` | `websocket.socket_send_buffer_bytes` | `65536` | Requested TCP send-buffer bound ahead of WebSocket control traffic (`0` keeps the platform default; must be ≤ `16777216`) |
 | `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection data queue capacity (must be ≥ 1); only reliable delivery waits when full |
 | `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY` | `websocket.control_queue_capacity` | `128` | Per-connection v3 priority control queue capacity (must be ≥ 2) |
 | `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds reliable delivery may wait for data-queue space before closing the recipient with `4002 slow_consumer` (must be > 0 and ≤ `600000`) |
-| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS` | `websocket.max_sojourn_ms` | `15000` | Maximum age of the oldest outbound item through socket-write completion before a `4002 slow_consumer` close (must be > `0` and exceed `batch_interval_ms` when batching is enabled) |
+| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS` | `websocket.max_sojourn_ms` | `15000` | Reliable/control sojourn and selected socket-write progress deadline before `4002 slow_consumer` (must be > `0` and exceed `batch_interval_ms` when batching is enabled) |
 | `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Seconds between v3 aggregate `RelayStats` and counter-only `DeliveryReport` snapshots (`0` disables periodic snapshots, not exact gap reports; must be ≤ `3600`) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
@@ -310,6 +311,7 @@ Complete reference of all configuration options with environment variable overri
     "idle_timeout_secs": 300,
     "server_ping_interval_secs": 10,
     "pong_timeout_secs": 5,
+    "socket_send_buffer_bytes": 65536,
     "send_queue_capacity": 1024,
     "control_queue_capacity": 128,
     "slow_consumer_timeout_ms": 5000,
@@ -341,6 +343,11 @@ Complete reference of all configuration options with environment variable overri
   application data/control queues; a miss closes with `4003 activity_timeout`.
   Set the interval to `0` to disable server probes. The Pong timeout must remain
   greater than `0`; both fields are capped at 3600 seconds.
+- `socket_send_buffer_bytes` - Requested TCP send buffer inherited by accepted
+  sockets (default: 65536; `0` keeps the operating-system default; maximum 16
+  MiB). This bounds bytes application data can hand to TCP ahead of a later
+  WebSocket Ping or priority report. Operating systems may clamp the request or
+  report a larger accounting value (Linux commonly reports twice the request).
 - `send_queue_capacity` - Per-connection data queue capacity in messages
   (default: 1024; must be ≥ 1). Reliable messages wait for space and apply
   sender backpressure. V3 `latest` and `volatile` messages never wait: their
@@ -360,12 +367,14 @@ Complete reference of all configuration options with environment variable overri
   cannot absorb reliable traffic for this long is closed with authoritative
   WebSocket code `4002 slow_consumer`; the `SLOW_CONSUMER` error is best effort.
   `latest` and `volatile` do not use this wait.
-- `max_sojourn_ms` - Maximum age of the oldest outbound item before the
-  connection is closed loudly with `4002 slow_consumer` (default: 15000; must
-  be > 0), even if it continues sending pings. The deadline covers every queue
-  lane, the current batch/in-flight item, and completion of the current socket
-  write. It must be greater than `batch_interval_ms` when batching is enabled,
-  ensuring a healthy item gets a scheduled flush opportunity.
+- `max_sojourn_ms` - Reliable messages are closed loudly with `4002
+  slow_consumer` when the oldest reliable queue/batch item cannot complete its
+  socket write within this end-to-end deadline (default: 15000; must be > 0).
+  Control messages use their own enqueue timestamp, so stale lossy data cannot
+  age a fresh report. Latest/volatile queue age is resolved by their explicit
+  drop/coalesce policy; once selected for the socket, this value bounds write
+  progress so a transport that stops draining cannot wedge the writer. It must
+  exceed `batch_interval_ms` when batching is enabled.
 - `delivery_stats_interval_secs` - Periodic v3 aggregate/counter snapshot
   cadence (default: 0, disabled; must be ≤ 3600). This does not suppress exact
   gap-bearing `DeliveryReport` frames, which are emitted whenever a lossy class

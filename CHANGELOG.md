@@ -764,6 +764,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed negotiated lossy delivery under a slow-but-draining TCP downstream.
+  A bounded, configurable TCP send buffer (`websocket.socket_send_buffer_bytes`,
+  default 65536; `0` restores the platform default) prevents megabytes of data
+  already accepted by the kernel from burying later WebSocket Pings and exact
+  `DeliveryReport` frames. Writer sojourn deadlines are now class-aware:
+  reliable traffic retains its oldest reliable queue-plus-write ceiling,
+  control traffic owns its enqueue deadline, and latest/volatile traffic gets a
+  bounded write-progress deadline without inheriting unrelated queue age. The
+  nightly 256-kbps asymmetric experiment now keeps a 90-KiB/s volatile stream
+  connected for 60 seconds with production Pings enabled and every observed
+  sequence gap covered by a causally prior exact report; reliable traffic still
+  fails loudly with `4002 slow_consumer` and reconnects with rotated wire tokens.
 - Fixed a room-lifecycle GC bug where every room was deleted a fixed interval after **creation**
   regardless of activity (default `inactive_room_timeout` = 1 h) — `Room.last_activity` was
   written only at creation and never refreshed (both refresher methods had zero call sites), so a

@@ -7,10 +7,9 @@
 //! - reliable traffic eventually exceeds the 15-second sojourn ceiling, closes
 //!   with `4002 slow_consumer`, and can reconnect twice with the token carried
 //!   on `RoomJoined` / `Reconnected` (the observable flap loop);
-//! - volatile traffic never parks the sender and sends causally prior exact
-//!   `DeliveryReport` ranges for every sequence gap the peer observes; the
-//!   experiment classifies whether it stays connected or the global socket
-//!   sojourn guard still turns sustained asymmetry into another loud flap.
+//! - volatile traffic never parks or evicts the recipient, survives production
+//!   transport Pings, and sends causally prior exact `DeliveryReport` ranges
+//!   for every sequence gap the peer observes.
 //!
 //! The server-facing receive window is clamped before connect. Without that
 //! control, localhost TCP autotuning can absorb megabytes and turn the test
@@ -351,6 +350,7 @@ fn spawn_volatile_observer(
                     ServerMessage::GameData {
                         from_player,
                         seq: Some(seq),
+                        class,
                         data,
                         ..
                     } if from_player == sender_id => {
@@ -380,7 +380,9 @@ fn spawn_volatile_observer(
                             "server delivered seq {seq} after reporting it omitted"
                         );
                         observation.last_seq = seq;
-                        observation.delivered += 1;
+                        if class == Some(DeliveryClass::Volatile) {
+                            observation.delivered += 1;
+                        }
                         if data.get("marker").and_then(serde_json::Value::as_bool) == Some(true) {
                             observation.termination = Some(VolatileTermination::Marker);
                             return observation;
@@ -412,25 +414,14 @@ fn spawn_volatile_observer(
 
 /// Reliable traffic flaps under sustained asymmetric bandwidth, but every
 /// eviction is explicit and both reconnect tokens are usable. The volatile
-/// phase then classifies the post-E2 behavior while requiring every outcome to
-/// stay loss-accounted or fail loudly.
+/// phase then proves the slow-but-draining link stays connected and every
+/// intentional volatile omission remains exact and observable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
-#[ignore = "nightly-only (verification-nightly.yml): two default 15s sojourn cycles plus a 60s volatile classifier"]
-async fn asymmetric_bandwidth_outcomes_are_never_silent() {
-    // H10 isolates delivery-queue behavior. With the production 10s/5s
-    // transport probe, the Ping can sit behind bytes already accepted by the
-    // kernel and `4003` wins at ~15s even though this link is still draining.
-    // The directional liveness suite owns that independent mechanism; disable
-    // it here so reliable sojourn versus volatile loss policy is the only
-    // variable under falsification.
-    let websocket_config = signal_fish_server::config::WebSocketConfig {
-        server_ping_interval_secs: 0,
-        ..signal_fish_server::config::WebSocketConfig::default()
-    };
+#[ignore = "nightly-only (verification-nightly.yml): two default 15s sojourn cycles plus a 60s volatile stability proof"]
+async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
     let config = ServerConfig {
         ping_timeout: Duration::from_secs(60),
-        websocket_config,
         ..ServerConfig::default()
     };
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
@@ -613,11 +604,16 @@ async fn asymmetric_bandwidth_outcomes_are_never_silent() {
         metrics.delivery_metrics_by_class().reliable.attempted > sender_baseline,
         "the final reliable marker did not traverse the delivery layer"
     );
+    assert_eq!(
+        volatile.delivered + volatile.reported_dropped,
+        volatile_sent,
+        "the constrained connection's cumulative volatile outcomes must conserve every offer"
+    );
 
     let slow_consumer_disconnects = metrics
         .websocket_slow_consumer_disconnects
         .load(Ordering::Relaxed);
-    let volatile_outcome = match volatile
+    match volatile
         .termination
         .as_ref()
         .expect("volatile observer returned without a terminal classification")
@@ -635,35 +631,20 @@ async fn asymmetric_bandwidth_outcomes_are_never_silent() {
                 !volatile.exact_gaps.is_empty(),
                 "a continuing volatile stream must name exact omitted ranges"
             );
-            "stable_through_marker".to_string()
         }
-        VolatileTermination::Close { code, reason } => {
-            assert_eq!(*code, 4002, "volatile fail-closed used the wrong code");
-            assert_eq!(reason, "slow_consumer");
-            assert_eq!(
-                slow_consumer_disconnects,
-                RELIABLE_CYCLES + 1,
-                "volatile close must increment the authoritative eviction metric"
-            );
-            format!("close_{code}_{reason}")
-        }
-        VolatileTermination::TransportError(error) => {
-            assert_eq!(
-                slow_consumer_disconnects,
-                RELIABLE_CYCLES + 1,
-                "a proxy-level reset is acceptable only after the server recorded a loud eviction"
-            );
-            format!("transport_reset_after_4002:{error}")
-        }
-        VolatileTermination::Ended => {
-            assert_eq!(
-                slow_consumer_disconnects,
-                RELIABLE_CYCLES + 1,
-                "bare EOF is acceptable only after the server recorded a loud eviction"
-            );
-            "eof_after_4002".to_string()
-        }
-    };
+        VolatileTermination::Close { code, reason } => panic!(
+            "volatile traffic must remain connected through the marker; closed with \
+             {code} {reason} and {slow_consumer_disconnects} slow-consumer disconnects"
+        ),
+        VolatileTermination::TransportError(error) => panic!(
+            "volatile traffic must remain connected through the marker; transport failed with \
+             {error} and {slow_consumer_disconnects} slow-consumer disconnects"
+        ),
+        VolatileTermination::Ended => panic!(
+            "volatile traffic must remain connected through the marker; socket ended with \
+             {slow_consumer_disconnects} slow-consumer disconnects"
+        ),
+    }
 
     let max_gap = *watcher_state
         .max_interarrival
@@ -671,12 +652,11 @@ async fn asymmetric_bandwidth_outcomes_are_never_silent() {
         .expect("watcher gap lock poisoned");
     eprintln!(
         "H10 result: downstream={}B/s offered={}B/s reliable_cycles={:?} \
-         volatile_outcome={} volatile_sent={} volatile_delivered={} volatile_dropped={} exact_ranges={} \
+         volatile_outcome=stable_through_marker volatile_sent={} volatile_delivered={} volatile_dropped={} exact_ranges={} \
          healthy_max_interarrival={max_gap:?}",
         DOWNSTREAM_BYTES_PER_SEC,
         OFFERED_BYTES_PER_SEC,
         cycle_measurements,
-        volatile_outcome,
         volatile_sent,
         volatile.delivered,
         volatile.reported_dropped,

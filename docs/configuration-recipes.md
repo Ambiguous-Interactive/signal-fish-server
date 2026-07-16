@@ -279,6 +279,7 @@ size and flush interval.
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
     "idle_timeout_secs": 300,
+    "socket_send_buffer_bytes": 65536,
     "send_queue_capacity": 1024,
     "control_queue_capacity": 128,
     "slow_consumer_timeout_ms": 5000,
@@ -294,6 +295,7 @@ Environment equivalent:
 export SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING=true
 export SIGNAL_FISH__WEBSOCKET__BATCH_SIZE=10
 export SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS=16
+export SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES=65536
 export SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY=1024
 export SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY=128
 export SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS=5000
@@ -318,14 +320,20 @@ waits when `send_queue_capacity` fills, while `latest` and `volatile` never pace
 the sender and account for every omission in a prior exact `DeliveryReport`.
 
 Size `send_queue_capacity` for burst headroom, but keep it consistent with
-`max_sojourn_ms`: the default closes a connection once its oldest outbound item
-cannot complete its socket write within 15 seconds, even if the client keeps
-pinging. The age check spans every queue lane plus batched/in-flight work.
+`max_sojourn_ms`: reliable traffic closes once its oldest reliable queued or
+batched item cannot complete within 15 seconds. Control uses its own enqueue
+age; latest/volatile queue age is handled by the class policy and gets a
+15-second write-progress budget only after selection.
 `slow_consumer_timeout_ms`
 (default `5000`) controls how long reliable delivery may wait for capacity;
 higher values ride out longer stalls but let one recipient pace reliable senders
 longer. The authoritative failure signal is close code `4002 slow_consumer`;
 the final `SLOW_CONSUMER` error is best effort.
+
+Keep `socket_send_buffer_bytes` bounded so the operating system cannot accept a
+large data tail ahead of later Ping/report frames. The default requests 65536
+bytes (`0` restores the platform default); the effective value is logged at
+listener startup because kernels may clamp or account it differently.
 
 Keep `control_queue_capacity` large enough for bursts of lifecycle and exact
 accountability traffic. V3 drains this lane before data within the active room
