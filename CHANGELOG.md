@@ -781,6 +781,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connected for 60 seconds with production Pings enabled and every observed
   sequence gap covered by a causally prior exact report; reliable traffic still
   fails loudly with `4002 slow_consumer` and reconnects with rotated wire tokens.
+  Registered shutdown waiting also includes scheduling margin after its three
+  bounded close writes, so a handler completing at the final write deadline is
+  not mistaken for a leaked socket under sanitizer or production shutdown load.
 - Fixed a room-lifecycle GC bug where every room was deleted a fixed interval after **creation**
   regardless of activity (default `inactive_room_timeout` = 1 h) — `Room.last_activity` was
   written only at creation and never refreshed (both refresher methods had zero call sites), so a

@@ -515,11 +515,16 @@ mod cli_tests {
             shutdown_connection_settle_timeout(),
             websocket::CONNECTION_CLOSE_WRITE_TIMEOUT
                 .saturating_mul(websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
+                .saturating_add(websocket::REGISTERED_SHUTDOWN_SETTLE_MARGIN)
         );
         assert_eq!(
             websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS,
             3,
             "registered shutdown close uses flush, semantic close, and sink close budgets"
+        );
+        assert!(
+            websocket::REGISTERED_SHUTDOWN_SETTLE_MARGIN > Duration::ZERO,
+            "handler cleanup needs scheduling margin after the final write budget"
         );
     }
 

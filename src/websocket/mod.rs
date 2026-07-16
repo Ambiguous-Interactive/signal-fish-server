@@ -39,7 +39,17 @@ pub const CONNECTION_CLOSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 pub const REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS: u32 =
     connection::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS;
 
+/// Scheduling margin after the final registered close-write budget expires.
+///
+/// The socket-task guard is released only after the timed operation returns
+/// and its parent handler completes. Waiting for exactly the sum of the write
+/// budgets races that cleanup at the same Tokio deadline, especially under
+/// sanitizer instrumentation.
+pub const REGISTERED_SHUTDOWN_SETTLE_MARGIN: Duration = Duration::from_secs(1);
+
 /// Process-level wait needed to let registered socket handlers finish shutdown.
 pub fn registered_connection_shutdown_settle_timeout() -> Duration {
-    CONNECTION_CLOSE_WRITE_TIMEOUT.saturating_mul(REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
+    CONNECTION_CLOSE_WRITE_TIMEOUT
+        .saturating_mul(REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
+        .saturating_add(REGISTERED_SHUTDOWN_SETTLE_MARGIN)
 }
