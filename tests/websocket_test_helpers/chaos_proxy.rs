@@ -111,6 +111,21 @@ impl ChaosProxy {
     /// Bind a listener on `127.0.0.1:0` and start proxying every accepted
     /// connection to `upstream`.
     pub async fn spawn(upstream: SocketAddr) -> Self {
+        Self::spawn_with_upstream_recv_buffer(upstream, None).await
+    }
+
+    /// Spawn a proxy whose server-facing socket requests a bounded receive
+    /// window before connecting.
+    ///
+    /// This keeps localhost TCP autotuning from absorbing an entire
+    /// bandwidth-fault experiment in the proxy's kernel buffer. `None`
+    /// preserves [`Self::spawn`]'s normal socket defaults; `Some(bytes)` is
+    /// intended for tests that need a constrained downstream to become
+    /// visible to the server's outbound queue within a bounded time.
+    pub async fn spawn_with_upstream_recv_buffer(
+        upstream: SocketAddr,
+        recv_buffer_bytes: Option<u32>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind chaos proxy listener");
@@ -135,7 +150,7 @@ impl ChaosProxy {
                     drop(client);
                     continue;
                 }
-                let Ok(server) = TcpStream::connect(upstream).await else {
+                let Ok(server) = connect_upstream(upstream, recv_buffer_bytes).await else {
                     // Upstream refused: drop the client so it observes EOF
                     // instead of a silent stall.
                     drop(client);
@@ -218,6 +233,21 @@ impl ChaosProxy {
     pub fn kill_mid_frame(&self) {
         self.control.kill.send_replace(KillMode::Fin);
     }
+}
+
+async fn connect_upstream(
+    upstream: SocketAddr,
+    recv_buffer_bytes: Option<u32>,
+) -> std::io::Result<TcpStream> {
+    let socket = if upstream.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    if let Some(bytes) = recv_buffer_bytes {
+        socket.set_recv_buffer_size(bytes)?;
+    }
+    socket.connect(upstream).await
 }
 
 impl Drop for ChaosProxy {

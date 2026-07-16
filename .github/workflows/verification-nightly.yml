@@ -36,6 +36,9 @@
 #     H2 16-player throughput/latency knee sweep.
 #     It also runs the H14 mixed-encoding amplification experiment: exact
 #     unsupported-format reports under a bandwidth-constrained JSON fallback.
+#     H10 classifies a 256-kbps recipient under ~90-KiB/s reliable and volatile
+#     demand, including loud reconnect flaps and the volatile
+#     stable-versus-fail-loud classification.
 #   - split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
 #     server processes pin the unsupported multi-instance failure catalog used
 #     by the deployment doctrine.
@@ -71,6 +74,7 @@ on:
       - "tests/scenario_realworld_e2e.rs"
       - "tests/sixteen_player_matrix_e2e.rs"
       - "tests/mixed_encoding_relay_e2e.rs"
+      - "tests/asymmetric_bandwidth_flap_e2e.rs"
       - "tests/split_brain_two_instances_e2e.rs"
       - "tests/websocket_test_helpers/**"
       - "clients/native/**"
@@ -476,6 +480,13 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test mixed_encoding_relay_e2e --run-ignored ignored-only \
             --success-output final 2>&1 | tee mixed-encoding-output.txt
+      - name: Run asymmetric-bandwidth flap experiment
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test asymmetric_bandwidth_flap_e2e --run-ignored ignored-only \
+            --success-output final 2>&1 | tee asymmetric-bandwidth-output.txt
       - name: Report scenario results to job summary
         if: always()
         shell: bash
@@ -497,6 +508,12 @@ jobs:
             echo
             echo '```text'
             tail -n 60 mixed-encoding-output.txt 2>/dev/null || echo "no mixed-encoding output captured"
+            echo '```'
+            echo
+            echo "### Asymmetric-bandwidth flap classification"
+            echo
+            echo '```text'
+            tail -n 60 asymmetric-bandwidth-output.txt 2>/dev/null || echo "no asymmetric-bandwidth output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
