@@ -11,7 +11,10 @@ use tokio::time::Instant;
 
 use crate::server::EnhancedGameServer;
 
-use super::sending::{send_single_message, SendAccounting, SendDisposition};
+use super::sending::{
+    preflight_binary_fallback, send_single_message, BinaryFallbackPreflight, SendAccounting,
+    SendDisposition,
+};
 
 /// Message batcher for WebSocket connections
 /// Batches multiple messages together to reduce syscall overhead
@@ -199,7 +202,14 @@ fn queued_write_deadline(
     receiver: &OutboundReceiver,
     max_sojourn: Duration,
     write_started_at: Instant,
+    known_unsupported: bool,
 ) -> Instant {
+    if known_unsupported {
+        // The reliable payload has already reached its terminal accounted-drop
+        // path. Its exact report is control progress, not unresolved reliable
+        // delivery, so unrelated reliable queue age must not expire it.
+        return write_started_at + max_sojourn;
+    }
     match queued.class() {
         Some(crate::protocol::DeliveryClass::Reliable) => {
             receiver
@@ -247,12 +257,18 @@ pub(super) async fn send_queued(
     let class = queued.class();
     let metadata = queued.metadata;
     let write_started_at = Instant::now();
+    let recipient_format = receiver.game_data_format();
+    let fallback_preflight = match &queued.payload {
+        OutboundPayload::Message(message) => preflight_binary_fallback(message, recipient_format),
+        OutboundPayload::DeliveryReport(_) => BinaryFallbackPreflight::NotNeeded,
+    };
     let deadline = queued_write_deadline(
         &queued,
         oldest_reliable_batched,
         receiver,
         max_sojourn,
         write_started_at,
+        fallback_preflight.is_unsupported(),
     );
     let message = match queued.payload {
         OutboundPayload::Message(message) => message,
@@ -269,6 +285,7 @@ pub(super) async fn send_queued(
         player_id,
         recipient_supports_v3,
         recipient_format,
+        fallback_preflight,
         metadata,
         &mut accounting,
     );
@@ -323,7 +340,7 @@ mod tests {
     use super::*;
 
     use crate::coordination::outbound_queue::{channel, DataDeliveryMetadata, OutboundData};
-    use crate::protocol::{DeliveryClass, RoomId};
+    use crate::protocol::{DeliveryClass, GameDataEncoding, RoomId};
     use serde_json::json;
 
     fn data(class: DeliveryClass, seq: u64) -> OutboundData {
@@ -340,6 +357,28 @@ mod tests {
             }),
             DataDeliveryMetadata {
                 class,
+                key: None,
+                from_player,
+                room_id,
+                epoch: 1,
+                seq,
+            },
+        )
+    }
+
+    fn unsupported_binary_data(seq: u64) -> OutboundData {
+        let from_player = PlayerId::from_u128(1);
+        let room_id = RoomId::from_u128(2);
+        OutboundData::new(
+            Arc::new(ServerMessage::GameDataBinary {
+                from_player,
+                encoding: GameDataEncoding::MessagePack,
+                payload: bytes::Bytes::from_static(&[0xc1]),
+                seq: Some(seq),
+                epoch: Some(1),
+            }),
+            DataDeliveryMetadata {
+                class: DeliveryClass::Reliable,
                 key: None,
                 from_player,
                 room_id,
@@ -367,6 +406,7 @@ mod tests {
                 &rx,
                 Duration::from_secs(15),
                 control_started_at,
+                false,
             ),
             control.enqueued_at + Duration::from_secs(15),
             "fresh control must not inherit stale volatile age"
@@ -382,6 +422,7 @@ mod tests {
                 &rx,
                 Duration::from_secs(15),
                 volatile_started_at,
+                false,
             ),
             volatile_started_at + Duration::from_secs(15),
             "lossy queue age must not trigger recipient eviction"
@@ -398,9 +439,32 @@ mod tests {
                 &rx,
                 Duration::from_secs(15),
                 Instant::now(),
+                false,
             ),
             reliable.enqueued_at + Duration::from_secs(15),
             "reliable delivery must retain its end-to-end sojourn ceiling"
+        );
+
+        tx.try_enqueue_data(unsupported_binary_data(3))
+            .expect("enqueue unsupported reliable binary data");
+        let unsupported = rx
+            .recv()
+            .await
+            .expect("queue open")
+            .expect("unsupported data");
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let report_write_started_at = Instant::now();
+        assert_eq!(
+            queued_write_deadline(
+                &unsupported,
+                None,
+                &rx,
+                Duration::from_secs(15),
+                report_write_started_at,
+                true,
+            ),
+            report_write_started_at + Duration::from_secs(15),
+            "a deterministic unsupported outcome must use report write progress, not reliable queue age"
         );
     }
 

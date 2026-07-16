@@ -7,6 +7,44 @@ use rmp_serde::{from_slice, to_vec_named};
 use serde::Serialize;
 use std::sync::Arc;
 
+/// Whether this binary message is guaranteed to take the accounted
+/// unsupported-format path for the recipient.
+///
+/// This synchronous preflight is used only to choose the writer deadline. The
+/// send path still performs the conversion and authoritative accounting, so a
+/// successful fallback remains reliable and every failure still emits its
+/// exact report before any successor.
+pub(super) enum BinaryFallbackPreflight {
+    NotNeeded,
+    Decoded(serde_json::Value),
+    Undeliverable(String),
+}
+
+impl BinaryFallbackPreflight {
+    pub(super) const fn is_unsupported(&self) -> bool {
+        matches!(self, Self::Undeliverable(_))
+    }
+}
+
+pub(super) fn preflight_binary_fallback(
+    message: &ServerMessage,
+    recipient_format: GameDataEncoding,
+) -> BinaryFallbackPreflight {
+    let ServerMessage::GameDataBinary {
+        encoding, payload, ..
+    } = message
+    else {
+        return BinaryFallbackPreflight::NotNeeded;
+    };
+    if *encoding == recipient_format {
+        return BinaryFallbackPreflight::NotNeeded;
+    }
+    match decode_binary_to_json(*encoding, payload) {
+        Ok(data) => BinaryFallbackPreflight::Decoded(data),
+        Err(reason) => BinaryFallbackPreflight::Undeliverable(reason),
+    }
+}
+
 /// Why a binary game-data fallback could not be delivered.
 enum BinaryFallbackError {
     /// The payload cannot be represented for this recipient (e.g. an rkyv
@@ -46,6 +84,7 @@ pub(super) async fn send_single_message(
     player_id: &PlayerId,
     recipient_supports_v3: bool,
     recipient_format: GameDataEncoding,
+    fallback_preflight: BinaryFallbackPreflight,
     metadata: Option<DataDeliveryMetadata>,
     accounting: &mut SendAccounting<'_>,
 ) -> Result<SendDisposition, ()> {
@@ -109,6 +148,7 @@ pub(super) async fn send_single_message(
                             seq,
                             epoch,
                             player_id,
+                            fallback_preflight,
                         )
                         .await;
                         disposition = notify_or_close_on_fallback_failure(
@@ -133,6 +173,7 @@ pub(super) async fn send_single_message(
                     seq,
                     epoch,
                     player_id,
+                    fallback_preflight,
                 )
                 .await;
                 disposition = notify_or_close_on_fallback_failure(
@@ -320,9 +361,17 @@ async fn send_binary_fallback(
     seq: Option<u64>,
     epoch: Option<u32>,
     player_id: &PlayerId,
+    preflight: BinaryFallbackPreflight,
 ) -> Result<(), BinaryFallbackError> {
-    let data =
-        decode_binary_to_json(encoding, payload).map_err(BinaryFallbackError::Undeliverable)?;
+    let data = match preflight {
+        BinaryFallbackPreflight::NotNeeded => {
+            decode_binary_to_json(encoding, payload).map_err(BinaryFallbackError::Undeliverable)?
+        }
+        BinaryFallbackPreflight::Decoded(data) => data,
+        BinaryFallbackPreflight::Undeliverable(reason) => {
+            return Err(BinaryFallbackError::Undeliverable(reason));
+        }
+    };
     // `seq`/`epoch` were already gated per recipient by the caller, so the enum
     // form serializes correctly for v3 (present) and pre-v3 (absent) alike.
     let fallback = ServerMessage::GameData {
@@ -582,6 +631,38 @@ mod tests {
 
     fn player_a() -> Uuid {
         Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff)
+    }
+
+    #[test]
+    fn unsupported_binary_fallback_preflight_is_exact() {
+        let message = |encoding, payload: &'static [u8]| ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding,
+            payload: bytes::Bytes::from_static(payload),
+            seq: Some(1),
+            epoch: Some(1),
+        };
+
+        assert!(preflight_binary_fallback(
+            &message(GameDataEncoding::MessagePack, &[0xc1]),
+            GameDataEncoding::Json,
+        )
+        .is_unsupported());
+        assert!(preflight_binary_fallback(
+            &message(GameDataEncoding::Rkyv, &[0x01]),
+            GameDataEncoding::Json,
+        )
+        .is_unsupported());
+        assert!(!preflight_binary_fallback(
+            &message(GameDataEncoding::MessagePack, &[0xc1]),
+            GameDataEncoding::MessagePack,
+        )
+        .is_unsupported());
+        assert!(!preflight_binary_fallback(
+            &message(GameDataEncoding::MessagePack, &[0x01]),
+            GameDataEncoding::Json,
+        )
+        .is_unsupported());
     }
 
     fn hex(bytes: &[u8]) -> String {

@@ -1542,7 +1542,7 @@ impl OutboundReceiver {
     /// Reliable queue age drives the slow-consumer sojourn close. Control and
     /// lossy traffic deliberately do not lend their age to reliable traffic:
     /// each has an independent writer deadline policy.
-    pub fn oldest_reliable_enqueued_at(&self) -> Option<Instant> {
+    pub(crate) fn oldest_reliable_enqueued_at(&self) -> Option<Instant> {
         let state = self.shared.state();
         state
             .legacy

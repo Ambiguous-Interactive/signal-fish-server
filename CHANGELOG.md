@@ -772,6 +772,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reliable traffic retains its oldest reliable queue-plus-write ceiling,
   control traffic owns its enqueue deadline, and latest/volatile traffic gets a
   bounded write-progress deadline without inheriting unrelated queue age. The
+  same progress deadline now covers exact reports for deterministic
+  writer-discovered format failures: those payloads have already reached an
+  accounted unsupported terminal outcome and no longer inherit the age of
+  unresolved reliable data. Valid cross-encoding fallbacks reuse the preflight
+  decode rather than parsing the payload twice. The
   nightly 256-kbps asymmetric experiment now keeps a 90-KiB/s volatile stream
   connected for 60 seconds with production Pings enabled and every observed
   sequence gap covered by a causally prior exact report; reliable traffic still

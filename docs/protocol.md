@@ -665,7 +665,10 @@ with reason `unsupported_format`, then attempts a supplemental `Error` with code
 `UNSUPPORTED_GAME_DATA_FORMAT`, both before any later data. The supplemental
 error is best effort: if its write fails after the report succeeds, the socket
 disconnects and no successor is exposed. The report, not the aggregate counter
-or error alone, authorizes a gap on a continuing stream.
+or error alone, authorizes a gap on a continuing stream. Once the writer has
+deterministically classified the conversion as unsupported, that payload has
+reached its accounted terminal outcome; its report/advisory uses the bounded
+socket-progress deadline rather than inheriting unresolved reliable queue age.
 
 ### Close codes
 
