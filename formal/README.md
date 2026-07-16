@@ -117,6 +117,11 @@ Queue closure uses the same fail-closed boundary: because the physical
 receiver closes just before the finalizer records `QueueClose`, producer
 outcomes observed on the wrong side of that recorded event emit `Unsupported`
 instead of violating the model's `queueOpen` guard.
+A lifecycle close can also cancel the live socket-write future after
+`WriterStart`. Because the pilot does not model partially written frames, the
+recorder emits `Unsupported` at `QueueClose` when that in-flight write has no
+matching `WriterDrain`; this rejects the trace before a later
+`CloseFlushStart` can masquerade as a TLC divergence.
 Any direct/untraced v2 queue item also emits `Unsupported`: hidden occupancy
 would otherwise change FIFO capacity and make a valid `SendFull` look invalid
 to the projected model.

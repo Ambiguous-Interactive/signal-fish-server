@@ -84,6 +84,7 @@ struct RecorderState {
     attempt_messages: HashMap<u64, usize>,
     enqueued_attempts: HashMap<u64, bool>,
     recorded_queue: VecDeque<u64>,
+    in_flight_write: Option<(u64, bool)>,
     close_requested: bool,
     slow_consumer_close: bool,
     queue_closed: bool,
@@ -354,11 +355,27 @@ impl DeliveryTraceRecorder {
             Some(delivery_id),
             None,
         );
+        state.in_flight_write = Some((delivery_id, close_flush));
         Some(delivery_id)
     }
 
     pub(crate) fn finish_write(&self, delivery_id: u64, close_flush: bool) {
-        self.record(
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.projection_stopped {
+            return;
+        }
+        if state.in_flight_write != Some((delivery_id, close_flush)) {
+            push_event(
+                &mut state,
+                DeliveryTraceAction::Unsupported,
+                Some(delivery_id),
+                Some("write-finish-without-matching-start"),
+            );
+            return;
+        }
+        state.in_flight_write = None;
+        push_event(
+            &mut state,
             if close_flush {
                 DeliveryTraceAction::CloseFlushDrain
             } else {
@@ -385,6 +402,23 @@ impl DeliveryTraceRecorder {
         }
         push_event(&mut state, DeliveryTraceAction::QueueClose, None, None);
         state.queue_closed = true;
+        let cancelled_live_write = match state.in_flight_write {
+            Some((delivery_id, false)) => Some(delivery_id),
+            Some((_, true)) | None => None,
+        };
+        if let Some(delivery_id) = cancelled_live_write {
+            state.in_flight_write = None;
+            // The send task's close-select cancelled the live socket-write
+            // future after WriterStart. The base model has no transition for
+            // a partially written frame, so reject this production schedule
+            // before a CloseFlushStart could look like a replay divergence.
+            push_event(
+                &mut state,
+                DeliveryTraceAction::Unsupported,
+                Some(delivery_id),
+                Some("live-write-cancelled-by-close"),
+            );
+        }
     }
 
     /// End a partial producer-only projection before a test harness mutates
@@ -633,6 +667,84 @@ mod tests {
             assert_eq!(last.detail, Some("queue-close-observation-order-race"));
             assert!(!state.attempt_messages.contains_key(&delivery));
         }
+    }
+
+    #[test]
+    fn recorder_rejects_live_write_cancelled_by_close_before_final_flush() {
+        let recorder =
+            DeliveryTraceRecorder::new("cancelled-live-write", 2).expect("valid recorder");
+        let first = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let first_delivery = recorder.begin_delivery(&first);
+        recorder.record(DeliveryTraceAction::SendFast, Some(first_delivery), None);
+        let second = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let second_delivery = recorder.begin_delivery(&second);
+        recorder.record(DeliveryTraceAction::SendFast, Some(second_delivery), None);
+
+        assert_eq!(recorder.start_write(&first, false), Some(first_delivery));
+        recorder.record(DeliveryTraceAction::LifecycleClose, None, None);
+        recorder.queue_closed();
+        assert_eq!(
+            recorder.start_write(&second, true),
+            Some(second_delivery),
+            "the recorder may continue collecting context after failing closed"
+        );
+
+        let state = recorder
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let unsupported = state
+            .events
+            .iter()
+            .find(|event| event.action == DeliveryTraceAction::Unsupported)
+            .expect("cancelled live write must fail closed");
+        assert_eq!(unsupported.delivery_id, Some(first_delivery));
+        assert_eq!(unsupported.detail, Some("live-write-cancelled-by-close"));
+        assert!(
+            state
+                .events
+                .iter()
+                .position(|event| event.action == DeliveryTraceAction::Unsupported)
+                < state
+                    .events
+                    .iter()
+                    .position(|event| event.action == DeliveryTraceAction::CloseFlushStart),
+            "unsupported cancellation must precede final-flush replay events"
+        );
+    }
+
+    #[test]
+    fn recorder_accepts_live_write_drained_before_final_flush() {
+        let recorder = DeliveryTraceRecorder::new("drained-live-write", 2).expect("valid recorder");
+        let first = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let first_delivery = recorder.begin_delivery(&first);
+        recorder.record(DeliveryTraceAction::SendFast, Some(first_delivery), None);
+        let second = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let second_delivery = recorder.begin_delivery(&second);
+        recorder.record(DeliveryTraceAction::SendFast, Some(second_delivery), None);
+
+        let live_write = recorder
+            .start_write(&first, false)
+            .expect("live write starts");
+        recorder.finish_write(live_write, false);
+        recorder.record(DeliveryTraceAction::LifecycleClose, None, None);
+        recorder.queue_closed();
+        let close_write = recorder
+            .start_write(&second, true)
+            .expect("close flush starts");
+        recorder.finish_write(close_write, true);
+
+        let state = recorder
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            state
+                .events
+                .iter()
+                .all(|event| event.action != DeliveryTraceAction::Unsupported),
+            "a completed live write must remain replayable across lifecycle close"
+        );
     }
 
     #[test]
