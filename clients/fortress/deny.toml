@@ -1,0 +1,97 @@
+# Supply-chain policy for the standalone Fortress interoperability fixture.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # fortress-rollback 0.10.0 directly uses bincode 2.0.1. The advisory is an
+    # unmaintained notice, not a memory/correctness vulnerability, and states
+    # that no safe upgrade is available. Remove this exception when the pinned
+    # issue-242 reproduction can move to a maintained Fortress release.
+    "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+skip = []
+skip-tree = []
+highlight = "all"
+
+[[bans.deny]]
+name = "atty"
+reason = "Unmaintained - use std::io::IsTerminal instead"
+
+[[bans.deny]]
+name = "instant"
+reason = "Deprecated - use std::time::Instant directly"
+
+[[bans.deny]]
+name = "rustls-pemfile"
+reason = "Unmaintained (RUSTSEC-2025-0134) - use rustls-pki-types"
+
+[[bans.deny]]
+name = "openssl"
+reason = "Prefer the pure-Rust rustls TLS stack"
+
+[[bans.deny]]
+name = "openssl-sys"
+reason = "Prefer the pure-Rust rustls TLS stack"
+
+[[bans.deny]]
+name = "native-tls"
+reason = "Prefer rustls for consistent cross-platform TLS"
+
+[[bans.deny]]
+name = "gcc"
+reason = "Renamed to cc"
+
+[[bans.deny]]
+name = "failure"
+reason = "Unmaintained - use thiserror or anyhow"
+
+[[bans.deny]]
+name = "failure_derive"
+reason = "Unmaintained - use thiserror derives"
+
+[[bans.deny]]
+name = "tempdir"
+reason = "Deprecated - use tempfile"
+
+[[bans.deny]]
+name = "term"
+reason = "Unmaintained"
+
+[[bans.deny]]
+name = "net2"
+reason = "Deprecated - use std::net and socket2"
+
+[[bans.deny]]
+name = "rustc-serialize"
+reason = "Deprecated - use serde"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
