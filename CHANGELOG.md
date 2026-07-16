@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a pinned Fortress Rollback issue-242 interoperability gate. Two real game
+  processes use `fortress-rollback` 0.10.0 and the released Signal Fish Rust
+  client 0.8.0 to advance 600 confirmed frames through a server built from the
+  current checkout. CI now rejects relay stalls, wait recommendations, loss,
+  overflow, excessive rollback/confirmation lag, low throughput, incomplete
+  sends, old queued frames, or mismatched state checksums.
 - Add an opt-in delivery trace-refinement pilot for the reliable v2 FIFO.
   Feature-gated per-connection JSONL capture now replays producer, writer,
   queue-close, and finalization transitions against TLA+, rejects unsupported

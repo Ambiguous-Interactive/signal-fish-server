@@ -312,6 +312,7 @@ jobs:
               # Cargo manifests/lockfiles (MSRV/toolchain/docs parity touchpoints).
               case "$f" in
                 Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
+                clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|.agents/skills/*|target/*|progress/*) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs) ;;

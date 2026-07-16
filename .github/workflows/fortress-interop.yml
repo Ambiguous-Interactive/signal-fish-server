@@ -1,0 +1,99 @@
+# Real-process Fortress Rollback regression for issue 242. The standalone
+# clients/fortress crate pins released client and game dependencies, while the
+# runner builds the signaling server from the commit under test.
+
+name: Fortress Interop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/fortress/**"
+      - "scripts/run-fortress-interop.sh"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/fortress-interop.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/fortress/**"
+      - "scripts/run-fortress-interop.sh"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/fortress-interop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  interop:
+    name: Fortress Rollback (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: |
+            .
+            clients/fortress
+          save-if: >-
+            ${{ github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Run Fortress interoperability fixture
+        run: bash scripts/run-fortress-interop.sh
+
+  client-deny:
+    name: Fortress Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Extract fixture MSRV
+        id: deny-msrv
+        run: |
+          set -euo pipefail
+          MSRV=$(bash scripts/read-toml-string.sh clients/fortress/Cargo.toml rust-version package || true)
+          if [ -z "$MSRV" ]; then
+            echo "ERROR: Could not extract rust-version from clients/fortress/Cargo.toml"
+            exit 1
+          fi
+          echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+      - name: Run cargo-deny (Fortress fixture)
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          manifest-path: clients/fortress/Cargo.toml
+          arguments: --all-features
+          rust-version: ${{ steps.deny-msrv.outputs.version }}
