@@ -2,9 +2,9 @@
 //!
 //! The nightly real-process matrix covers clean mesh and host topologies at
 //! N=2/8/16, one exact N=3 pairwise ICE partition, and fail-loud 1% `tc netem`
-//! loss at N=2/8. Loss stays active
-//! through ICE/channel formation; exact channel exchange is released only
-//! after fault lift. The H8 fault variant additionally proves a partial
+//! loss at N=2/8. Loss stays active for a bounded formation window; the exact
+//! graph and channel exchange must settle after fault lift. The H8 fault
+//! variant additionally proves a partial
 //! partition: one client with deterministic crippled ICE falls back to the
 //! WebSocket relay while the other 15 retain their exact 105-edge WebRTC
 //! submesh. The pairwise cell removes only one edge while all three clients
@@ -39,6 +39,7 @@ use websocket_test_helpers::server_process::{spawn_server, ServerProcess};
 const H8_PLAYERS: usize = 16;
 const EVENT_DEADLINE: Duration = Duration::from_secs(60);
 const SUCCESS_BARRIER_DEADLINE: Duration = Duration::from_secs(360);
+const NETEM_FORMATION_WINDOW: Duration = Duration::from_secs(10);
 const CLIENT_EXIT_DEADLINE: Duration = Duration::from_secs(30);
 const METRIC_QUIESCENCE_DEADLINE: Duration = Duration::from_secs(30);
 const CLIENT_MAX_RUNTIME_SECS: u64 = 540;
@@ -988,6 +989,10 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             Duration::from_secs(scenario.run_for_secs()) > maximum_pre_success_wait,
             "loss-client soft deadline must exceed room creation plus the shared fault-formation/recovery barrier"
         );
+        assert!(
+            NETEM_FORMATION_WINDOW < Duration::from_secs(scenario.p2p_timeout_secs()),
+            "the loss window must lift before the client's P2P fallback deadline"
+        );
     }
     let maximum_bounded_host_release_wait =
         EVENT_DEADLINE + SUCCESS_BARRIER_DEADLINE + EVENT_DEADLINE + CLIENT_EXIT_DEADLINE;
@@ -1097,11 +1102,26 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let barrier_started = tokio::time::Instant::now();
     let barrier_deadline = barrier_started + SUCCESS_BARRIER_DEADLINE;
     let netem_drops = if scenario.uses_netem() {
-        // Prove that every planned pair formed while loss is still active.
-        // Do not keep netem installed while waiting for the terminal local ICE
-        // gathering callback: a dropped mDNS packet can leave gathering open
-        // after every data channel is already connected, deadlocking the
-        // exchange gate without disproving connectivity under loss.
+        // Exercise ICE/DTLS/SCTP formation under real random loss for longer
+        // than the historical clean/loss barriers, then test the transition
+        // this scenario names: exact recovery after fault lift. Requiring the
+        // complete graph before lifting a stochastic fault made recovery
+        // unreachable when a single DCEP/channel-open exchange remained
+        // wedged under loss.
+        let loss_window_deadline = tokio::time::Instant::now() + NETEM_FORMATION_WINDOW;
+        join_all(
+            clients
+                .iter_mut()
+                .map(|client| client.drain_until(loss_window_deadline)),
+        )
+        .await;
+        let guard = netem_guard
+            .take()
+            .expect("netem scenario owns an active qdisc guard");
+        guard.verify_active();
+        let drops = guard.release();
+
+        // Any incomplete pair must now recover on the clean loopback path.
         join_all(clients.iter_mut().enumerate().map(|(ordinal, client)| {
             let expected_pairs = match scenario.topology {
                 MatrixTopology::Mesh => scenario.players - 1,
@@ -1115,11 +1135,6 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             )
         }))
         .await;
-        let guard = netem_guard
-            .take()
-            .expect("netem scenario owns an active qdisc guard");
-        guard.verify_active();
-        let drops = guard.release();
         join_all(clients.iter_mut().map(|client| {
             client.await_event_count(
                 "exchange_ready",

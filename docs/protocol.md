@@ -623,12 +623,21 @@ that ordering or record exact accountability, it fails closed: no later data is
 exposed and the connection closes with `4002 slow_consumer`. V2 retains its
 legacy FIFO ordering.
 
-Every outbound item is also bounded by `websocket.max_sojourn_ms` (default
-15000). The deadline is measured from the oldest item across all queue lanes,
-the current batch, and the item being written; the current socket write must
-finish before that deadline. Expiry closes the recipient with `4002
-slow_consumer`, even if that client continues to send pings. Farewell `Error`
-frames are best effort; the close code is authoritative.
+Queue priority ends once TCP accepts bytes, so accepted sockets also inherit a
+bounded send-buffer request (`websocket.socket_send_buffer_bytes`, default
+65536; `0` keeps the platform default). This limits data already committed
+ahead of a later WebSocket Ping or delivery report. The operating system may
+clamp or account the request differently; Linux commonly reports twice the
+requested value.
+
+`websocket.max_sojourn_ms` (default 15000) is class-aware. Reliable traffic is
+bounded from the oldest reliable queue/batch enqueue through socket-write
+completion. Control traffic uses its own enqueue timestamp, so stale lossy
+data cannot expire a fresh report. Latest/volatile queue age is resolved by
+their explicit coalesce/drop policy; after selection, the same duration bounds
+socket-write progress so a transport that stops draining cannot wedge the sole
+writer. Deadline expiry fails closed with `4002 slow_consumer`. Farewell
+`Error` frames are best effort; the close code is authoritative.
 
 Practical consequences:
 
@@ -656,7 +665,10 @@ with reason `unsupported_format`, then attempts a supplemental `Error` with code
 `UNSUPPORTED_GAME_DATA_FORMAT`, both before any later data. The supplemental
 error is best effort: if its write fails after the report succeeds, the socket
 disconnects and no successor is exposed. The report, not the aggregate counter
-or error alone, authorizes a gap on a continuing stream.
+or error alone, authorizes a gap on a continuing stream. Once the writer has
+deterministically classified the conversion as unsupported, that payload has
+reached its accounted terminal outcome; its report/advisory uses the bounded
+socket-progress deadline rather than inheriting unresolved reliable queue age.
 
 ### Close codes
 
@@ -671,7 +683,7 @@ surface and are never renumbered):
 | ---- | ------------- | ------- |
 | `4000` | `server_shutdown` | The server is shutting down after a graceful drain |
 | `4001` | `auth_timeout` | Never authenticated within `websocket.auth_timeout_secs` |
-| `4002` | `slow_consumer` | Delivery contract failed closed: reliable queue timeout, oldest outbound/write sojourn, or inability to preserve exact accountability/control priority |
+| `4002` | `slow_consumer` | Delivery contract failed closed: reliable queue/sojourn timeout, selected socket write stopped progressing, or exact accountability/control priority could not be preserved |
 | `4003` | `activity_timeout` | The server WebSocket Ping write timed out, the matching Pong missed its deadline, or the `server.ping_timeout` activity reaper evicted the connection |
 | `4004` | `idle_timeout` | No inbound frame within `websocket.idle_timeout_secs` |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |

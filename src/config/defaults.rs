@@ -433,6 +433,18 @@ pub const fn default_pong_timeout_secs() -> u64 {
     5
 }
 
+/// Default requested TCP send-buffer size for accepted HTTP/WebSocket sockets.
+///
+/// Keeping the kernel handoff bounded prevents megabytes of already-accepted
+/// game data from sitting ahead of a WebSocket Ping or delivery report. Linux
+/// reports approximately twice this value because `SO_SNDBUF` includes kernel
+/// bookkeeping; 64 KiB therefore leaves about four seconds of data ahead of
+/// control traffic on a 256-kbps downstream, below the default 5-second Pong
+/// deadline while preserving more bandwidth-delay-product headroom.
+pub const fn default_socket_send_buffer_bytes() -> u32 {
+    64 * 1_024
+}
+
 /// Default per-connection outbound queue capacity (messages).
 ///
 /// Sized to absorb realistic relay bursts (e.g. rollback-netcode input
@@ -466,7 +478,7 @@ pub const fn default_slow_consumer_timeout_ms() -> u64 {
     5_000
 }
 
-/// Default maximum outbound queue sojourn time in milliseconds.
+/// Default reliable/control queue sojourn and socket-write progress time.
 ///
 /// The 15-second default bounds stale queued state while leaving ample room for
 /// transient client and network stalls.

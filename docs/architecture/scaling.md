@@ -155,8 +155,13 @@ fail_loud_bound ≈ queue_fill_seconds + slow_consumer_timeout
 If `excess_rate` is zero, the queue does not fill under steady state; still
 reserve burst headroom. A full reliable queue can pace room senders for at most
 one `slow_consumer_timeout_ms` window before that recipient is closed loudly.
-`max_sojourn_ms` is an independent upper bound on the age of queued, batched,
-or in-flight work and may close the connection first.
+`max_sojourn_ms` independently bounds oldest reliable queued/batched work and
+each control item's own queue age through write completion. Latest/volatile
+queue age is handled by their loss policy; the value bounds their selected
+socket write instead. Any of those deadlines may close the connection first.
+`socket_send_buffer_bytes` bounds data already handed to TCP ahead of later
+control (the 65536-byte default is a request; operating systems may clamp or
+account it differently).
 
 Do not multiply `send_queue_capacity × slow_consumer_timeout` and interpret the
 result as seconds: queue slots and time have different units. With the defaults,

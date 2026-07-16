@@ -282,7 +282,9 @@ async fn main() -> anyhow::Result<()> {
             tls_shutdown_handle.graceful_shutdown(None);
         });
 
-        let serve_result = axum_server::bind_rustls(addr, tls_config)
+        let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?
+            .into_std()?;
+        let serve_result = axum_server::from_tcp_rustls(listener, tls_config)?
             .handle(tls_handle)
             .serve(make_service)
             .await;
@@ -294,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start the server over plain TCP (typically behind a reverse proxy).
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
     tracing::info!(
         %addr,
         cors_origins = %cfg.security.cors_origins,
@@ -513,11 +515,16 @@ mod cli_tests {
             shutdown_connection_settle_timeout(),
             websocket::CONNECTION_CLOSE_WRITE_TIMEOUT
                 .saturating_mul(websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
+                .saturating_add(websocket::REGISTERED_SHUTDOWN_SETTLE_MARGIN)
         );
         assert_eq!(
             websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS,
             3,
             "registered shutdown close uses flush, semantic close, and sink close budgets"
+        );
+        assert!(
+            websocket::REGISTERED_SHUTDOWN_SETTLE_MARGIN > Duration::ZERO,
+            "handler cleanup needs scheduling margin after the final write budget"
         );
     }
 

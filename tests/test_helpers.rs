@@ -24,9 +24,11 @@ pub struct RunningTestServer {
 #[allow(dead_code)]
 impl RunningTestServer {
     pub async fn spawn(server: Arc<EnhancedGameServer>, router: axum::Router) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
+        let listener = signal_fish_server::websocket::bind_tcp_listener(
+            "127.0.0.1:0".parse().expect("parse test listener address"),
+            server.config().websocket_config.socket_send_buffer_bytes,
+        )
+        .expect("bind test listener");
         let addr = listener.local_addr().expect("read test listener address");
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let serve_task = tokio::spawn(async move {

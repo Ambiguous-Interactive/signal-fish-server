@@ -103,6 +103,7 @@
     "idle_timeout_secs": 300,
     "server_ping_interval_secs": 10,
     "pong_timeout_secs": 5,
+    "socket_send_buffer_bytes": 65536,
     "send_queue_capacity": 1024,
     "control_queue_capacity": 128,
     "slow_consumer_timeout_ms": 5000,

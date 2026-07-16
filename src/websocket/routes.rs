@@ -4,9 +4,41 @@ use axum::extract::State;
 use axum::routing::get;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpSocket};
 
 use super::handler::{websocket_handler, websocket_handler_v3};
 use super::metrics::{metrics_handler, prometheus_metrics_handler};
+
+const LISTENER_BACKLOG: u32 = 1_024;
+
+/// Bind a TCP listener whose accepted sockets inherit a bounded send buffer.
+///
+/// A bounded kernel handoff is part of the WebSocket control-priority
+/// contract: once a data frame has been accepted by TCP, application-level
+/// queue priority cannot move a later Ping or delivery report ahead of it.
+pub fn bind_tcp_listener(
+    addr: SocketAddr,
+    socket_send_buffer_bytes: u32,
+) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    if socket_send_buffer_bytes > 0 {
+        socket.set_send_buffer_size(socket_send_buffer_bytes)?;
+    }
+    let effective_send_buffer_bytes = socket.send_buffer_size()?;
+    socket.bind(addr)?;
+    let listener = socket.listen(LISTENER_BACKLOG)?;
+    tracing::info!(
+        requested_send_buffer_bytes = socket_send_buffer_bytes,
+        effective_send_buffer_bytes,
+        "Bound TCP listener with bounded WebSocket kernel handoff"
+    );
+    Ok(listener)
+}
 
 /// Create the nestable Axum router with WebSocket support.
 ///
@@ -84,6 +116,7 @@ pub async fn run_server(
     server_config: ServerConfig,
     cors_origins: String,
 ) -> anyhow::Result<()> {
+    let socket_send_buffer_bytes = server_config.websocket_config.socket_send_buffer_bytes;
     // Create storage configuration
     let database_config = DatabaseConfig::from_env()?;
 
@@ -112,7 +145,7 @@ pub async fn run_server(
     let app = create_standalone_router(&cors_origins).with_state(game_server);
 
     // Start server
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = bind_tcp_listener(addr, socket_send_buffer_bytes)?;
     tracing::info!(%addr, "Starting enhanced Signal Fish server");
     tracing::info!(
         deployment_mode = "single_instance",
@@ -129,4 +162,46 @@ pub async fn run_server(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn accepted_socket_preserves_listener_send_buffer_bound() {
+        const REQUESTED_BYTES: u32 = 32 * 1_024;
+        // Linux commonly reports exactly twice the request. macOS applies its
+        // own accepted-socket rounding (for example, 65,328 for a 32-KiB
+        // request). The cross-platform contract is the bounded kernel handoff,
+        // not byte-for-byte equality with a pre-connect probe socket.
+        const MAX_EFFECTIVE_BYTES: u32 = REQUESTED_BYTES * 2;
+
+        let listener = bind_tcp_listener(
+            "127.0.0.1:0".parse().expect("parse loopback address"),
+            REQUESTED_BYTES,
+        )
+        .expect("bind bounded listener");
+        let addr = listener.local_addr().expect("read listener address");
+        let accept = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept loopback client");
+            let stream = stream.into_std().expect("convert accepted stream");
+            TcpSocket::from_std_stream(stream)
+                .send_buffer_size()
+                .expect("read accepted send buffer")
+        });
+
+        let client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect loopback client");
+        let accepted = accept.await.expect("accept task panicked");
+        drop(client);
+
+        assert!(
+            accepted <= MAX_EFFECTIVE_BYTES,
+            "accepted socket SO_SNDBUF {accepted} exceeded the configured \
+             two-times effective ceiling {MAX_EFFECTIVE_BYTES}"
+        );
+    }
 }

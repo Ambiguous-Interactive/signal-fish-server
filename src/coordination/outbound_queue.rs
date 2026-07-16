@@ -1524,6 +1524,7 @@ impl OutboundReceiver {
     /// each lane's front. The socket writer combines this with in-flight/batched
     /// timestamps so sustained fresh traffic cannot hide stale work from the
     /// global sojourn deadline.
+    #[cfg(test)]
     pub fn oldest_enqueued_at(&self) -> Option<Instant> {
         let state = self.shared.state();
         state
@@ -1532,6 +1533,24 @@ impl OutboundReceiver {
             .chain(state.control.iter())
             .chain(state.data.iter())
             .chain(state.barriers.iter())
+            .map(|queued| queued.enqueued_at)
+            .min()
+    }
+
+    /// Oldest reliable item still resident in any queue lane.
+    ///
+    /// Reliable queue age drives the slow-consumer sojourn close. Control and
+    /// lossy traffic deliberately do not lend their age to reliable traffic:
+    /// each has an independent writer deadline policy.
+    pub(crate) fn oldest_reliable_enqueued_at(&self) -> Option<Instant> {
+        let state = self.shared.state();
+        state
+            .legacy
+            .iter()
+            .chain(state.control.iter())
+            .chain(state.data.iter())
+            .chain(state.barriers.iter())
+            .filter(|queued| queued.class() == Some(DeliveryClass::Reliable))
             .map(|queued| queued.enqueued_at)
             .min()
     }
