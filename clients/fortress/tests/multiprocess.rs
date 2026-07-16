@@ -10,6 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
 const CHILD_DEADLINE: Duration = Duration::from_secs(40);
+const SERVER_READY_DEADLINE: Duration = Duration::from_secs(10);
+const SERVER_SPAWN_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Deserialize)]
 struct Report {
@@ -61,7 +63,7 @@ impl Drop for Server {
 }
 
 fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve port");
+    let listener = TcpListener::bind("0.0.0.0:0").expect("reserve port");
     listener.local_addr().expect("ephemeral address").port()
 }
 
@@ -85,6 +87,72 @@ fn wait_for(mut predicate: impl FnMut() -> bool, deadline: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+fn wait_for_server(child: &mut Child, port: u16) -> Result<(), String> {
+    let end = Instant::now() + SERVER_READY_DEADLINE;
+    while Instant::now() < end {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("query server process: {error}"))?
+        {
+            return Err(format!("server exited before readiness with {status}"));
+        }
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "server did not bind 127.0.0.1:{port} within {SERVER_READY_DEADLINE:?}"
+    ))
+}
+
+fn spawn_server(server_bin: &str) -> (Server, u16) {
+    let mut failures = Vec::new();
+    for attempt in 1..=SERVER_SPAWN_ATTEMPTS {
+        let port = free_port();
+        let mut command = Command::new(server_bin);
+        command.stdout(Stdio::null()).stderr(Stdio::inherit());
+
+        // Config loading applies environment overrides last. Scrub the whole
+        // namespace so ambient developer/runner settings cannot change auth,
+        // TURN, rate limits, or any other behavior under this regression.
+        for (key, _) in std::env::vars_os() {
+            if key
+                .to_str()
+                .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
+            {
+                command.env_remove(&key);
+            }
+        }
+        command
+            .env("SIGNAL_FISH__PORT", port.to_string())
+            .env("SIGNAL_FISH__LOGGING__LEVEL", "warn")
+            .env("SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING", "false")
+            .env("SIGNAL_FISH__TURN__ENABLED", "false")
+            .env("SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH", "false")
+            .env("SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH", "false")
+            .env("SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE", "false");
+
+        match command.spawn() {
+            Ok(mut child) => match wait_for_server(&mut child, port) {
+                Ok(()) => return (Server(child), port),
+                Err(reason) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    failures.push(format!("attempt {attempt} (port {port}): {reason}"));
+                }
+            },
+            Err(error) => failures.push(format!(
+                "attempt {attempt} (port {port}): spawn server: {error}"
+            )),
+        }
+    }
+    panic!(
+        "server failed to become ready after {SERVER_SPAWN_ATTEMPTS} attempts:\n{}",
+        failures.join("\n")
+    );
 }
 
 fn wait_outputs(mut first: Child, mut second: Child) -> (Output, Output) {
@@ -206,27 +274,8 @@ fn two_fortress_game_processes_sustain_60fps_through_real_server() {
         "SIGNAL_FISH_SERVER_BIN must be absolute so child cwd changes cannot select another binary"
     );
     let peer_bin = env!("CARGO_BIN_EXE_fortress-relay-peer");
-    let port = free_port();
     let room_file = temp_room_file();
-    let mut server = Server(
-        Command::new(server_bin)
-            .env("SIGNAL_FISH__PORT", port.to_string())
-            .env("SIGNAL_FISH__LOGGING__LEVEL", "warn")
-            .env("SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH", "false")
-            .env("SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH", "false")
-            .env("SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE", "false")
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn Signal Fish Server"),
-    );
-    assert!(
-        wait_for(
-            || TcpStream::connect(("127.0.0.1", port)).is_ok(),
-            Duration::from_secs(10),
-        ),
-        "timed out waiting for server readiness"
-    );
+    let (mut server, port) = spawn_server(&server_bin);
     assert!(
         server.0.try_wait().expect("query server").is_none(),
         "server exited early"
