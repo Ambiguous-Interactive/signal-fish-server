@@ -63,6 +63,22 @@ async fn connect(addr: std::net::SocketAddr) -> (WsSink, WsReceiver) {
     stream.split()
 }
 
+/// Receive the next frame before one absolute phase deadline.
+///
+/// Server protocol Pings and other unrelated frames must not restart a relative
+/// timeout: doing so can turn a missing expected message into an unbounded wait.
+async fn next_frame_before(
+    receiver: &mut WsReceiver,
+    deadline: tokio::time::Instant,
+    context: &str,
+) -> Message {
+    tokio::time::timeout_at(deadline, receiver.next())
+        .await
+        .unwrap_or_else(|_elapsed| panic!("{context}: timed out before the phase deadline"))
+        .unwrap_or_else(|| panic!("{context}: connection closed"))
+        .unwrap_or_else(|error| panic!("{context}: websocket error: {error}"))
+}
+
 /// Join `room` and return the server-assigned player id.
 async fn join_room(
     sink: &mut WsSink,
@@ -83,12 +99,9 @@ async fn join_room(
         .await
         .expect("send JoinRoom");
 
+    let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
     loop {
-        let frame = tokio::time::timeout(EVENT_DEADLINE, receiver.next())
-            .await
-            .expect("timed out waiting for RoomJoined")
-            .expect("connection closed while joining room")
-            .expect("websocket error while joining room");
+        let frame = next_frame_before(receiver, deadline, "waiting for RoomJoined").await;
         let Message::Text(text) = frame else {
             continue;
         };
@@ -192,8 +205,10 @@ async fn rst_during_relay_heals_room_and_conserves() {
         ledger.record_consumed_v2_room_snapshot("Watcher", &[sender_id, watcher_id]);
         ledger.record_consumed_v2_room_snapshot("Victim", &[sender_id, watcher_id, victim_id]);
 
-        // The victim drains through the proxy until the RST severs it, then
-        // records its own (gap-free-prefix) disconnect.
+        // The victim drains through the proxy while the link is live. The
+        // proxy unit test independently proves that `rst_all` terminates the
+        // client-facing socket on every platform; this relay test proves the
+        // complementary server-facing contract through PlayerLeft below.
         let victim_ledger = Arc::clone(&ledger);
         let victim_drain = tokio::spawn(async move {
             loop {
@@ -205,7 +220,6 @@ async fn rst_during_relay_heals_room_and_conserves() {
                     Some(Ok(_)) => continue,
                 }
             }
-            victim_ledger.note_injected_fault("Victim", "tcp-rst mid-relay");
         });
 
         let mut payload = LedgerPayload::new("Sender", PAYLOAD_PADDING_BYTES);
@@ -219,6 +233,17 @@ async fn rst_during_relay_heals_room_and_conserves() {
         })
         .await;
         proxy.rst_all();
+        // Freeze the victim's already-proven prefix before recording the
+        // terminal fault. Otherwise an already-buffered pre-RST frame can
+        // race the terminal marker and correctly trip the auditor's
+        // no-frames-after-disconnect invariant.
+        victim_drain.abort();
+        match victim_drain.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => panic!("victim drain panicked: {error}"),
+        }
+        ledger.note_injected_fault("Victim", "tcp-rst mid-relay");
 
         send_burst(&mut sender_sink, &mut payload, POST_RST_MESSAGES).await;
         let total_sent = payload.sent();
@@ -226,12 +251,14 @@ async fn rst_during_relay_heals_room_and_conserves() {
         // The watcher must observe the complete stream AND the victim's
         // PlayerLeft (the room healing around the dead connection).
         let mut saw_victim_leave = false;
+        let watcher_deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
         while ledger.received_count("Watcher", "Sender") < total_sent || !saw_victim_leave {
-            let frame = tokio::time::timeout(EVENT_DEADLINE, watcher_rx.next())
-                .await
-                .expect("watcher timed out waiting for the post-RST stream")
-                .expect("watcher connection closed mid-stream")
-                .expect("watcher websocket error mid-stream");
+            let frame = next_frame_before(
+                &mut watcher_rx,
+                watcher_deadline,
+                "watcher waiting for the post-RST stream and PlayerLeft",
+            )
+            .await;
             let Message::Text(text) = frame else {
                 continue;
             };
@@ -239,8 +266,11 @@ async fn rst_during_relay_heals_room_and_conserves() {
                 saw_victim_leave = true;
             }
         }
+        // Keep the client-side sink alive until PlayerLeft proves that the
+        // server observed the proxy's upstream RST rather than a local client
+        // drop racing the injected fault.
+        drop(victim_sink);
 
-        victim_drain.await.expect("victim drain panicked");
         (ledger, total_sent)
     };
     let (ledger, total_sent) = tokio::time::timeout(tokio::time::Duration::from_secs(60), chaos)
@@ -453,22 +483,26 @@ async fn reconnect_churn_leaks_nothing() {
 
             // Both sides must observe the full exchange BEFORE the kill, so
             // the terminal ledger is exact (nothing was in flight).
+            let persistent_relay_deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
             while ledger.received_count("Persistent", &churn_name) < MESSAGES_FROM_CHURN {
-                let frame = tokio::time::timeout(EVENT_DEADLINE, persistent_rx.next())
-                    .await
-                    .expect("persistent client timed out draining churn relay")
-                    .expect("persistent connection closed mid-churn")
-                    .expect("persistent websocket error mid-churn");
+                let frame = next_frame_before(
+                    &mut persistent_rx,
+                    persistent_relay_deadline,
+                    "persistent client draining churn relay",
+                )
+                .await;
                 if let Message::Text(text) = frame {
                     let _player_left = record_frame(&ledger, "Persistent", &text);
                 }
             }
+            let churn_relay_deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
             while ledger.received_count(&churn_name, &persistent_sender) < MESSAGES_TO_CHURN {
-                let frame = tokio::time::timeout(EVENT_DEADLINE, churn_rx.next())
-                    .await
-                    .expect("churn client timed out draining persistent relay")
-                    .expect("churn connection closed before its kill")
-                    .expect("churn websocket error before its kill");
+                let frame = next_frame_before(
+                    &mut churn_rx,
+                    churn_relay_deadline,
+                    "churn client draining persistent relay",
+                )
+                .await;
                 if let Message::Text(text) = frame {
                     let _player_left = record_frame(&ledger, &churn_name, &text);
                 }
@@ -479,12 +513,14 @@ async fn reconnect_churn_leaks_nothing() {
             proxy.rst_all();
             ledger.note_injected_fault(&churn_name, "tcp-rst churn kill");
             let mut saw_churn_leave = false;
+            let player_left_deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
             while !saw_churn_leave {
-                let frame = tokio::time::timeout(EVENT_DEADLINE, persistent_rx.next())
-                    .await
-                    .expect("persistent client timed out waiting for churn PlayerLeft")
-                    .expect("persistent connection closed awaiting PlayerLeft")
-                    .expect("persistent websocket error awaiting PlayerLeft");
+                let frame = next_frame_before(
+                    &mut persistent_rx,
+                    player_left_deadline,
+                    "persistent client waiting for churn PlayerLeft",
+                )
+                .await;
                 if let Message::Text(text) = frame {
                     saw_churn_leave = record_frame(&ledger, "Persistent", &text) == Some(churn_id);
                 }

@@ -83,14 +83,15 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 - This policy applies to every repository agent entrypoint (Codex, Claude, and
   GitHub Copilot).
 - Use local `git` for branch management, staging, commits, and pushes.
-- Prefer the connected VS Code GitHub extension / GitHub app for pull-request
-  creation, metadata, comments, reviewer requests, and review inspection.
+- Use the connected VS Code GitHub extension / GitHub app for pull-request
+  creation, metadata, comments, reviewer requests, review inspection, and every
+  other GitHub operation it supports.
 - Do not block repository delivery solely because `gh auth status` is
   unauthenticated when the connected GitHub extension/app is available and the
   Git remote can push successfully.
-- Use `gh` only for capabilities the connector cannot supply (notably detailed
-  GitHub Actions logs or GraphQL review-thread operations), and only when an
-  authenticated CLI session is available.
+- Fall back to `gh` only for a required capability the extension/app cannot
+  supply (notably detailed GitHub Actions logs or GraphQL review-thread
+  operations), and only when an authenticated CLI session is available.
 
 ### Hook Reliability Rules (Required)
 

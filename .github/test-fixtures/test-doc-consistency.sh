@@ -133,6 +133,7 @@ INTERNAL_PATHS=(
     "Cargo.lock"
     "PLAN.md"
     "AGENTS.md"
+    "CLAUDE.md"
     "pre-push.txt"
     "logs_2025.zip"
     # Linter/tool config (glob patterns)

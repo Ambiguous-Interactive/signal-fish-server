@@ -157,6 +157,7 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         "Cargo.lock",
         "PLAN.md",
         "AGENTS.md",
+        "CLAUDE.md",
         "pre-push.txt",
         ".gitignore",
         ".dockerignore",

@@ -21085,6 +21085,47 @@ fn test_ci_dep_detect_is_actor_agnostic_for_dependency_only_skips() {
     );
 }
 
+#[test]
+fn test_agent_github_access_policy_is_extension_first() {
+    let root = repo_root();
+    let policy_files = [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".github/copilot-instructions.md",
+        ".llm/context.md",
+        ".llm/skills/mandatory-workflow.md",
+    ];
+
+    for relative_path in policy_files {
+        let policy = read_file(&root.join(relative_path));
+        let normalized = policy.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("local `git`"),
+            "{relative_path} must reserve branches, commits, and pushes for local git"
+        );
+        assert!(
+            normalized.contains("VS Code GitHub") && normalized.contains("GitHub app"),
+            "{relative_path} must make the connected VS Code GitHub extension/app primary"
+        );
+        assert!(
+            normalized.contains("fallback") || normalized.contains("Fall back"),
+            "{relative_path} must describe gh as a fallback"
+        );
+        assert!(
+            normalized.contains("authenticated"),
+            "{relative_path} must allow gh fallback only through an authenticated session"
+        );
+        let capability_limited = normalized.contains("only when")
+            && (normalized.contains("cannot")
+                || normalized.contains("does not expose")
+                || normalized.contains("lacks"));
+        assert!(
+            capability_limited,
+            "{relative_path} must limit gh fallback to capabilities the extension/app cannot perform"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal Path Classification Tests
 //
@@ -21131,6 +21172,7 @@ const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
     ".dockerignore",
     "PLAN.md",
     "AGENTS.md",
+    "CLAUDE.md",
     "pre-push.txt",
     "logs_*.zip",
     "clippy.toml",
