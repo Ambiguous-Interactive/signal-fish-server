@@ -17,6 +17,7 @@ context.
 |--------|-----------|-------|--------|
 | Native | [`native/`](native/README.md) | Rust + [webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.17 (real DTLS/SCTP data channels) | ✅ In-repo, CI-enforced (`.github/workflows/webrtc-interop.yml`) |
 | Browser | [`browser/`](browser/README.md) | TypeScript + real headless-Chromium `RTCPeerConnection` (playwright-core) | ✅ In-repo, CI-enforced (`.github/workflows/browser-interop.yml`) |
+| Fortress | [`fortress/`](fortress/README.md) | Rust + `fortress-rollback` 0.10.0 + released Signal Fish Rust client 0.8.0 | ✅ In-repo issue-242 regression, CI-enforced (`.github/workflows/fortress-interop.yml`) |
 
 Both clients speak the same JSONL stdout event contract and exit codes (the
 [native README](native/README.md) is canonical), so one Rust interop harness asserts over native and browser
@@ -29,6 +30,7 @@ interop cells live in the native crate's test harness behind the `browser-intero
 ```bash
 bash scripts/run-webrtc-interop.sh    # native client: unit + native<->native interop suite
 bash scripts/run-browser-interop.sh   # browser client: lint/build + browser<->native interop cells
+bash scripts/run-fortress-interop.sh  # two Fortress games through this checkout's server
 ```
 
 The first builds the server binary, lints the native client, and runs its unit + multi-process WebRTC interop
@@ -37,3 +39,9 @@ browser client and runs the browser cells (mixed mesh, browser↔browser, host s
 crippled-ICE browser fallback, the mDNS `.local` trap, pure-v2 browser, mid-handshake close handling, and
 SIGTERM/SIGKILL Chromium teardown reaping). Everything runs over loopback; the
 only network fetch is the cached Chromium headless-shell download at install time.
+
+The Fortress fixture is a separate compatibility consumer rather than a
+reference implementation of the wire protocol. It recreates a 60 Hz rollback
+game loop with one polling-client callback per frame and gates throughput,
+queue age, delivery conservation, rollback depth, and checksum agreement
+against the real server binary.

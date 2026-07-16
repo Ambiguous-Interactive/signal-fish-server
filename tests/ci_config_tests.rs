@@ -1339,6 +1339,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
         "docker-publish.yml",
         "Docker image publish to GHCR (owner/repo-derived image name)",
     ),
+    (
+        "fortress-interop.yml",
+        "Pinned Fortress Rollback real-process interoperability gate",
+    ),
 ];
 
 /// Container image platforms that MUST be published as a single multi-arch
@@ -21028,6 +21032,58 @@ fn test_run_local_ci_excludes_check_outdated() {
     );
 }
 
+#[test]
+fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
+    let root = repo_root();
+    let root_manifest = read_file(&root.join("Cargo.toml"));
+    let manifest = read_file(&root.join("clients/fortress/Cargo.toml"));
+    let workflow = read_live_file(&root.join(".github/workflows/fortress-interop.yml"));
+    let runner = read_file(&root.join("scripts/run-fortress-interop.sh"));
+
+    for dependency in [
+        "fortress-rollback = \"=0.10.0\"",
+        "signal-fish-client = { version = \"=0.8.0\"",
+    ] {
+        assert!(
+            manifest.contains(dependency),
+            "clients/fortress must exact-pin its production interoperability dependency: {dependency}"
+        );
+    }
+
+    assert_eq!(
+        extract_toml_version(&manifest, "rust-version"),
+        extract_toml_version(&root_manifest, "rust-version"),
+        "the standalone Fortress fixture must track the server MSRV"
+    );
+
+    for required_path in [
+        "src/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "clients/fortress/**",
+        "scripts/run-fortress-interop.sh",
+        ".github/workflows/fortress-interop.yml",
+    ] {
+        assert_eq!(
+            workflow.matches(&format!("- \"{required_path}\"")).count(),
+            2,
+            "fortress-interop.yml must trigger on `{required_path}` for both push and pull_request"
+        );
+    }
+
+    for required in [
+        "cargo build --locked --bin signal-fish-server",
+        "SERVER_BIN=\"${REPO_ROOT}/target/${PROFILE_DIR}/signal-fish-server\"",
+        "SIGNAL_FISH_SERVER_BIN=\"${SERVER_BIN}\" cargo test --locked --all-features",
+        "cargo clippy --locked --all-targets --all-features -- -D warnings",
+    ] {
+        assert!(
+            runner.contains(required),
+            "Fortress runner must retain current-checkout and warning-free gate: `{required}`"
+        );
+    }
+}
+
 fn extract_ci_dep_detect_step(ci_content: &str) -> String {
     let step_start = ci_content
         .find("      - name: Detect dependency-only changes")
@@ -21051,12 +21107,15 @@ fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message
             && dep_detect_step_live.contains(
                 "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
             )
+            && dep_detect_step_live.contains(
+                "clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+            )
             && dep_detect_step_live
                 .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
         "dep-detect must skip changelog for dependency-only Cargo changes using file classification, \
          not commit message heuristics.\n\
          Required logic:\n\
-         1. Track whether root/native Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
+         1. Track whether root/native/Fortress Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
          2. Set skip_changelog=true when HAS_CARGO_CHANGE=true and NON_INTERNAL=false.\n\
          This prevents merge commit messages from accidentally forcing the changelog gate."
     );
