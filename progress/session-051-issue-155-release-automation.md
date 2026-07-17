@@ -48,3 +48,16 @@ Bugbot also identified that the workflow invoked locked Cargo metadata without
 first installing the repository's pinned Rust toolchain. Prepare Release now
 reads `rust-toolchain.toml` after checkout and installs that exact toolchain
 before running the transformer; a policy-ordering test prevents regression.
+
+A later review caught that the generated release comparison used the newest
+dated changelog section instead of the actual pre-bump package identity. Since
+the repository has `v0.3.0` and `v0.4.0` tags but no matching dated sections,
+that would have skipped both tags. The comparison now always starts at the
+pre-bump `Cargo.toml` version; the fixture intentionally keeps an older dated
+section to prove the two identities cannot be confused again.
+
+The existing documentation checker originally recognized compare endpoints
+only when they had dated changelog sections. It now also accepts an exact local
+`vX.Y.Z` Git tag, preserving typo detection while supporting this repository's
+real `v0.3.0` and `v0.4.0` releases. A Git-backed fixture proves an absent tag
+still fails and an existing immutable tag passes.

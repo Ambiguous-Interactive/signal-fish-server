@@ -61,11 +61,11 @@ impl Fixture {
              - Ship the release preparation workflow.\n\n\
              ### Fixed\n\n\
              - Preserve categorized notes.\n\n\
-             ## [1.2.3] - 2026-07-01\n\n\
+             ## [1.1.0] - 2026-07-01\n\n\
              ### Added\n\n\
              - Previous release.\n\n\
-             [Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v1.2.3...HEAD\n\
-             [1.2.3]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v1.2.3\n",
+             [Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v1.1.0...HEAD\n\
+             [1.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v1.1.0\n",
         );
         write(
             &root.join("scripts/check-doc-consistency.sh"),
@@ -194,8 +194,8 @@ fn prepare_release_fails_closed_on_empty_notes_existing_version_or_lock_drift() 
 
     let duplicate = Fixture::new("1.2.3");
     let changelog = read(duplicate.root.join("CHANGELOG.md")).replace(
-        "## [1.2.3] - 2026-07-01",
-        "## [1.2.4] - 2026-07-10\n\n### Fixed\n\n- Already cut.\n\n## [1.2.3] - 2026-07-01",
+        "## [1.1.0] - 2026-07-01",
+        "## [1.2.4] - 2026-07-10\n\n### Fixed\n\n- Already cut.\n\n## [1.1.0] - 2026-07-01",
     );
     write(&duplicate.root.join("CHANGELOG.md"), &changelog);
     let output = duplicate.run(&["--bump", "patch", "--date", RELEASE_DATE]);

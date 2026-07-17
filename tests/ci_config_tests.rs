@@ -4067,7 +4067,7 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         "docs/library-usage.md",
         ".llm/context.md",
         "Unreleased",
-        "sort -V",
+        "cut_changelog_release CHANGELOG.md \"$NEXT_VERSION\" \"$RELEASE_DATE\" \"$CURRENT_VERSION\"",
         "metadata --locked --no-deps --format-version 1",
         "scripts/check-doc-consistency.sh",
     ] {

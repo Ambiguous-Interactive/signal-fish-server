@@ -369,7 +369,11 @@ validate_changelog() {
         if [[ "$release_ref" =~ /compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.v${version}([#?].*)?$ ]]; then
             local previous_version
             previous_version="${BASH_REMATCH[1]}"
-            if ! grep -Fxq "$previous_version" <<< "$versions"; then
+            # A legitimate prior tag can predate changelog section backfills.
+            # Accept that immutable release identity, but still reject typos and
+            # nonexistent compare endpoints when neither evidence source exists.
+            if ! grep -Fxq "$previous_version" <<< "$versions" \
+                && ! git rev-parse --verify --quiet "refs/tags/v$previous_version" >/dev/null; then
                 action_error "[$version] compare link references unknown previous version v$previous_version (link: $release_ref)"
             fi
             continue

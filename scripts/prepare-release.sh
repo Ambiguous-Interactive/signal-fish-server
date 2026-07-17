@@ -176,15 +176,6 @@ if ! grep -Eq '^### (Added|Changed|Deprecated|Removed|Fixed|Security)$' <<< "$UN
     exit 1
 fi
 
-LATEST_RELEASE=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' CHANGELOG.md \
-    | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/' \
-    | sort -V \
-    | tail -n 1)
-if [ -z "$LATEST_RELEASE" ]; then
-    echo "ERROR: CHANGELOG.md has no dated release section to compare from." >&2
-    exit 1
-fi
-
 replace_root_package_version() {
     local file="$1"
     local next_version="$2"
@@ -344,7 +335,7 @@ for lockfile in Cargo.lock clients/native/Cargo.lock; do
 done
 replace_documented_version docs/library-usage.md "$CURRENT_VERSION" "$NEXT_VERSION"
 replace_context_version .llm/context.md "$CURRENT_VERSION" "$NEXT_VERSION"
-cut_changelog_release CHANGELOG.md "$NEXT_VERSION" "$RELEASE_DATE" "$LATEST_RELEASE"
+cut_changelog_release CHANGELOG.md "$NEXT_VERSION" "$RELEASE_DATE" "$CURRENT_VERSION"
 
 if [ "$(read_package_version)" != "$NEXT_VERSION" ]; then
     echo "ERROR: Cargo.toml version update did not persist." >&2

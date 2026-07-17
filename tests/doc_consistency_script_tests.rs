@@ -4,6 +4,7 @@ mod common;
 
 use common::{bash_command, repo_root, unique_temp_dir, write_file};
 use std::fs;
+use std::process::Command;
 use std::thread;
 
 use regex::RegexBuilder;
@@ -113,6 +114,15 @@ fn run_checker_with_fixture(
     extra_files: &[(&str, &str)],
     args: &[&str],
 ) -> (i32, String) {
+    run_checker_with_fixture_and_tags(overrides, extra_files, args, &[])
+}
+
+fn run_checker_with_fixture_and_tags(
+    overrides: &[(&str, &str)],
+    extra_files: &[(&str, &str)],
+    args: &[&str],
+    tags: &[&str],
+) -> (i32, String) {
     let temp_root = unique_temp_dir("doc-consistency");
     let script_src = repo_root().join("scripts/check-doc-consistency.sh");
     let script_dst = temp_root.path().join("scripts/check-doc-consistency.sh");
@@ -131,6 +141,31 @@ fn run_checker_with_fixture(
 
     for (path, content) in extra_files {
         write_file(&temp_root.path().join(path), content);
+    }
+
+    if !tags.is_empty() {
+        for arguments in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "fixture"],
+        ] {
+            let status = Command::new("git")
+                .args(arguments)
+                .current_dir(temp_root.path())
+                .status()
+                .expect("run fixture Git command");
+            assert!(status.success(), "fixture Git setup failed");
+        }
+        for tag in tags {
+            let status = Command::new("git")
+                .args(["tag", tag])
+                .current_dir(temp_root.path())
+                .status()
+                .expect("create fixture release tag");
+            assert!(status.success(), "fixture tag creation failed for {tag}");
+        }
     }
 
     let mut command = bash_command();
@@ -156,6 +191,26 @@ fn run_checker_with_fixture(
         output.status.code().unwrap_or(-1),
         combined.replace("\r\n", "\n"),
     )
+}
+
+#[test]
+fn test_release_compare_accepts_existing_tag_without_dated_section() {
+    let changelog = "# Changelog\n\n\
+        The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n\
+        ## [Unreleased]\n\n### Changed\n- Pending.\n\n\
+        ## [0.2.0] - 2026-02-24\n\n### Added\n- Release notes.\n\n\
+        ## [0.1.0] - 2026-02-15\n\n### Added\n- Initial release.\n\n\
+        [Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.2.0...HEAD\n\
+        [0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.1...v0.2.0\n\
+        [0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0\n";
+
+    let (exit_code, output) =
+        run_checker_with_fixture_and_tags(&[("CHANGELOG.md", changelog)], &[], &[], &["v0.1.1"]);
+    assert_eq!(
+        exit_code, 0,
+        "An existing immutable release tag is a valid compare endpoint even when its dated \
+         changelog section has not been backfilled.\nOutput:\n{output}"
+    );
 }
 
 #[derive(Debug)]
