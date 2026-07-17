@@ -210,14 +210,23 @@ try {
         `${name}: negative control did not run the healthy control's 600-callback active budget`,
       );
       assert(
-        report.max_admissions_per_callback <= 1,
-        `${name}: negative control admitted more than one relay send in a Rust callback`,
+        report.max_admissions_per_callback === 1,
+        `${name}: negative control did not exercise exactly one maximum admission per callback`,
       );
       assert(
         report.callback_intervals.mean_us >= 8_000,
         `${name}: negative control observed a synthetic/too-fast callback mean`,
       );
       assert(violations.length > 0, `${name}: negative control unexpectedly satisfied every healthy gate`);
+      assert(
+        report.relay_frames_enqueued_during_run >= 600 &&
+          report.client_game_data_sent_during_run >= 600,
+        `${name}: negative control did not exercise a non-vacuous capped workload`,
+      );
+      assert(
+        report.checksums_matched === report.checksums_compared,
+        `${name}: negative control checksum accounting disagreed`,
+      );
       assert(
         report.client_game_data_sent_during_run <= report.active_callback_count * 2,
         `${name}: negative control did not break the per-callback completion gate`,
@@ -229,8 +238,9 @@ try {
       assert(
         violations.every((violation) =>
           new RegExp(
-            "confirmed_frame=|fewer than 1200|non-nominal callback mean|" +
-              "oldest queue age|stall_count|wait_recommendations|" +
+            "current_frame=|confirmed_frame=|insufficient Fortress advancement|" +
+              "fewer than 1200|non-nominal callback mean|oldest queue age|" +
+              "stall_count|wait_recommendations|checksum agreement gate failed|" +
               "confirmation lag exceeded|rollback depth=|active wall time|" +
               "completed rate|sends per callback",
           ).test(violation),
