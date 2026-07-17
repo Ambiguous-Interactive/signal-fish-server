@@ -4036,6 +4036,8 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
     for required in [
         "major|minor|patch",
         "date -u +%F",
+        "is_real_calendar_date",
+        "year % 400 == 0",
         "Cargo.toml",
         "Cargo.lock",
         "clients/native/Cargo.lock",

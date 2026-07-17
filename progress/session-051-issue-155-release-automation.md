@@ -34,3 +34,12 @@ and packaged artifacts.
 - CI policy tests pin the workflow choice input, non-cancellable concurrency,
   least privilege, GitHub App token, branch/tag collision checks, recovery
   artifact, PR creation, and handoff to the publication workflow.
+
+## Exact-head CI follow-up
+
+The first PR-head macOS Nextest run exposed a platform-specific date-validation
+bug: `prepare-release.sh` used GNU `date -d`, which BSD `date` does not provide.
+The validator now performs strict Gregorian calendar checks in Bash, including
+century leap-year rules, so release preparation has identical behavior on the
+Linux, macOS, and Windows CI runners. The regression matrix includes a valid
+leap day plus invalid leap-day, range, and year-zero cases.

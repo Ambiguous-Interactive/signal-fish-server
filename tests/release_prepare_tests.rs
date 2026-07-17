@@ -106,9 +106,13 @@ fn read(path: impl AsRef<Path>) -> String {
 
 #[test]
 fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
-    for (bump, expected) in [("patch", "1.2.4"), ("minor", "1.3.0"), ("major", "2.0.0")] {
+    for (bump, expected, release_date) in [
+        ("patch", "1.2.4", RELEASE_DATE),
+        ("minor", "1.3.0", RELEASE_DATE),
+        ("major", "2.0.0", "2028-02-29"),
+    ] {
         let fixture = Fixture::new("1.2.3");
-        let output = fixture.run(&["--bump", bump, "--date", RELEASE_DATE]);
+        let output = fixture.run(&["--bump", bump, "--date", release_date]);
         assert!(
             output.status.success(),
             "{bump} preparation failed:\n{}",
@@ -140,7 +144,7 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
 
         let changelog = read(fixture.root.join("CHANGELOG.md"));
         assert!(changelog.contains(&format!(
-            "## [Unreleased]\n\n## [{expected}] - {RELEASE_DATE}\n\n### Added"
+            "## [Unreleased]\n\n## [{expected}] - {release_date}\n\n### Added"
         )));
         assert!(changelog.contains("- Preserve categorized notes."));
         assert!(changelog.contains(&format!(
@@ -157,6 +161,10 @@ fn prepare_release_rejects_invalid_inputs_before_mutating_files() {
     for arguments in [
         vec!["--bump", "prerelease"],
         vec!["--bump", "patch", "--date", "2026-02-30"],
+        vec!["--bump", "patch", "--date", "2025-02-29"],
+        vec!["--bump", "patch", "--date", "0000-01-01"],
+        vec!["--bump", "patch", "--date", "2026-13-01"],
+        vec!["--bump", "patch", "--date", "2026-01-00"],
         vec!["--date", RELEASE_DATE],
     ] {
         let fixture = Fixture::new("1.2.3");

@@ -64,8 +64,33 @@ esac
 if [ -z "$RELEASE_DATE" ]; then
     RELEASE_DATE=$(date -u +%F)
 fi
-if [[ ! "$RELEASE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
-    || [ "$(date -u -d "$RELEASE_DATE" +%F 2>/dev/null || true)" != "$RELEASE_DATE" ]; then
+
+# Validate Gregorian calendar dates in Bash instead of relying on GNU `date -d`,
+# which is unavailable on the macOS runners used by the required CI matrix.
+is_real_calendar_date() {
+    local candidate="$1"
+    local year month day max_day
+
+    [[ "$candidate" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || return 1
+    year=$((10#${BASH_REMATCH[1]}))
+    month=$((10#${BASH_REMATCH[2]}))
+    day=$((10#${BASH_REMATCH[3]}))
+
+    ((year >= 1 && month >= 1 && month <= 12 && day >= 1)) || return 1
+    case "$month" in
+        2)
+            max_day=28
+            if ((year % 400 == 0 || (year % 4 == 0 && year % 100 != 0))); then
+                max_day=29
+            fi
+            ;;
+        4|6|9|11) max_day=30 ;;
+        *) max_day=31 ;;
+    esac
+    ((day <= max_day))
+}
+
+if ! is_real_calendar_date "$RELEASE_DATE"; then
     echo "ERROR: --date must be a real calendar date in YYYY-MM-DD form." >&2
     exit 2
 fi
