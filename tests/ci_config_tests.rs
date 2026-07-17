@@ -4005,6 +4005,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "actions/create-github-app-token@v3.2.0",
         "permission-contents: write",
         "permission-pull-requests: write",
+        "ref: ${{ github.event.repository.default_branch }}",
         "Read Rust toolchain",
         "dtolnay/rust-toolchain@v1",
         "toolchain: ${{ steps.toolchain.outputs.channel }}",

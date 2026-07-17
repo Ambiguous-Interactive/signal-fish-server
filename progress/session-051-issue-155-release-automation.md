@@ -68,3 +68,9 @@ test seams hard-coded Linux's `/bin/true`, while macOS provides
 runner. The same head's ASan suite passed all tests before reproducing the
 repository's known process-exit leak signature (29 allocations, about 39.8 KiB),
 so that job is classified for an exact-head retry rather than a code change.
+
+Bugbot's next pass found a queued-dispatch race: checkout without an explicit
+`ref` uses the SHA captured when the workflow was requested, which can be stale
+by the time non-cancellable release preparation starts. Checkout now resolves
+the repository's current default-branch ref at job execution, and the workflow
+policy test pins that requirement.
