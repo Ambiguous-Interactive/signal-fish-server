@@ -1353,6 +1353,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
         "Release automation (crates.io + GitHub release)",
     ),
     (
+        "prepare-release.yml",
+        "Manual release preparation (semver bump + changelog release PR)",
+    ),
+    (
         "ci-safety.yml",
         "Advanced safety analysis (Miri, AddressSanitizer — staged)",
     ),
@@ -3966,6 +3970,135 @@ FROM chef AS builder";
         !strip_comment_lines(jsonc_commented).contains("docker-outside-of-docker"),
         "a guard asserting the LIVE view must reject a `//`-commented JSONC feature line"
     );
+}
+
+#[test]
+fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/prepare-release.yml"));
+    let permissions = extract_yaml_mapping_block(&workflow, "permissions", 0)
+        .expect("prepare-release.yml must define workflow-level permissions");
+    let prepare = extract_workflow_job_block(&workflow, "prepare")
+        .expect("prepare-release.yml must define the prepare job");
+
+    assert!(workflow.contains("name: Prepare Release"));
+    assert!(workflow.contains("workflow_dispatch:"));
+    for required in [
+        "bump:",
+        "type: choice",
+        "- patch",
+        "- minor",
+        "- major",
+        "dry_run:",
+        "cancel-in-progress: false",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "prepare-release.yml must contain `{required}` so a maintainer can choose a safe, \
+             non-cancellable semantic-version preparation run."
+        );
+    }
+
+    assert_eq!(permissions.trim(), "contents: read");
+    for required in [
+        "Require default branch dispatch",
+        "actions/create-github-app-token@v3.2.0",
+        "permission-contents: write",
+        "permission-pull-requests: write",
+        "ref: ${{ github.event.repository.default_branch }}",
+        "Read Rust toolchain",
+        "dtolnay/rust-toolchain@v1",
+        "toolchain: ${{ steps.toolchain.outputs.channel }}",
+        "bash scripts/prepare-release.sh --bump \"$BUMP\"",
+        "git diff --check",
+        "branch=\"release/v${version}\"",
+        "auth_header=$(printf 'x-access-token:%s' \"$GH_TOKEN\" | base64 | tr -d '\\n')",
+        "ls-remote --exit-code --tags",
+        "ls-remote --exit-code --heads",
+        "push origin \"HEAD:refs/heads/${BRANCH}\"",
+        "gh pr create",
+        "Release - Publish Crate",
+        "actions/upload-artifact@v7.0.1",
+    ] {
+        assert!(
+            prepare.contains(required),
+            "prepare-release.yml prepare job must contain `{required}`.\nJob block:\n{prepare}"
+        );
+    }
+
+    assert!(
+        prepare.contains("GH_TOKEN: ${{ steps.app-token.outputs.token }}"),
+        "The release PR must be created with the installation token so normal pull_request CI \
+         runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
+    );
+
+    assert_eq!(
+        prepare
+            .matches(
+                "git -c \"http.https://github.com/.extraheader=AUTHORIZATION: basic \
+                 ${auth_header}\""
+            )
+            .count(),
+        3,
+        "Every remote git operation (tag probe, branch probe, and branch push) must use the \
+         installation-token authorization header; unauthenticated probes can fail on private \
+         repositories or anonymous rate limits."
+    );
+
+    let checkout = prepare
+        .find("Checkout default branch")
+        .expect("prepare job must check out the repository");
+    let read_toolchain = prepare
+        .find("Read Rust toolchain")
+        .expect("prepare job must read the pinned Rust toolchain");
+    let install_toolchain = prepare
+        .find("Install Rust toolchain")
+        .expect("prepare job must install the pinned Rust toolchain");
+    let prepare_files = prepare
+        .find("Prepare release files")
+        .expect("prepare job must run the release transformer");
+    assert!(
+        checkout < read_toolchain
+            && read_toolchain < install_toolchain
+            && install_toolchain < prepare_files,
+        "The pinned Rust toolchain must be installed after checkout and before release \
+         preparation invokes Cargo."
+    );
+}
+
+#[test]
+fn test_prepare_release_script_updates_every_canonical_release_input() {
+    let root = repo_root();
+    let script = read_live_file(&root.join("scripts/prepare-release.sh"));
+
+    for required in [
+        "major|minor|patch",
+        "date -u +%F",
+        "is_real_calendar_date",
+        "year % 400 == 0",
+        "Cargo.toml",
+        "Cargo.lock",
+        "clients/native/Cargo.lock",
+        "docs/library-usage.md",
+        ".llm/context.md",
+        "Unreleased",
+        "cut_changelog_release CHANGELOG.md \"$NEXT_VERSION\" \"$RELEASE_DATE\" \"$CURRENT_VERSION\"",
+        "metadata --locked --no-deps --format-version 1",
+        "scripts/check-doc-consistency.sh",
+    ] {
+        assert!(
+            script.contains(required),
+            "prepare-release.sh must contain live `{required}` handling so version, lockfile, \
+             changelog, and documented release identities cannot drift."
+        );
+    }
+
+    for manifest in ["Cargo.toml", "clients/native/Cargo.toml"] {
+        assert!(
+            script.contains(manifest),
+            "prepare-release.sh must validate {manifest} with locked Cargo metadata."
+        );
+    }
 }
 
 #[test]

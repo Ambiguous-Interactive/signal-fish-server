@@ -6,12 +6,31 @@ resolve to the same tagged commit.
 
 ## Prepare the Release Commit
 
-1. Set `[package].version` in `Cargo.toml` and refresh `Cargo.lock`.
-2. Move the release notes from `[Unreleased]` to an exact
-   `## [X.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md` and update its comparison
-   links.
-3. Push the release commit to the default branch and wait for the required CI
-   and documentation workflows to pass on that commit.
+Run the **Prepare Release** workflow from the default branch:
+
+1. Choose `patch`, `minor`, or `major` from the `bump` dropdown. Use `dry_run`
+   first when you only want to validate and inspect the generated diff.
+2. The workflow computes the next version from `Cargo.toml`, updates the root
+   package and every tracked lockfile that embeds it, synchronizes public dependency
+   examples and project metadata, and moves `[Unreleased]` into an exact
+   `## [X.Y.Z] - YYYY-MM-DD` changelog section with corrected comparison links.
+3. Review and merge the generated `release/vX.Y.Z` pull request only after its
+   normal CI and documentation workflows pass on the exact release commit.
+
+The non-dry-run path requires the repository secrets `AUTO_COMMIT_APP_ID` and
+`AUTO_COMMIT_APP_PRIVATE_KEY`. The installed GitHub App needs read/write access
+to repository contents and pull requests. The workflow deliberately uses its
+installation token when pushing the branch and opening the pull request so the
+generated `pull_request` event starts normal CI; GitHub suppresses new workflow
+runs for equivalent writes made with the built-in `GITHUB_TOKEN`.
+
+For local recovery or troubleshooting, run the same deterministic transformer
+from a clean default-branch checkout, inspect the diff, and open the release PR
+normally:
+
+```bash
+bash scripts/prepare-release.sh --bump patch
+```
 
 Do not create or move the version tag by hand for the normal manual path. Run
 the **Release - Publish Crate** workflow with `release_version=X.Y.Z`. It creates
