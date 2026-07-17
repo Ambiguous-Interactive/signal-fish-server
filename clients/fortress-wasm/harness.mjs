@@ -328,9 +328,10 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
         report.godot_runtime.minor === 5 &&
         report.godot_runtime.patch === 0 &&
         report.godot_runtime.status === "stable" &&
-        report.godot_runtime.string.startsWith("4.5.stable") &&
-        typeof report.godot_runtime.build === "string" &&
-        typeof report.godot_runtime.hash === "string",
+        report.godot_runtime.string === "4.5-stable (official)" &&
+        report.godot_runtime.build === "official" &&
+        typeof report.godot_runtime.hash === "string" &&
+        report.godot_runtime.hash.length > 0,
       `${name}: Godot runtime identity drift`,
     );
     assert(report.target === "wasm32-unknown-emscripten" && report.target_os === "emscripten", `${name}: native fallback detected`);

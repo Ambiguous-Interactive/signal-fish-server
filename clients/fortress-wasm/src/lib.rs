@@ -240,7 +240,9 @@ impl Runtime {
             || config.godot_runtime.minor != 5
             || config.godot_runtime.patch != 0
             || config.godot_runtime.status != "stable"
-            || !config.godot_runtime.string.starts_with("4.5.stable")
+            || config.godot_runtime.build != "official"
+            || config.godot_runtime.hash.is_empty()
+            || config.godot_runtime.string != "4.5-stable (official)"
         {
             return Err(format!(
                 "unsupported Godot runtime identity {} (expected 4.5.0 stable)",
