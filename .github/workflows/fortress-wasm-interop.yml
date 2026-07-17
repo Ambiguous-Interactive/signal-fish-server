@@ -1,0 +1,164 @@
+# Exact-release issue-242 reproduction in two genuine Godot no-thread WASM
+# exports. Godot downloads are cached only under their official SHA-512 values;
+# Chromium is installed fresh from the repository's exact npm lockfile.
+
+name: Fortress WASM Interop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/fortress/src/relay.rs"
+      - "clients/fortress/src/workload.rs"
+      - "clients/fortress-wasm/**"
+      - "clients/browser/package.json"
+      - "clients/browser/package-lock.json"
+      - "scripts/run-fortress-wasm-interop.sh"
+      - ".github/workflows/fortress-wasm-interop.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clients/fortress/src/relay.rs"
+      - "clients/fortress/src/workload.rs"
+      - "clients/fortress-wasm/**"
+      - "clients/browser/package.json"
+      - "clients/browser/package-lock.json"
+      - "scripts/run-fortress-wasm-interop.sh"
+      - ".github/workflows/fortress-wasm-interop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_NIGHTLY: nightly-2026-03-01
+  EMSDK_VERSION: 3.1.74
+  GODOT_VERSION: "4.5"
+  GODOT_RELEASE: 4.5-stable
+  GODOT_EDITOR_SHA512: b5bd5d8a4dd3f44de1d123361beabaafa4825dd05b5e20fd2bfa540f32594f81d82e7c4e86fae420f4faee77d9def573b570f8b156e9c84a4dc2d5123d09e852
+  GODOT_TEMPLATES_SHA512: 1643140ac56ba8e6d18be34eb27788ec6a216e4a3f45dbcc3e01caf2b28ae9c8229832061e30200e296a1be46cec61e2b54c6d9df190b921ea1d0ad5f3f25ed1
+  GODOT_DOWNLOADS: ${{ github.workspace }}/.godot-downloads/4.5
+  GODOT_ROOT: ${{ github.workspace }}/.godot-ci/4.5
+  XDG_DATA_HOME: ${{ github.workspace }}/.godot-data/4.5
+
+jobs:
+  browser-interop:
+    name: Godot no-thread Chromium E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+          components: rust-src, clippy
+      - name: Install pinned Emscripten SDK
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: |
+            .
+            clients/fortress-wasm
+          save-if: >-
+            ${{ github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Cache checksum-pinned Godot archives
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ env.GODOT_DOWNLOADS }}
+          key: godot-${{ runner.os }}-${{ env.GODOT_EDITOR_SHA512 }}-${{ env.GODOT_TEMPLATES_SHA512 }}
+      - name: Download and verify official Godot archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GODOT_DOWNLOADS"
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          if [ ! -f "$GODOT_DOWNLOADS/godot.zip" ]; then
+            curl --fail --location --retry 5 --output "$GODOT_DOWNLOADS/godot.zip" \
+              "$base/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          fi
+          if [ ! -f "$GODOT_DOWNLOADS/templates.tpz" ]; then
+            curl --fail --location --retry 5 --output "$GODOT_DOWNLOADS/templates.tpz" \
+              "$base/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          fi
+          echo "$GODOT_EDITOR_SHA512  $GODOT_DOWNLOADS/godot.zip" | sha512sum --check
+          echo "$GODOT_TEMPLATES_SHA512  $GODOT_DOWNLOADS/templates.tpz" | sha512sum --check
+      - name: Install verified Godot editor and templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GODOT_ROOT" "$XDG_DATA_HOME/godot/export_templates"
+          unzip -q -o "$GODOT_DOWNLOADS/godot.zip" -d "$GODOT_ROOT"
+          template_stage="${RUNNER_TEMP}/signal-fish-godot-templates"
+          mkdir -p "$template_stage"
+          unzip -q -o "$GODOT_DOWNLOADS/templates.tpz" -d "$template_stage"
+          cp -R "$template_stage/templates" \
+            "$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.stable"
+          chmod +x "$GODOT_ROOT/Godot_v${GODOT_RELEASE}_linux.x86_64"
+          echo "GODOT4_BIN=$GODOT_ROOT/Godot_v${GODOT_RELEASE}_linux.x86_64" >> "$GITHUB_ENV"
+      - name: Compile exact released graph for Emscripten
+        env:
+          RUSTFLAGS: >-
+            -Z unstable-options
+            -C panic=immediate-abort
+            -C link-arg=-sSIDE_MODULE=2
+            -C llvm-args=-enable-emscripten-cxx-exceptions=0
+            -Z default-visibility=hidden
+            -Z link-native-libraries=no
+        run: |
+          set -euo pipefail
+          export BINDGEN_EXTRA_CLANG_ARGS_wasm32_unknown_emscripten="--target=wasm32-unknown-emscripten --sysroot=${EMSDK}/upstream/emscripten/cache/sysroot -D__EMSCRIPTEN__"
+          cargo +"$RUST_NIGHTLY" clippy \
+            --manifest-path clients/fortress-wasm/Cargo.toml \
+            --locked \
+            --target-dir target/fortress-wasm \
+            -Zbuild-std=std \
+            --target wasm32-unknown-emscripten \
+            --release \
+            -- -D warnings
+      - name: Characterize released graph plus expected-busted control
+        env:
+          INSTALL_PLAYWRIGHT_DEPS: "1"
+        run: bash scripts/run-fortress-wasm-interop.sh
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: fortress-wasm-failure-${{ github.run_id }}
+          path: |
+            clients/fortress-wasm/artifacts/
+            clients/fortress-wasm/project/build/
+          if-no-files-found: warn
+          retention-days: 14
+
+  dependency-audit:
+    name: Fortress WASM Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          manifest-path: clients/fortress-wasm/Cargo.toml
+          arguments: --all-features
+          rust-version: 1.89.0

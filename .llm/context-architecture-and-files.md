@@ -27,7 +27,7 @@ See [Detailed File Tables](context-file-reference.md) for full file tables.
 `clients/` holds reference clients as standalone packages OUTSIDE the root
 package (own lockfile/deny.toml; outside the root cargo build/test/coverage
 gates, though the root panic/timeout policy scans do walk its sources and
-`scripts/check-msrv-consistency.sh` pins `clients/native/Cargo.toml` to the
+`scripts/check-msrv-consistency.sh` pins every Rust client manifest to the
 root MSRV). `clients/native/` is the webrtc-rs reference client +
 multi-process interop suite (run via `scripts/run-webrtc-interop.sh`; see
 `clients/native/README.md` and ADR-0004). `clients/browser/` is the
@@ -37,6 +37,13 @@ browser↔native interop cells live in the native crate behind the
 `browser-interop` cargo feature and run via `scripts/run-browser-interop.sh`
 (see `clients/browser/README.md` and ADR-0005). Both clients share one JSONL
 stdout event contract and exit codes (the native README is canonical).
+`clients/fortress/` is the native Fortress rollback interoperability fixture;
+`clients/fortress-wasm/` reuses its deterministic workload and relay ledger in
+a Godot 4.5, single-threaded Emscripten build exercised by two isolated browser
+processes via `scripts/run-fortress-wasm-interop.sh`. The exact released WASM
+graph is an expected-`BUSTED` characterization: its adapter admits multiple
+messages per callback, but client completions remain near one per callback.
+P13 stays open until that released-client bottleneck is removed.
 
 ## Architectural Invariants
 

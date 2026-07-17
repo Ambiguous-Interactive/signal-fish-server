@@ -146,7 +146,16 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Check 6: .devcontainer/Dockerfile (informational only - may use newer Rust)
+# Check 6: clients/fortress-wasm/Cargo.toml (Godot/WASM interoperability fixture)
+if [ -f clients/fortress-wasm/Cargo.toml ]; then
+    FORTRESS_WASM_MSRV=$(bash scripts/read-toml-string.sh clients/fortress-wasm/Cargo.toml rust-version package || true)
+    check_file "clients/fortress-wasm/Cargo.toml" "$MSRV" "$FORTRESS_WASM_MSRV" "rust-version"
+else
+    check_missing "clients/fortress-wasm/Cargo.toml"
+    FAILED=$((FAILED + 1))
+fi
+
+# Check 7: .devcontainer/Dockerfile (informational only - may use newer Rust)
 if [ -f .devcontainer/Dockerfile ]; then
     # Extract MSRV comment if present
     if grep -q "# Project MSRV:" .devcontainer/Dockerfile; then
@@ -193,7 +202,10 @@ if [ "$FAILED" -ne 0 ]; then
     echo "5. Update clients/fortress/Cargo.toml:"
     echo "   rust-version = \"$MSRV\""
     echo ""
-    echo "6. Update .devcontainer/Dockerfile (optional):"
+    echo "6. Update clients/fortress-wasm/Cargo.toml:"
+    echo "   rust-version = \"$MSRV\""
+    echo ""
+    echo "7. Update .devcontainer/Dockerfile (optional):"
     echo "   # Project MSRV: $MSRV"
     echo ""
     echo "See .llm/skills/msrv-management.md for detailed guidance."

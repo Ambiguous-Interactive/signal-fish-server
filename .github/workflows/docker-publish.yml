@@ -181,7 +181,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: container-publish-${{ needs.resolve.outputs.publish_latest == 'true' && 'latest' || needs.resolve.outputs.source_revision }}
+      # Release and main events can target the same immutable sha-* alias. A
+      # single publication lane prevents either event from observing stale
+      # registry state or racing an alias repair performed by the other.
+      group: container-publish
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: read
@@ -216,9 +220,8 @@ jobs:
           repo="${repo,,}"
           echo "name=ghcr.io/${owner}/${repo}" >> "$GITHUB_OUTPUT"
 
-      - name: Reuse a verified immutable release digest
+      - name: Reuse a verified immutable image digest
         id: existing
-        if: needs.resolve.outputs.is_release == 'true'
         shell: bash
         env:
           IMAGE: ${{ steps.image.outputs.name }}
@@ -226,87 +229,88 @@ jobs:
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
           SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
           SHA_TAG: sha-${{ needs.resolve.outputs.short_sha }}
+          IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}
+          IS_RELEASE: ${{ needs.resolve.outputs.is_release }}
           IS_BACKFILL: ${{ needs.resolve.outputs.is_backfill }}
+        run: bash scripts/reuse-verified-image.sh
+
+      - name: Prepare Docker metadata
+        id: meta
+        if: steps.existing.outputs.reuse != 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
+          IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+          MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
+          IS_RELEASE: ${{ needs.resolve.outputs.is_release }}
+          PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
+          PUBLISH_SHA: ${{ steps.existing.outputs.publish_sha }}
         run: |
           set -euo pipefail
 
-          tag_exists() {
-            local reference=$1
-            local inspect_output
-            if inspect_output=$(docker buildx imagetools inspect "$reference" 2>&1); then
-              return 0
+          image_title=${GITHUB_REPOSITORY#*/}
+          image_description=$(bash scripts/read-toml-string.sh Cargo.toml description package)
+          image_licenses=$(bash scripts/read-toml-string.sh Cargo.toml license package)
+          image_url="https://github.com/${GITHUB_REPOSITORY}"
+          image_created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          for value_name in image_title image_description image_licenses image_url image_created; do
+            if [ -z "${!value_name}" ] || [[ "${!value_name}" == *$'\n'* ]]; then
+              echo "ERROR: Could not derive safe local OCI metadata value: ${value_name}." >&2
+              exit 1
             fi
-            if grep -Eqi 'not found|manifest unknown|name unknown' <<< "$inspect_output"; then
-              return 1
-            fi
-            echo "ERROR: Could not determine whether $reference exists; refusing to rebuild over an unknown registry state." >&2
-            printf '%s\n' "$inspect_output" >&2
+          done
+
+          tags=()
+          if [ "$PUBLISH_LATEST" = "true" ]; then
+            tags+=("${IMAGE}:latest")
+          fi
+          if [ "$PUBLISH_SHA" != "false" ]; then
+            tags+=("${IMAGE}:sha-${SHORT_SHA}")
+          fi
+          if [ "$IS_RELEASE" = "true" ]; then
+            tags+=(
+              "${IMAGE}:${RELEASE_TAG}"
+              "${IMAGE}:${RELEASE_VERSION}"
+              "${IMAGE}:${MAJOR_MINOR}"
+            )
+          fi
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "ERROR: Container publication resolved no image tags." >&2
             exit 1
-          }
+          fi
 
-          desired_tags=("$RELEASE_TAG" "$RELEASE_VERSION")
-          sha_exists=false
-          if tag_exists "${IMAGE}:${SHA_TAG}"; then
-            sha_exists=true
-          fi
-          if [ "$IS_BACKFILL" != "true" ]; then
-            desired_tags+=("$SHA_TAG")
-          fi
-          existing_tags=()
-          missing_tags=()
-          for tag in "${desired_tags[@]}"; do
-            if tag_exists "${IMAGE}:${tag}"; then
-              existing_tags+=("$tag")
-            else
-              missing_tags+=("$tag")
-            fi
+          labels=(
+            "org.opencontainers.image.created=${image_created}"
+            "org.opencontainers.image.description=${image_description}"
+            "org.opencontainers.image.licenses=${image_licenses}"
+            "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            "org.opencontainers.image.title=${image_title}"
+            "org.opencontainers.image.revision=${SOURCE_REVISION}"
+            "org.opencontainers.image.url=${image_url}"
+            "org.opencontainers.image.version=${IMAGE_VERSION}"
+          )
+          annotations=()
+          for level in manifest index; do
+            for label in "${labels[@]}"; do
+              annotations+=("${level}:${label}")
+            done
           done
 
-          if [ "${#existing_tags[@]}" -eq 0 ]; then
-            {
-              echo "reuse=false"
-              if [ "$IS_BACKFILL" = "true" ] && [ "$sha_exists" = "true" ]; then
-                echo "publish_sha=false"
-              else
-                echo "publish_sha=true"
-              fi
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          digest=$(bash scripts/verify-release-image.sh \
-            "$IMAGE" "$SOURCE_REVISION" "$RELEASE_VERSION" "${existing_tags[@]}")
-          for tag in "${missing_tags[@]}"; do
-            docker buildx imagetools create --tag "${IMAGE}:${tag}" "${IMAGE}@${digest}"
-          done
-          if [ "$IS_BACKFILL" = "true" ] && [ "$sha_exists" != "true" ]; then
-            docker buildx imagetools create --tag "${IMAGE}:${SHA_TAG}" "${IMAGE}@${digest}"
-          fi
-          echo "Reusing verified release digest $digest"
           {
-            echo "reuse=true"
-            echo "digest=$digest"
-            echo "publish_sha=false"
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+            echo "labels<<EOF"
+            printf '%s\n' "${labels[@]}"
+            echo "EOF"
+            echo "annotations<<EOF"
+            printf '%s\n' "${annotations[@]}"
+            echo "EOF"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6.2.0
-        env:
-          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
-        with:
-          images: ${{ steps.image.outputs.name }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=latest,enable=${{ needs.resolve.outputs.publish_latest == 'true' }}
-            type=raw,value=sha-${{ needs.resolve.outputs.short_sha }},enable=${{ steps.existing.outputs.publish_sha != 'false' }}
-            type=raw,value=${{ needs.resolve.outputs.release_tag }},enable=${{ needs.resolve.outputs.is_release == 'true' }}
-            type=raw,value=${{ needs.resolve.outputs.release_version }},enable=${{ needs.resolve.outputs.is_release == 'true' }}
-            type=raw,value=${{ needs.resolve.outputs.major_minor }},enable=${{ needs.resolve.outputs.is_release == 'true' }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ needs.resolve.outputs.source_revision }}
-            org.opencontainers.image.version=${{ needs.resolve.outputs.image_version }}
 
       - name: Build and push Docker image
         id: build
@@ -331,6 +335,14 @@ jobs:
           MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
         run: docker buildx imagetools create --tag "${IMAGE}:${MAJOR_MINOR}" "${IMAGE}@${DIGEST}"
 
+      - name: Update latest from verified immutable digest
+        if: needs.resolve.outputs.is_release != 'true' && steps.existing.outputs.reuse == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.existing.outputs.digest }}
+        run: docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}@${DIGEST}"
+
       - name: Verify versioned tags, platforms, and source labels
         id: verify
         if: needs.resolve.outputs.is_release == 'true'
@@ -342,11 +354,11 @@ jobs:
           MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
           SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
           SHA_TAG: sha-${{ needs.resolve.outputs.short_sha }}
-          PUBLISH_SHA: ${{ steps.existing.outputs.publish_sha }}
+          VERIFY_SHA: ${{ steps.existing.outputs.verify_sha }}
         run: |
           set -euo pipefail
           tags=("$RELEASE_TAG" "$RELEASE_VERSION" "$MAJOR_MINOR")
-          if [ "$PUBLISH_SHA" != "false" ]; then
+          if [ "$VERIFY_SHA" != "false" ]; then
             tags+=("$SHA_TAG")
           fi
           bash scripts/verify-release-image.sh \
@@ -356,4 +368,4 @@ jobs:
         id: rolling-digest
         if: needs.resolve.outputs.is_release != 'true'
         shell: bash
-        run: echo "digest=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+        run: echo "digest=${{ steps.existing.outputs.digest || steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"

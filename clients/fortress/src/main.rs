@@ -1,41 +1,29 @@
 mod relay;
+pub mod workload;
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use fortress_rollback::{
-    Config, FortressEvent, FortressRequest, InputVec, P2PSession, SessionBuilder, SessionState,
-};
+use fortress_rollback::{FortressEvent, P2PSession, SessionBuilder, SessionState};
 use relay::{InboundRelayFrame, RelaySocket};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use signal_fish_client::protocol::GameDataEncoding;
 use signal_fish_client::{
     JoinRoomParams, SignalFishConfig, SignalFishError, SignalFishEvent, SignalFishPollingClient,
     WebSocketTransport,
 };
 use uuid::Uuid;
+use workload::{apply_requests, input_for_frame, GameConfig, GameState, TARGET_CONFIRMED_FRAMES};
 
-const TARGET_CONFIRMED_FRAMES: i32 = 600;
 const PROCESS_DEADLINE: Duration = Duration::from_secs(30);
 const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct Input {
-    buttons: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-struct GameState {
-    frame: i32,
-    checksum: u64,
-}
-
-struct GameConfig;
-
-impl Config for GameConfig {
-    type Input = Input;
-    type State = GameState;
-    type Address = Uuid;
+struct PendingInbound {
+    from_player: Uuid,
+    encoding: GameDataEncoding,
+    payload: Vec<u8>,
+    seq: Option<u64>,
+    epoch: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,36 +64,14 @@ struct Report {
     relay_send_retries: u64,
     running_elapsed_ms: u128,
     polling_callbacks_during_run: u64,
-}
-
-fn apply_requests(
-    state: &mut GameState,
-    requests: impl IntoIterator<Item = FortressRequest<GameConfig>>,
-) {
-    for request in requests {
-        match request {
-            FortressRequest::SaveGameState { cell, frame } => {
-                cell.save(frame, Some(state.clone()), Some(u128::from(state.checksum)));
-            }
-            FortressRequest::LoadGameState { cell, .. } => {
-                if let Some(saved) = cell.load() {
-                    *state = saved;
-                }
-            }
-            FortressRequest::AdvanceFrame { inputs } => advance_game(state, &inputs),
-        }
-    }
-}
-
-fn advance_game(state: &mut GameState, inputs: &InputVec<Input>) {
-    state.frame = state.frame.saturating_add(1);
-    let mut mixed = state.frame as u64;
-    for (input, _status) in inputs.iter() {
-        mixed = mixed
-            .wrapping_mul(0x9E37_79B1_85EB_CA87)
-            .wrapping_add(u64::from(input.buttons));
-    }
-    state.checksum = state.checksum.rotate_left(7) ^ mixed;
+    relay_sent_sequence_count: u64,
+    relay_sent_first_sequence: u64,
+    relay_sent_last_sequence: u64,
+    relay_sent_sequence_hash: u64,
+    relay_received_sequence_count: u64,
+    relay_received_first_sequence: u64,
+    relay_received_last_sequence: u64,
+    relay_received_sequence_hash: u64,
 }
 
 fn outbound_is_drained(
@@ -204,6 +170,10 @@ async fn main() -> Result<(), String> {
     let mut polling_callbacks_during_run = 0u64;
     let mut running_client_sent_baseline = 0u64;
     let mut running_relay_enqueued_baseline = 0u64;
+    let mut local_target_reached = false;
+    let mut workload_finished = false;
+    let mut peer_left_after_ack = false;
+    let mut pending_inbound = Vec::new();
 
     while Instant::now() < deadline {
         let events = client.poll();
@@ -248,22 +218,25 @@ async fn main() -> Result<(), String> {
                     seq,
                     epoch,
                 } => {
-                    if let Some(local_id) = local {
-                        if let Some(remote) = roster.iter().copied().find(|id| *id != local_id) {
-                            relay.admit_inbound(InboundRelayFrame {
-                                local: local_id,
-                                known_remote: remote,
-                                from: from_player,
-                                encoding,
-                                seq,
-                                epoch,
-                                payload: &payload,
-                            });
-                        }
-                    }
+                    pending_inbound.push(PendingInbound {
+                        from_player,
+                        encoding,
+                        payload,
+                        seq,
+                        epoch,
+                    });
                 }
                 SignalFishEvent::Disconnected { reason, .. } => {
                     return Err(format!("server disconnected peer: {reason:?}"));
+                }
+                SignalFishEvent::PlayerLeft { player_id, .. } => {
+                    if role == "joiner" && relay.joiner_ack_enqueued() {
+                        peer_left_after_ack = true;
+                    } else {
+                        return Err(format!(
+                            "Signal Fish peer left before final ack: {player_id}"
+                        ));
+                    }
                 }
                 SignalFishEvent::Error { message, .. }
                 | SignalFishEvent::AuthenticationError { error: message, .. } => {
@@ -280,65 +253,162 @@ async fn main() -> Result<(), String> {
                 .copied()
                 .find(|id| *id != local_id)
                 .ok_or("missing remote player")?;
+            relay
+                .configure_identity(local_id, remote)
+                .map_err(|error| format!("configure relay identity: {error}"))?;
             session = Some(build_session(local_id, remote, relay.clone())?);
         }
 
+        if session.is_some() {
+            let local_id = local.ok_or("session exists without local id")?;
+            let remote = roster
+                .iter()
+                .copied()
+                .find(|id| *id != local_id)
+                .ok_or("session exists without remote id")?;
+            for frame in pending_inbound.drain(..) {
+                relay.admit_inbound(InboundRelayFrame {
+                    local: local_id,
+                    known_remote: remote,
+                    from: frame.from_player,
+                    encoding: frame.encoding,
+                    seq: frame.seq,
+                    epoch: frame.epoch,
+                    payload: &frame.payload,
+                });
+            }
+        }
+
+        workload_finished |= local_target_reached && relay.target_received();
         if let Some(fortress) = session.as_mut() {
-            fortress.poll_remote_clients();
-            for event in fortress.events() {
-                match event {
-                    FortressEvent::WaitRecommendation { skip_frames } => {
-                        recommended_skips = skip_frames;
+            if !workload_finished {
+                fortress.poll_remote_clients();
+                for event in fortress.events() {
+                    match event {
+                        FortressEvent::WaitRecommendation { skip_frames } => {
+                            recommended_skips = skip_frames;
+                        }
+                        FortressEvent::DesyncDetected { frame, .. } => {
+                            return Err(format!("Fortress desync at frame {frame:?}"));
+                        }
+                        FortressEvent::Disconnected { addr } => {
+                            return Err(format!("Fortress peer disconnected: {addr}"));
+                        }
+                        _ => {}
                     }
-                    FortressEvent::DesyncDetected { frame, .. } => {
-                        return Err(format!("Fortress desync at frame {frame:?}"));
+                }
+
+                if fortress.current_state() == SessionState::Running {
+                    if running_since.is_none() {
+                        relay.reset_queue_peak();
+                        running_since = Some(Instant::now());
+                        running_client_sent_baseline = client.stats().game_data_sent;
+                        running_relay_enqueued_baseline = relay.counters().enqueued_outbound;
                     }
-                    FortressEvent::Disconnected { addr } => {
-                        return Err(format!("Fortress peer disconnected: {addr}"));
+                    let target_reached =
+                        fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES;
+                    observe_running_phase(
+                        target_reached,
+                        &mut polling_callbacks_during_run,
+                        &mut running_finished_at,
+                        Instant::now(),
+                    );
+                    local_target_reached |= target_reached;
+                    if !target_reached && recommended_skips > 0 {
+                        recommended_skips = recommended_skips.saturating_sub(1);
+                    } else if !target_reached {
+                        let current = fortress.current_frame().as_i32();
+                        for handle in fortress.local_player_handles() {
+                            let input = input_for_frame(current, handle.as_usize());
+                            fortress
+                                .add_local_input(handle, input)
+                                .map_err(|error| format!("add input: {error}"))?;
+                        }
+                        let requests = fortress
+                            .advance_frame()
+                            .map_err(|error| format!("advance Fortress: {error}"))?;
+                        apply_requests(&mut state, requests);
                     }
-                    _ => {}
                 }
             }
 
-            if fortress.current_state() == SessionState::Running {
-                if running_since.is_none() {
-                    relay.reset_queue_peak();
-                    running_since = Some(Instant::now());
-                    running_client_sent_baseline = client.stats().game_data_sent;
-                    running_relay_enqueued_baseline = relay.counters().enqueued_outbound;
-                }
-                let target_reached = fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES;
-                observe_running_phase(
-                    target_reached,
-                    &mut polling_callbacks_during_run,
-                    &mut running_finished_at,
-                    Instant::now(),
-                );
-                if !target_reached && recommended_skips > 0 {
-                    recommended_skips = recommended_skips.saturating_sub(1);
-                } else if !target_reached {
-                    let current = fortress.current_frame().as_i32();
-                    for handle in fortress.local_player_handles() {
-                        let input = Input {
-                            buttons: (current as u32).wrapping_mul(31)
-                                ^ u32::from(local == roster.iter().next().copied()),
-                        };
-                        fortress
-                            .add_local_input(handle, input)
-                            .map_err(|error| format!("add input: {error}"))?;
-                    }
-                    let requests = fortress
-                        .advance_frame()
-                        .map_err(|error| format!("advance Fortress: {error}"))?;
-                    apply_requests(&mut state, requests);
-                }
+            if local_target_reached && !relay.target_enqueued() {
+                let local_id = local.ok_or("local id disappeared")?;
+                let remote = roster
+                    .iter()
+                    .copied()
+                    .find(|id| *id != local_id)
+                    .ok_or("remote id disappeared")?;
+                relay
+                    .enqueue_target_reached(&remote)
+                    .map_err(|error| format!("enqueue relay target marker: {error}"))?;
             }
 
             drain_relay(&mut client, &relay, &mut relay_retries)?;
             relay.sample_queue();
+            workload_finished |= local_target_reached && relay.target_received();
+            if workload_finished
+                && !relay.completion_enqueued()
+                && outbound_is_drained(
+                    relay.queue_depth(),
+                    relay.counters().enqueued_outbound,
+                    client.stats().game_data_sent,
+                )
+            {
+                let local_id = local.ok_or("local id disappeared")?;
+                let remote = roster
+                    .iter()
+                    .copied()
+                    .find(|id| *id != local_id)
+                    .ok_or("remote id disappeared")?;
+                relay
+                    .enqueue_completion(&remote)
+                    .map_err(|error| format!("enqueue relay completion: {error}"))?;
+                drain_relay(&mut client, &relay, &mut relay_retries)?;
+                relay.sample_queue();
+            }
+            let completion_exchange_done = relay.completion_enqueued()
+                && relay.completion_received()
+                && outbound_is_drained(
+                    relay.queue_depth(),
+                    relay.counters().enqueued_outbound,
+                    client.stats().game_data_sent,
+                );
+            if role == "creator" && completion_exchange_done && !relay.creator_final_enqueued() {
+                let local_id = local.ok_or("local id disappeared")?;
+                let remote = roster
+                    .iter()
+                    .copied()
+                    .find(|id| *id != local_id)
+                    .ok_or("remote id disappeared")?;
+                relay
+                    .enqueue_creator_final(&remote)
+                    .map_err(|error| format!("enqueue creator final marker: {error}"))?;
+                drain_relay(&mut client, &relay, &mut relay_retries)?;
+                relay.sample_queue();
+            }
+            if role == "joiner"
+                && completion_exchange_done
+                && relay.creator_final_received()
+                && !relay.joiner_ack_enqueued()
+            {
+                let local_id = local.ok_or("local id disappeared")?;
+                let remote = roster
+                    .iter()
+                    .copied()
+                    .find(|id| *id != local_id)
+                    .ok_or("remote id disappeared")?;
+                relay
+                    .enqueue_joiner_ack(&remote)
+                    .map_err(|error| format!("enqueue joiner final ack: {error}"))?;
+                drain_relay(&mut client, &relay, &mut relay_retries)?;
+                relay.sample_queue();
+            }
             let relay_stats = relay.counters();
             let client_stats = client.stats();
-            if fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES
+            let role_handshake_done = (role == "creator" && relay.joiner_ack_received())
+                || (role == "joiner" && peer_left_after_ack);
+            if role_handshake_done
                 && outbound_is_drained(
                     relay.queue_depth(),
                     relay_stats.enqueued_outbound,
@@ -346,6 +416,8 @@ async fn main() -> Result<(), String> {
                 )
             {
                 let metrics = fortress.metrics();
+                let sent_ledger = relay.sent_ledger();
+                let received_ledger = relay.received_ledger();
                 let report = Report {
                     player_id: local.ok_or("local id disappeared")?,
                     current_frame: fortress.current_frame().as_i32(),
@@ -388,6 +460,14 @@ async fn main() -> Result<(), String> {
                     running_elapsed_ms: running_elapsed(running_since, running_finished_at)
                         .as_millis(),
                     polling_callbacks_during_run,
+                    relay_sent_sequence_count: sent_ledger.count,
+                    relay_sent_first_sequence: sent_ledger.first_sequence,
+                    relay_sent_last_sequence: sent_ledger.last_sequence,
+                    relay_sent_sequence_hash: sent_ledger.sequence_hash,
+                    relay_received_sequence_count: received_ledger.count,
+                    relay_received_first_sequence: received_ledger.first_sequence,
+                    relay_received_last_sequence: received_ledger.last_sequence,
+                    relay_received_sequence_hash: received_ledger.sequence_hash,
                 };
                 println!(
                     "{}",
@@ -415,9 +495,17 @@ async fn main() -> Result<(), String> {
         )
     });
     Err(format!(
-        "peer deadline expired: role={role}, roster={}, session={diagnostics:?}, pipeline_depth={}, client_stats={:?}",
+        "peer deadline expired: role={role}, roster={}, session={diagnostics:?}, local_target_reached={local_target_reached}, target_enqueued={}, target_received={}, workload_finished={workload_finished}, completion_enqueued={}, completion_received={}, pipeline_depth={}, relay_stats={:?}, sent_ledger={:?}, received_ledger={:?}, pending_inbound={}, client_stats={:?}",
         roster.len(),
+        relay.target_enqueued(),
+        relay.target_received(),
+        relay.completion_enqueued(),
+        relay.completion_received(),
         relay.queue_depth(),
+        relay.counters(),
+        relay.sent_ledger(),
+        relay.received_ledger(),
+        pending_inbound.len(),
         client.stats()
     ))
 }
