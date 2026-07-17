@@ -61,3 +61,10 @@ only when they had dated changelog sections. It now also accepts an exact local
 `vX.Y.Z` Git tag, preserving typo detection while supporting this repository's
 real `v0.3.0` and `v0.4.0` releases. A Git-backed fixture proves an absent tag
 still fails and an existing immutable tag passes.
+
+The replacement macOS lane then found one last fixture-only assumption: the
+test seams hard-coded Linux's `/bin/true`, while macOS provides
+`/usr/bin/true`. They now invoke `true` through `PATH`, matching every required
+runner. The same head's ASan suite passed all tests before reproducing the
+repository's known process-exit leak signature (29 allocations, about 39.8 KiB),
+so that job is classified for an exact-head retry rather than a code change.

@@ -88,8 +88,8 @@ impl Fixture {
             .arg(script)
             .args(arguments)
             .current_dir(&self.root)
-            .env("PREPARE_RELEASE_CARGO_BIN", "/bin/true")
-            .env("PREPARE_RELEASE_DOC_CHECK", "/bin/true")
+            .env("PREPARE_RELEASE_CARGO_BIN", "true")
+            .env("PREPARE_RELEASE_DOC_CHECK", "true")
             .output()
             .expect("run prepare-release.sh")
     }
