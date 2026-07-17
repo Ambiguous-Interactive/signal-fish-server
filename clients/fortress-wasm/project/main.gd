@@ -21,11 +21,16 @@ func _ready() -> void:
 	if typeof(config) != TYPE_DICTIONARY:
 		_publish_bridge_error("injected browser configuration is not an object")
 		return
+	# Godot's JSON parser represents JavaScript numbers as floats. Restore the
+	# integer wire types expected by the Rust configuration schema before the
+	# second serialization boundary.
+	config["schema_version"] = int(config.get("schema_version", -1))
+	config["browser_process_id"] = int(config.get("browser_process_id", -1))
 	var version_info := Engine.get_version_info()
 	config["godot_runtime"] = {
-		"major": version_info.get("major", -1),
-		"minor": version_info.get("minor", -1),
-		"patch": version_info.get("patch", -1),
+		"major": int(version_info.get("major", -1)),
+		"minor": int(version_info.get("minor", -1)),
+		"patch": int(version_info.get("patch", -1)),
 		"status": version_info.get("status", ""),
 		"build": version_info.get("build", ""),
 		"hash": version_info.get("hash", ""),

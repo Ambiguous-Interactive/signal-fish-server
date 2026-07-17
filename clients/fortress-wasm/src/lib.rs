@@ -25,7 +25,6 @@ use workload::{
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const MIN_ACTIVE_CALLBACKS: u64 = 600;
 const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;
-const SETTLE_CALLBACKS: u32 = 30;
 const RUNTIME_DEADLINE: Duration = Duration::from_secs(35);
 const SIGNAL_FISH_CLIENT_VERSION: &str = "0.8.0";
 const FORTRESS_ROLLBACK_VERSION: &str = "0.10.0";
@@ -75,6 +74,14 @@ struct RoomReady<'a> {
     role: &'a str,
     instance_nonce: Uuid,
     room_code: &'a str,
+}
+
+struct PendingInbound {
+    from_player: Uuid,
+    encoding: GameDataEncoding,
+    payload: Vec<u8>,
+    seq: Option<u64>,
+    epoch: Option<u32>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -196,9 +203,9 @@ struct Runtime {
     max_admissions_per_callback: u64,
     running_client_sent_baseline: u64,
     running_relay_enqueued_baseline: u64,
+    local_target_reached: bool,
     workload_finished: bool,
-    settle_callbacks: u32,
-    settle_received_count: u64,
+    pending_inbound: Vec<PendingInbound>,
 }
 
 impl Runtime {
@@ -270,9 +277,9 @@ impl Runtime {
             max_admissions_per_callback: 0,
             running_client_sent_baseline: 0,
             running_relay_enqueued_baseline: 0,
+            local_target_reached: false,
             workload_finished: false,
-            settle_callbacks: 0,
-            settle_received_count: 0,
+            pending_inbound: Vec::new(),
         })
     }
 
@@ -290,8 +297,12 @@ impl Runtime {
             self.handle_event(event)?;
         }
         self.ensure_session()?;
+        self.admit_pending_inbound()?;
 
-        let mut target_reached = self.workload_finished;
+        self.workload_finished |= self.local_target_reached
+            && (self.config.run_mode == RunMode::NegativeOneAdmissionPerCallback
+                || self.relay.target_received());
+        let mut target_reached = self.local_target_reached;
         if !self.workload_finished {
             if let Some(fortress) = self.session.as_mut() {
                 fortress.poll_remote_clients();
@@ -357,7 +368,28 @@ impl Runtime {
         {
             target_reached = true;
         }
-        self.workload_finished |= target_reached;
+        self.local_target_reached |= target_reached;
+
+        if self.config.run_mode == RunMode::Healthy
+            && self.local_target_reached
+            && !self.relay.target_enqueued()
+        {
+            let local = self
+                .local
+                .ok_or("local id disappeared before target marker")?;
+            let remote = self
+                .roster
+                .iter()
+                .copied()
+                .find(|player| *player != local)
+                .ok_or("remote id disappeared before target marker")?;
+            self.relay
+                .enqueue_target_reached(&remote)
+                .map_err(|error| format!("enqueue relay target marker: {error}"))?;
+        }
+        self.workload_finished |= self.local_target_reached
+            && (self.config.run_mode == RunMode::NegativeOneAdmissionPerCallback
+                || self.relay.target_received());
 
         let admission_cap = match self.config.run_mode {
             RunMode::Healthy => usize::MAX,
@@ -376,19 +408,63 @@ impl Runtime {
 
         let drained = self.relay.queue_depth() == 0
             && self.relay.counters().enqueued_outbound == self.client.stats().game_data_sent;
-        if !self.workload_finished || !drained {
-            self.settle_callbacks = 0;
-            self.settle_received_count = self.relay.received_ledger().count;
+        if self.workload_finished && drained && !self.relay.completion_enqueued() {
+            let local = self.local.ok_or("local id disappeared before completion")?;
+            let remote = self
+                .roster
+                .iter()
+                .copied()
+                .find(|player| *player != local)
+                .ok_or("remote id disappeared before completion")?;
+            self.relay
+                .enqueue_completion(&remote)
+                .map_err(|error| format!("enqueue relay completion: {error}"))?;
             return Ok(false);
         }
-        let received_count = self.relay.received_ledger().count;
-        if received_count == self.settle_received_count {
-            self.settle_callbacks = self.settle_callbacks.saturating_add(1);
-        } else {
-            self.settle_received_count = received_count;
-            self.settle_callbacks = 0;
+        let completion_exchange_done = self.relay.completion_enqueued()
+            && self.relay.completion_received()
+            && self.relay.queue_depth() == 0
+            && self.relay.counters().enqueued_outbound == self.client.stats().game_data_sent;
+        if self.config.role == "creator"
+            && completion_exchange_done
+            && !self.relay.creator_final_enqueued()
+        {
+            let local = self
+                .local
+                .ok_or("local id disappeared before creator final")?;
+            let remote = self
+                .roster
+                .iter()
+                .copied()
+                .find(|player| *player != local)
+                .ok_or("remote id disappeared before creator final")?;
+            self.relay
+                .enqueue_creator_final(&remote)
+                .map_err(|error| format!("enqueue creator final marker: {error}"))?;
+            return Ok(false);
         }
-        let complete = self.settle_callbacks >= SETTLE_CALLBACKS;
+        if self.config.role == "joiner"
+            && completion_exchange_done
+            && self.relay.creator_final_received()
+            && !self.relay.joiner_ack_enqueued()
+        {
+            let local = self.local.ok_or("local id disappeared before joiner ack")?;
+            let remote = self
+                .roster
+                .iter()
+                .copied()
+                .find(|player| *player != local)
+                .ok_or("remote id disappeared before joiner ack")?;
+            self.relay
+                .enqueue_joiner_ack(&remote)
+                .map_err(|error| format!("enqueue joiner final ack: {error}"))?;
+            return Ok(false);
+        }
+        let drained = self.relay.queue_depth() == 0
+            && self.relay.counters().enqueued_outbound == self.client.stats().game_data_sent;
+        let complete =
+            (self.config.role == "creator" && self.relay.joiner_ack_received() && drained)
+                || (self.config.role == "joiner" && self.relay.joiner_ack_enqueued() && drained);
         if complete {
             self.running_finished_at.get_or_insert_with(Instant::now);
         }
@@ -444,23 +520,12 @@ impl Runtime {
                 seq,
                 epoch,
             } => {
-                let local = self
-                    .local
-                    .ok_or("received game data before local identity")?;
-                let remote = self
-                    .roster
-                    .iter()
-                    .copied()
-                    .find(|player| *player != local)
-                    .ok_or("received game data before remote identity")?;
-                self.relay.admit_inbound(InboundRelayFrame {
-                    local,
-                    known_remote: remote,
-                    from: from_player,
+                self.pending_inbound.push(PendingInbound {
+                    from_player,
                     encoding,
+                    payload,
                     seq,
                     epoch,
-                    payload: &payload,
                 });
             }
             SignalFishEvent::PlayerLeft { player_id, .. } => {
@@ -498,6 +563,27 @@ impl Runtime {
             )
             .map_err(|error| format!("configure relay identity: {error}"))?;
         self.session = Some(build_session(local, remote, self.relay.clone())?);
+        Ok(())
+    }
+
+    fn admit_pending_inbound(&mut self) -> Result<(), String> {
+        let Some(local) = self.local else {
+            return Ok(());
+        };
+        let Some(remote) = self.roster.iter().copied().find(|player| *player != local) else {
+            return Ok(());
+        };
+        for frame in self.pending_inbound.drain(..) {
+            self.relay.admit_inbound(InboundRelayFrame {
+                local,
+                known_remote: remote,
+                from: frame.from_player,
+                encoding: frame.encoding,
+                seq: frame.seq,
+                epoch: frame.epoch,
+                payload: &frame.payload,
+            });
+        }
         Ok(())
     }
 

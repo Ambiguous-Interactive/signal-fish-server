@@ -3,7 +3,6 @@ import { createRequire } from "node:module";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, normalize, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import net from "node:net";
 
@@ -83,6 +82,11 @@ server.stderr.on("data", (chunk) => serverChunks.push(chunk));
 const httpServer = createServer((request, response) => {
   try {
     const pathname = new URL(request.url ?? "/", "http://fixture.invalid").pathname;
+    if (pathname === "/favicon.ico") {
+      response.writeHead(204, { "cache-control": "no-store" });
+      response.end();
+      return;
+    }
     const relative = pathname === "/" ? "index.html" : pathname.slice(1);
     const candidate = normalize(join(exportDirectory, relative));
     if (!candidate.startsWith(`${exportDirectory}${sep}`) || !existsSync(candidate)) {
@@ -359,6 +363,8 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
   assert(creatorReport.relay_sent_last_sequence === joinerReport.relay_received_last_sequence, "creator->joiner last sequence mismatch");
   assert(creatorReport.relay_sent_sequence_hash === joinerReport.relay_received_sequence_hash, "creator->joiner sequence ledger mismatch");
   assert(joinerReport.relay_sent_sequence_count === creatorReport.relay_received_sequence_count, "joiner->creator sequence count mismatch");
+  assert(joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence, "joiner->creator first sequence mismatch");
+  assert(joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence, "joiner->creator last sequence mismatch");
   assert(joinerReport.relay_sent_sequence_hash === creatorReport.relay_received_sequence_hash, "joiner->creator sequence ledger mismatch");
   for (const peer of [creator, joiner]) {
     assert(peer.errors.length === 0, `${peer.role}: browser errors:\n${peer.errors.join("\n")}`);

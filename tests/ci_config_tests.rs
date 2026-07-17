@@ -21518,6 +21518,10 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "config.godot_runtime.string.starts_with(\"4.5.stable\")",
         "godot_runtime: self.config.godot_runtime.clone()",
         "configure_identity",
+        "enqueue_target_reached",
+        "enqueue_completion",
+        "enqueue_creator_final",
+        "enqueue_joiner_ack",
         "relay_sent_sequence_hash",
         "relay_received_sequence_hash",
     ] {
@@ -21532,6 +21536,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     );
     for required in [
         "Engine.get_version_info()",
+        "config[\"schema_version\"] = int(",
+        "config[\"browser_process_id\"] = int(",
         "config[\"godot_runtime\"]",
         "peer.configure(JSON.stringify(config))",
     ] {
@@ -21559,6 +21565,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "-browser-errors.log",
         "-partial-report.json",
         "relay_sent_sequence_hash === joinerReport.relay_received_sequence_hash",
+        "joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence",
+        "joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence",
         "healthyViolations.length > 0",
         "BUSTED fortress-wasm expected negative control",
         "HEALTHY fortress-wasm healthy control",

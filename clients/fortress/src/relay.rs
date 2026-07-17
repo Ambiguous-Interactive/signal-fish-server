@@ -10,7 +10,13 @@ use uuid::Uuid;
 const DESTINATION_BYTES: usize = 16;
 const NONCE_BYTES: usize = 16;
 const SEQUENCE_BYTES: usize = 8;
-const ENVELOPE_BYTES: usize = DESTINATION_BYTES + NONCE_BYTES + SEQUENCE_BYTES;
+const KIND_BYTES: usize = 1;
+const ENVELOPE_BYTES: usize = DESTINATION_BYTES + NONCE_BYTES + SEQUENCE_BYTES + KIND_BYTES;
+const KIND_DATA: u8 = 0;
+const KIND_TARGET_REACHED: u8 = 1;
+const KIND_COMPLETION: u8 = 2;
+const KIND_CREATOR_FINAL: u8 = 3;
+const KIND_JOINER_ACK: u8 = 4;
 const MAX_OUTBOUND_FRAMES: usize = 256;
 const MAX_INBOUND_FRAMES: usize = 256;
 const MAX_INBOUND_PER_POLL: usize = 256;
@@ -67,6 +73,14 @@ struct Shared {
     next_outbound_sequence: u64,
     sent_ledger: RelayLedger,
     received_ledger: RelayLedger,
+    target_enqueued: bool,
+    target_received: bool,
+    completion_enqueued: bool,
+    completion_received: bool,
+    creator_final_enqueued: bool,
+    creator_final_received: bool,
+    joiner_ack_enqueued: bool,
+    joiner_ack_received: bool,
 }
 
 /// Fortress's UDP-like socket boundary backed by Signal Fish binary relay frames.
@@ -195,6 +209,114 @@ impl RelaySocket {
             .map_or_else(|_| RelayLedger::default(), |shared| shared.received_ledger)
     }
 
+    pub fn completion_enqueued(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.completion_enqueued)
+    }
+
+    pub fn target_enqueued(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.target_enqueued)
+    }
+
+    pub fn target_received(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.target_received)
+    }
+
+    pub fn enqueue_target_reached(&self, destination: &Uuid) -> Result<(), &'static str> {
+        let Ok(mut shared) = self.shared.lock() else {
+            return Err("relay target mutex poisoned");
+        };
+        if shared.target_enqueued {
+            return Ok(());
+        }
+        if shared.outbound.len() >= MAX_OUTBOUND_FRAMES {
+            return Err("relay target queue is full");
+        }
+        enqueue_frame(&mut shared, destination, KIND_TARGET_REACHED, &[])?;
+        shared.target_enqueued = true;
+        Ok(())
+    }
+
+    pub fn completion_received(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.completion_received)
+    }
+
+    pub fn enqueue_completion(&self, destination: &Uuid) -> Result<(), &'static str> {
+        let Ok(mut shared) = self.shared.lock() else {
+            return Err("relay completion mutex poisoned");
+        };
+        if shared.completion_enqueued {
+            return Ok(());
+        }
+        if shared.outbound.len() >= MAX_OUTBOUND_FRAMES {
+            return Err("relay completion queue is full");
+        }
+        enqueue_frame(&mut shared, destination, KIND_COMPLETION, &[])?;
+        shared.completion_enqueued = true;
+        Ok(())
+    }
+
+    pub fn creator_final_enqueued(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.creator_final_enqueued)
+    }
+
+    pub fn creator_final_received(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.creator_final_received)
+    }
+
+    pub fn enqueue_creator_final(&self, destination: &Uuid) -> Result<(), &'static str> {
+        let Ok(mut shared) = self.shared.lock() else {
+            return Err("relay creator-final mutex poisoned");
+        };
+        if shared.creator_final_enqueued {
+            return Ok(());
+        }
+        if shared.outbound.len() >= MAX_OUTBOUND_FRAMES {
+            return Err("relay creator-final queue is full");
+        }
+        enqueue_frame(&mut shared, destination, KIND_CREATOR_FINAL, &[])?;
+        shared.creator_final_enqueued = true;
+        Ok(())
+    }
+
+    pub fn joiner_ack_enqueued(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.joiner_ack_enqueued)
+    }
+
+    pub fn joiner_ack_received(&self) -> bool {
+        self.shared
+            .lock()
+            .is_ok_and(|shared| shared.joiner_ack_received)
+    }
+
+    pub fn enqueue_joiner_ack(&self, destination: &Uuid) -> Result<(), &'static str> {
+        let Ok(mut shared) = self.shared.lock() else {
+            return Err("relay joiner-ack mutex poisoned");
+        };
+        if shared.joiner_ack_enqueued {
+            return Ok(());
+        }
+        if shared.outbound.len() >= MAX_OUTBOUND_FRAMES {
+            return Err("relay joiner-ack queue is full");
+        }
+        enqueue_frame(&mut shared, destination, KIND_JOINER_ACK, &[])?;
+        shared.joiner_ack_enqueued = true;
+        Ok(())
+    }
+
     pub fn admit_inbound(&self, frame: InboundRelayFrame<'_>) {
         let InboundRelayFrame {
             local,
@@ -211,7 +333,7 @@ impl RelaySocket {
         if encoding != GameDataEncoding::MessagePack
             || seq.is_none_or(|value| value == 0)
             || epoch.is_none_or(|value| value == 0)
-            || payload.len() <= ENVELOPE_BYTES
+            || payload.len() < ENVELOPE_BYTES
         {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
             return;
@@ -266,7 +388,39 @@ impl RelaySocket {
             return;
         }
 
+        let Some(kind) = payload.get(DESTINATION_BYTES + NONCE_BYTES + SEQUENCE_BYTES) else {
+            shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
+            return;
+        };
         let message_bytes = &payload[ENVELOPE_BYTES..];
+        if *kind == KIND_TARGET_REACHED && message_bytes.is_empty() {
+            shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
+            record_sequence(&mut shared.received_ledger, application_sequence);
+            shared.target_received = true;
+            return;
+        }
+        if *kind == KIND_COMPLETION && message_bytes.is_empty() {
+            shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
+            record_sequence(&mut shared.received_ledger, application_sequence);
+            shared.completion_received = true;
+            return;
+        }
+        if *kind == KIND_CREATOR_FINAL && message_bytes.is_empty() {
+            shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
+            record_sequence(&mut shared.received_ledger, application_sequence);
+            shared.creator_final_received = true;
+            return;
+        }
+        if *kind == KIND_JOINER_ACK && message_bytes.is_empty() {
+            shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
+            record_sequence(&mut shared.received_ledger, application_sequence);
+            shared.joiner_ack_received = true;
+            return;
+        }
+        if *kind != KIND_DATA {
+            shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
+            return;
+        }
         match codec::decode_message(message_bytes) {
             Ok((message, consumed)) if consumed == message_bytes.len() => {
                 if shared.inbound.len() >= MAX_INBOUND_FRAMES {
@@ -293,26 +447,38 @@ impl RelaySocket {
                     shared.counters.outbound_overflow.saturating_add(1);
                 return;
             }
-            let Some(local_instance_nonce) = shared.local_instance_nonce else {
+            if enqueue_frame(&mut shared, destination, KIND_DATA, &encoded).is_err() {
                 shared.counters.encode_failures = shared.counters.encode_failures.saturating_add(1);
-                return;
-            };
-            let sequence = shared.next_outbound_sequence;
-            shared.next_outbound_sequence = shared.next_outbound_sequence.saturating_add(1);
-            let mut payload = Vec::with_capacity(ENVELOPE_BYTES.saturating_add(encoded.len()));
-            payload.extend_from_slice(destination.as_bytes());
-            payload.extend_from_slice(local_instance_nonce.as_bytes());
-            payload.extend_from_slice(&sequence.to_be_bytes());
-            payload.extend_from_slice(&encoded);
-            shared.outbound.push_back(OutboundRelayFrame {
-                payload,
-                enqueued_at: Instant::now(),
-                sequence,
-            });
-            shared.counters.enqueued_outbound = shared.counters.enqueued_outbound.saturating_add(1);
-            sample_queue(&mut shared, Instant::now());
+            }
         }
     }
+}
+
+fn enqueue_frame(
+    shared: &mut Shared,
+    destination: &Uuid,
+    kind: u8,
+    body: &[u8],
+) -> Result<(), &'static str> {
+    let Some(local_instance_nonce) = shared.local_instance_nonce else {
+        return Err("relay identity is not configured");
+    };
+    let sequence = shared.next_outbound_sequence;
+    shared.next_outbound_sequence = shared.next_outbound_sequence.saturating_add(1);
+    let mut payload = Vec::with_capacity(ENVELOPE_BYTES.saturating_add(body.len()));
+    payload.extend_from_slice(destination.as_bytes());
+    payload.extend_from_slice(local_instance_nonce.as_bytes());
+    payload.extend_from_slice(&sequence.to_be_bytes());
+    payload.push(kind);
+    payload.extend_from_slice(body);
+    shared.outbound.push_back(OutboundRelayFrame {
+        payload,
+        enqueued_at: Instant::now(),
+        sequence,
+    });
+    shared.counters.enqueued_outbound = shared.counters.enqueued_outbound.saturating_add(1);
+    sample_queue(shared, Instant::now());
+    Ok(())
 }
 
 impl NonBlockingSocket<Uuid> for RelaySocket {
@@ -442,5 +608,54 @@ mod tests {
             MAX_OUTBOUND_FRAMES as u64
         );
         assert_eq!(socket.counters().outbound_overflow, 1);
+    }
+
+    #[test]
+    fn ordered_target_and_completion_markers_close_both_ledgers() {
+        let creator_id = Uuid::new_v4();
+        let joiner_id = Uuid::new_v4();
+        let creator = RelaySocket::default();
+        let joiner = RelaySocket::default();
+        creator
+            .configure_identity(creator_id, joiner_id)
+            .expect("configure creator identity");
+        joiner
+            .configure_identity(joiner_id, creator_id)
+            .expect("configure joiner identity");
+
+        creator
+            .enqueue_target_reached(&joiner_id)
+            .expect("enqueue target marker");
+        creator
+            .enqueue_completion(&joiner_id)
+            .expect("enqueue completion marker");
+        creator
+            .enqueue_creator_final(&joiner_id)
+            .expect("enqueue creator-final marker");
+        creator
+            .enqueue_joiner_ack(&joiner_id)
+            .expect("enqueue joiner-ack marker");
+
+        for server_sequence in 1..=4 {
+            let frame = creator.take_outbound().expect("ordered marker");
+            joiner.admit_inbound(InboundRelayFrame {
+                local: joiner_id,
+                known_remote: creator_id,
+                from: creator_id,
+                encoding: GameDataEncoding::MessagePack,
+                seq: Some(server_sequence),
+                epoch: Some(1),
+                payload: &frame.payload,
+            });
+            creator.mark_admitted(frame);
+        }
+
+        assert!(joiner.target_received());
+        assert!(joiner.completion_received());
+        assert!(joiner.creator_final_received());
+        assert!(joiner.joiner_ack_received());
+        assert_eq!(joiner.received_ledger().count, 4);
+        assert_eq!(creator.sent_ledger(), joiner.received_ledger());
+        assert_eq!(joiner.counters().accepted_inbound, 4);
     }
 }
