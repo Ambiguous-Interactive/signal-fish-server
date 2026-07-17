@@ -1,0 +1,228 @@
+# Prepares a reviewed release commit; publication remains release.yml's job.
+#
+# The workflow uses an installation token from the organization's auto-commit
+# GitHub App. Unlike GITHUB_TOKEN, that token lets the generated pull request
+# trigger the repository's normal pull_request CI workflows.
+
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semantic-version component to increment"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      dry_run:
+        description: "Validate and print the release diff without opening a pull request"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release pull request
+    if: github.repository == 'Ambiguous-Interactive/signal-fish-server'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require default branch dispatch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "ERROR: Prepare Release must run from ${DEFAULT_BRANCH}; got ${GITHUB_REF}." >&2
+            exit 1
+          fi
+
+      - name: Check auto-commit GitHub App credentials
+        env:
+          AUTO_COMMIT_APP_ID: ${{ secrets.AUTO_COMMIT_APP_ID }}
+          AUTO_COMMIT_APP_PRIVATE_KEY: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AUTO_COMMIT_APP_ID:-}" ] && [ -n "${AUTO_COMMIT_APP_PRIVATE_KEY:-}" ]; then
+            exit 0
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "WARNING: AUTO_COMMIT_APP_* secrets are missing; dry-run can continue." >&2
+            exit 0
+          fi
+          echo "ERROR: AUTO_COMMIT_APP_ID and AUTO_COMMIT_APP_PRIVATE_KEY are required." >&2
+          echo "The App must have repository Contents and Pull requests read/write permissions." >&2
+          exit 1
+
+      - name: Generate auto-commit GitHub App token
+        id: app-token
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ secrets.AUTO_COMMIT_APP_ID }}
+          private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout default branch
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          persist-credentials: false
+
+      - name: Prepare release files
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: bash scripts/prepare-release.sh --bump "$BUMP"
+
+      - name: Validate prepared diff scope
+        run: |
+          set -euo pipefail
+          git diff --check
+
+          expected=$(mktemp)
+          actual=$(mktemp)
+          printf '%s\n' \
+            .llm/context.md \
+            CHANGELOG.md \
+            Cargo.lock \
+            Cargo.toml \
+            clients/native/Cargo.lock \
+            docs/library-usage.md \
+            | sort > "$expected"
+          git diff --name-only | sort > "$actual"
+          if ! diff -u "$expected" "$actual"; then
+            echo "ERROR: Release preparation changed an unexpected file set." >&2
+            exit 1
+          fi
+
+      - name: Resolve prepared release identity
+        id: release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: |
+          set -euo pipefail
+          version=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "ERROR: Prepared Cargo.toml version is not strict X.Y.Z semver: $version" >&2
+            exit 1
+          fi
+          branch="release/v${version}"
+          tag="v${version}"
+
+          set +e
+          tag_result=$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1)
+          tag_status=$?
+          branch_result=$(git ls-remote --exit-code --heads origin "refs/heads/${branch}" 2>&1)
+          branch_status=$?
+          set -e
+
+          if [ "$tag_status" -eq 0 ]; then
+            echo "ERROR: Release tag ${tag} already exists." >&2
+            exit 1
+          elif [ "$tag_status" -ne 2 ]; then
+            echo "ERROR: Failed to check release tag ${tag}: ${tag_result}" >&2
+            exit "$tag_status"
+          fi
+          if [ "$branch_status" -eq 0 ]; then
+            echo "ERROR: Release branch ${branch} already exists." >&2
+            exit 1
+          elif [ "$branch_status" -ne 2 ]; then
+            echo "ERROR: Failed to check release branch ${branch}: ${branch_result}" >&2
+            exit "$branch_status"
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "branch=$branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create recovery patch
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/release-prepare
+          git diff --binary > "artifacts/release-prepare/release-${VERSION}.patch"
+          git diff --stat > "artifacts/release-prepare/release-${VERSION}.stat.txt"
+
+      - name: Print dry-run diff
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: |
+          set -euo pipefail
+          echo "Dry run: would push ${BRANCH} and open a release PR for ${VERSION}."
+          git --no-pager diff --
+
+      - name: Push release branch and open pull request
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add \
+            .llm/context.md \
+            CHANGELOG.md \
+            Cargo.lock \
+            Cargo.toml \
+            clients/native/Cargo.lock \
+            docs/library-usage.md
+          git commit -m "release: ${VERSION}"
+
+          auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            push origin "HEAD:refs/heads/${BRANCH}"
+
+          body_file=$(mktemp)
+          {
+            echo "Automated release preparation for Signal Fish Server ${VERSION}."
+            echo
+            echo "## Checklist"
+            echo
+            echo "- [ ] \`Cargo.toml\` and path-package lockfiles identify \`${VERSION}\`."
+            echo "- [ ] \`CHANGELOG.md\` release notes and date are reviewed."
+            echo "- [ ] All required checks pass on this exact release commit."
+            echo
+            echo "## After merge"
+            echo
+            echo "Run **Release - Publish Crate** from \`${DEFAULT_BRANCH}\` with \`release_version=${VERSION}\`."
+            echo "That workflow creates or verifies annotated tag \`${TAG}\`, then publishes crates.io and GHCR."
+            echo "It creates the GitHub Release and attaches the SBOM and platform archives."
+          } > "$body_file"
+
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$DEFAULT_BRANCH" \
+            --head "$BRANCH" \
+            --title "release: ${VERSION}" \
+            --body-file "$body_file"
+
+      - name: Upload release preparation recovery patch
+        if: ${{ failure() && !inputs.dry_run }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: release-prepare-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/release-prepare/
+          if-no-files-found: ignore

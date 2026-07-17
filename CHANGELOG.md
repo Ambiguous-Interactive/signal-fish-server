@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a manual **Prepare Release** workflow with a `patch` / `minor` / `major`
+  dropdown and optional dry run. It deterministically bumps the root crate and
+  path-package lockfiles, synchronizes public version references, cuts the
+  dated Keep a Changelog section and comparison links, validates the prepared
+  tree, and opens a `release/vX.Y.Z` pull request using an installation token so
+  normal PR CI runs. The existing **Release - Publish Crate** workflow remains
+  the reviewed second phase and publishes crates.io, the canonical annotated
+  GitHub release/tag, verified GHCR images, SBOM, and platform archives.
 - Add the browser completion cell for the Fortress Rollback issue-242 gate.
   The exact released Fortress 0.10.0 and Signal Fish Rust client 0.8.0 graph now
   runs inside two independent Godot 4.5 no-thread WASM exports in Chromium,

@@ -1353,6 +1353,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
         "Release automation (crates.io + GitHub release)",
     ),
     (
+        "prepare-release.yml",
+        "Manual release preparation (semver bump + changelog release PR)",
+    ),
+    (
         "ci-safety.yml",
         "Advanced safety analysis (Miri, AddressSanitizer — staged)",
     ),
@@ -3966,6 +3970,95 @@ FROM chef AS builder";
         !strip_comment_lines(jsonc_commented).contains("docker-outside-of-docker"),
         "a guard asserting the LIVE view must reject a `//`-commented JSONC feature line"
     );
+}
+
+#[test]
+fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/prepare-release.yml"));
+    let permissions = extract_yaml_mapping_block(&workflow, "permissions", 0)
+        .expect("prepare-release.yml must define workflow-level permissions");
+    let prepare = extract_workflow_job_block(&workflow, "prepare")
+        .expect("prepare-release.yml must define the prepare job");
+
+    assert!(workflow.contains("name: Prepare Release"));
+    assert!(workflow.contains("workflow_dispatch:"));
+    for required in [
+        "bump:",
+        "type: choice",
+        "- patch",
+        "- minor",
+        "- major",
+        "dry_run:",
+        "cancel-in-progress: false",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "prepare-release.yml must contain `{required}` so a maintainer can choose a safe, \
+             non-cancellable semantic-version preparation run."
+        );
+    }
+
+    assert_eq!(permissions.trim(), "contents: read");
+    for required in [
+        "Require default branch dispatch",
+        "actions/create-github-app-token@v3.2.0",
+        "permission-contents: write",
+        "permission-pull-requests: write",
+        "bash scripts/prepare-release.sh --bump \"$BUMP\"",
+        "git diff --check",
+        "branch=\"release/v${version}\"",
+        "git ls-remote --exit-code --tags",
+        "git ls-remote --exit-code --heads",
+        "push origin \"HEAD:refs/heads/${BRANCH}\"",
+        "gh pr create",
+        "Release - Publish Crate",
+        "actions/upload-artifact@v7.0.1",
+    ] {
+        assert!(
+            prepare.contains(required),
+            "prepare-release.yml prepare job must contain `{required}`.\nJob block:\n{prepare}"
+        );
+    }
+
+    assert!(
+        prepare.contains("GH_TOKEN: ${{ steps.app-token.outputs.token }}"),
+        "The release PR must be created with the installation token so normal pull_request CI \
+         runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
+    );
+}
+
+#[test]
+fn test_prepare_release_script_updates_every_canonical_release_input() {
+    let root = repo_root();
+    let script = read_live_file(&root.join("scripts/prepare-release.sh"));
+
+    for required in [
+        "major|minor|patch",
+        "date -u +%F",
+        "Cargo.toml",
+        "Cargo.lock",
+        "clients/native/Cargo.lock",
+        "docs/library-usage.md",
+        ".llm/context.md",
+        "Unreleased",
+        "sort -V",
+        "metadata --locked --no-deps --format-version 1",
+        "scripts/check-doc-consistency.sh",
+    ] {
+        assert!(
+            script.contains(required),
+            "prepare-release.sh must contain live `{required}` handling so version, lockfile, \
+             changelog, and documented release identities cannot drift."
+        );
+    }
+
+    for manifest in ["Cargo.toml", "clients/native/Cargo.toml"] {
+        assert!(
+            script.contains(manifest),
+            "prepare-release.sh must validate {manifest} with locked Cargo metadata."
+        );
+    }
 }
 
 #[test]
