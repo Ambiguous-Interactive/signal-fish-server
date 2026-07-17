@@ -75,9 +75,11 @@ fi
 
 digest=$(GITHUB_OUTPUT='' bash "$VERIFY_RELEASE_IMAGE_SCRIPT" \
   "$IMAGE" "$SOURCE_REVISION" "$IMAGE_VERSION" "${existing_tags[@]}")
-for tag in "${missing_tags[@]}"; do
-  docker buildx imagetools create --tag "${IMAGE}:${tag}" "${IMAGE}@${digest}"
-done
+if [ "${#missing_tags[@]}" -gt 0 ]; then
+  for tag in "${missing_tags[@]}"; do
+    docker buildx imagetools create --tag "${IMAGE}:${tag}" "${IMAGE}@${digest}"
+  done
+fi
 if [ "$IS_BACKFILL" = "true" ] && [ "$preserve_historical_sha" != "true" ]; then
   docker buildx imagetools create --tag "${IMAGE}:${SHA_TAG}" "${IMAGE}@${digest}"
 fi

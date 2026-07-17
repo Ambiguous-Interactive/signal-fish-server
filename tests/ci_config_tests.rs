@@ -12,7 +12,9 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
