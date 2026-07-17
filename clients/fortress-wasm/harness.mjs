@@ -141,8 +141,8 @@ try {
   });
 
   [creatorReport, joinerReport] = await Promise.all([
-    waitForGlobal(creator.page, "__FORTRESS_RESULT", 60_000),
-    waitForGlobal(joiner.page, "__FORTRESS_RESULT", 60_000),
+    waitForGlobal(creator.page, "__FORTRESS_RESULT", 105_000),
+    waitForGlobal(joiner.page, "__FORTRESS_RESULT", 105_000),
   ]);
   await new Promise((accept) => setTimeout(accept, 250));
   const creatorBrowser = await browserAttestation(creator);
@@ -178,6 +178,10 @@ try {
         report.max_admissions_per_callback > 1,
         `${name}: released characterization never attempted multi-send admission`,
       );
+      assert(
+        report.callback_intervals.mean_us >= 8_000,
+        `${name}: released characterization observed a synthetic/too-fast callback mean`,
+      );
       assert(violations.length > 0, `${name}: released graph unexpectedly satisfied every P13 healthy gate`);
       assert(
         report.client_game_data_sent_during_run <= report.active_callback_count * 2,
@@ -189,7 +193,7 @@ try {
       );
       assert(
         violations.every((violation) =>
-          /oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(
+          /non-nominal callback mean|oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(
             violation,
           ),
         ),

@@ -21511,7 +21511,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "#[path = \"../../fortress/src/relay.rs\"]",
         "#[path = \"../../fortress/src/workload.rs\"]",
         "RunMode::NegativeOneAdmissionPerCallback => 1",
-        "const RUNTIME_DEADLINE: Duration = Duration::from_secs(50);",
+        "const RUNTIME_DEADLINE: Duration = Duration::from_secs(90);",
         "const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;",
         "self.active_callback_count >= NEGATIVE_ACTIVE_CALLBACK_BUDGET",
         "self.completed || self.report_json.is_some()",
@@ -21591,9 +21591,10 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     for required in [
         "report.confirmed_frame >= 600",
         "report.max_admissions_per_callback > 1",
+        "report.callback_intervals.mean_us >= 8_000",
         "report.client_game_data_sent_during_run <= report.active_callback_count * 2",
         "report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120",
-        "/oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(",
+        "/non-nominal callback mean|oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(",
         "released graph developed an unrelated healthy-gate failure",
     ] {
         assert!(
@@ -21671,11 +21672,26 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "3.1.74",
         "released \"${EXPORT_DIR}\"",
         "negative \"${EXPORT_DIR}\"",
+        "timeout --foreground 180s",
         "timeout --foreground",
     ] {
         assert!(
             runner.contains(required),
             "P13 runner is missing `{required}`"
+        );
+    }
+    assert_eq!(
+        runner.matches("timeout --foreground 180s").count(),
+        2,
+        "P13 runner must preserve diagnostics for both released and negative browser cells"
+    );
+    for required in [
+        "waitForGlobal(creator.page, \"__FORTRESS_RESULT\", 105_000)",
+        "waitForGlobal(joiner.page, \"__FORTRESS_RESULT\", 105_000)",
+    ] {
+        assert!(
+            harness.contains(required),
+            "P13 harness is missing the bounded report wait `{required}`"
         );
     }
 

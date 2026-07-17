@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-peer relay ledgers. The released graph reproducibly reaches the
   diagnostic deadline as `BUSTED`: although the adapter admits multiple
   messages per callback, the client completes about one send per callback and
-  misses the healthy throughput, stall, queue-age, and wall-time gates. CI
+  misses the healthy throughput, callback-cadence, stall, queue-age, and
+  wall-time gates. CI
   requires a complete 600-frame characterization with no unrelated failure,
   alongside an expected-busted one-admission control, and P13 remains open.
   This result is Chromium-specific and does not generalize to every browser.

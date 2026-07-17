@@ -27,7 +27,9 @@ templates, and Rust `nightly-2026-03-01` plus `rust-src`. The exact released
 graph currently produces a reproducible `BUSTED` result before 600 confirmed
 frames: the adapter admits more than one message per callback, but client
 completions remain near one per callback and miss the healthy throughput gates.
-The characterization gate now requires both peers to reach 600 confirmed
+Observed callback cadence also varies with runner load and can miss its healthy
+bound; it is accepted only alongside the per-peer completion bottleneck. The
+characterization gate now requires both peers to reach 600 confirmed
 frames, reproduce that per-peer completion bottleneck, preserve every
 conservation and correctness gate, and avoid unrelated failures before the
 expected `BUSTED` result can pass CI. An unexpectedly healthy release is

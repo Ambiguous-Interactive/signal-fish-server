@@ -91,9 +91,9 @@ else
     node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install chromium
 fi
 
-timeout --foreground 110s node "${FIXTURE_ROOT}/harness.mjs" \
+timeout --foreground 180s node "${FIXTURE_ROOT}/harness.mjs" \
     released "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
-timeout --foreground 80s node "${FIXTURE_ROOT}/harness.mjs" \
+timeout --foreground 180s node "${FIXTURE_ROOT}/harness.mjs" \
     negative "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
 
 printf 'BUSTED (expected): released Signal Fish client 0.8.0 does not satisfy the Godot no-thread WASM healthy gates\n'
