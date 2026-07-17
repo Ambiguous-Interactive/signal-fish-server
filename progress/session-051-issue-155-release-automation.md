@@ -43,3 +43,8 @@ The validator now performs strict Gregorian calendar checks in Bash, including
 century leap-year rules, so release preparation has identical behavior on the
 Linux, macOS, and Windows CI runners. The regression matrix includes a valid
 leap day plus invalid leap-day, range, and year-zero cases.
+
+Bugbot also identified that the workflow invoked locked Cargo metadata without
+first installing the repository's pinned Rust toolchain. Prepare Release now
+reads `rust-toolchain.toml` after checkout and installs that exact toolchain
+before running the transformer; a policy-ordering test prevents regression.

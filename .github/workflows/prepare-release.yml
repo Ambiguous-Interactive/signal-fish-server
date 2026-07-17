@@ -81,6 +81,22 @@ jobs:
           token: ${{ steps.app-token.outputs.token || github.token }}
           persist-credentials: false
 
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$channel" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml." >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
       - name: Prepare release files
         env:
           BUMP: ${{ inputs.bump }}

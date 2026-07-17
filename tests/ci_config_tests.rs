@@ -4005,6 +4005,9 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "actions/create-github-app-token@v3.2.0",
         "permission-contents: write",
         "permission-pull-requests: write",
+        "Read Rust toolchain",
+        "dtolnay/rust-toolchain@v1",
+        "toolchain: ${{ steps.toolchain.outputs.channel }}",
         "bash scripts/prepare-release.sh --bump \"$BUMP\"",
         "git diff --check",
         "branch=\"release/v${version}\"",
@@ -4025,6 +4028,26 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         prepare.contains("GH_TOKEN: ${{ steps.app-token.outputs.token }}"),
         "The release PR must be created with the installation token so normal pull_request CI \
          runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
+    );
+
+    let checkout = prepare
+        .find("Checkout default branch")
+        .expect("prepare job must check out the repository");
+    let read_toolchain = prepare
+        .find("Read Rust toolchain")
+        .expect("prepare job must read the pinned Rust toolchain");
+    let install_toolchain = prepare
+        .find("Install Rust toolchain")
+        .expect("prepare job must install the pinned Rust toolchain");
+    let prepare_files = prepare
+        .find("Prepare release files")
+        .expect("prepare job must run the release transformer");
+    assert!(
+        checkout < read_toolchain
+            && read_toolchain < install_toolchain
+            && install_toolchain < prepare_files,
+        "The pinned Rust toolchain must be installed after checkout and before release \
+         preparation invokes Cargo."
     );
 }
 
