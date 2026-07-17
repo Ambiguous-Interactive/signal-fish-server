@@ -4335,6 +4335,74 @@ fn test_container_publish_supports_release_and_backfill_entry_points() {
 }
 
 #[test]
+fn test_container_publish_bootstraps_tools_from_workflow_revision() {
+    let root = repo_root();
+    let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+
+    for job_name in ["resolve", "docker-publish"] {
+        let job = extract_workflow_job_block(&docker, job_name)
+            .unwrap_or_else(|| panic!("docker-publish.yml must define {job_name}"));
+        let tooling_position = job
+            .find("- name: Checkout publication tooling")
+            .unwrap_or_else(|| panic!("{job_name} must check out publication tooling"));
+        let source_position = job
+            .find("- name: Checkout exact source")
+            .unwrap_or_else(|| panic!("{job_name} must check out exact source"));
+
+        assert!(
+            tooling_position < source_position,
+            "{job_name} must load current publication tooling before checking out historical source."
+        );
+        for required in [
+            "repository: ${{ job.workflow_repository }}",
+            "ref: ${{ job.workflow_sha }}",
+            "path: publication-tools",
+            "scripts/read-toml-string.sh",
+            "scripts/reuse-verified-image.sh",
+            "scripts/verify-release-image.sh",
+            "sparse-checkout-cone-mode: false",
+            "persist-credentials: false",
+        ] {
+            assert!(
+                job.contains(required),
+                "{job_name} tooling checkout must contain `{required}` so a tagged source that predates publication helpers remains releasable.\nJob block:\n{job}"
+            );
+        }
+
+        let source_step = extract_named_workflow_step(&job, "Checkout exact source")
+            .unwrap_or_else(|| panic!("{job_name} must define its exact-source checkout"));
+        assert!(
+            source_step.contains("path: source"),
+            "{job_name} must isolate exact source from workflow tooling.\nStep:\n{source_step}"
+        );
+    }
+
+    for required in [
+        "source_revision=$(git -C source rev-parse",
+        "publication-tools/scripts/read-toml-string.sh source/Cargo.toml",
+        "VERIFY_RELEASE_IMAGE_SCRIPT: ${{ github.workspace }}/publication-tools/scripts/verify-release-image.sh",
+        "run: bash publication-tools/scripts/reuse-verified-image.sh",
+        "bash publication-tools/scripts/verify-release-image.sh",
+        "context: source",
+    ] {
+        assert!(
+            docker.contains(required),
+            "docker-publish.yml must consume isolated source/tooling through `{required}`."
+        );
+    }
+    for forbidden in [
+        "run: bash scripts/reuse-verified-image.sh",
+        "bash scripts/verify-release-image.sh \\",
+        "context: .",
+    ] {
+        assert!(
+            !docker.contains(forbidden),
+            "docker-publish.yml must not use ambiguous checkout-relative publication path `{forbidden}`."
+        );
+    }
+}
+
+#[test]
 fn test_release_identity_fails_closed_across_artifacts() {
     let root = repo_root();
     let release = read_live_file(&root.join(".github/workflows/release.yml"));
@@ -4363,8 +4431,8 @@ fn test_release_identity_fails_closed_across_artifacts() {
             &docker,
             vec![
                 "Cargo.toml version package",
-                "git fetch --no-tags origin \"refs/tags/${release_tag}:refs/tags/${release_tag}\"",
-                "git cat-file -t \"refs/tags/${release_tag}\"",
+                "git -C source fetch --no-tags origin \"refs/tags/${release_tag}:refs/tags/${release_tag}\"",
+                "git -C source cat-file -t \"refs/tags/${release_tag}\"",
                 "escaped_version=${release_version//./\\\\.}",
                 "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
                 "org.opencontainers.image.revision=",
@@ -4414,7 +4482,8 @@ fn test_release_retries_reuse_digest_and_record_verification() {
         "IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}",
         "IS_RELEASE: ${{ needs.resolve.outputs.is_release }}",
         "IS_BACKFILL: ${{ needs.resolve.outputs.is_backfill }}",
-        "run: bash scripts/reuse-verified-image.sh",
+        "VERIFY_RELEASE_IMAGE_SCRIPT: ${{ github.workspace }}/publication-tools/scripts/verify-release-image.sh",
+        "run: bash publication-tools/scripts/reuse-verified-image.sh",
     ] {
         assert!(
             existing.contains(required),
@@ -4491,6 +4560,8 @@ fn test_release_retries_reuse_digest_and_record_verification() {
     for required in [
         ".github/workflows/docker-publish.yml:",
         "unexpected key \"queue\" for \"concurrency\" section",
+        "property \"workflow_repository\" is not defined in object type",
+        "property \"workflow_sha\" is not defined in object type",
     ] {
         assert!(
             actionlint_config.contains(required),

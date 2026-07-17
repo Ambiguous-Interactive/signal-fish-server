@@ -1,7 +1,11 @@
-# GitHub Actions supports `concurrency.queue: max`, but actionlint 1.7.12 does
-# not yet include that schema key. Keep this exception path- and message-scoped
-# until the repository's pinned actionlint release recognizes it.
+# GitHub Actions supports `concurrency.queue: max` and the reusable-workflow
+# `job.workflow_repository` / `job.workflow_sha` contexts, but actionlint 1.7.12
+# does not yet include those schema fields. Keep these exceptions path- and
+# message-scoped until the repository's pinned actionlint release recognizes
+# them.
 paths:
   .github/workflows/docker-publish.yml:
     ignore:
       - 'unexpected key "queue" for "concurrency" section'
+      - 'property "workflow_repository" is not defined in object type'
+      - 'property "workflow_sha" is not defined in object type'
