@@ -7,13 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Make historical GHCR backfills load publication helpers from the exact
-  workflow revision while building only the tagged source checkout. Releases
-  that predate the helper scripts no longer fail before the container build,
-  and current workflow tooling cannot alter the historical build context.
-
 ### Added
 
 - Add a manual **Prepare Release** workflow with a `patch` / `minor` / `major`
@@ -797,6 +790,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make historical GHCR backfills load publication helpers from the exact
+  workflow revision while building only the tagged source checkout. Releases
+  that predate the helper scripts no longer fail before the container build,
+  and current workflow tooling cannot alter the historical build context.
 - Fixed negotiated lossy delivery under a slow-but-draining TCP downstream.
   A bounded, configurable TCP send buffer (`websocket.socket_send_buffer_bytes`,
   default 65536; `0` restores the platform default) prevents megabytes of data
