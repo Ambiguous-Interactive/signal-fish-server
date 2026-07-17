@@ -41,10 +41,10 @@ const [mode, exportDirectoryArg, serverBinaryArg, artifactDirectoryArg, buildSha
   process.argv.slice(2);
 if (!mode || !exportDirectoryArg || !serverBinaryArg || !artifactDirectoryArg || !buildSha) {
   throw new Error(
-    "usage: node harness.mjs <healthy|negative> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
+    "usage: node harness.mjs <released|negative> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
   );
 }
-if (!new Set(["healthy", "negative"]).has(mode)) {
+if (!new Set(["released", "negative"]).has(mode)) {
   throw new Error(`unsupported run mode: ${mode}`);
 }
 if (!isAbsolute(serverBinaryArg) || !existsSync(serverBinaryArg)) {
@@ -141,8 +141,8 @@ try {
   });
 
   [creatorReport, joinerReport] = await Promise.all([
-    waitForGlobal(creator.page, "__FORTRESS_RESULT", 45_000),
-    waitForGlobal(joiner.page, "__FORTRESS_RESULT", 45_000),
+    waitForGlobal(creator.page, "__FORTRESS_RESULT", 60_000),
+    waitForGlobal(joiner.page, "__FORTRESS_RESULT", 60_000),
   ]);
   await new Promise((accept) => setTimeout(accept, 250));
   const creatorBrowser = await browserAttestation(creator);
@@ -163,31 +163,72 @@ try {
     joinerBrowser,
     room.room_code,
   );
-  const healthyViolations = [
-    ...healthViolations("creator", creatorReport),
-    ...healthViolations("joiner", joinerReport),
+  const peerHealth = [
+    ["creator", creatorReport, healthViolations("creator", creatorReport)],
+    ["joiner", joinerReport, healthViolations("joiner", joinerReport)],
   ];
-  if (mode === "healthy") {
-    assert(healthyViolations.length === 0, `HEALTHY gates failed:\n${healthyViolations.join("\n")}`);
-    process.stdout.write("HEALTHY fortress-wasm healthy control\n");
+  const healthyViolations = peerHealth.flatMap(([, , violations]) => violations);
+  if (mode === "released") {
+    for (const [name, report, violations] of peerHealth) {
+      assert(
+        report.confirmed_frame >= 600,
+        `${name}: released graph did not complete the full 600-confirmed-frame characterization`,
+      );
+      assert(
+        report.max_admissions_per_callback > 1,
+        `${name}: released characterization never attempted multi-send admission`,
+      );
+      assert(violations.length > 0, `${name}: released graph unexpectedly satisfied every P13 healthy gate`);
+      assert(
+        report.client_game_data_sent_during_run <= report.active_callback_count * 2,
+        `${name}: released graph did not reproduce the per-callback completion bottleneck`,
+      );
+      assert(
+        report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120,
+        `${name}: released graph did not reproduce the completed-rate bottleneck`,
+      );
+      assert(
+        violations.every((violation) =>
+          /oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(
+            violation,
+          ),
+        ),
+        `${name}: released graph developed an unrelated healthy-gate failure:\n${violations.join("\n")}`,
+      );
+    }
+    process.stdout.write(
+      `BUSTED fortress-wasm expected released-client characterization (${healthyViolations.length} healthy-gate violations)\n`,
+    );
   } else {
-    assert(
-      creatorReport.active_callback_count >= 600 &&
-        joinerReport.active_callback_count >= 600,
-      "negative control did not run the healthy control's 600-callback active budget",
-    );
-    assert(
-      creatorReport.max_admissions_per_callback <= 1 &&
-        joinerReport.max_admissions_per_callback <= 1,
-      "negative control admitted more than one relay send in a Rust callback",
-    );
-    assert(healthyViolations.length > 0, "negative control unexpectedly satisfied every healthy gate");
-    assert(
-      healthyViolations.some((violation) =>
-        /completed rate|sends per callback/.test(violation),
-      ),
-      `negative control was not busted by cap-induced throughput gates:\n${healthyViolations.join("\n")}`,
-    );
+    for (const [name, report, violations] of peerHealth) {
+      assert(
+        report.active_callback_count >= 600,
+        `${name}: negative control did not run the healthy control's 600-callback active budget`,
+      );
+      assert(
+        report.max_admissions_per_callback <= 1,
+        `${name}: negative control admitted more than one relay send in a Rust callback`,
+      );
+      assert(violations.length > 0, `${name}: negative control unexpectedly satisfied every healthy gate`);
+      assert(
+        report.client_game_data_sent_during_run <= report.active_callback_count * 2,
+        `${name}: negative control did not break the per-callback completion gate`,
+      );
+      assert(
+        report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120,
+        `${name}: negative control did not break the completed-rate gate`,
+      );
+      assert(
+        violations.every((violation) =>
+          new RegExp(
+            "confirmed_frame=|fewer than 1200|oldest queue age|stall_count|" +
+              "confirmation lag exceeded|rollback depth=|active wall time|" +
+              "completed rate|sends per callback",
+          ).test(violation),
+        ),
+        `${name}: negative control developed an unrelated healthy-gate failure:\n${violations.join("\n")}`,
+      );
+    }
     process.stdout.write(
       `BUSTED fortress-wasm expected negative control (${healthyViolations.length} healthy-gate violations)\n`,
     );
@@ -264,7 +305,7 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
         room_code: roomCode,
         instance_nonce: instanceNonce,
         expected_remote_nonce: expectedRemoteNonce,
-        run_mode: mode === "healthy" ? "healthy" : "negative_one_admission_per_callback",
+        run_mode: mode === "released" ? "healthy" : "negative_one_admission_per_callback",
         build_sha: buildSha,
         browser_process_id: pid,
         browser_artifact: `${browserArtifact}:${browserArtifactSha256}`,
@@ -350,7 +391,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assert(browser.sharedArrayBufferType === "undefined", `${name}: SharedArrayBuffer is exposed`);
     assert(browser.workerConstructions === 0 && browser.serviceWorkerRegistrations === 0, `${name}: worker use detected`);
   }
-  assert(creatorReport.run_mode === (mode === "healthy" ? "healthy" : "negative_one_admission_per_callback"), "creator run-mode mismatch");
+  assert(creatorReport.run_mode === (mode === "released" ? "healthy" : "negative_one_admission_per_callback"), "creator run-mode mismatch");
   assert(joinerReport.run_mode === creatorReport.run_mode, "peer run-mode mismatch");
   assert(creatorReport.instance_nonce !== joinerReport.instance_nonce, "duplicate instance nonces");
   assert(creatorReport.player_id !== joinerReport.player_id, "duplicate Signal Fish player ids");

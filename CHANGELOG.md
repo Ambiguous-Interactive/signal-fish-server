@@ -12,10 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the browser completion cell for the Fortress Rollback issue-242 gate.
   The exact released Fortress 0.10.0 and Signal Fish Rust client 0.8.0 graph now
   runs inside two independent Godot 4.5 no-thread WASM exports in Chromium,
-  proving one poll per real Rust game callback, cross-peer relay ledgers,
-  throughput/latency/rollback/checksum bounds, and an expected-busted
-  one-admission-per-callback negative control. This result is Chromium-specific
-  and does not generalize to every browser.
+  exercising one poll per real Rust game callback and reporting exact
+  cross-peer relay ledgers. The released graph reproducibly reaches the
+  diagnostic deadline as `BUSTED`: although the adapter admits multiple
+  messages per callback, the client completes about one send per callback and
+  misses the healthy throughput, stall, queue-age, and wall-time gates. CI
+  requires a complete 600-frame characterization with no unrelated failure,
+  alongside an expected-busted one-admission control, and P13 remains open.
+  This result is Chromium-specific and does not generalize to every browser.
 - Add a pinned Fortress Rollback issue-242 interoperability gate. Two real game
   processes use `fortress-rollback` 0.10.0 and the released Signal Fish Rust
   client 0.8.0 to advance 600 confirmed frames through a server built from the

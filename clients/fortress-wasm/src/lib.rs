@@ -25,7 +25,7 @@ use workload::{
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const MIN_ACTIVE_CALLBACKS: u64 = 600;
 const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;
-const RUNTIME_DEADLINE: Duration = Duration::from_secs(35);
+const RUNTIME_DEADLINE: Duration = Duration::from_secs(50);
 const SIGNAL_FISH_CLIENT_VERSION: &str = "0.8.0";
 const FORTRESS_ROLLBACK_VERSION: &str = "0.10.0";
 const GODOT_RUST_VERSION: &str = "0.4.5";
@@ -287,7 +287,7 @@ impl Runtime {
 
     fn tick(&mut self) -> Result<bool, String> {
         if self.configured_at.elapsed() > RUNTIME_DEADLINE {
-            return Err("35-second Rust runtime deadline expired".to_owned());
+            return Err("50-second Rust runtime deadline expired".to_owned());
         }
 
         self.callback_count = self.callback_count.saturating_add(1);

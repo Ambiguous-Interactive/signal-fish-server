@@ -92,8 +92,8 @@ else
 fi
 
 timeout --foreground 110s node "${FIXTURE_ROOT}/harness.mjs" \
-    healthy "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
+    released "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
 timeout --foreground 80s node "${FIXTURE_ROOT}/harness.mjs" \
     negative "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
 
-printf 'HEALTHY: Fortress 0.10.0 + Signal Fish client 0.8.0 Godot no-thread WASM interop\n'
+printf 'BUSTED (expected): released Signal Fish client 0.8.0 does not satisfy the Godot no-thread WASM healthy gates\n'

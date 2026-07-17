@@ -134,7 +134,7 @@ jobs:
             --target wasm32-unknown-emscripten \
             --release \
             -- -D warnings
-      - name: Build and run healthy plus expected-busted cells
+      - name: Characterize released graph plus expected-busted control
         env:
           INSTALL_PLAYWRIGHT_DEPS: "1"
         run: bash scripts/run-fortress-wasm-interop.sh

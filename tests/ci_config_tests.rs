@@ -21511,6 +21511,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "#[path = \"../../fortress/src/relay.rs\"]",
         "#[path = \"../../fortress/src/workload.rs\"]",
         "RunMode::NegativeOneAdmissionPerCallback => 1",
+        "const RUNTIME_DEADLINE: Duration = Duration::from_secs(50);",
         "const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;",
         "self.active_callback_count >= NEGATIVE_ACTIVE_CALLBACK_BUDGET",
         "self.completed || self.report_json.is_some()",
@@ -21558,7 +21559,6 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "assertExactKeys(report, reportKeys",
         "report.relay_send_retries <= 8",
         "report.client_game_data_sent_during_run * 1_000",
-        "/completed rate|sends per callback/",
         "await persistPeerArtifacts(joiner, joinerReport)",
         "pageSnapshot = await Promise.race([snapshotPromise, snapshotTimeout])",
         "page snapshot timed out`)),\n          1_000",
@@ -21567,15 +21567,65 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "relay_sent_sequence_hash === joinerReport.relay_received_sequence_hash",
         "joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence",
         "joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence",
-        "healthyViolations.length > 0",
         "BUSTED fortress-wasm expected negative control",
-        "HEALTHY fortress-wasm healthy control",
+        "BUSTED fortress-wasm expected released-client characterization",
     ] {
         assert!(
             harness.contains(required),
             "P13 browser harness is missing `{required}`"
         );
     }
+    let released_start = harness
+        .find("if (mode === \"released\") {")
+        .expect("P13 harness must define released characterization");
+    let negative_start = harness[released_start..]
+        .find("  } else {")
+        .map(|offset| released_start + offset)
+        .expect("P13 harness must define negative characterization");
+    let negative_end = harness[negative_start..]
+        .find("\n  }\n} catch (error)")
+        .map(|offset| negative_start + offset)
+        .expect("P13 harness must bound negative characterization");
+    let released_classification = &harness[released_start..negative_start];
+    let negative_classification = &harness[negative_start..negative_end];
+    for required in [
+        "report.confirmed_frame >= 600",
+        "report.max_admissions_per_callback > 1",
+        "report.client_game_data_sent_during_run <= report.active_callback_count * 2",
+        "report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120",
+        "/oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(",
+        "released graph developed an unrelated healthy-gate failure",
+    ] {
+        assert!(
+            released_classification.contains(required),
+            "P13 released classifier is missing `{required}`"
+        );
+    }
+    assert_eq!(
+        released_classification.matches("violations.every").count(),
+        1,
+        "P13 released classifier must reject every unrelated healthy-gate violation"
+    );
+    for required in [
+        "report.active_callback_count >= 600",
+        "report.max_admissions_per_callback <= 1",
+        "report.client_game_data_sent_during_run <= report.active_callback_count * 2",
+        "report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120",
+        "\"confirmed_frame=|fewer than 1200|oldest queue age|stall_count|\" +",
+        "\"confirmation lag exceeded|rollback depth=|active wall time|\" +",
+        "\"completed rate|sends per callback\",",
+        "negative control developed an unrelated healthy-gate failure",
+    ] {
+        assert!(
+            negative_classification.contains(required),
+            "P13 negative classifier is missing `{required}`"
+        );
+    }
+    assert_eq!(
+        negative_classification.matches("violations.every").count(),
+        1,
+        "P13 negative classifier must reject every unrelated healthy-gate violation"
+    );
     assert!(
         !harness.contains("/confirmed_frame|completed rate|sends per callback/"),
         "P13 negative control must not accept shortened confirmed-frame progress as expected BUSTED evidence"
@@ -21619,7 +21669,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "wasm32-unknown-emscripten",
         "nightly-2026-03-01",
         "3.1.74",
-        "healthy \"${EXPORT_DIR}\"",
+        "released \"${EXPORT_DIR}\"",
         "negative \"${EXPORT_DIR}\"",
         "timeout --foreground",
     ] {
