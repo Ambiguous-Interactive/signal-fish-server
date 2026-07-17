@@ -137,11 +137,14 @@ jobs:
           fi
           branch="release/v${version}"
           tag="v${version}"
+          auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
 
           set +e
-          tag_result=$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1)
+          tag_result=$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1)
           tag_status=$?
-          branch_result=$(git ls-remote --exit-code --heads origin "refs/heads/${branch}" 2>&1)
+          branch_result=$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+            ls-remote --exit-code --heads origin "refs/heads/${branch}" 2>&1)
           branch_status=$?
           set -e
 

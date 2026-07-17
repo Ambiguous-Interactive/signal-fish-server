@@ -4012,8 +4012,9 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "bash scripts/prepare-release.sh --bump \"$BUMP\"",
         "git diff --check",
         "branch=\"release/v${version}\"",
-        "git ls-remote --exit-code --tags",
-        "git ls-remote --exit-code --heads",
+        "auth_header=$(printf 'x-access-token:%s' \"$GH_TOKEN\" | base64 | tr -d '\\n')",
+        "ls-remote --exit-code --tags",
+        "ls-remote --exit-code --heads",
         "push origin \"HEAD:refs/heads/${BRANCH}\"",
         "gh pr create",
         "Release - Publish Crate",
@@ -4029,6 +4030,19 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         prepare.contains("GH_TOKEN: ${{ steps.app-token.outputs.token }}"),
         "The release PR must be created with the installation token so normal pull_request CI \
          runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
+    );
+
+    assert_eq!(
+        prepare
+            .matches(
+                "git -c \"http.https://github.com/.extraheader=AUTHORIZATION: basic \
+                 ${auth_header}\""
+            )
+            .count(),
+        3,
+        "Every remote git operation (tag probe, branch probe, and branch push) must use the \
+         installation-token authorization header; unauthenticated probes can fail on private \
+         repositories or anonymous rate limits."
     );
 
     let checkout = prepare
