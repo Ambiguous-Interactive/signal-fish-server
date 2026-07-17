@@ -1,0 +1,14 @@
+; Minimal Godot 4.5 no-thread browser interoperability project.
+config_version=5
+
+[application]
+config/name="Signal Fish Fortress WASM Interop"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=640
+window/size/viewport_height=360
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

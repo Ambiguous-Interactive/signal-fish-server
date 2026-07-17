@@ -18,6 +18,7 @@ context.
 | Native | [`native/`](native/README.md) | Rust + [webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.17 (real DTLS/SCTP data channels) | ✅ In-repo, CI-enforced (`.github/workflows/webrtc-interop.yml`) |
 | Browser | [`browser/`](browser/README.md) | TypeScript + real headless-Chromium `RTCPeerConnection` (playwright-core) | ✅ In-repo, CI-enforced (`.github/workflows/browser-interop.yml`) |
 | Fortress | [`fortress/`](fortress/README.md) | Rust + `fortress-rollback` 0.10.0 + released Signal Fish Rust client 0.8.0 | ✅ In-repo issue-242 regression, CI-enforced (`.github/workflows/fortress-interop.yml`) |
+| Fortress WASM | [`fortress-wasm/`](fortress-wasm/README.md) | Godot 4.5 no-thread WASM + Fortress 0.10.0 + released Rust client 0.8.0 | ✅ Chromium-specific issue-242 gate (`.github/workflows/fortress-wasm-interop.yml`) |
 
 Both clients speak the same JSONL stdout event contract and exit codes (the
 [native README](native/README.md) is canonical), so one Rust interop harness asserts over native and browser
@@ -31,6 +32,7 @@ interop cells live in the native crate's test harness behind the `browser-intero
 bash scripts/run-webrtc-interop.sh    # native client: unit + native<->native interop suite
 bash scripts/run-browser-interop.sh   # browser client: lint/build + browser<->native interop cells
 bash scripts/run-fortress-interop.sh  # two Fortress games through this checkout's server
+bash scripts/run-fortress-wasm-interop.sh  # two independent Godot WASM peers in Chromium
 ```
 
 The first builds the server binary, lints the native client, and runs its unit + multi-process WebRTC interop
@@ -45,3 +47,8 @@ reference implementation of the wire protocol. It recreates a 60 Hz rollback
 game loop with one polling-client callback per frame and gates throughput,
 queue age, delivery conservation, rollback depth, and checksum agreement
 against the real server binary.
+
+| Fortress compatibility cell | Runtime | Result |
+|---|---|---|
+| Native | Two Rust processes over loopback WebSockets | CI-enforced healthy |
+| WASM | Godot 4.5 no-thread export in two independent headless-Chromium processes | CI-enforced healthy in Chromium only; no claim is made for other browsers |

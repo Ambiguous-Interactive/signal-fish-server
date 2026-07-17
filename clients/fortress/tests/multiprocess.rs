@@ -51,6 +51,14 @@ struct Report {
     relay_send_retries: u64,
     running_elapsed_ms: u128,
     polling_callbacks_during_run: u64,
+    relay_sent_sequence_count: u64,
+    relay_sent_first_sequence: u64,
+    relay_sent_last_sequence: u64,
+    relay_sent_sequence_hash: u64,
+    relay_received_sequence_count: u64,
+    relay_received_first_sequence: u64,
+    relay_received_last_sequence: u64,
+    relay_received_sequence_hash: u64,
 }
 
 struct Server(Child);
@@ -321,6 +329,38 @@ fn two_fortress_game_processes_sustain_60fps_through_real_server() {
     println!("joiner report: {joiner_report:#?}");
 
     assert_ne!(creator_report.player_id, joiner_report.player_id);
+    assert_eq!(
+        creator_report.relay_sent_sequence_count,
+        joiner_report.relay_received_sequence_count
+    );
+    assert_eq!(
+        creator_report.relay_sent_first_sequence,
+        joiner_report.relay_received_first_sequence
+    );
+    assert_eq!(
+        creator_report.relay_sent_last_sequence,
+        joiner_report.relay_received_last_sequence
+    );
+    assert_eq!(
+        creator_report.relay_sent_sequence_hash,
+        joiner_report.relay_received_sequence_hash
+    );
+    assert_eq!(
+        joiner_report.relay_sent_sequence_count,
+        creator_report.relay_received_sequence_count
+    );
+    assert_eq!(
+        joiner_report.relay_sent_first_sequence,
+        creator_report.relay_received_first_sequence
+    );
+    assert_eq!(
+        joiner_report.relay_sent_last_sequence,
+        creator_report.relay_received_last_sequence
+    );
+    assert_eq!(
+        joiner_report.relay_sent_sequence_hash,
+        creator_report.relay_received_sequence_hash
+    );
     assert_healthy("creator", &creator_report);
     assert_healthy("joiner", &joiner_report);
     assert_ne!(creator_report.game_checksum, 0);

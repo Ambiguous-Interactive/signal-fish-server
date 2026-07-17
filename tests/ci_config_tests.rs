@@ -1366,6 +1366,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
         "fortress-interop.yml",
         "Pinned Fortress Rollback real-process interoperability gate",
     ),
+    (
+        "fortress-wasm-interop.yml",
+        "Pinned Fortress Rollback Godot no-thread WASM interoperability gate",
+    ),
 ];
 
 /// Container image platforms that MUST be published as a single multi-arch
@@ -21450,6 +21454,209 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
     }
 }
 
+#[test]
+fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
+    let root = repo_root();
+    let root_manifest = read_file(&root.join("Cargo.toml"));
+    let manifest = read_file(&root.join("clients/fortress-wasm/Cargo.toml"));
+    let lockfile = read_file(&root.join("clients/fortress-wasm/Cargo.lock"));
+    let source = read_file(&root.join("clients/fortress-wasm/src/lib.rs"));
+    let harness = read_file(&root.join("clients/fortress-wasm/harness.mjs"));
+    let project = read_file(&root.join("clients/fortress-wasm/project/export_presets.cfg"));
+    let bridge = read_file(&root.join("clients/fortress-wasm/project/main.gd"));
+    let runner = read_file(&root.join("scripts/run-fortress-wasm-interop.sh"));
+    let workflow = read_live_file(&root.join(".github/workflows/fortress-wasm-interop.yml"));
+
+    for dependency in [
+        "fortress-rollback = \"=0.10.0\"",
+        "signal-fish-client = { version = \"=0.8.0\", default-features = false, features = [\"transport-godot\"] }",
+        "godot = { version = \"=0.4.5\", features = [\"api-custom\", \"experimental-wasm\", \"experimental-wasm-nothreads\", \"lazy-function-tables\"] }",
+    ] {
+        assert!(
+            manifest.contains(dependency),
+            "Fortress WASM fixture must retain exact released/no-thread dependency `{dependency}`"
+        );
+    }
+    assert_eq!(
+        extract_toml_version(&manifest, "rust-version"),
+        extract_toml_version(&root_manifest, "rust-version"),
+        "the Godot/WASM fixture must track the server MSRV"
+    );
+    for locked in [
+        "name = \"fortress-rollback\"\nversion = \"0.10.0\"",
+        "name = \"signal-fish-client\"\nversion = \"0.8.0\"",
+        "name = \"godot\"\nversion = \"0.4.5\"",
+    ] {
+        let start = lockfile
+            .find(locked)
+            .unwrap_or_else(|| panic!("Fortress WASM lockfile is missing `{locked}`"));
+        let package = &lockfile[start
+            ..lockfile[start..]
+                .find("\n\n")
+                .map_or(lockfile.len(), |offset| start + offset)];
+        assert!(
+            package.contains("source = \"registry+https://github.com/rust-lang/crates.io-index\""),
+            "P13 production dependencies must resolve from crates.io without path/Git overrides: {package}"
+        );
+    }
+
+    assert!(project.contains("variant/thread_support=false"));
+    assert!(project.contains("variant/extensions_support=true"));
+    assert!(!source.contains("transport-websocket-emscripten"));
+    for required in [
+        "impl INode for FortressWasmPeer",
+        "fn process(&mut self, _delta: f64)",
+        "let events = self.client.poll();",
+        "self.poll_count = self.poll_count.saturating_add(1)",
+        "#[path = \"../../fortress/src/relay.rs\"]",
+        "#[path = \"../../fortress/src/workload.rs\"]",
+        "RunMode::NegativeOneAdmissionPerCallback => 1",
+        "const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;",
+        "self.active_callback_count >= NEGATIVE_ACTIVE_CALLBACK_BUDGET",
+        "self.completed || self.report_json.is_some()",
+        "self.running_finished_at.get_or_insert_with(Instant::now);",
+        "config.godot_runtime.string.starts_with(\"4.5.stable\")",
+        "godot_runtime: self.config.godot_runtime.clone()",
+        "configure_identity",
+        "relay_sent_sequence_hash",
+        "relay_received_sequence_hash",
+    ] {
+        assert!(
+            source.contains(required),
+            "P13 Rust gate is missing `{required}`"
+        );
+    }
+    assert!(
+        !bridge.contains(".poll(") && !bridge.contains("advance_frame"),
+        "GDScript must remain a report/config bridge and never advance networking or Fortress"
+    );
+    for required in [
+        "Engine.get_version_info()",
+        "config[\"godot_runtime\"]",
+        "peer.configure(JSON.stringify(config))",
+    ] {
+        assert!(
+            bridge.contains(required),
+            "P13 GDScript bridge is missing runtime identity injection `{required}`"
+        );
+    }
+
+    for required in [
+        "chromium.launchServer",
+        "creatorReport.browser_process_id !== joinerReport.browser_process_id",
+        "crossOriginIsolated === false",
+        "sharedArrayBufferType === \"undefined\"",
+        "workerConstructions === 0",
+        "report.callback_count === report.poll_count",
+        "report.godot_runtime.string.startsWith(\"4.5.stable\")",
+        "assertExactKeys(report, reportKeys",
+        "report.relay_send_retries <= 8",
+        "report.client_game_data_sent_during_run * 1_000",
+        "/completed rate|sends per callback/",
+        "await persistPeerArtifacts(joiner, joinerReport)",
+        "pageSnapshot = await Promise.race([snapshotPromise, snapshotTimeout])",
+        "page snapshot timed out`)),\n          1_000",
+        "-browser-errors.log",
+        "-partial-report.json",
+        "relay_sent_sequence_hash === joinerReport.relay_received_sequence_hash",
+        "healthyViolations.length > 0",
+        "BUSTED fortress-wasm expected negative control",
+        "HEALTHY fortress-wasm healthy control",
+    ] {
+        assert!(
+            harness.contains(required),
+            "P13 browser harness is missing `{required}`"
+        );
+    }
+    assert!(
+        !harness.contains("/confirmed_frame|completed rate|sends per callback/"),
+        "P13 negative control must not accept shortened confirmed-frame progress as expected BUSTED evidence"
+    );
+    let persist_before_close = harness
+        .find("await persistPeerArtifacts(joiner, joinerReport)")
+        .expect("P13 must persist joiner artifacts");
+    let close_after_persist = harness
+        .find("await closePeer(joiner)")
+        .expect("P13 must close the joiner");
+    assert!(
+        persist_before_close < close_after_persist,
+        "P13 must persist page diagnostics before closing browser peers"
+    );
+    let persistence = &harness[harness
+        .find("async function persistPeerArtifacts")
+        .expect("P13 must define browser artifact persistence")..];
+    let log_before_snapshot = persistence
+        .find("safeWriteArtifact(`${peer.role}-browser.log`")
+        .expect("P13 must persist collected browser logs");
+    let errors_before_snapshot = persistence
+        .find("safeWriteArtifact(`${peer.role}-browser-errors.log`")
+        .expect("P13 must persist collected browser errors");
+    let page_evaluate = persistence
+        .find("const snapshotPromise = peer.page.evaluate")
+        .expect("P13 must request the renderer snapshot");
+    let bounded_snapshot = persistence
+        .find("pageSnapshot = await Promise.race")
+        .expect("P13 must bound the renderer snapshot");
+    assert!(
+        log_before_snapshot < page_evaluate && errors_before_snapshot < page_evaluate,
+        "P13 must synchronously persist collected logs and errors before asking the renderer for a snapshot"
+    );
+    assert!(
+        page_evaluate < bounded_snapshot,
+        "P13 must race the renderer snapshot against its timeout"
+    );
+
+    for required in [
+        "cargo build --manifest-path \"${REPO_ROOT}/Cargo.toml\" --locked --bin signal-fish-server",
+        "wasm32-unknown-emscripten",
+        "nightly-2026-03-01",
+        "3.1.74",
+        "healthy \"${EXPORT_DIR}\"",
+        "negative \"${EXPORT_DIR}\"",
+        "timeout --foreground",
+    ] {
+        assert!(
+            runner.contains(required),
+            "P13 runner is missing `{required}`"
+        );
+    }
+
+    for required_path in [
+        "src/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "clients/fortress/src/relay.rs",
+        "clients/fortress/src/workload.rs",
+        "clients/fortress-wasm/**",
+        "clients/browser/package-lock.json",
+        "scripts/run-fortress-wasm-interop.sh",
+        ".github/workflows/fortress-wasm-interop.yml",
+    ] {
+        assert_eq!(
+            workflow.matches(&format!("- \"{required_path}\"")).count(),
+            2,
+            "fortress-wasm-interop.yml must trigger on `{required_path}` for push and pull_request"
+        );
+    }
+    for required in [
+        "GODOT_EDITOR_SHA512:",
+        "GODOT_TEMPLATES_SHA512:",
+        "sha512sum --check",
+        "cargo +\"$RUST_NIGHTLY\" clippy",
+        "actions/upload-artifact@v7.0.1",
+        "if: failure()",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "P13 workflow is missing `{required}`"
+        );
+    }
+    assert!(
+        !workflow.contains("node_modules\n") && !workflow.contains("playwright-browsers"),
+        "P13 must not cache mutable/unverified Chromium installations"
+    );
+}
+
 fn extract_ci_dep_detect_step(ci_content: &str) -> String {
     let step_start = ci_content
         .find("      - name: Detect dependency-only changes")
@@ -21475,6 +21682,9 @@ fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message
             )
             && dep_detect_step_live.contains(
                 "clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+            )
+            && dep_detect_step_live.contains(
+                "clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live
                 .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),

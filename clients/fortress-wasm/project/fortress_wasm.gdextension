@@ -1,0 +1,8 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+web.debug.wasm32 = "res://bin/signal_fish_fortress_wasm_interop.wasm"
+web.release.wasm32 = "res://bin/signal_fish_fortress_wasm_interop.wasm"
