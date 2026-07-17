@@ -21594,7 +21594,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "report.callback_intervals.mean_us >= 8_000",
         "report.client_game_data_sent_during_run <= report.active_callback_count * 2",
         "report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120",
-        "/non-nominal callback mean|oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(",
+        "/non-nominal callback mean|oldest queue age|stall_count|wait_recommendations|active wall time|completed rate|sends per callback/.test(",
         "released graph developed an unrelated healthy-gate failure",
     ] {
         assert!(
@@ -21610,9 +21610,11 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     for required in [
         "report.active_callback_count >= 600",
         "report.max_admissions_per_callback <= 1",
+        "report.callback_intervals.mean_us >= 8_000",
         "report.client_game_data_sent_during_run <= report.active_callback_count * 2",
         "report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120",
-        "\"confirmed_frame=|fewer than 1200|oldest queue age|stall_count|\" +",
+        "\"confirmed_frame=|fewer than 1200|non-nominal callback mean|\" +",
+        "\"oldest queue age|stall_count|wait_recommendations|\" +",
         "\"confirmation lag exceeded|rollback depth=|active wall time|\" +",
         "\"completed rate|sends per callback\",",
         "negative control developed an unrelated healthy-gate failure",

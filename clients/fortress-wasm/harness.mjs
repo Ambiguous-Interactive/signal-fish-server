@@ -193,7 +193,7 @@ try {
       );
       assert(
         violations.every((violation) =>
-          /non-nominal callback mean|oldest queue age|stall_count|active wall time|completed rate|sends per callback/.test(
+          /non-nominal callback mean|oldest queue age|stall_count|wait_recommendations|active wall time|completed rate|sends per callback/.test(
             violation,
           ),
         ),
@@ -213,6 +213,10 @@ try {
         report.max_admissions_per_callback <= 1,
         `${name}: negative control admitted more than one relay send in a Rust callback`,
       );
+      assert(
+        report.callback_intervals.mean_us >= 8_000,
+        `${name}: negative control observed a synthetic/too-fast callback mean`,
+      );
       assert(violations.length > 0, `${name}: negative control unexpectedly satisfied every healthy gate`);
       assert(
         report.client_game_data_sent_during_run <= report.active_callback_count * 2,
@@ -225,7 +229,8 @@ try {
       assert(
         violations.every((violation) =>
           new RegExp(
-            "confirmed_frame=|fewer than 1200|oldest queue age|stall_count|" +
+            "confirmed_frame=|fewer than 1200|non-nominal callback mean|" +
+              "oldest queue age|stall_count|wait_recommendations|" +
               "confirmation lag exceeded|rollback depth=|active wall time|" +
               "completed rate|sends per callback",
           ).test(violation),

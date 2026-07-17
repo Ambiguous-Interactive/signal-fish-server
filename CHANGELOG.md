@@ -13,10 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The exact released Fortress 0.10.0 and Signal Fish Rust client 0.8.0 graph now
   runs inside two independent Godot 4.5 no-thread WASM exports in Chromium,
   exercising one poll per real Rust game callback and reporting exact
-  cross-peer relay ledgers. The released graph reproducibly reaches the
-  diagnostic deadline as `BUSTED`: although the adapter admits multiple
+  cross-peer relay ledgers. The released graph produces complete reports at
+  confirmed frame 607 as `BUSTED`: although the adapter admits multiple
   messages per callback, the client completes about one send per callback and
-  misses the healthy throughput, callback-cadence, stall, queue-age, and
+  misses the healthy throughput, callback-cadence, wait, stall, queue-age, and
   wall-time gates. CI
   requires a complete 600-frame characterization with no unrelated failure,
   alongside an expected-busted one-admission control, and P13 remains open.
