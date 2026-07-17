@@ -1,0 +1,7 @@
+# GitHub Actions supports `concurrency.queue: max`, but actionlint 1.7.12 does
+# not yet include that schema key. Keep this exception path- and message-scoped
+# until the repository's pinned actionlint release recognizes it.
+paths:
+  .github/workflows/docker-publish.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

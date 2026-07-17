@@ -12,7 +12,7 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -771,6 +771,29 @@ fn extract_yaml_mapping_block(content: &str, key: &str, indent: usize) -> Option
     }
 
     None
+}
+
+/// Extract one workflow step by its unquoted `name`, stopping at the next step
+/// at the same indentation. This keeps structural assertions scoped to the
+/// step they protect instead of accepting a matching token elsewhere.
+fn extract_named_workflow_step(content: &str, name: &str) -> Option<String> {
+    let marker = format!("- name: {name}");
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.iter().position(|line| line.trim() == marker)?;
+    let step_indent = yaml_indent_spaces(lines[start]);
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| {
+            !line.trim().is_empty()
+                && yaml_indent_spaces(line) == step_indent
+                && line.trim_start().starts_with("- ")
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+
+    Some(lines[start..end].join("\n"))
 }
 
 /// Detect the indentation level of the first non-empty line in a YAML block.
@@ -3514,11 +3537,15 @@ fn test_automation_files_avoid_unpinned_tool_execution_patterns() {
 }
 
 #[test]
-fn test_docker_publish_workflow_uses_owner_derived_ghcr_image_name() {
+fn test_docker_publish_workflow_generates_owner_derived_metadata_locally() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/docker-publish.yml");
     let content = read_file(&workflow_path);
     let content_live = strip_comment_lines(&content);
+    let metadata_step = extract_named_workflow_step(&content_live, "Prepare Docker metadata")
+        .expect("docker-publish.yml must contain its local metadata step");
+    let build_step = extract_named_workflow_step(&content_live, "Build and push Docker image")
+        .expect("docker-publish.yml must contain its Docker build step");
 
     assert!(
         content_live.contains("GITHUB_REPOSITORY_OWNER"),
@@ -3529,13 +3556,59 @@ fn test_docker_publish_workflow_uses_owner_derived_ghcr_image_name() {
         "docker-publish.yml must derive GHCR repository name from GITHUB_REPOSITORY."
     );
     assert!(
-        content_live.contains("images: ${{ steps.image.outputs.name }}"),
-        "docker-publish.yml must pass a derived step output to docker/metadata-action images."
+        metadata_step.contains("IMAGE: ${{ steps.image.outputs.name }}"),
+        "docker-publish.yml must pass the derived image name to its local metadata step."
     );
     assert!(
-        !content.contains("images: ghcr.io/"),
-        "docker-publish.yml must not hard-code GHCR owner/repo in metadata-action images."
+        !metadata_step.contains("docker/metadata-action"),
+        "docker-publish.yml local metadata step must not call the GitHub repository API through docker/metadata-action."
     );
+    for required in [
+        "image_title=${GITHUB_REPOSITORY#*/}",
+        "Cargo.toml description package",
+        "Cargo.toml license package",
+        "image_created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+        "tags+=(\"${IMAGE}:latest\")",
+        "tags+=(\"${IMAGE}:sha-${SHORT_SHA}\")",
+        "\"${IMAGE}:${RELEASE_TAG}\"",
+        "\"${IMAGE}:${RELEASE_VERSION}\"",
+        "\"${IMAGE}:${MAJOR_MINOR}\"",
+        "org.opencontainers.image.created=${image_created}",
+        "org.opencontainers.image.description=${image_description}",
+        "org.opencontainers.image.licenses=${image_licenses}",
+        "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}",
+        "org.opencontainers.image.title=${image_title}",
+        "org.opencontainers.image.revision=${SOURCE_REVISION}",
+        "org.opencontainers.image.url=${image_url}",
+        "org.opencontainers.image.version=${IMAGE_VERSION}",
+        "for level in manifest index",
+    ] {
+        assert!(
+            metadata_step.contains(required),
+            "docker-publish.yml local metadata generation is missing `{required}`."
+        );
+    }
+    assert!(
+        metadata_step.contains("if: steps.existing.outputs.reuse != 'true'"),
+        "docker-publish.yml must skip metadata generation when a verified release digest is reused."
+    );
+    for required in [
+        "tags: ${{ steps.meta.outputs.tags }}",
+        "labels: ${{ steps.meta.outputs.labels }}",
+        "annotations: ${{ steps.meta.outputs.annotations }}",
+    ] {
+        assert!(
+            build_step.contains(required),
+            "docker-publish.yml build step must consume local metadata output `{required}`."
+        );
+    }
+
+    for forbidden in ["curl ", "gh api", "api.github.com", "uses:"] {
+        assert!(
+            !metadata_step.contains(forbidden),
+            "docker-publish.yml local metadata step must not perform network/API access through `{forbidden}`."
+        );
+    }
 }
 
 /// Map a container platform to the (TARGETARCH/variant `case` token, Rust target
@@ -4111,7 +4184,7 @@ fn test_container_publish_supports_release_and_backfill_entry_points() {
         "if [ -n \"$CALL_REVISION\" ]",
         "workflow_dispatch)",
         "refs/tags/",
-        "publish_latest == 'true' && 'latest' || needs.resolve.outputs.source_revision",
+        "group: container-publish",
     ] {
         assert!(
             docker.contains(required),
@@ -4193,36 +4266,73 @@ fn test_release_retries_reuse_digest_and_record_verification() {
     let root = repo_root();
     let release = read_live_file(&root.join(".github/workflows/release.yml"));
     let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
-    let marker = "      - name: Reuse a verified immutable release digest";
-    let start = docker
-        .find(marker)
+    let existing = extract_named_workflow_step(&docker, "Reuse a verified immutable image digest")
         .expect("docker-publish.yml must define immutable digest reuse");
-    let after_start = &docker[start + marker.len()..];
-    let end = after_start
-        .find("\n      - name:")
-        .map(|offset| start + marker.len() + offset)
-        .unwrap_or(docker.len());
-    let existing = &docker[start..end];
+    let reuse_script = read_live_file(&root.join("scripts/reuse-verified-image.sh"));
+    let actionlint_config = read_live_file(&root.join(".github/actionlint.yaml"));
 
     for required in [
+        "IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}",
+        "IS_RELEASE: ${{ needs.resolve.outputs.is_release }}",
+        "IS_BACKFILL: ${{ needs.resolve.outputs.is_backfill }}",
+        "run: bash scripts/reuse-verified-image.sh",
+    ] {
+        assert!(
+            existing.contains(required),
+            "immutable digest reuse step must contain `{required}`.\nStep block:\n{existing}"
+        );
+    }
+    assert!(
+        !existing
+            .lines()
+            .any(|line| line.trim_start().starts_with("if:")),
+        "immutable digest reuse must run for both rolling and release events.\nStep block:\n{existing}"
+    );
+
+    for required in [
+        "desired_tags=(\"$SHA_TAG\")",
         "desired_tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\")",
-        "desired_tags+=(\"$SHA_TAG\")",
-        "scripts/verify-release-image.sh",
+        "desired_tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\" \"$SHA_TAG\")",
+        "if [ \"$IS_RELEASE\" = \"true\" ]",
+        "if [ \"$IS_BACKFILL\" = \"true\" ]",
+        "preserve_historical_sha=true",
+        "VERIFY_RELEASE_IMAGE_SCRIPT=${VERIFY_RELEASE_IMAGE_SCRIPT:-scripts/verify-release-image.sh}",
         "docker buildx imagetools create --tag",
         "refusing to rebuild over an unknown registry state",
         "reuse=true",
         "publish_sha=false",
     ] {
         assert!(
-            existing.contains(required),
-            "immutable release retry step must contain `{required}` so a partial retry repairs \
-             only missing aliases while preserving verified bytes.\nStep block:\n{existing}"
+            reuse_script.contains(required),
+            "immutable reuse script must contain `{required}` so a partial retry repairs only \
+             missing aliases while preserving verified bytes.\nScript:\n{reuse_script}"
         );
     }
     assert!(
-        !existing.contains(":latest"),
-        "historical/versioned retries must never backfill from mutable :latest.\nStep block:\n{existing}"
+        !reuse_script.contains(":latest"),
+        "immutable digest reuse must never use mutable :latest as a source.\nScript:\n{reuse_script}"
     );
+    assert!(
+        !reuse_script.contains("sha_exists"),
+        "SHA existence must be handled through the fail-closed registry probe.\nScript:\n{reuse_script}"
+    );
+
+    for required in [
+        "group: container-publish",
+        "queue: max",
+        "Update latest from verified immutable digest",
+        "needs.resolve.outputs.is_release != 'true' && steps.existing.outputs.reuse == 'true'",
+        "VERIFY_SHA: ${{ steps.existing.outputs.verify_sha }}",
+        "tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\" \"$MAJOR_MINOR\")",
+        "if [ \"$VERIFY_SHA\" != \"false\" ]",
+        "tags+=(\"$SHA_TAG\")",
+        "steps.existing.outputs.digest || steps.build.outputs.digest",
+    ] {
+        assert!(
+            docker.contains(required),
+            "immutable rolling/release publication is missing `{required}`."
+        );
+    }
 
     for required in [
         "needs.publish-container.outputs.digest",
@@ -4239,6 +4349,262 @@ fn test_release_retries_reuse_digest_and_record_verification() {
         docker.contains("steps.verify.outputs.digest || steps.rolling-digest.outputs.digest"),
         "docker-publish.yml must expose a digest for both versioned releases and rolling main-branch publishes."
     );
+    for required in [
+        ".github/workflows/docker-publish.yml:",
+        "unexpected key \"queue\" for \"concurrency\" section",
+    ] {
+        assert!(
+            actionlint_config.contains(required),
+            "the pinned actionlint compatibility exception must stay narrowly scoped through `{required}`."
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_container_publish_immutable_state_transitions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Case {
+        name: &'static str,
+        is_release: bool,
+        is_backfill: bool,
+        initial_tags: &'static [&'static str],
+        initial_version: &'static str,
+        expected_reuse: bool,
+        expected_publish_sha: bool,
+        expected_verify_sha: bool,
+        expected_tags: &'static [&'static str],
+    }
+
+    let cases = [
+        Case {
+            name: "rolling first publication",
+            is_release: false,
+            is_backfill: false,
+            initial_tags: &[],
+            initial_version: "0.4.0",
+            expected_reuse: false,
+            expected_publish_sha: true,
+            expected_verify_sha: true,
+            expected_tags: &[],
+        },
+        Case {
+            name: "rolling rerun",
+            is_release: false,
+            is_backfill: false,
+            initial_tags: &["sha-source"],
+            initial_version: "0.4.0",
+            expected_reuse: true,
+            expected_publish_sha: false,
+            expected_verify_sha: true,
+            expected_tags: &["sha-source"],
+        },
+        Case {
+            name: "release after rolling",
+            is_release: true,
+            is_backfill: false,
+            initial_tags: &["sha-source"],
+            initial_version: "0.4.0",
+            expected_reuse: true,
+            expected_publish_sha: false,
+            expected_verify_sha: true,
+            expected_tags: &["sha-source", "v0.4.0", "0.4.0"],
+        },
+        Case {
+            name: "release retry",
+            is_release: true,
+            is_backfill: false,
+            initial_tags: &["sha-source", "v0.4.0", "0.4.0"],
+            initial_version: "0.4.0",
+            expected_reuse: true,
+            expected_publish_sha: false,
+            expected_verify_sha: true,
+            expected_tags: &["sha-source", "v0.4.0", "0.4.0"],
+        },
+        Case {
+            name: "main after release",
+            is_release: false,
+            is_backfill: false,
+            initial_tags: &["sha-source", "v0.4.0", "0.4.0"],
+            initial_version: "0.4.0",
+            expected_reuse: true,
+            expected_publish_sha: false,
+            expected_verify_sha: true,
+            expected_tags: &["sha-source", "v0.4.0", "0.4.0"],
+        },
+        Case {
+            name: "historical backfill preserves latest-version SHA",
+            is_release: true,
+            is_backfill: true,
+            initial_tags: &["sha-source"],
+            initial_version: "latest",
+            expected_reuse: false,
+            expected_publish_sha: false,
+            expected_verify_sha: false,
+            expected_tags: &["sha-source"],
+        },
+    ];
+
+    let root = repo_root();
+    let transition_script = root.join("scripts/reuse-verified-image.sh");
+    for case in cases {
+        let fixture = unique_temp_dir("container-publish-transition");
+        let registry = fixture.path().join("registry.txt");
+        let github_output = fixture.path().join("github-output.txt");
+        let fake_docker = fixture.path().join("bin/docker");
+        let fake_verifier = fixture.path().join("verify-image.sh");
+        let image = "ghcr.io/example/signal-fish-server";
+        let mut initial_registry = case
+            .initial_tags
+            .iter()
+            .map(|tag| format!("{image}:{tag} sha256:stable {}", case.initial_version))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !initial_registry.is_empty() {
+            initial_registry.push('\n');
+        }
+        write_file(&registry, &initial_registry);
+        write_file(&github_output, "");
+        write_file(
+            &fake_docker,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1 $2 $3" = "buildx imagetools inspect" ]; then
+  if grep -Fq "$4 " "$MOCK_REGISTRY"; then exit 0; fi
+  echo "manifest unknown" >&2
+  exit 1
+fi
+if [ "$1 $2 $3 $4" = "buildx imagetools create --tag" ]; then
+  target=$5
+  digest=${6#*@}
+  if grep -Fq "$target " "$MOCK_REGISTRY"; then
+    echo "refusing to overwrite $target" >&2
+    exit 2
+  fi
+  printf '%s %s %s\n' "$target" "$digest" "$MOCK_IMAGE_VERSION" >> "$MOCK_REGISTRY"
+  exit 0
+fi
+echo "unexpected docker invocation: $*" >&2
+exit 2
+"#,
+        );
+        write_file(
+            &fake_verifier,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+image=$1
+expected_version=$3
+shift 3
+digest=""
+for tag in "$@"; do
+  candidate=$(awk -v ref="${image}:${tag}" '$1 == ref { print $2 }' "$MOCK_REGISTRY")
+  version=$(awk -v ref="${image}:${tag}" '$1 == ref { print $3 }' "$MOCK_REGISTRY")
+  [ -n "$candidate" ] || exit 2
+  [ "$version" = "$expected_version" ] || exit 4
+  if [ -n "$digest" ] && [ "$candidate" != "$digest" ]; then exit 3; fi
+  digest=$candidate
+done
+printf '%s\n' "$digest"
+"#,
+        );
+
+        for executable in [&fake_docker, &fake_verifier] {
+            let mut permissions = fs::metadata(executable)
+                .expect("mock executable metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(executable, permissions).expect("set mock executable mode");
+        }
+
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![fixture.path().join("bin")];
+        paths.extend(std::env::split_paths(&existing_path));
+        let path = std::env::join_paths(paths).expect("join mock PATH");
+        let output = bash_command()
+            .arg(&transition_script)
+            .current_dir(&root)
+            .env("PATH", path)
+            .env("MOCK_REGISTRY", &registry)
+            .env("MOCK_IMAGE_VERSION", "0.4.0")
+            .env("VERIFY_RELEASE_IMAGE_SCRIPT", &fake_verifier)
+            .env("GITHUB_OUTPUT", &github_output)
+            .env("IMAGE", image)
+            .env("SOURCE_REVISION", "0123456789abcdef")
+            .env("SHA_TAG", "sha-source")
+            .env("IMAGE_VERSION", "0.4.0")
+            .env("IS_RELEASE", case.is_release.to_string())
+            .env("IS_BACKFILL", case.is_backfill.to_string())
+            .env("RELEASE_TAG", "v0.4.0")
+            .env("RELEASE_VERSION", "0.4.0")
+            .output()
+            .unwrap_or_else(|error| panic!("{} failed to execute: {error}", case.name));
+        assert!(
+            output.status.success(),
+            "{} failed:\nstdout: {}\nstderr: {}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let outputs = read_file(&github_output);
+        assert_eq!(
+            outputs.contains("reuse=true"),
+            case.expected_reuse,
+            "{} reuse verdict",
+            case.name
+        );
+        let expected_publish_sha = format!("publish_sha={}", case.expected_publish_sha);
+        let expected_verify_sha = format!("verify_sha={}", case.expected_verify_sha);
+        assert!(
+            outputs
+                .lines()
+                .any(|line| line == expected_publish_sha.as_str()),
+            "{} SHA publication verdict must be `{expected_publish_sha}`",
+            case.name
+        );
+        assert!(
+            outputs
+                .lines()
+                .any(|line| line == expected_verify_sha.as_str()),
+            "{} SHA verification verdict must be `{expected_verify_sha}`",
+            case.name
+        );
+        if case.expected_reuse {
+            assert!(
+                outputs.contains("digest=sha256:stable"),
+                "{} digest",
+                case.name
+            );
+        }
+        let registry_contents = read_file(&registry);
+        let tags: BTreeMap<&str, &str> = registry_contents
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                Some((fields.next()?, fields.next()?))
+            })
+            .collect();
+        for tag in case.expected_tags {
+            let reference = format!("{image}:{tag}");
+            assert_eq!(
+                tags.get(reference.as_str()),
+                Some(&"sha256:stable"),
+                "{} must leave `{tag}` on the original immutable digest",
+                case.name
+            );
+        }
+        if case.is_backfill && case.initial_version == "latest" {
+            let sha_line = registry_contents
+                .lines()
+                .find(|line| line.starts_with(&format!("{image}:sha-source ")))
+                .expect("historical SHA must remain present");
+            assert!(
+                sha_line.ends_with(" latest"),
+                "historical SHA must retain version=latest: {sha_line}"
+            );
+        }
+    }
 }
 
 #[test]

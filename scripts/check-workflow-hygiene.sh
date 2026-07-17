@@ -57,6 +57,31 @@ success() {
     echo -e "${GREEN}[OK]${NC} $1"
 }
 
+extract_named_workflow_step() {
+    local workflow=$1
+    local step_name=$2
+
+    awk -v target="$step_name" '
+        function leading_spaces(value) {
+            match(value, /[^ ]/)
+            return RSTART == 0 ? length(value) : RSTART - 1
+        }
+        {
+            trimmed = $0
+            sub(/^[[:space:]]+/, "", trimmed)
+            if (!found && trimmed == "- name: " target) {
+                found = 1
+                step_indent = leading_spaces($0)
+            } else if (found && leading_spaces($0) == step_indent && trimmed ~ /^- /) {
+                exit
+            }
+            if (found) {
+                print
+            }
+        }
+    ' "$workflow"
+}
+
 build_allowed_first_party_image_refs() {
     # Keep historical namespace for backward compatibility during migration.
     local allowed_refs
@@ -399,7 +424,7 @@ record_remote_action_ref() {
 
     for index in "${!REMOTE_ACTION_KEYS[@]}"; do
         if [ "${REMOTE_ACTION_KEYS[$index]}" = "$action_key" ]; then
-            REMOTE_ACTION_SITES[$index]+="${site}"$'\n'
+            REMOTE_ACTION_SITES[index]+="${site}"$'\n'
             return
         fi
     done
@@ -1099,15 +1124,27 @@ DOCKER_PUBLISH_POLICY_VIOLATIONS=0
 DOCKER_PUBLISH_WORKFLOW=".github/workflows/docker-publish.yml"
 
 if [ -f "$DOCKER_PUBLISH_WORKFLOW" ]; then
-    if grep -qE '^[[:space:]]*images:[[:space:]]*ghcr\.io/[A-Za-z0-9._-]+/[A-Za-z0-9._.-]+' "$DOCKER_PUBLISH_WORKFLOW"; then
-        error "$DOCKER_PUBLISH_WORKFLOW: Uses hard-coded GHCR image name in metadata-action"
-        error "  Derive the image name from repository owner/name and reference a step output."
+    DOCKER_METADATA_STEP=$(extract_named_workflow_step "$DOCKER_PUBLISH_WORKFLOW" "Prepare Docker metadata")
+    if [ -z "$DOCKER_METADATA_STEP" ]; then
+        error "$DOCKER_PUBLISH_WORKFLOW: Missing the local Prepare Docker metadata step"
         DOCKER_PUBLISH_POLICY_VIOLATIONS=$((DOCKER_PUBLISH_POLICY_VIOLATIONS + 1))
-    fi
+    else
+        DOCKER_METADATA_STEP_LIVE=$(grep -vE '^[[:space:]]*#' <<< "$DOCKER_METADATA_STEP" || true)
+        if grep -qE '^[[:space:]]*IMAGE:[[:space:]]*ghcr\.io/[A-Za-z0-9._-]+/[A-Za-z0-9._.-]+' <<< "$DOCKER_METADATA_STEP_LIVE"; then
+            error "$DOCKER_PUBLISH_WORKFLOW: Uses a hard-coded GHCR image name in metadata generation"
+            error "  Derive the image name from repository owner/name and reference the image step output."
+            DOCKER_PUBLISH_POLICY_VIOLATIONS=$((DOCKER_PUBLISH_POLICY_VIOLATIONS + 1))
+        fi
 
-    if ! grep -qE '^[[:space:]]*images:[[:space:]]*\$\{\{[[:space:]]*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+[[:space:]]*\}\}' "$DOCKER_PUBLISH_WORKFLOW"; then
-        error "$DOCKER_PUBLISH_WORKFLOW: metadata-action images input must use a derived step output"
-        DOCKER_PUBLISH_POLICY_VIOLATIONS=$((DOCKER_PUBLISH_POLICY_VIOLATIONS + 1))
+        if ! grep -qE '^[[:space:]]*IMAGE:[[:space:]]*\$\{\{[[:space:]]*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+[[:space:]]*\}\}' <<< "$DOCKER_METADATA_STEP_LIVE"; then
+            error "$DOCKER_PUBLISH_WORKFLOW: local metadata generation must use a derived image step output"
+            DOCKER_PUBLISH_POLICY_VIOLATIONS=$((DOCKER_PUBLISH_POLICY_VIOLATIONS + 1))
+        fi
+
+        if grep -Eq 'docker/metadata-action|api\.github\.com|(^|[[:space:]])gh[[:space:]]+api([[:space:]]|$)|(^|[[:space:]])curl[[:space:]]' <<< "$DOCKER_METADATA_STEP_LIVE"; then
+            error "$DOCKER_PUBLISH_WORKFLOW: local metadata step must not use repository API or network metadata lookups"
+            DOCKER_PUBLISH_POLICY_VIOLATIONS=$((DOCKER_PUBLISH_POLICY_VIOLATIONS + 1))
+        fi
     fi
 fi
 

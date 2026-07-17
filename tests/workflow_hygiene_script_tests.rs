@@ -72,6 +72,68 @@ fn run_hygiene_with_workflow(workflow_name: &str, workflow_content: &str) -> (bo
 }
 
 #[test]
+fn test_workflow_hygiene_scopes_docker_metadata_policy_to_named_step() {
+    let workflow = r#"name: Docker Publish
+on: [push]
+# Historical note: docker/metadata-action used to be called here.
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Prepare Docker metadata
+        shell: bash
+        # Historical note: docker/metadata-action used to be called here.
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: echo "tags=${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+      - name: Document unrelated API client
+        run: echo "curl api.github.com is not part of metadata generation"
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("docker-publish.yml", workflow);
+
+    assert!(
+        success,
+        "Docker metadata hygiene must ignore comments and unrelated steps.\nOutput:\n{output}"
+    );
+    assert!(
+        !output.contains("local metadata step must not use repository API"),
+        "Only the named local metadata step belongs to this policy.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_workflow_hygiene_rejects_api_lookup_inside_docker_metadata_step() {
+    let workflow = r#"name: Docker Publish
+on: [push]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Prepare Docker metadata
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: curl https://api.github.com/repos/example/repository
+      - name: Build
+        run: echo done
+"#;
+
+    let (success, output) = run_hygiene_with_workflow("docker-publish.yml", workflow);
+
+    assert!(
+        !success,
+        "Network metadata lookup must fail Docker workflow hygiene.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("local metadata step must not use repository API"),
+        "Expected a metadata-step API lookup diagnostic.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_workflow_hygiene_detects_missing_locked_in_multiline_cargo_command() {
     let workflow = r#"name: Test Workflow
 on: [push]
