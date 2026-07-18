@@ -40,10 +40,11 @@ stdout event contract and exit codes (the native README is canonical).
 `clients/fortress/` is the native Fortress rollback interoperability fixture;
 `clients/fortress-wasm/` reuses its deterministic workload and relay ledger in
 a Godot 4.5, single-threaded Emscripten build exercised by two isolated browser
-processes via `scripts/run-fortress-wasm-interop.sh`. The exact released WASM
-graph is an expected-`BUSTED` characterization: its adapter admits multiple
-messages per callback, but client completions remain near one per callback.
-P13 stays open until that released-client bottleneck is removed.
+processes via `scripts/run-fortress-wasm-interop.sh`. The exact released 0.9.0
+client + Godot adapter graph is required to pass every health gate in two
+Chromium processes; the same harness retains an expected-`BUSTED`
+one-admission-per-callback negative control. P13 is complete for the explicitly
+scoped Chromium cell.
 
 ## Architectural Invariants
 

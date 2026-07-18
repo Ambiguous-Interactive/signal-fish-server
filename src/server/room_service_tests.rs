@@ -155,6 +155,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         active_session_plans: Arc::new(DashMap::new()),
         pending_durable_player_detaches: Arc::new(DashMap::new()),
         fail_retain_room_publication_snapshot: AtomicBool::new(false),
+        reconnect_teardown_test_gate: StdMutex::new(None),
         spectator_service,
         transport_security: TransportSecurityConfig::default(),
         dashboard_metrics_cache,

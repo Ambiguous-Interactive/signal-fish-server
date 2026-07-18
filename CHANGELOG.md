@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Complete the H6 reconnect-race falsification matrix with a deterministic,
+  test-only teardown gate. The gate proves a reconnect rejected as
+  `PlayerAlreadyConnected` after its record is armed does not consume the token,
+  and that the same token succeeds as soon as the old connection is removed.
 - Advance the Fortress/Godot no-thread WASM acceptance gate to the exact
   crates.io releases `signal-fish-client` 0.9.0 and
   `signal-fish-client-godot` 0.9.0. The primary two-browser cell now requires

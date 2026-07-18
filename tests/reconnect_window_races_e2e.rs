@@ -1,9 +1,10 @@
 //! P10.C **H6** — reconnect window / claim edge races (falsification experiment).
 //!
-//! Falsifies two DETERMINISTIC edges of the reconnection state machine through
-//! the real WebSocket stack. The third edge listed for H6 (reconnect-during-
-//! teardown) is an inherently timing-narrow race and is deliberately NOT
-//! attempted here — see "Deferred" below.
+//! Falsifies two deterministic edges of the reconnection state machine through
+//! the real WebSocket stack. H6's third edge (reconnect-during-teardown) is
+//! covered at the handler/unregister boundary by the deterministic test-only
+//! gate in
+//! `server::signaling_tests::reconnect_during_teardown_preserves_token_for_retry`.
 //!
 //! # Pre-registered prediction (PLAN.md, P10.C H6)
 //!
@@ -12,7 +13,7 @@
 //! > reconnect-during-teardown requires client retry (`PlayerAlreadyConnected`;
 //! > token NOT consumed) → F3 SDK rule.
 //!
-//! Prediction for the two facets below: **both PASS.**
+//! Prediction for all three facets: **PASS.**
 //!
 //! # Facet 1 — window boundary, independent of the cleanup tick
 //!
@@ -65,19 +66,19 @@
 //! widening the window to 3600s, after which the very same post-sleep call
 //! returns `Reconnected` instead of `ReconnectionFailed` (reverted).
 //!
-//! # Deferred (NOT implemented here)
+//! # Facet 3 — reconnect during teardown
 //!
-//! NOTE: the reconnect-during-teardown race — a `Reconnect` arriving while
-//! `has_client(player)` is still true mid-teardown, yielding
-//! `PlayerAlreadyConnected` with the token NOT consumed (the early guard at
-//! `src/server/reconnection_service.rs:247-260`) — is an inherently
-//! timing-narrow RACE that cannot be made deterministic without flakiness. It
-//! is deferred to nightly / a future harness knob per the PLAN, and drives the
-//! F3 SDK "retry on PlayerAlreadyConnected" rule.
+//! A `cfg(test)` gate pauses the real unregister transaction after it arms the
+//! pending record and before it removes the old connection. A replacement then
+//! receives `PlayerAlreadyConnected`; direct manager validation proves the
+//! token remains valid. Releasing the gate completes teardown, and the same
+//! replacement's successful use of that token for `Reconnected` proves it was
+//! not consumed. The gate replaces the former timing-narrow race with explicit
+//! events and no sleeps.
 //!
 //! # Result
 //!
-//! CONFIRMED — both facets pass; prediction upheld. (Observed detail: the
+//! CONFIRMED — all three facets pass; prediction upheld. (Observed detail: the
 //! post-window rejection surfaces as `ReconnectionTokenInvalid`, because the
 //! token's own embedded expiry — armed to `disconnect + window` — is checked a
 //! hair before the dedicated `WindowExpired` gate.)
