@@ -4120,6 +4120,8 @@ fn test_release_dispatch_derives_identity_and_reuses_only_safe_tags() {
         "source_revision=$(git rev-parse \"refs/tags/${tag}^{commit}\")",
         "git merge-base --is-ancestor \"$source_revision\" \"$dispatch_revision\"",
         "git merge-base --is-ancestor \"$source_revision\" \"origin/${DEFAULT_BRANCH}\"",
+        "resolver_scratch=$(mktemp -d \"${scratch_base}/release-resolver.XXXXXX\")",
+        "cp scripts/read-toml-string.sh \"${resolver_scratch}/read-toml-string.sh\"",
         "git checkout --detach \"$source_revision\"",
         "source Cargo.toml (${cargo_version}) disagree",
     ] {

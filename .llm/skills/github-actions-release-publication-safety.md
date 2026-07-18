@@ -25,6 +25,11 @@ If the matching tag already exists during a retry:
 3. Detach at the tagged commit and revalidate Cargo and changelog metadata.
 4. Reuse that source revision without moving the tag.
 
+If resolution detaches the active worktree, preserve any workflow-revision
+parsers or policy helpers in runner-temporary storage before detaching. An
+absolute path inside the same checkout is insufficient because checkout
+replaces the file behind that path.
+
 This permits a workflow-only fix on `main` to finish a partially published older
 commit while preserving the immutable artifact identity.
 

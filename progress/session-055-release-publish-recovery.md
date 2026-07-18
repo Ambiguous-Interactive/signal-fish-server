@@ -59,7 +59,7 @@ Green implementation:
 
 Targeted evidence:
 
-- `cargo test --locked --test release_publish_tests -- --nocapture`: 3 passed.
+- `cargo test --locked --test release_publish_tests -- --nocapture`: 4 passed.
 - `cargo test --locked --test ci_config_tests`: 285 passed, 1 ignored after the
   SBOM path assertion was aligned with the isolated `source/` checkout.
 - `actionlint`, `shellcheck`, workflow hygiene, LLM size/example policy,
@@ -80,3 +80,15 @@ Full verification:
   suite: 285 passed, 1 ignored.
 - Independent adversarial review: zero remaining issues after three findings
   were fixed and covered by behavioral fixtures.
+
+## Pull request review
+
+- PR #185 opened at commit `a8c50ac` and all fast workflows passed.
+- Cursor Bugbot found that retry detachment replaced the default relative TOML
+  helper with the historical tag's copy. The resolver now snapshots the
+  dispatch-revision helper under runner-temporary storage before detaching, and
+  a production-path fixture proves recovery when the historical tag does not
+  contain that helper.
+- GitHub Copilot was explicitly requested and awaited, but the service reported
+  that the requesting account had reached its review quota. A retry remains
+  scheduled after the feedback fix and CI rerun.

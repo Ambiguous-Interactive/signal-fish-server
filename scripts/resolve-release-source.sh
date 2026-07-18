@@ -6,7 +6,24 @@ EVENT_NAME=${RELEASE_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}
 DEFAULT_BRANCH=${RELEASE_DEFAULT_BRANCH:-}
 EVENT_REF=${RELEASE_EVENT_REF:-${GITHUB_REF:-}}
 OUTPUT_FILE=${RELEASE_OUTPUT_FILE:-${GITHUB_OUTPUT:-}}
-READ_TOML_SCRIPT=${READ_TOML_SCRIPT:-scripts/read-toml-string.sh}
+
+# Preserve the dispatch revision's parser before a retry detaches the worktree
+# to a historical tag. Tests may inject an already-isolated helper explicitly.
+resolver_scratch=
+cleanup() {
+    if [ -n "$resolver_scratch" ]; then
+        rm -rf -- "$resolver_scratch"
+    fi
+}
+trap cleanup EXIT
+if [ -n "${READ_TOML_SCRIPT:-}" ]; then
+    readonly READ_TOML_SCRIPT
+else
+    scratch_base=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+    resolver_scratch=$(mktemp -d "${scratch_base}/release-resolver.XXXXXX")
+    cp scripts/read-toml-string.sh "${resolver_scratch}/read-toml-string.sh"
+    readonly READ_TOML_SCRIPT="${resolver_scratch}/read-toml-string.sh"
+fi
 
 if [ -z "$EVENT_NAME" ] || [ -z "$DEFAULT_BRANCH" ] || [ -z "$EVENT_REF" ] || [ -z "$OUTPUT_FILE" ]; then
     echo "ERROR: release event, default branch, ref, and output file are required." >&2

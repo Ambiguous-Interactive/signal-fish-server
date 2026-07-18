@@ -130,6 +130,19 @@ impl ReleaseFixture {
             .expect("run release resolver")
     }
 
+    fn resolve_with_production_reader(&self, event: &str, event_ref: &str) -> Output {
+        let _ = fs::remove_file(&self.output);
+        Command::new("bash")
+            .arg(&self.resolver)
+            .current_dir(&self.root)
+            .env("RELEASE_EVENT_NAME", event)
+            .env("RELEASE_DEFAULT_BRANCH", "main")
+            .env("RELEASE_EVENT_REF", event_ref)
+            .env("RELEASE_OUTPUT_FILE", &self.output)
+            .output()
+            .expect("run release resolver with production reader lookup")
+    }
+
     fn resolved_value(&self, key: &str) -> String {
         fs::read_to_string(&self.output)
             .expect("read release outputs")
@@ -286,6 +299,33 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
             );
         }
     }
+}
+
+#[test]
+fn release_source_resolver_preserves_dispatch_revision_tooling_across_detach() {
+    let fixture = ReleaseFixture::new("1.2.3");
+    let release = fixture.head();
+    fixture.tag(true, &release);
+
+    let dispatch_reader = fixture.root.join("scripts/read-toml-string.sh");
+    fs::create_dir_all(dispatch_reader.parent().expect("reader parent"))
+        .expect("create dispatch scripts directory");
+    fs::copy(&fixture.reader, &dispatch_reader).expect("install dispatch revision reader");
+    git(&fixture.root, &["add", "scripts/read-toml-string.sh"]);
+    git(
+        &fixture.root,
+        &["commit", "-m", "add fixed release tooling"],
+    );
+    git(&fixture.root, &["push", "origin", "main"]);
+
+    let output = fixture.resolve_with_production_reader("workflow_dispatch", "refs/heads/main");
+    assert!(
+        output.status.success(),
+        "resolver must keep using dispatch-revision tooling after detaching to a tag that lacks it:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.resolved_value("source_revision"), release);
 }
 
 #[test]
