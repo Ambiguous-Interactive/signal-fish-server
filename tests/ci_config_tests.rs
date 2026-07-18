@@ -4032,6 +4032,15 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
          runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
     );
 
+    assert!(
+        prepare
+            .contains("The workflow derives version \\`${VERSION}\\` from the reviewed Cargo.toml")
+            && !prepare.contains("with \\`release_version=${VERSION}\\`"),
+        "The generated release PR must direct maintainers to dispatch from the default branch \
+         without retyping the reviewed version. Redundant release identity input caused the \
+         failed 0.10.1 dispatch for the 0.4.1 release.\nJob block:\n{prepare}"
+    );
+
     assert_eq!(
         prepare
             .matches(
@@ -4063,6 +4072,172 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
             && install_toolchain < prepare_files,
         "The pinned Rust toolchain must be installed after checkout and before release \
          preparation invokes Cargo."
+    );
+}
+
+#[test]
+fn test_release_dispatch_derives_identity_and_reuses_only_safe_tags() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let on_block = extract_yaml_mapping_block(&release, "on", 0)
+        .expect("release.yml must define workflow triggers");
+    let resolve = extract_workflow_job_block(&release, "resolve-release")
+        .expect("release.yml must define resolve-release");
+    let resolver = read_live_file(&root.join("scripts/resolve-release-source.sh"));
+
+    assert!(
+        on_block.contains("workflow_dispatch:") && !on_block.contains("release_version:"),
+        "Manual release publication must derive the reviewed Cargo.toml version instead of \
+         asking an operator to retype it.\nTrigger block:\n{on_block}"
+    );
+    assert!(
+        release.contains("group: release-publish")
+            && !release.contains("github.event.inputs.release_version"),
+        "All release attempts must share one non-cancelling publication lock and must not derive \
+         concurrency identity from removed manual input."
+    );
+
+    for required in [
+        "RELEASE_EVENT_NAME: ${{ github.event_name }}",
+        "RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+        "RELEASE_EVENT_REF: ${{ github.ref }}",
+        "run: bash scripts/resolve-release-source.sh",
+    ] {
+        assert!(
+            resolve.contains(required),
+            "resolve-release must pass `{required}` to the tested release resolver.\n\
+             Job block:\n{resolve}"
+        );
+    }
+
+    for required in [
+        "Release publication must be dispatched from ${DEFAULT_BRANCH}",
+        "dispatch_revision=$(git rev-parse \"HEAD^{commit}\")",
+        "version=$(read_cargo_version)",
+        "tag=\"v${version}\"",
+        "git ls-remote --exit-code --tags origin \"refs/tags/${tag}\"",
+        "Existing release tag ${candidate_tag} is lightweight",
+        "source_revision=$(git rev-parse \"refs/tags/${tag}^{commit}\")",
+        "git merge-base --is-ancestor \"$source_revision\" \"$dispatch_revision\"",
+        "git merge-base --is-ancestor \"$source_revision\" \"origin/${DEFAULT_BRANCH}\"",
+        "resolver_scratch=$(mktemp -d \"${scratch_base}/release-resolver.XXXXXX\")",
+        "cp scripts/read-toml-string.sh \"${resolver_scratch}/read-toml-string.sh\"",
+        "git checkout --detach \"$source_revision\"",
+        "source Cargo.toml (${cargo_version}) disagree",
+    ] {
+        assert!(
+            resolver.contains(required),
+            "resolve-release must contain `{required}` so a manual retry can safely reuse an \
+             immutable annotated release tag while rejecting unmerged or mismatched sources.\n\
+             Resolver:\n{resolver}"
+        );
+    }
+}
+
+#[test]
+fn test_release_publication_keeps_probes_outside_the_checkout() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let readiness = extract_workflow_job_block(&release, "publication-readiness")
+        .expect("release.yml must define publication-readiness");
+    let ensure_tag = extract_workflow_job_block(&release, "ensure-tag")
+        .expect("release.yml must define ensure-tag");
+    let publish =
+        extract_workflow_job_block(&release, "publish").expect("release.yml must define publish");
+    let probe = extract_named_workflow_step(&readiness, "Check for an idempotent crates.io retry")
+        .expect("publication-readiness must define the crates.io retry probe");
+    let clean = extract_named_workflow_step(&publish, "Verify clean checkout before publication")
+        .expect("publish must define a clean-checkout publication gate");
+    let crate_check = read_live_file(&root.join("scripts/check-crates-io-release.sh"));
+    let clean_check = read_live_file(&root.join("scripts/check-clean-release-worktree.sh"));
+
+    for required in [
+        "needs: [resolve-release, preflight]",
+        "crate_exists: ${{ steps.crate.outputs.exists }}",
+        "Check for an idempotent crates.io retry",
+        "Require crates.io token",
+        "if: steps.crate.outputs.exists != 'true'",
+        "CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}",
+        "cargo publish --locked --dry-run",
+        "Verify dry-run preserved a clean checkout",
+    ] {
+        assert!(
+            readiness.contains(required),
+            "publication-readiness must contain `{required}` before any irreversible release \
+             mutation.\nJob block:\n{readiness}"
+        );
+    }
+    assert!(
+        ensure_tag.contains("needs: [resolve-release, publication-readiness]"),
+        "ensure-tag must run only after credentials and the exact package pass readiness.\n\
+         Job block:\n{ensure_tag}"
+    );
+
+    for required in [
+        "mktemp -d \"${RUNNER_TEMP}/crates-io-retry.XXXXXX\"",
+        "trap cleanup EXIT",
+        "response_file=\"${scratch_dir}/crate-version.json\"",
+        "crate_file=\"${scratch_dir}/signal-fish-server-${VERSION}.crate\"",
+        "--output \"$response_file\"",
+    ] {
+        assert!(
+            crate_check.contains(required),
+            "The crates.io retry probe must contain `{required}` so generated registry files \
+             cannot dirty the package checkout.\nScript:\n{crate_check}"
+        );
+    }
+    for forbidden in [
+        "--output crate-version.json",
+        "crate_file=\"signal-fish-server-${VERSION}.crate\"",
+    ] {
+        assert!(
+            !crate_check.contains(forbidden),
+            "The crates.io retry probe must not write checkout-relative scratch path \
+             `{forbidden}`.\nScript:\n{crate_check}"
+        );
+    }
+    assert!(
+        probe.contains("run: bash publication-tools/scripts/check-crates-io-release.sh"),
+        "Publication readiness must execute the tested crates.io probe helper.\nStep:\n{probe}"
+    );
+
+    for required in [
+        "git status --porcelain=v1 --untracked-files=all",
+        "Refusing to publish a dirty release checkout",
+        "Release probes and generated files must use RUNNER_TEMP",
+    ] {
+        assert!(
+            clean_check.contains(required),
+            "The clean-checkout gate must contain `{required}` with actionable diagnostics.\n\
+             Script:\n{clean_check}"
+        );
+    }
+    assert!(
+        clean.contains("run: bash ../publication-tools/scripts/check-clean-release-worktree.sh"),
+        "The final clean gate must execute the tested helper.\nStep:\n{clean}"
+    );
+    let clean_position = publish
+        .find("Verify clean checkout before publication")
+        .expect("clean gate position");
+    let publish_position = publish
+        .find("Publish to crates.io")
+        .expect("publish position");
+    assert!(
+        clean_position < publish_position,
+        "The checkout must be verified immediately before Cargo \
+         publication.\nJob block:\n{publish}"
+    );
+    let between = &publish[clean_position..publish_position];
+    assert_eq!(
+        between.matches("      - name:").count(),
+        1,
+        "No step may mutate the checkout between the clean gate and Cargo publication.\n\
+         Intervening block:\n{between}"
+    );
+    assert!(
+        !release.contains("--allow-dirty"),
+        "Release automation must never bypass Cargo's dirty-checkout protection with \
+         --allow-dirty."
     );
 }
 
@@ -4128,6 +4303,47 @@ fn test_release_workflow_builds_all_platform_binaries() {
         live.contains("fail-fast: false"),
         "release.yml binary build matrix must set `fail-fast: false` so a single platform's \
          failure does not strip every other platform's binary off the release."
+    );
+}
+
+#[test]
+fn test_release_binary_builds_use_dispatch_tooling_with_exact_source() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let binaries = extract_workflow_job_block(&release, "build-binaries")
+        .expect("release.yml must define build-binaries");
+    let tooling_position = binaries
+        .find("- name: Checkout publication tooling")
+        .expect("build-binaries must check out dispatch-revision publication tooling");
+    let source_position = binaries
+        .find("- name: Checkout exact source")
+        .expect("build-binaries must check out the immutable release source");
+
+    assert!(
+        tooling_position < source_position,
+        "build-binaries must isolate current workflow tooling before historical source"
+    );
+    for required in [
+        "ref: ${{ github.sha }}",
+        "path: publication-tools",
+        "scripts/read-toml-string.sh",
+        "sparse-checkout-cone-mode: false",
+        "ref: ${{ needs.resolve-release.outputs.source_revision }}",
+        "path: source",
+        "working-directory: source",
+        "bash ../publication-tools/scripts/read-toml-string.sh rust-toolchain.toml",
+        "echo \"archive=source/$ARCHIVE\"",
+    ] {
+        assert!(
+            binaries.contains(required),
+            "build-binaries must contain `{required}` so workflow-only recovery fixes remain \
+             available while every artifact is built from the exact tagged source.\n\
+             Job block:\n{binaries}"
+        );
+    }
+    assert!(
+        !binaries.contains("bash scripts/read-toml-string.sh"),
+        "build-binaries must not execute a parser from the historical source checkout"
     );
 }
 
@@ -4408,23 +4624,37 @@ fn test_release_identity_fails_closed_across_artifacts() {
     let release = read_live_file(&root.join(".github/workflows/release.yml"));
     let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
     let verifier = read_live_file(&root.join("scripts/verify-release-image.sh"));
+    let resolver = read_live_file(&root.join("scripts/resolve-release-source.sh"));
+    let crate_check = read_live_file(&root.join("scripts/check-crates-io-release.sh"));
 
     let required_by_file = [
         (
             "release.yml",
             &release,
             vec![
-                "Cargo.toml version package",
-                "escaped_version=${version//./\\\\.}",
-                "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
-                "git fetch --no-tags origin \"refs/tags/${tag}:refs/tags/${tag}\"",
+                "scripts/resolve-release-source.sh",
                 "git cat-file -t \"refs/tags/${TAG}\"",
                 "refusing to move it",
-                ".cargo_vcs_info.json",
-                "published_revision",
                 "target_commitish: ${{ needs.resolve-release.outputs.source_revision }}",
                 "Verify GitHub Release identity",
             ],
+        ),
+        (
+            "resolve-release-source.sh",
+            &resolver,
+            vec![
+                "Cargo.toml version package",
+                "escaped_version=${version//./\\\\.}",
+                "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
+                "git fetch --force origin \"refs/tags/${tag}:refs/tags/${tag}\"",
+                "git merge-base --is-ancestor",
+                "git checkout --detach",
+            ],
+        ),
+        (
+            "check-crates-io-release.sh",
+            &crate_check,
+            vec![".cargo_vcs_info.json", "published_revision", "RUNNER_TEMP"],
         ),
         (
             "docker-publish.yml",
@@ -14851,6 +15081,8 @@ fn test_release_workflow_requires_preflight() {
         release_yml.display()
     );
 
+    let publication_readiness = extract_workflow_job_block(&content, "publication-readiness")
+        .expect("release.yml must define publication-readiness");
     let ensure_tag = extract_workflow_job_block(&content, "ensure-tag")
         .expect("release.yml must define ensure-tag");
     let publish_container = extract_workflow_job_block(&content, "publish-container")
@@ -14859,13 +15091,18 @@ fn test_release_workflow_requires_preflight() {
         extract_workflow_job_block(&content, "publish").expect("release.yml must define publish");
 
     // The irreversible publication chain must remain resolve -> preflight ->
-    // immutable tag -> verified container -> crate/GitHub Release.
+    // credential/package readiness -> immutable tag -> verified container ->
+    // crate/GitHub Release.
     assert!(
-        ensure_tag.contains("needs: [resolve-release, preflight]")
+        publication_readiness.contains("needs: [resolve-release, preflight]")
+            && ensure_tag.contains("needs: [resolve-release, publication-readiness]")
             && publish_container.contains("needs: [resolve-release, ensure-tag]")
-            && publish.contains("needs: [resolve-release, publish-container]"),
+            && publish
+                .contains("needs: [resolve-release, publication-readiness, publish-container]"),
         "release.yml publication jobs must preserve the fail-closed dependency chain \
-         resolve-release -> preflight -> ensure-tag -> publish-container -> publish.\n\
+         resolve-release -> preflight -> publication-readiness -> ensure-tag -> \
+         publish-container -> publish.\n\
+         publication-readiness:\n{publication_readiness}\n\
          ensure-tag:\n{ensure_tag}\n\
          publish-container:\n{publish_container}\n\
          publish:\n{publish}"
@@ -16520,9 +16757,9 @@ fn test_release_workflow_attaches_sbom_to_release() {
 
     // The attach step must reference sbom.cdx.json
     assert!(
-        content.contains("files: sbom.cdx.json"),
+        content.contains("files: source/sbom.cdx.json"),
         "release.yml must attach sbom.cdx.json to the GitHub release.\n\
-         Add 'files: sbom.cdx.json' to the 'Attach SBOM to release' step.\n\
+         Add 'files: source/sbom.cdx.json' to the 'Attach SBOM to release' step.\n\
          This allows release consumers to download the SBOM for audit purposes.\n\
          File: {}",
         release_yml.display()

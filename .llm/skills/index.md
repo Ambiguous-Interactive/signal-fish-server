@@ -44,6 +44,7 @@
 - [Bash Scripts in CI/CD](./github-actions-bash-scripts.md)
 - [GitHub Actions Caching & Action Versioning](./github-actions-caching.md)
 - [CI Configuration Validation Tests](./github-actions-config-tests.md)
+- [GitHub Actions Release Publication Safety](./github-actions-release-publication-safety.md)
 - [GitHub Actions Release Gating](./github-actions-release.md)
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md)
 - [GitHub Actions Workflow Configuration](./github-actions-workflow-config.md)

@@ -227,7 +227,8 @@ jobs:
             echo
             echo "## After merge"
             echo
-            echo "Run **Release - Publish Crate** from \`${DEFAULT_BRANCH}\` with \`release_version=${VERSION}\`."
+            echo "Run **Release - Publish Crate** from \`${DEFAULT_BRANCH}\`."
+            echo "The workflow derives version \`${VERSION}\` from the reviewed Cargo.toml; do not re-enter it."
             echo "That workflow creates or verifies annotated tag \`${TAG}\`, then publishes crates.io and GHCR."
             echo "It creates the GitHub Release and attaches the SBOM and platform archives."
           } > "$body_file"

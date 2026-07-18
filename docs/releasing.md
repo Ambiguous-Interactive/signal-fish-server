@@ -33,9 +33,12 @@ bash scripts/prepare-release.sh --bump patch
 ```
 
 Do not create or move the version tag by hand for the normal manual path. Run
-the **Release - Publish Crate** workflow with `release_version=X.Y.Z`. It creates
-an annotated `vX.Y.Z` tag before publication, or verifies that an existing tag
-is annotated and already points at the exact release commit.
+the **Release - Publish Crate** workflow from the default branch without a
+version input. It derives the reviewed version from `Cargo.toml`, eliminating a
+second operator-entered identity. If the matching tag already exists after a
+partial run, the workflow requires that it is annotated, reachable from the
+dispatched default-branch commit, and consistent with the tagged Cargo and
+changelog metadata; the retry then publishes that immutable source commit.
 
 The release workflow directly calls the reusable container workflow. It does
 not depend on a tag created with `GITHUB_TOKEN` starting a second workflow.
@@ -43,15 +46,25 @@ Publication proceeds in this order:
 
 1. validate the Cargo, changelog, source, and tag identity;
 2. verify required CI for the source commit;
-3. create or validate the immutable annotated tag;
-4. build and verify the versioned multi-architecture GHCR manifest;
-5. publish the crate idempotently;
-6. create or complete the GitHub Release and record the image digest;
-7. attach the SBOM and available platform binaries.
+3. query crates.io from an isolated temporary directory, reject conflicting
+   published bytes/source, require the token only for an absent version, and
+   dry-run the exact package from a clean checkout;
+4. create or validate the immutable annotated tag;
+5. build and verify the versioned multi-architecture GHCR manifest;
+6. verify the source checkout is still clean and publish the crate idempotently;
+7. create or complete the GitHub Release and record the image digest;
+8. attach the SBOM and available platform binaries.
 
 If a run stops after creating one artifact, rerun the same version. The retry
 accepts only artifacts that prove the same source revision. Existing version
 tags are never moved; missing aliases are repaired from the verified digest.
+Resolver, container, publication, and binary jobs load policy helpers from the
+dispatched workflow revision in a checkout separate from the immutable tagged
+source, so a workflow-only recovery fix can safely complete an older release.
+Registry responses and downloaded `.crate` files remain under `RUNNER_TEMP`,
+and the final untracked-aware cleanliness gate prevents publication probes from
+silently changing the package contents. Never bypass that boundary with
+`cargo publish --allow-dirty`.
 
 ## Direct Tags and Historical Backfills
 

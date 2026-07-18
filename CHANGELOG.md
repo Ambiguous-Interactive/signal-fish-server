@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Make release publication retry-safe by deriving the manual version from the
+  reviewed default-branch source, reusing only matching immutable annotated
+  tags, validating crates.io state before tag and container mutation, keeping
+  registry probes outside the checkout, and enforcing a clean source tree
+  immediately before `cargo publish`.
+
 ## [0.4.1] - 2026-07-18
 
 ### Added
