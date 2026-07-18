@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -17,7 +18,13 @@ impl Fixture {
     fn new(version: &str) -> Self {
         let temp = tempfile::tempdir().expect("create release fixture");
         let root = temp.path().to_path_buf();
-        for directory in [".llm", "clients/native", "docs", "fuzz", "scripts"] {
+        for directory in [
+            ".llm/code-samples/protocol",
+            "clients/native",
+            "docs/guides",
+            "fuzz",
+            "scripts",
+        ] {
             fs::create_dir_all(root.join(directory)).expect("create fixture directory");
         }
 
@@ -50,34 +57,76 @@ impl Fixture {
         );
         write(
             &root.join(".llm/context.md"),
-            &format!("# Context\n\n- **Version:** {version}\n"),
+            &format!(
+                "# Context\n\n- **Version:** {version}\n\n\
+                 [v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\n\
+                 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n"
+            ),
         );
         write(
             &root.join("CHANGELOG.md"),
-            "# Changelog\n\n\
+            &format!("# Changelog\n\n\
              The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n\
              ## [Unreleased]\n\n\
              ### Added\n\n\
              - Ship the release preparation workflow.\n\n\
              ### Fixed\n\n\
              - Preserve categorized notes.\n\n\
-             ## [1.1.0] - 2026-07-01\n\n\
+             ## [{version}] - 2026-07-01\n\n\
              ### Added\n\n\
              - Previous release.\n\n\
-             [Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v1.1.0...HEAD\n\
-             [1.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v1.1.0\n",
+             [Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v{version}...HEAD\n\
+             [{version}]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v{version}\n"),
         );
         write(
-            &root.join("scripts/check-doc-consistency.sh"),
-            "#!/usr/bin/env bash\nexit 0\n",
+            &root.join("README.md"),
+            "# README\n\n[v2 client sample](.llm/code-samples/protocol/v2-client-messages.jsonl)\n[v2 server sample](.llm/code-samples/protocol/v2-server-messages.jsonl)\n",
         );
+        write(
+            &root.join(".llm/code-samples/protocol/v2-client-messages.jsonl"),
+            "{\"type\":\"Authenticate\",\"data\":{}}\n",
+        );
+        write(
+            &root.join(".llm/code-samples/protocol/v2-server-messages.jsonl"),
+            "{\"type\":\"Authenticated\",\"data\":{\"app_name\":\"test\",\"rate_limits\":{}}}\n",
+        );
+        write(
+            &root.join("docs/guides/rust-client.md"),
+            "# Rust client\n\n```rust\npub enum GameDataEncoding {\n    Json,\n    MessagePack,\n}\n```\n",
+        );
+        let checker =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-doc-consistency.sh");
+        let checker_destination = root.join("scripts/check-doc-consistency.sh");
+        fs::copy(&checker, &checker_destination).expect("copy real document checker");
+        let mut permissions = fs::metadata(&checker_destination)
+            .expect("read checker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&checker_destination, permissions)
+            .expect("make fixture checker executable");
 
+        for arguments in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Release Fixture"],
+            vec!["config", "user.email", "release-fixture@example.invalid"],
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "released baseline"],
+        ] {
+            let status = Command::new("git")
+                .args(arguments)
+                .current_dir(&root)
+                .status()
+                .expect("initialize fixture release history");
+            assert!(status.success(), "fixture Git setup failed");
+        }
         let status = Command::new("git")
-            .args(["init", "--quiet"])
+            .args(["tag", "-a"])
+            .arg(format!("v{version}"))
+            .args(["-m", "released baseline"])
             .current_dir(&root)
             .status()
-            .expect("initialize fixture worktree");
-        assert!(status.success(), "git init failed for release fixture");
+            .expect("create fixture release tag");
+        assert!(status.success(), "fixture release tag setup failed");
 
         Self { _temp: temp, root }
     }
@@ -93,6 +142,17 @@ impl Fixture {
             .output()
             .expect("run prepare-release.sh")
     }
+
+    fn run_with_real_doc_checker(&self, arguments: &[&str]) -> Output {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/prepare-release.sh");
+        Command::new("bash")
+            .arg(script)
+            .args(arguments)
+            .current_dir(&self.root)
+            .env("PREPARE_RELEASE_CARGO_BIN", "true")
+            .output()
+            .expect("run prepare-release.sh with real document checker")
+    }
 }
 
 fn write(path: &Path, content: &str) {
@@ -102,6 +162,32 @@ fn write(path: &Path, content: &str) {
 fn read(path: impl AsRef<Path>) -> String {
     let path = path.as_ref();
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+const RELEASE_FILES: [&str; 6] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "clients/native/Cargo.lock",
+    "CHANGELOG.md",
+    "docs/library-usage.md",
+    ".llm/context.md",
+];
+
+fn release_file_snapshot(fixture: &Fixture) -> Vec<(&'static str, String)> {
+    RELEASE_FILES
+        .iter()
+        .map(|path| (*path, read(fixture.root.join(path))))
+        .collect()
+}
+
+fn assert_release_files_unchanged(fixture: &Fixture, before: &[(&str, String)]) {
+    for (path, expected) in before {
+        assert_eq!(
+            read(fixture.root.join(path)),
+            *expected,
+            "{path} changed despite a preflight failure"
+        );
+    }
 }
 
 #[test]
@@ -139,7 +225,11 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
         assert!(!docs.contains("1.2.3"));
         assert_eq!(
             read(fixture.root.join(".llm/context.md")),
-            format!("# Context\n\n- **Version:** {expected}\n")
+            format!(
+                "# Context\n\n- **Version:** {expected}\n\n\
+                 [v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\n\
+                 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n"
+            )
         );
 
         let changelog = read(fixture.root.join("CHANGELOG.md"));
@@ -194,8 +284,8 @@ fn prepare_release_fails_closed_on_empty_notes_existing_version_or_lock_drift() 
 
     let duplicate = Fixture::new("1.2.3");
     let changelog = read(duplicate.root.join("CHANGELOG.md")).replace(
-        "## [1.1.0] - 2026-07-01",
-        "## [1.2.4] - 2026-07-10\n\n### Fixed\n\n- Already cut.\n\n## [1.1.0] - 2026-07-01",
+        "## [1.2.3] - 2026-07-01",
+        "## [1.2.4] - 2026-07-10\n\n### Fixed\n\n- Already cut.\n\n## [1.2.3] - 2026-07-01",
     );
     write(&duplicate.root.join("CHANGELOG.md"), &changelog);
     let output = duplicate.run(&["--bump", "patch", "--date", RELEASE_DATE]);
@@ -218,4 +308,110 @@ fn prepare_release_rejects_semver_arithmetic_overflow() {
     let output = fixture.run(&["--bump", "major", "--date", RELEASE_DATE]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot safely increment"));
+}
+
+#[test]
+fn prepare_release_rejects_cargo_version_without_matching_latest_release_before_mutation() {
+    let fixture = Fixture::new("1.2.3");
+    let changelog = read(fixture.root.join("CHANGELOG.md"))
+        .replace("[1.2.3]", "[1.1.0]")
+        .replace("v1.2.3", "v1.1.0");
+    write(&fixture.root.join("CHANGELOG.md"), &changelog);
+    let before = release_file_snapshot(&fixture);
+
+    let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+
+    assert!(!output.status.success(), "invalid release baseline passed");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("latest dated CHANGELOG.md release"),
+        "unexpected diagnostic:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_release_files_unchanged(&fixture, &before);
+}
+
+#[test]
+fn prepare_release_rejects_invalid_tag_baselines_before_mutation() {
+    for tag_kind in ["missing", "lightweight", "non-ancestor", "target-exists"] {
+        let fixture = Fixture::new("1.2.3");
+        if tag_kind != "target-exists" {
+            let status = Command::new("git")
+                .args(["tag", "--delete", "v1.2.3"])
+                .current_dir(&fixture.root)
+                .status()
+                .expect("delete fixture tag");
+            assert!(status.success());
+        }
+        match tag_kind {
+            "missing" => {}
+            "lightweight" => {
+                assert!(Command::new("git")
+                    .args(["tag", "v1.2.3"])
+                    .current_dir(&fixture.root)
+                    .status()
+                    .expect("create lightweight tag")
+                    .success());
+            }
+            "non-ancestor" => {
+                let tree = Command::new("git")
+                    .args(["rev-parse", "HEAD^{tree}"])
+                    .current_dir(&fixture.root)
+                    .output()
+                    .expect("resolve fixture tree");
+                assert!(tree.status.success());
+                let tree = String::from_utf8(tree.stdout).expect("tree hash is UTF-8");
+                let commit = Command::new("git")
+                    .args(["commit-tree", tree.trim(), "-m", "unrelated release"])
+                    .current_dir(&fixture.root)
+                    .output()
+                    .expect("create unrelated commit");
+                assert!(commit.status.success());
+                let commit = String::from_utf8(commit.stdout).expect("commit hash is UTF-8");
+                assert!(Command::new("git")
+                    .args(["tag", "-a", "v1.2.3", commit.trim(), "-m", "unrelated"])
+                    .current_dir(&fixture.root)
+                    .status()
+                    .expect("create unrelated annotated tag")
+                    .success());
+            }
+            "target-exists" => {
+                assert!(Command::new("git")
+                    .args(["tag", "-a", "v1.2.4", "-m", "already released"])
+                    .current_dir(&fixture.root)
+                    .status()
+                    .expect("create target tag")
+                    .success());
+            }
+            _ => unreachable!(),
+        }
+
+        let before = release_file_snapshot(&fixture);
+        let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+        assert!(
+            !output.status.success(),
+            "{tag_kind} tag baseline unexpectedly passed"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = match tag_kind {
+            "missing" => "is missing",
+            "lightweight" => "must be annotated",
+            "non-ancestor" => "ancestor of HEAD",
+            "target-exists" => "already exists locally",
+            _ => unreachable!(),
+        };
+        assert!(stderr.contains(expected), "unexpected diagnostic: {stderr}");
+        assert_release_files_unchanged(&fixture, &before);
+    }
+}
+
+#[test]
+fn prepared_release_passes_the_real_document_checker() {
+    let fixture = Fixture::new("1.2.3");
+    let output = fixture.run_with_real_doc_checker(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(
+        output.status.success(),
+        "integrated preparation failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

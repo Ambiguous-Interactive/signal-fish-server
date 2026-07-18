@@ -165,6 +165,65 @@ if grep -Eq "^## \\[${NEXT_VERSION//./\\.}\\]([[:space:]]|$)" CHANGELOG.md; then
     exit 1
 fi
 
+LATEST_CHANGELOG_VERSION=$(grep -E '^## \[(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' CHANGELOG.md \
+    | head -n 1 \
+    | sed -E 's/^## \[([^]]+)\].*/\1/' || true)
+if [ -z "$LATEST_CHANGELOG_VERSION" ] || [ "$LATEST_CHANGELOG_VERSION" != "$CURRENT_VERSION" ]; then
+    echo "ERROR: Cargo.toml version $CURRENT_VERSION must equal the latest dated CHANGELOG.md release (found: ${LATEST_CHANGELOG_VERSION:-none})." >&2
+    exit 1
+fi
+
+CURRENT_TAG="refs/tags/v$CURRENT_VERSION"
+if ! git rev-parse --verify --quiet "$CURRENT_TAG" >/dev/null; then
+    echo "ERROR: Baseline tag v$CURRENT_VERSION is missing." >&2
+    exit 1
+fi
+if [ "$(git cat-file -t "$CURRENT_TAG")" != "tag" ]; then
+    echo "ERROR: Baseline tag v$CURRENT_VERSION must be annotated." >&2
+    exit 1
+fi
+CURRENT_TAG_COMMIT=$(git rev-parse "$CURRENT_TAG^{commit}")
+if ! git merge-base --is-ancestor "$CURRENT_TAG_COMMIT" HEAD; then
+    echo "ERROR: Baseline tag v$CURRENT_VERSION must resolve to an ancestor of HEAD." >&2
+    exit 1
+fi
+if git rev-parse --verify --quiet "refs/tags/v$NEXT_VERSION" >/dev/null; then
+    echo "ERROR: Target tag v$NEXT_VERSION already exists locally." >&2
+    exit 1
+fi
+
+# These two overrides are narrow test seams. Production and the workflow use
+# the real commands, while isolated fixture tests can validate transformations
+# without resolving the repository's dependency graph.
+PREPARE_RELEASE_CARGO_BIN=${PREPARE_RELEASE_CARGO_BIN:-cargo}
+PREPARE_RELEASE_DOC_CHECK=${PREPARE_RELEASE_DOC_CHECK:-scripts/check-doc-consistency.sh}
+
+# Validate the released baseline before touching any of the six output files.
+# The documentation checker is deliberately file-only: fetched tags and clone
+# depth cannot change whether the comparison chain is valid.
+for lockfile in Cargo.lock clients/native/Cargo.lock; do
+    lock_entry_state=$(awk -v current_version="$CURRENT_VERSION" '
+        BEGIN { target = 0; entries = 0; matching = 0 }
+        /^\[\[package\]\]$/ { target = 0 }
+        /^name = "signal-fish-server"$/ { target = 1 }
+        target == 1 && /^version = "/ {
+            entries++
+            if ($0 == "version = \"" current_version "\"") matching++
+            target = 0
+        }
+        END { print entries ":" matching }
+    ' "$lockfile")
+    if [ "$lock_entry_state" != "1:1" ]; then
+        echo "ERROR: Expected exactly one signal-fish-server package entry at version $CURRENT_VERSION in $lockfile." >&2
+        exit 1
+    fi
+done
+"$PREPARE_RELEASE_DOC_CHECK" --skip-changelog-gate
+for manifest in Cargo.toml clients/native/Cargo.toml; do
+    "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --no-deps --format-version 1 \
+        --manifest-path "$manifest" >/dev/null
+done
+
 UNRELEASED_BODY=$(awk '
     /^## \[Unreleased\]$/ { in_unreleased = 1; next }
     in_unreleased && /^## \[/ { exit }
@@ -341,12 +400,6 @@ if [ "$(read_package_version)" != "$NEXT_VERSION" ]; then
     echo "ERROR: Cargo.toml version update did not persist." >&2
     exit 1
 fi
-
-# These two overrides are narrow test seams. Production and the workflow use
-# the real commands, while isolated fixture tests can validate transformations
-# without resolving the repository's dependency graph.
-PREPARE_RELEASE_CARGO_BIN=${PREPARE_RELEASE_CARGO_BIN:-cargo}
-PREPARE_RELEASE_DOC_CHECK=${PREPARE_RELEASE_DOC_CHECK:-scripts/check-doc-consistency.sh}
 
 for manifest in Cargo.toml clients/native/Cargo.toml; do
     "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --no-deps --format-version 1 \

@@ -4,9 +4,10 @@
 //! a healthy peer shares the room. The same physical link exercises both v3
 //! delivery contracts:
 //!
-//! - reliable traffic eventually exceeds the 15-second sojourn ceiling, closes
-//!   with `4002 slow_consumer`, and can reconnect twice with the token carried
-//!   on `RoomJoined` / `Reconnected` (the observable flap loop);
+//! - reliable traffic eventually exceeds the 15-second sojourn ceiling, makes
+//!   the server's `4002 slow_consumer` decision (the close frame is asserted
+//!   when the already-congested TCP path preserves it), and can reconnect twice
+//!   with the token carried on `RoomJoined` / `Reconnected`;
 //! - volatile traffic never parks or evicts the recipient, survives production
 //!   transport Pings, and sends causally prior exact `DeliveryReport` ranges
 //!   for every sequence gap the peer observes.
@@ -32,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use test_helpers::{create_test_server_with_config, RunningTestServer};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{error::ProtocolError, Error as WebSocketError, Message};
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
 use websocket_test_helpers::room16::{self, PlayerHandle};
 use websocket_test_helpers::{assert_message_conservation, next_matching_server_message_within};
@@ -59,9 +60,13 @@ struct WatcherState {
 }
 
 struct CloseObservation {
-    code: u16,
-    reason: String,
+    termination: ReliableTermination,
     game_data: u64,
+}
+
+enum ReliableTermination {
+    SemanticClose { code: u16, reason: String },
+    ResetWithoutClosingHandshake,
 }
 
 #[derive(Default)]
@@ -199,13 +204,29 @@ fn spawn_close_observer(mut ws: WsStream, cycle: u64) -> tokio::task::JoinHandle
     tokio::spawn(async move {
         let mut game_data = 0;
         loop {
-            let frame = ws
-                .next()
-                .await
-                .unwrap_or_else(|| panic!("reliable cycle {cycle}: victim ended without Close"))
-                .unwrap_or_else(|error| {
+            let frame = match ws.next().await {
+                Some(Ok(frame)) => frame,
+                Some(Err(WebSocketError::Protocol(
+                    ProtocolError::ResetWithoutClosingHandshake,
+                ))) => {
+                    return CloseObservation {
+                        termination: ReliableTermination::ResetWithoutClosingHandshake,
+                        game_data,
+                    };
+                }
+                Some(Err(WebSocketError::Io(error)))
+                    if error.kind() == std::io::ErrorKind::ConnectionReset =>
+                {
+                    return CloseObservation {
+                        termination: ReliableTermination::ResetWithoutClosingHandshake,
+                        game_data,
+                    };
+                }
+                Some(Err(error)) => {
                     panic!("reliable cycle {cycle}: victim websocket error before Close: {error}")
-                });
+                }
+                None => panic!("reliable cycle {cycle}: victim ended without Close"),
+            };
             match frame {
                 Message::Text(text) => {
                     if matches!(
@@ -218,8 +239,10 @@ fn spawn_close_observer(mut ws: WsStream, cycle: u64) -> tokio::task::JoinHandle
                 }
                 Message::Close(Some(frame)) => {
                     return CloseObservation {
-                        code: frame.code.into(),
-                        reason: frame.reason.to_string(),
+                        termination: ReliableTermination::SemanticClose {
+                            code: frame.code.into(),
+                            reason: frame.reason.to_string(),
+                        },
                         game_data,
                     };
                 }
@@ -493,11 +516,27 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
             .await
             .unwrap_or_else(|_| panic!("reliable cycle {cycle}: close frame stayed buried"))
             .expect("reliable close observer panicked");
-        assert_eq!(close.code, 4002, "reliable cycle {cycle}: wrong close code");
-        assert_eq!(
-            close.reason, "slow_consumer",
-            "reliable cycle {cycle}: wrong close reason"
-        );
+        match &close.termination {
+            ReliableTermination::SemanticClose { code, reason } => {
+                assert_eq!(*code, 4002, "reliable cycle {cycle}: wrong close code");
+                assert_eq!(
+                    reason, "slow_consumer",
+                    "reliable cycle {cycle}: wrong close reason"
+                );
+            }
+            ReliableTermination::ResetWithoutClosingHandshake => {
+                assert_eq!(
+                    metrics
+                        .websocket_slow_consumer_disconnects
+                        .load(Ordering::Relaxed),
+                    cycle,
+                    "reliable cycle {cycle}: transport reset lacked the independent server-side slow-consumer decision"
+                );
+                eprintln!(
+                    "H10 reliable cycle {cycle}: close frame lost after proven slow-consumer decision"
+                );
+            }
+        }
         assert!(
             close.game_data > 0,
             "reliable cycle {cycle}: constrained peer received no data; throttle was vacuous"
@@ -667,6 +706,18 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
     let _watcher_ws = watcher_task.await.expect("watcher task panicked");
     sender_stop.send_replace(true);
     sender_reader.await.expect("sender reader task panicked");
+    assert_eq!(
+        metrics.websocket_ping_timeouts.load(Ordering::Relaxed),
+        0,
+        "active H10 connections must never fail an idle liveness probe"
+    );
+    assert!(
+        metrics
+            .websocket_ping_probes_skipped_activity
+            .load(Ordering::Relaxed)
+            > 0,
+        "H10 sustained inbound traffic never exercised activity-based probe skipping"
+    );
     assert_message_conservation(&metrics).await;
     running.shutdown().await;
 }

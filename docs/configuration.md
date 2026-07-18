@@ -338,9 +338,11 @@ Complete reference of all configuration options with environment variable overri
   affected by the 300s default. Keep this enabled in production — it reclaims
   zombie sockets that would otherwise hold file descriptors open indefinitely.
 - `server_ping_interval_secs` / `pong_timeout_secs` - The server sends an RFC
-  6455 Ping every 10 seconds by default and requires its matching Pong within 5
-  seconds. The probe is written directly by the socket layer, outside the
-  application data/control queues; a miss closes with `4003 activity_timeout`.
+  6455 Ping after an otherwise-idle 10-second interval by default and requires
+  its matching Pong within 5 seconds. Recent decoded inbound non-Pong activity skips the
+  probe; a non-Pong frame arriving after the write cancels it as fresh liveness.
+  The probe is written directly by the socket layer, outside the application
+  data/control queues; a silent miss closes with `4003 activity_timeout`.
   Set the interval to `0` to disable server probes. The Pong timeout must remain
   greater than `0`; both fields are capped at 3600 seconds.
 - `socket_send_buffer_bytes` - Requested TCP send buffer inherited by accepted

@@ -225,6 +225,158 @@ async fn missing_pong_closes_with_activity_timeout() {
 }
 
 #[tokio::test]
+async fn inbound_activity_skips_probes_until_the_connection_becomes_idle() {
+    let (running, server) = start_server(1, 1).await;
+    let ws = connect(running.addr()).await;
+    let (mut sink, mut stream) = ws.split();
+    let mut traffic = tokio::time::interval(tokio::time::Duration::from_millis(200));
+    let active_until = tokio::time::Instant::now() + tokio::time::Duration::from_millis(2_500);
+
+    while tokio::time::Instant::now() < active_until {
+        tokio::select! {
+            _ = traffic.tick() => {
+                sink.send(Message::Text(
+                    serde_json::to_string(&ClientMessage::Ping)
+                        .expect("serialize application Ping")
+                        .into(),
+                ))
+                .await
+                .expect("send active application traffic");
+            }
+            frame = stream.next() => {
+                let frame = frame
+                    .expect("connection closed during active traffic")
+                    .expect("websocket read failed during active traffic");
+                assert!(
+                    !matches!(frame, Message::Ping(_)),
+                    "an active connection received an unnecessary liveness probe"
+                );
+            }
+        }
+    }
+
+    let payload = loop {
+        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(3), stream.next())
+            .await
+            .expect("idle connection never received a liveness probe")
+            .expect("connection closed before idle liveness probe")
+            .expect("websocket read failed before idle liveness probe");
+        if let Message::Ping(payload) = frame {
+            break payload;
+        }
+    };
+    sink.send(Message::Pong(payload))
+        .await
+        .expect("answer idle liveness probe");
+    assert!(
+        server
+            .metrics()
+            .websocket_ping_probes_skipped_activity
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 2,
+        "active inbound traffic did not skip scheduled probes"
+    );
+    assert_eq!(
+        server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "active inbound traffic caused a false liveness timeout"
+    );
+
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn non_pong_activity_cancels_an_outstanding_probe() {
+    let (running, server) = start_server(1, 2).await;
+    let mut ws = connect(running.addr()).await;
+
+    // Do not read the server Ping: tungstenite would otherwise queue its
+    // automatic Pong. Wait until the first probe is outstanding, then prove a
+    // separate decoded application frame cancels it.
+    tokio::time::sleep(tokio::time::Duration::from_millis(1_200)).await;
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::Ping)
+            .expect("serialize application Ping")
+            .into(),
+    ))
+    .await
+    .expect("send post-probe application activity");
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+    loop {
+        if server
+            .metrics()
+            .websocket_ping_probes_cancelled_activity
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 1
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "post-probe activity never cancelled the liveness probe"
+        );
+        tokio::task::yield_now().await;
+    }
+    let survive_until = tokio::time::Instant::now() + tokio::time::Duration::from_millis(2_200);
+    let mut traffic = tokio::time::interval(tokio::time::Duration::from_millis(200));
+    let mut saw_application_pong = false;
+    while tokio::time::Instant::now() < survive_until {
+        tokio::select! {
+            _ = traffic.tick() => {
+                ws.send(Message::Text(
+                    serde_json::to_string(&ClientMessage::Ping)
+                        .expect("serialize follow-up application Ping")
+                        .into(),
+                ))
+                .await
+                .expect("connection died after probe cancellation");
+            }
+            frame = ws.next() => {
+                let frame = frame
+                    .expect("connection closed after probe cancellation")
+                    .expect("websocket read failed after probe cancellation");
+                if let Message::Text(text) = frame {
+                    let message: ServerMessage = serde_json::from_str(&text)
+                        .expect("decode post-cancellation application response");
+                    saw_application_pong |= matches!(message, ServerMessage::Pong);
+                }
+            }
+        }
+    }
+    assert!(
+        saw_application_pong,
+        "connection did not process application traffic beyond the old probe deadline"
+    );
+    assert_eq!(
+        server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    let payload = loop {
+        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next())
+            .await
+            .expect("idle connection never received a later probe")
+            .expect("connection closed before later probe")
+            .expect("websocket read failed before later probe");
+        if let Message::Ping(payload) = frame {
+            break payload;
+        }
+    };
+    ws.send(Message::Pong(payload))
+        .await
+        .expect("answer later idle probe");
+
+    running.shutdown().await;
+}
+
+#[tokio::test]
 async fn zero_interval_disables_server_ping_frames() {
     let (running, _server) = start_server(0, 1).await;
     let mut ws = connect(running.addr()).await;

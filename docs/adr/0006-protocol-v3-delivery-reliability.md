@@ -67,10 +67,11 @@ Planned shutdown uses a bounded drain: v3 clients may receive `GoingAway`, all
 remaining sockets close with `4000 server_shutdown`, new room creation stops,
 and no reconnect token is armed for the exiting in-memory instance.
 
-The socket layer sends RFC 6455 Ping probes independently of application
-queues. A missing matching Pong by the configured deadline closes with `4003
-activity_timeout`; successful replies refresh liveness and produce RTT metrics.
-This needs no protocol negotiation or browser/client release because compliant
+After an otherwise-idle interval, the socket layer sends an RFC 6455 Ping
+independently of application queues. Decoded inbound non-Pong traffic skips or cancels
+the probe as fresh liveness; otherwise a missing matching Pong closes with
+`4003 activity_timeout`, while successful replies produce RTT metrics. This
+needs no protocol negotiation or browser/client release because compliant
 WebSocket stacks answer protocol Ping automatically.
 
 ### Compatibility and future seam

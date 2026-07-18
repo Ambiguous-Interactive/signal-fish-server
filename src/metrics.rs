@@ -92,6 +92,12 @@ pub struct ServerMetrics {
     /// Server-initiated RFC 6455 WebSocket pings that did not receive their
     /// matching Pong before `websocket.pong_timeout_secs`.
     pub websocket_ping_timeouts: AtomicU64,
+    /// Scheduled liveness probes omitted because inbound traffic already
+    /// proved the connection active during the preceding interval.
+    pub websocket_ping_probes_skipped_activity: AtomicU64,
+    /// Outstanding liveness probes cancelled when a non-Pong inbound frame
+    /// proved the connection active after the Ping write began.
+    pub websocket_ping_probes_cancelled_activity: AtomicU64,
     /// Delivery attempts routed through the reliable server delivery and
     /// reservation paths: one per message per recipient, counted before the
     /// outcome is known. Together with
@@ -340,6 +346,8 @@ pub struct ConnectionMetrics {
     pub websocket_backpressure_events: u64,
     pub websocket_slow_consumer_disconnects: u64,
     pub websocket_ping_timeouts: u64,
+    pub websocket_ping_probes_skipped_activity: u64,
+    pub websocket_ping_probes_cancelled_activity: u64,
     pub websocket_ping_rtt: OperationLatencyMetrics,
     pub websocket_delivery_attempts: u64,
     pub websocket_deliveries_enqueued: u64,
@@ -547,6 +555,8 @@ impl ServerMetrics {
             websocket_backpressure_events: AtomicU64::new(0),
             websocket_slow_consumer_disconnects: AtomicU64::new(0),
             websocket_ping_timeouts: AtomicU64::new(0),
+            websocket_ping_probes_skipped_activity: AtomicU64::new(0),
+            websocket_ping_probes_cancelled_activity: AtomicU64::new(0),
             websocket_delivery_attempts: AtomicU64::new(0),
             websocket_deliveries_enqueued: AtomicU64::new(0),
             websocket_deliveries_channel_closed: AtomicU64::new(0),
@@ -691,6 +701,16 @@ impl ServerMetrics {
 
     pub fn increment_websocket_ping_timeouts(&self) {
         self.websocket_ping_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_websocket_ping_probes_skipped_activity(&self) {
+        self.websocket_ping_probes_skipped_activity
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_websocket_ping_probes_cancelled_activity(&self) {
+        self.websocket_ping_probes_cancelled_activity
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub async fn record_websocket_ping_rtt(&self, duration: Duration) {
@@ -1373,6 +1393,12 @@ impl ServerMetrics {
                     .websocket_slow_consumer_disconnects
                     .load(Ordering::Relaxed),
                 websocket_ping_timeouts: self.websocket_ping_timeouts.load(Ordering::Relaxed),
+                websocket_ping_probes_skipped_activity: self
+                    .websocket_ping_probes_skipped_activity
+                    .load(Ordering::Relaxed),
+                websocket_ping_probes_cancelled_activity: self
+                    .websocket_ping_probes_cancelled_activity
+                    .load(Ordering::Relaxed),
                 websocket_ping_rtt,
                 websocket_delivery_attempts: self
                     .websocket_delivery_attempts

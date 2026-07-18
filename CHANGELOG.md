@@ -113,6 +113,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (delivery classes, epoch, reconnect watermarks, drain, and WebSocket pings),
   including the rejected/deferred feature cut list.
 
+### Fixed
+
+- Make historical GHCR backfills load publication helpers from the exact
+  workflow revision while building only the tagged source checkout. Releases
+  that predate the helper scripts no longer fail before the container build,
+  and current workflow tooling cannot alter the historical build context.
+- Fixed negotiated lossy delivery under a slow-but-draining TCP downstream.
+  A bounded, configurable TCP send buffer (`websocket.socket_send_buffer_bytes`,
+  default 65536; `0` restores the platform default) prevents megabytes of data
+  already accepted by the kernel from burying later WebSocket Pings and exact
+  `DeliveryReport` frames. Writer sojourn deadlines are now class-aware:
+  reliable traffic retains its oldest reliable queue-plus-write ceiling,
+  control traffic owns its enqueue deadline, and latest/volatile traffic gets a
+  bounded write-progress deadline without inheriting unrelated queue age. The
+  same progress deadline now covers exact reports for deterministic
+  writer-discovered format failures: those payloads have already reached an
+  accounted unsupported terminal outcome and no longer inherit the age of
+  unresolved reliable data. Valid cross-encoding fallbacks reuse the preflight
+  decode rather than parsing the payload twice. The
+  nightly 256-kbps asymmetric experiment now keeps a 90-KiB/s volatile stream
+  connected for 60 seconds with production Pings enabled and every observed
+  sequence gap covered by a causally prior exact report; reliable traffic still
+  fails loudly with `4002 slow_consumer` and reconnects with rotated wire tokens.
+  Registered shutdown waiting also includes scheduling margin after its three
+  bounded close writes, so a handler completing at the final write deadline is
+  not mistaken for a leaked socket under sanitizer or production shutdown load.
+  Server transport probes are now idle-only: decoded non-Pong traffic is
+  published before awaited application processing, skips an unnecessary probe,
+  or cancels an outstanding one. Exact matching Pongs still record RTT, stale
+  Pongs still cannot satisfy a probe, and genuine silence still closes `4003`.
+
+### Changed
+
+- Rate-limit protocol-v3 unsupported-format advisory errors per sender and
+  recipient while preserving an exact `DeliveryReport` for every omitted
+  sequence. Mixed-encoding malformed payloads can no longer double each relay
+  into an unbounded report/error stream; later advisories include the number
+  suppressed since the prior notice.
+
+## [0.4.0] - 2026-07-12
+
+### Added
+
 - Add server-initiated RFC 6455 liveness probes (P10.E4). By default each
   connection receives a transport-level Ping every 10 seconds and must return
   the matching Pong within 5 seconds or close with `4003 activity_timeout`.
@@ -375,6 +418,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_release_workflow_builds_all_platform_binaries`,
   `test_release_workflow_attaches_binaries_with_checksums`) so the container manifest and
   release-binary matrix can never silently regress to a single platform again.
+
+### Fixed
+
+- Fixed a room-lifecycle GC bug where every room was deleted a fixed interval after **creation**
+  regardless of activity (default `inactive_room_timeout` = 1 h) — `Room.last_activity` was
+  written only at creation and never refreshed (both refresher methods had zero call sites), so a
+  session over an hour old was reaped with players still in it, and a long-lived room that emptied
+  was deleted immediately, collapsing the reconnection window (reconnects failed `RoomNotFound`
+  with still-valid tokens). `last_activity` is now refreshed on join, on a real leave/disconnect,
+  and once per inbound message on the throttled liveness path — covering pings, relayed `GameData`
+  (JSON and binary), and WebRTC `Signal` traffic uniformly; the empty-room clock keys off
+  `last_activity` (not `created_at`) so both cleanup paths agree; and room GC never deletes a room
+  that still holds an unexpired reconnection record
+  (`ReconnectionManager::rooms_with_active_reconnections`). Startup validation additionally rejects
+  `server.heartbeat_throttle_secs >= server.inactive_room_timeout`, so the throttled refresh can
+  never lag the reaper and re-open the bug by misconfiguration.
+- Fixed a config timeout-inversion where a legal combination evicted a **healthy** sender: with
+  `websocket.slow_consumer_timeout_ms ≥ server.ping_timeout · 1000`, a sender parked on the
+  broadcast fan-out for a slow recipient could outlast the activity-reaper deadline and be closed
+  `4003` before its slow recipient was ever disconnected. Startup validation now rejects that
+  combination (cross-field check, guarded on `ping_timeout > 0`).
+- Fixed `game_data_messages` (`signal_fish_game_data_messages_total`) reading a permanent `0`: the
+  metric was exported to Prometheus but never incremented. It is now counted once per relayed
+  `GameData` message at the relay funnel.
+- Fixed an orphaned reconnection replay buffer (found by the new `fuzz_reconnect_tokens` fuzz
+  target): a player re-registering a disconnect from a NEW room replaced its pending record and
+  left the old room's replay ring alive forever — capturing control events and replaying ghosts
+  for a room with nobody pending.
+- Fixed a send-task race (found by the close-code e2e suite) where a connection's write loop
+  ending in the same instant a close reason was requested could lose the reason — and with it
+  the semantic close code — because the unbiased `select!` took the loop-ended arm; terminal
+  paths now re-check the close listener non-blockingly.
+- Fixed [#131](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/131): the relay
+  silently dropped `GameData` under burst — each connection's outbound queue was a small bounded
+  channel (`batch_size * 4` = 40 messages) written with a fire-and-forget `try_send`, so a burst
+  that outpaced one recipient's drain rate discarded messages with only a metric to show for it.
+  The server no longer silently drops reliable delivery: the fast path is a
+  non-waiting try-enqueue, but a full reliable queue makes delivery wait (true backpressure) for up to
+  `websocket.slow_consumer_timeout_ms`, and only a recipient that stays full past that timeout is
+  disconnected as a slow consumer (metrics + warning log + best-effort `SLOW_CONSUMER` error
+  frame, then the close). Room senders are paced to their slowest healthy recipient; a dead
+  recipient costs reliable senders at most one timeout window before it is evicted. Protocol-v3
+  `latest` / `volatile` omissions are instead explicit in `DeliveryReport`. Covered end to end by
+  `tests/relay_backpressure_e2e.rs`; delivery semantics are documented in `docs/protocol.md`.
+- Undeliverable binary game data is no longer silently dropped by the send path: a payload that
+  cannot be converted for a recipient (e.g. an internal binary encoding relayed to a JSON-only
+  client) now surfaces an explicit `Error` frame with code `UNSUPPORTED_GAME_DATA_FORMAT` to that
+  recipient in place of each undeliverable payload. A v3 recipient first receives an exact
+  `DeliveryReport` gap; the aggregate drop metric still increments.
+- Hardened release and documentation validation: `release.yml` now skips binary
+  attachment with a clear diagnostic when no `release-binary-*` artifacts exist,
+  uses an existing `actions/download-artifact` tag, and the workflow hygiene job
+  can verify pinned GitHub Action tags exist upstream. Documentation version
+  scans now prune vendored `third_party/` Markdown while rejecting unsyncable
+  versionless `signal-fish-server` dependency examples.
+- Fixed [#122](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/122): the
+  published `ghcr.io/ambiguous-interactive/signal-fish-server` image was built only for
+  `linux/amd64`, so pulling it on ARM64 Linux (AWS Graviton, Ampere, Raspberry Pi, Apple Silicon
+  under Docker) failed with `no matching manifest for linux/arm64/v8`. `docker-publish.yml` now
+  builds a single multi-architecture manifest covering `linux/amd64`, `linux/arm64`, and
+  `linux/arm/v7`. The Rust binary is cross-compiled natively on the build runner (the heavy
+  compile never runs under emulation; only the trivial runtime-image setup does), and the
+  `Dockerfile` resolves the cross toolchain per target arch (build-host-agnostic via
+  `$BUILDARCH`).
+
+### Changed
+
+- **Consolidated the pre-release protocol into a single v3.** The
+  delivery-reliability features that were briefly developed behind a separate
+  `protocol_version: 4` (server-stamped `GameData.seq` + incarnation `epoch`, and
+  the opt-in `RelayStats` frame) now negotiate under **v3** — there is no v4. v3
+  is the single unshipped/mutable "current" version (WebRTC signaling AND
+  delivery reliability), additive over the frozen v2 floor.
+  `SERVER_MAX_PROTOCOL_VERSION` and the `protocol.max_protocol_version` default
+  are now **3**; a client that still advertises `4`/`5` is clamped to 3. v2
+  remains byte-frozen (the pre-v3 forms are unchanged). Net effect for consumers:
+  a client obtains the reliability surface by negotiating v3 rather than v4. The
+  `[Unreleased]` entries that referenced "v4" describe these same features as
+  they now ship — under v3.
+- The activity reaper (`ConnectionManager::collect_expired_clients`) and the heartbeat-update
+  throttle (`ConnectionManager::should_update_last_seen`) now read the Tokio runtime clock
+  (`tokio::time::Instant`) instead of `std::time::Instant`. Production behavior is unchanged —
+  outside a paused runtime `tokio::time::Instant` wraps the same monotonic std clock — but tests
+  can now drive these windows deterministically with `tokio::time::advance()` under
+  `#[tokio::test(start_paused = true)]` at zero wall-clock cost. The `heartbeat.rs` reaper test
+  that previously relied on a real 25 ms sleep is now paused-clock and instant.
+- Raised `security.max_connections_per_ip` default `10` → `24`. Ten silently refused the 11th
+  concurrent connection from one IP, so a 16-player session behind a single NAT (LAN party,
+  office, venue) could not connect. `24` covers 16 players plus spectators and reconnect churn.
+  (The per-room player count is bounded separately by that room's `max_players`, default `8`.)
+- SDK platform/version enforcement (`protocol.sdk_compatibility.enforce`) now defaults to
+  `false` (opt-in): with the old default the prepopulated platform list made a default-config
+  server reject every client that did not claim to be a known engine — including
+  `platform: None` and custom/Rust clients. Deployments shipping engine SDKs re-enable it
+  explicitly.
+- `protocol.max_protocol_version` now defaults to `4`.
+- The `PlayerReconnected` notification fan-out is concurrent (bounded by the slowest recipient)
+  instead of serial per recipient.
+
+## [0.3.0] - 2026-06-20
+
+### Added
+
 - Added `tests/docs_site_consistency.rs`, a documentation-accuracy regression guard that ties the
   published docs to source: it asserts `docs/reference/error-codes.md` documents every `ErrorCode`
   variant, `docs/protocol.md` documents every `ClientMessage` / `ServerMessage` variant and the
@@ -790,91 +936,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Make historical GHCR backfills load publication helpers from the exact
-  workflow revision while building only the tagged source checkout. Releases
-  that predate the helper scripts no longer fail before the container build,
-  and current workflow tooling cannot alter the historical build context.
-- Fixed negotiated lossy delivery under a slow-but-draining TCP downstream.
-  A bounded, configurable TCP send buffer (`websocket.socket_send_buffer_bytes`,
-  default 65536; `0` restores the platform default) prevents megabytes of data
-  already accepted by the kernel from burying later WebSocket Pings and exact
-  `DeliveryReport` frames. Writer sojourn deadlines are now class-aware:
-  reliable traffic retains its oldest reliable queue-plus-write ceiling,
-  control traffic owns its enqueue deadline, and latest/volatile traffic gets a
-  bounded write-progress deadline without inheriting unrelated queue age. The
-  same progress deadline now covers exact reports for deterministic
-  writer-discovered format failures: those payloads have already reached an
-  accounted unsupported terminal outcome and no longer inherit the age of
-  unresolved reliable data. Valid cross-encoding fallbacks reuse the preflight
-  decode rather than parsing the payload twice. The
-  nightly 256-kbps asymmetric experiment now keeps a 90-KiB/s volatile stream
-  connected for 60 seconds with production Pings enabled and every observed
-  sequence gap covered by a causally prior exact report; reliable traffic still
-  fails loudly with `4002 slow_consumer` and reconnects with rotated wire tokens.
-  Registered shutdown waiting also includes scheduling margin after its three
-  bounded close writes, so a handler completing at the final write deadline is
-  not mistaken for a leaked socket under sanitizer or production shutdown load.
-- Fixed a room-lifecycle GC bug where every room was deleted a fixed interval after **creation**
-  regardless of activity (default `inactive_room_timeout` = 1 h) — `Room.last_activity` was
-  written only at creation and never refreshed (both refresher methods had zero call sites), so a
-  session over an hour old was reaped with players still in it, and a long-lived room that emptied
-  was deleted immediately, collapsing the reconnection window (reconnects failed `RoomNotFound`
-  with still-valid tokens). `last_activity` is now refreshed on join, on a real leave/disconnect,
-  and once per inbound message on the throttled liveness path — covering pings, relayed `GameData`
-  (JSON and binary), and WebRTC `Signal` traffic uniformly; the empty-room clock keys off
-  `last_activity` (not `created_at`) so both cleanup paths agree; and room GC never deletes a room
-  that still holds an unexpired reconnection record
-  (`ReconnectionManager::rooms_with_active_reconnections`). Startup validation additionally rejects
-  `server.heartbeat_throttle_secs >= server.inactive_room_timeout`, so the throttled refresh can
-  never lag the reaper and re-open the bug by misconfiguration.
-- Fixed a config timeout-inversion where a legal combination evicted a **healthy** sender: with
-  `websocket.slow_consumer_timeout_ms ≥ server.ping_timeout · 1000`, a sender parked on the
-  broadcast fan-out for a slow recipient could outlast the activity-reaper deadline and be closed
-  `4003` before its slow recipient was ever disconnected. Startup validation now rejects that
-  combination (cross-field check, guarded on `ping_timeout > 0`).
-- Fixed `game_data_messages` (`signal_fish_game_data_messages_total`) reading a permanent `0`: the
-  metric was exported to Prometheus but never incremented. It is now counted once per relayed
-  `GameData` message at the relay funnel.
-- Fixed an orphaned reconnection replay buffer (found by the new `fuzz_reconnect_tokens` fuzz
-  target): a player re-registering a disconnect from a NEW room replaced its pending record and
-  left the old room's replay ring alive forever — capturing control events and replaying ghosts
-  for a room with nobody pending.
-- Fixed a send-task race (found by the close-code e2e suite) where a connection's write loop
-  ending in the same instant a close reason was requested could lose the reason — and with it
-  the semantic close code — because the unbiased `select!` took the loop-ended arm; terminal
-  paths now re-check the close listener non-blockingly.
-- Fixed [#131](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/131): the relay
-  silently dropped `GameData` under burst — each connection's outbound queue was a small bounded
-  channel (`batch_size * 4` = 40 messages) written with a fire-and-forget `try_send`, so a burst
-  that outpaced one recipient's drain rate discarded messages with only a metric to show for it.
-  The server no longer silently drops reliable delivery: the fast path is a
-  non-waiting try-enqueue, but a full reliable queue makes delivery wait (true backpressure) for up to
-  `websocket.slow_consumer_timeout_ms`, and only a recipient that stays full past that timeout is
-  disconnected as a slow consumer (metrics + warning log + best-effort `SLOW_CONSUMER` error
-  frame, then the close). Room senders are paced to their slowest healthy recipient; a dead
-  recipient costs reliable senders at most one timeout window before it is evicted. Protocol-v3
-  `latest` / `volatile` omissions are instead explicit in `DeliveryReport`. Covered end to end by
-  `tests/relay_backpressure_e2e.rs`; delivery semantics are documented in `docs/protocol.md`.
-- Undeliverable binary game data is no longer silently dropped by the send path: a payload that
-  cannot be converted for a recipient (e.g. an internal binary encoding relayed to a JSON-only
-  client) now surfaces an explicit `Error` frame with code `UNSUPPORTED_GAME_DATA_FORMAT` to that
-  recipient in place of each undeliverable payload. A v3 recipient first receives an exact
-  `DeliveryReport` gap; the aggregate drop metric still increments.
-- Hardened release and documentation validation: `release.yml` now skips binary
-  attachment with a clear diagnostic when no `release-binary-*` artifacts exist,
-  uses an existing `actions/download-artifact` tag, and the workflow hygiene job
-  can verify pinned GitHub Action tags exist upstream. Documentation version
-  scans now prune vendored `third_party/` Markdown while rejecting unsyncable
-  versionless `signal-fish-server` dependency examples.
-- Fixed [#122](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/122): the
-  published `ghcr.io/ambiguous-interactive/signal-fish-server` image was built only for
-  `linux/amd64`, so pulling it on ARM64 Linux (AWS Graviton, Ampere, Raspberry Pi, Apple Silicon
-  under Docker) failed with `no matching manifest for linux/arm64/v8`. `docker-publish.yml` now
-  builds a single multi-architecture manifest covering `linux/amd64`, `linux/arm64`, and
-  `linux/arm/v7`. The Rust binary is cross-compiled natively on the build runner (the heavy
-  compile never runs under emulation; only the trivial runtime-image setup does), and the
-  `Dockerfile` resolves the cross toolchain per target arch (build-host-agnostic via
-  `$BUILDARCH`).
 - Fixed a class of CI failure where a root version bump silently invalidated the committed
   `clients/native` lockfile: it kept pinning the previous `signal-fish-server` version, so the
   `--locked` Browser Interop and WebRTC Interop builds failed with a cryptic "lock file needs to be
@@ -1041,42 +1102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Rate-limit protocol-v3 unsupported-format advisory errors per sender and
-  recipient while preserving an exact `DeliveryReport` for every omitted
-  sequence. Mixed-encoding malformed payloads can no longer double each relay
-  into an unbounded report/error stream; later advisories include the number
-  suppressed since the prior notice.
-- **Consolidated the pre-release protocol into a single v3.** The
-  delivery-reliability features that were briefly developed behind a separate
-  `protocol_version: 4` (server-stamped `GameData.seq` + incarnation `epoch`, and
-  the opt-in `RelayStats` frame) now negotiate under **v3** — there is no v4. v3
-  is the single unshipped/mutable "current" version (WebRTC signaling AND
-  delivery reliability), additive over the frozen v2 floor.
-  `SERVER_MAX_PROTOCOL_VERSION` and the `protocol.max_protocol_version` default
-  are now **3**; a client that still advertises `4`/`5` is clamped to 3. v2
-  remains byte-frozen (the pre-v3 forms are unchanged). Net effect for consumers:
-  a client obtains the reliability surface by negotiating v3 rather than v4. The
-  `[Unreleased]` entries that referenced "v4" describe these same features as
-  they now ship — under v3.
-- The activity reaper (`ConnectionManager::collect_expired_clients`) and the heartbeat-update
-  throttle (`ConnectionManager::should_update_last_seen`) now read the Tokio runtime clock
-  (`tokio::time::Instant`) instead of `std::time::Instant`. Production behavior is unchanged —
-  outside a paused runtime `tokio::time::Instant` wraps the same monotonic std clock — but tests
-  can now drive these windows deterministically with `tokio::time::advance()` under
-  `#[tokio::test(start_paused = true)]` at zero wall-clock cost. The `heartbeat.rs` reaper test
-  that previously relied on a real 25 ms sleep is now paused-clock and instant.
-- Raised `security.max_connections_per_ip` default `10` → `24`. Ten silently refused the 11th
-  concurrent connection from one IP, so a 16-player session behind a single NAT (LAN party,
-  office, venue) could not connect. `24` covers 16 players plus spectators and reconnect churn.
-  (The per-room player count is bounded separately by that room's `max_players`, default `8`.)
-- SDK platform/version enforcement (`protocol.sdk_compatibility.enforce`) now defaults to
-  `false` (opt-in): with the old default the prepopulated platform list made a default-config
-  server reject every client that did not claim to be a known engine — including
-  `platform: None` and custom/Rust clients. Deployments shipping engine SDKs re-enable it
-  explicitly.
-- `protocol.max_protocol_version` now defaults to `4`.
-- The `PlayerReconnected` notification fan-out is concurrent (bounded by the slowest recipient)
-  instead of serial per recipient.
 - Upgraded the dependency tree to current releases. The only direct major bump is `tower-http`
   0.6 → 0.7 (the CORS/trace middleware the server mounts); `bytes` moved 1.11 → 1.12 and every
   other crate advanced to its latest semver-compatible version via a lockfile refresh. The root and
@@ -1174,6 +1199,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Architecture Decision Record (ADR) documentation scaffolding under `docs/adr/`.
 - Added ADR index integration in `docs/README.md` and `docs/architecture.md`.
 
+## [0.1.1] - 2026-02-23
+
+### Changed
+
+- Updated locked dependency patch releases and expanded CI, release, hook,
+  and repository-policy validation.
+
 ## [0.1.0] - 2026-02-15
 
 ### Added
@@ -1190,6 +1222,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional TLS/mTLS support via `rustls` (`tls` feature).
 - Optional legacy full-mesh mode (`legacy-fullmesh` feature).
 
-[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0

@@ -194,7 +194,7 @@ fn run_checker_with_fixture_and_tags(
 }
 
 #[test]
-fn test_release_compare_accepts_existing_tag_without_dated_section() {
+fn test_release_compare_rejects_existing_tag_without_dated_section() {
     let changelog = "# Changelog\n\n\
         The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n\
         ## [Unreleased]\n\n### Changed\n- Pending.\n\n\
@@ -204,12 +204,28 @@ fn test_release_compare_accepts_existing_tag_without_dated_section() {
         [0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.1...v0.2.0\n\
         [0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0\n";
 
+    let (tagless_exit_code, tagless_output) =
+        run_checker_with_fixture(&[("CHANGELOG.md", changelog)], &[], &[]);
     let (exit_code, output) =
         run_checker_with_fixture_and_tags(&[("CHANGELOG.md", changelog)], &[], &[], &["v0.1.1"]);
     assert_eq!(
+        (
+            exit_code,
+            output.contains("compare link references unknown previous version")
+        ),
+        (
+            tagless_exit_code,
+            tagless_output.contains("compare link references unknown previous version")
+        ),
+        "Fetched tags changed changelog validity.\nTagless:\n{tagless_output}\nTagged:\n{output}"
+    );
+    assert_ne!(
         exit_code, 0,
-        "An existing immutable release tag is a valid compare endpoint even when its dated \
-         changelog section has not been backfilled.\nOutput:\n{output}"
+        "Fetched tags must not make an incomplete changelog valid.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("compare link references unknown previous version"),
+        "The failure should identify the missing dated release section.\nOutput:\n{output}"
     );
 }
 
@@ -553,6 +569,61 @@ fn test_doc_consistency_script_data_driven_cases() {
             args: vec![],
             expected_exit: 1,
             must_contain: vec!["compare link references unknown previous version"],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_release_sections_are_not_strictly_descending",
+            overrides: vec![(
+                "CHANGELOG.md",
+                "# Changelog\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n## [0.1.0] - 2026-02-15\n\n### Added\n- Initial.\n\n## [0.2.0] - 2026-02-24\n\n### Added\n- Later.\n\n[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.2.0...HEAD\n[0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...v0.2.0\n[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["strictly descending semantic-version order"],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_release_section_is_duplicated",
+            overrides: vec![(
+                "CHANGELOG.md",
+                "# Changelog\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n## [0.1.0] - 2026-02-15\n\n### Added\n- Initial.\n\n## [0.1.0] - 2026-02-16\n\n### Fixed\n- Duplicate.\n\n[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD\n[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["duplicate dated release section for 0.1.0"],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_release_date_is_not_a_real_calendar_date",
+            overrides: vec![(
+                "CHANGELOG.md",
+                "# Changelog\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n## [0.1.0] - 2026-02-30\n\n### Added\n- Initial.\n\n[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD\n[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["invalid calendar date 2026-02-30"],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_release_compare_skips_adjacent_section",
+            overrides: vec![(
+                "CHANGELOG.md",
+                "# Changelog\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n## [0.3.0] - 2026-03-01\n\n### Added\n- Third.\n\n## [0.2.0] - 2026-02-24\n\n### Added\n- Second.\n\n## [0.1.0] - 2026-02-15\n\n### Added\n- Initial.\n\n[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.3.0...HEAD\n[0.3.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...v0.3.0\n[0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...v0.2.0\n[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["must compare adjacent releases v0.2.0...v0.3.0"],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "fails_when_oldest_release_uses_a_compare_link",
+            overrides: vec![(
+                "CHANGELOG.md",
+                "# Changelog\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n## [0.1.0] - 2026-02-15\n\n### Added\n- Initial.\n\n[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD\n[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.0.0...v0.1.0\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["oldest release [0.1.0] must link directly"],
             must_not_contain: vec![],
         },
         // ---------------------------------------------------------------

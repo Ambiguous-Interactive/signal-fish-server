@@ -279,8 +279,10 @@ validate_changelog() {
         action_error "CHANGELOG.md must reference Keep a Changelog"
     fi
 
-    if ! grep -q '^## \[Unreleased\]$' <<< "$changelog"; then
-        action_error "CHANGELOG.md must contain an exact '## [Unreleased]' heading"
+    local unreleased_count
+    unreleased_count=$(grep -c '^## \[Unreleased\]$' <<< "$changelog" || true)
+    if [ "$unreleased_count" -ne 1 ]; then
+        action_error "CHANGELOG.md must contain an exact '## [Unreleased]' heading exactly once (found: $unreleased_count)"
     fi
 
     if grep -q '^## Unreleased$' <<< "$changelog"; then
@@ -327,18 +329,98 @@ validate_changelog() {
         fi
     fi
 
-    # Collect released versions from headers.
-    local versions
-    versions=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' <<< "$changelog" \
-        | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/' || true)
+    local first_bracketed_heading
+    first_bracketed_heading=$(grep -E '^## \[' <<< "$changelog" | head -n 1 || true)
+    if [ "$first_bracketed_heading" != '## [Unreleased]' ]; then
+        action_error "CHANGELOG.md [Unreleased] must be the first bracketed section"
+    fi
 
-    if [ -z "$versions" ]; then
+    is_real_changelog_date() {
+        local value="$1"
+        local year month day max_day
+        if [[ ! "$value" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]]; then
+            return 1
+        fi
+        year=$((10#${BASH_REMATCH[1]}))
+        month=$((10#${BASH_REMATCH[2]}))
+        day=$((10#${BASH_REMATCH[3]}))
+        if ((year < 1 || month < 1 || month > 12 || day < 1)); then
+            return 1
+        fi
+        case "$month" in
+            2)
+                max_day=28
+                if ((year % 400 == 0 || (year % 4 == 0 && year % 100 != 0))); then
+                    max_day=29
+                fi
+                ;;
+            4|6|9|11) max_day=30 ;;
+            *) max_day=31 ;;
+        esac
+        ((day <= max_day))
+    }
+
+    semver_is_greater() {
+        local lhs="$1"
+        local rhs="$2"
+        local lhs_major lhs_minor lhs_patch rhs_major rhs_minor rhs_patch
+        IFS=. read -r lhs_major lhs_minor lhs_patch <<< "$lhs"
+        IFS=. read -r rhs_major rhs_minor rhs_patch <<< "$rhs"
+        if ((10#$lhs_major != 10#$rhs_major)); then
+            ((10#$lhs_major > 10#$rhs_major))
+        elif ((10#$lhs_minor != 10#$rhs_minor)); then
+            ((10#$lhs_minor > 10#$rhs_minor))
+        else
+            ((10#$lhs_patch > 10#$rhs_patch))
+        fi
+    }
+
+    # Parse every bracketed level-two heading, not just valid ones, so malformed
+    # releases cannot disappear from the comparison chain.
+    local -a versions=()
+    local heading version release_date seen_version
+    local release_heading_pattern='^## \[((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$'
+    while IFS= read -r heading; do
+        [ -z "$heading" ] && continue
+        if [ "$heading" = '## [Unreleased]' ]; then
+            continue
+        fi
+        if [[ "$heading" =~ $release_heading_pattern ]]; then
+            version="${BASH_REMATCH[1]}"
+            release_date="${BASH_REMATCH[5]}"
+        else
+            action_error "CHANGELOG.md has malformed release heading: '$heading'"
+            continue
+        fi
+
+        if ! is_real_changelog_date "$release_date"; then
+            action_error "CHANGELOG.md release [$version] has invalid calendar date $release_date"
+        fi
+        # Bash 3.2 (the macOS system Bash) reports a declared-but-empty array as
+        # unbound under `set -u`. Do not expand the array before its first item.
+        if [ "${#versions[@]}" -gt 0 ]; then
+            for seen_version in "${versions[@]}"; do
+                if [ "$seen_version" = "$version" ]; then
+                    action_error "CHANGELOG.md has duplicate dated release section for $version"
+                fi
+            done
+        fi
+        versions+=("$version")
+    done < <(grep -E '^## \[' <<< "$changelog" || true)
+
+    if [ "${#versions[@]}" -eq 0 ]; then
         action_warn "No dated release sections found in CHANGELOG.md"
         return
     fi
 
-    local latest_version
-    latest_version=$(printf '%s\n' "$versions" | sort -V | tail -n 1)
+    local index
+    for ((index = 1; index < ${#versions[@]}; index++)); do
+        if ! semver_is_greater "${versions[index - 1]}" "${versions[index]}"; then
+            action_error "CHANGELOG.md release sections must be in strictly descending semantic-version order (${versions[index - 1]} before ${versions[index]})"
+        fi
+    done
+
+    local latest_version="${versions[0]}"
 
     local unreleased_ref
     unreleased_ref=$(grep -E '^\[Unreleased\]:' <<< "$changelog" | sed -E 's/^\[Unreleased\]:[[:space:]]*(\S+).*$/\1/' || true)
@@ -350,37 +432,38 @@ validate_changelog() {
         fi
     fi
 
-    # Validate link references for every released version section.
-    local version
-    while IFS= read -r version; do
-        [ -z "$version" ] && continue
-
-        local release_ref
-        release_ref=$(grep -E "^\[$version\]:" <<< "$changelog" | sed -E "s/^\[$version\]:[[:space:]]*(\\S+).*$/\\1/" || true)
-        if [ -z "$release_ref" ]; then
+    # Validate a single, contiguous comparison chain using repository files
+    # alone. Checkout depth and fetched tags must never alter this result.
+    local release_ref release_ref_lines release_ref_count previous_version linked_previous
+    for ((index = 0; index < ${#versions[@]}; index++)); do
+        version="${versions[index]}"
+        release_ref_lines=$(grep -E "^\[$version\]:" <<< "$changelog" || true)
+        release_ref_count=$(awk 'NF { count++ } END { print count + 0 }' <<< "$release_ref_lines")
+        if [ "$release_ref_count" -ne 1 ]; then
+            action_error "CHANGELOG.md must define exactly one [$version]: link reference (found: $release_ref_count)"
             action_error "CHANGELOG.md must define a [$version]: link reference"
             continue
         fi
+        release_ref=$(sed -E "s/^\[$version\]:[[:space:]]*(\\S+).*$/\\1/" <<< "$release_ref_lines")
 
-        if [[ "$release_ref" =~ /releases/tag/v${version}([#?].*)?$ ]]; then
-            continue
-        fi
-
-        if [[ "$release_ref" =~ /compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.v${version}([#?].*)?$ ]]; then
-            local previous_version
-            previous_version="${BASH_REMATCH[1]}"
-            # A legitimate prior tag can predate changelog section backfills.
-            # Accept that immutable release identity, but still reject typos and
-            # nonexistent compare endpoints when neither evidence source exists.
-            if ! grep -Fxq "$previous_version" <<< "$versions" \
-                && ! git rev-parse --verify --quiet "refs/tags/v$previous_version" >/dev/null; then
-                action_error "[$version] compare link references unknown previous version v$previous_version (link: $release_ref)"
+        if [ "$index" -eq "$((${#versions[@]} - 1))" ]; then
+            if [[ ! "$release_ref" =~ /releases/tag/v${version}([#?].*)?$ ]]; then
+                action_error "CHANGELOG.md oldest release [$version] must link directly to /releases/tag/v$version (found: $release_ref)"
             fi
             continue
         fi
 
-        action_error "[$version] link must point to /releases/tag/v$version or /compare/vPREV...v$version (found: $release_ref)"
-    done < <(printf '%s\n' "$versions")
+        previous_version="${versions[index + 1]}"
+        if [[ "$release_ref" =~ /compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.v${version}([#?].*)?$ ]]; then
+            linked_previous="${BASH_REMATCH[1]}"
+            if [[ " ${versions[*]} " != *" $linked_previous "* ]]; then
+                action_error "[$version] compare link references unknown previous version v$linked_previous (link: $release_ref)"
+            fi
+        fi
+        if [[ ! "$release_ref" =~ /compare/v${previous_version}\.\.\.v${version}([#?].*)?$ ]]; then
+            action_error "[$version] link must compare adjacent releases v$previous_version...v$version (found: $release_ref)"
+        fi
+    done
 }
 
 validate_changelog

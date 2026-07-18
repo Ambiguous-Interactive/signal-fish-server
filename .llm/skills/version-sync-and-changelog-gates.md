@@ -17,6 +17,26 @@
 3. `CHANGELOG.md` must remain Keep a Changelog compliant.
 4. If non-internal files change, `CHANGELOG.md` must be updated in the same change.
 
+## Release History Invariants
+
+Changelog validity is file-backed and must be identical in a tagless/shallow
+checkout and a full clone. Never use a fetched Git tag as a substitute for a
+missing dated release section.
+
+- Keep exactly one `[Unreleased]` section first.
+- Keep unique, strictly descending `X.Y.Z` release headings with real dates.
+- Point `[Unreleased]` from the newest dated release to `HEAD`.
+- Link every release to the immediately adjacent older section; only the oldest
+  release uses a direct tag link.
+- Before preparing a release, require `Cargo.toml` to equal the newest dated
+  release and require its annotated `vX.Y.Z` tag to resolve to an ancestor of
+  `HEAD`. Reject an existing target section or local target tag before mutation.
+
+Run `scripts/prepare-release.sh` only from this valid released baseline. Its
+preflight and postflight checks are intentional atomicity boundaries; do not
+weaken them by widening CI checkout depth or by making correctness conditional
+on repository topology.
+
 ## Version Scan Scope
 
 `scripts/check-doc-consistency.sh` scans first-party Markdown for
