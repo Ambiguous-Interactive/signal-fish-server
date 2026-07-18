@@ -58,6 +58,9 @@ Publication proceeds in this order:
 If a run stops after creating one artifact, rerun the same version. The retry
 accepts only artifacts that prove the same source revision. Existing version
 tags are never moved; missing aliases are repaired from the verified digest.
+Resolver, container, publication, and binary jobs load policy helpers from the
+dispatched workflow revision in a checkout separate from the immutable tagged
+source, so a workflow-only recovery fix can safely complete an older release.
 Registry responses and downloaded `.crate` files remain under `RUNNER_TEMP`,
 and the final untracked-aware cleanliness gate prevents publication probes from
 silently changing the package contents. Never bypass that boundary with

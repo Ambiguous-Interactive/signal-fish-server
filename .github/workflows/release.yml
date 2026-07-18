@@ -651,17 +651,34 @@ jobs:
           - target: aarch64-pc-windows-msvc
             os: windows-latest
     steps:
-      - name: Checkout repository
+      # Keep workflow policy/tools separate from the immutable release source.
+      # A retry may intentionally build an older tag that predates these
+      # helpers, while the workflow itself must retain the reviewed tooling
+      # from the dispatch revision.
+      - name: Checkout publication tooling
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: publication-tools
+          sparse-checkout: |
+            scripts/read-toml-string.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Checkout exact source
         uses: actions/checkout@v7.0.0
         with:
           ref: ${{ needs.resolve-release.outputs.source_revision }}
+          path: source
+          persist-credentials: false
 
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
+        working-directory: source
         run: |
           set -euo pipefail
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          CHANNEL=$(bash ../publication-tools/scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
           if [ -z "$CHANNEL" ]; then
             echo "ERROR: Could not extract channel from rust-toolchain.toml" >&2
             exit 1
@@ -691,11 +708,13 @@ jobs:
 
       - name: Build release binary
         shell: bash
+        working-directory: source
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package binary and checksum
         id: package
         shell: bash
+        working-directory: source
         run: |
           set -euo pipefail
 
@@ -728,7 +747,7 @@ jobs:
             shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
           fi
 
-          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "archive=source/$ARCHIVE" >> "$GITHUB_OUTPUT"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v7.0.1

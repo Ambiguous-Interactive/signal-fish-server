@@ -60,7 +60,7 @@ Green implementation:
 Targeted evidence:
 
 - `cargo test --locked --test release_publish_tests -- --nocapture`: 4 passed.
-- `cargo test --locked --test ci_config_tests`: 285 passed, 1 ignored after the
+- `cargo test --locked --test ci_config_tests`: 286 passed, 1 ignored after the
   SBOM path assertion was aligned with the isolated `source/` checkout.
 - `actionlint`, `shellcheck`, workflow hygiene, LLM size/example policy,
   markdown, documentation consistency, and `git diff --check`: passed.
@@ -77,7 +77,7 @@ Full verification:
 - Hook readiness, pre-commit worktree policy (905 ms), and pre-push worktree
   policy (539 ms): passed.
 - Explicit documentation policy suites: 15 passed. Explicit CI configuration
-  suite: 285 passed, 1 ignored.
+  suite: 286 passed, 1 ignored.
 - Independent adversarial review: zero remaining issues after three findings
   were fixed and covered by behavioral fixtures.
 
@@ -89,6 +89,11 @@ Full verification:
   dispatch-revision helper under runner-temporary storage before detaching, and
   a production-path fixture proves recovery when the historical tag does not
   contain that helper.
+- The new-head Bugbot pass then found the same boundary missing from the binary
+  matrix. Binary builds now use isolated dispatch-tooling and exact-source
+  checkouts, with a CI configuration test pinning the checkout order, parser
+  path, source working directory, and artifact path.
 - GitHub Copilot was explicitly requested and awaited, but the service reported
-  that the requesting account had reached its review quota. A retry remains
-  scheduled after the feedback fix and CI rerun.
+  that the requesting account had reached its review quota. The required retry
+  after the feedback fix was also requested and awaited, and returned the same
+  external quota result.

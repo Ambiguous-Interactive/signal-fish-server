@@ -30,6 +30,13 @@ parsers or policy helpers in runner-temporary storage before detaching. An
 absolute path inside the same checkout is insufficient because checkout
 replaces the file behind that path.
 
+Apply that boundary to every downstream consumer, including binary build
+matrices: check out workflow-revision tooling and immutable release source into
+separate directories, run parsers from the tooling checkout against explicit
+source paths, and set build/package working directories to the source checkout.
+A retry is not safe if one matrix job silently falls back to helpers embedded in
+the historical tag.
+
 This permits a workflow-only fix on `main` to finish a partially published older
 commit while preserving the immutable artifact identity.
 
@@ -65,6 +72,8 @@ Cargo's own protection remains the final defense.
 - [ ] Manual dispatch derives Cargo version from the default branch.
 - [ ] Existing retry tags are annotated, immutable, dispatched-commit
   ancestors, and metadata-consistent.
+- [ ] Resolver, publication, container, and binary jobs keep dispatch-revision
+  tooling separate from immutable release source.
 - [ ] Registry collision checks run before irreversible publication.
 - [ ] Registry scratch files live under `$RUNNER_TEMP` and are cleaned.
 - [ ] A `git status --porcelain=v1 --untracked-files=all` gate immediately

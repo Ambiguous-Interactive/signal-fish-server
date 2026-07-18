@@ -4307,6 +4307,47 @@ fn test_release_workflow_builds_all_platform_binaries() {
 }
 
 #[test]
+fn test_release_binary_builds_use_dispatch_tooling_with_exact_source() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let binaries = extract_workflow_job_block(&release, "build-binaries")
+        .expect("release.yml must define build-binaries");
+    let tooling_position = binaries
+        .find("- name: Checkout publication tooling")
+        .expect("build-binaries must check out dispatch-revision publication tooling");
+    let source_position = binaries
+        .find("- name: Checkout exact source")
+        .expect("build-binaries must check out the immutable release source");
+
+    assert!(
+        tooling_position < source_position,
+        "build-binaries must isolate current workflow tooling before historical source"
+    );
+    for required in [
+        "ref: ${{ github.sha }}",
+        "path: publication-tools",
+        "scripts/read-toml-string.sh",
+        "sparse-checkout-cone-mode: false",
+        "ref: ${{ needs.resolve-release.outputs.source_revision }}",
+        "path: source",
+        "working-directory: source",
+        "bash ../publication-tools/scripts/read-toml-string.sh rust-toolchain.toml",
+        "echo \"archive=source/$ARCHIVE\"",
+    ] {
+        assert!(
+            binaries.contains(required),
+            "build-binaries must contain `{required}` so workflow-only recovery fixes remain \
+             available while every artifact is built from the exact tagged source.\n\
+             Job block:\n{binaries}"
+        );
+    }
+    assert!(
+        !binaries.contains("bash scripts/read-toml-string.sh"),
+        "build-binaries must not execute a parser from the historical source checkout"
+    );
+}
+
+#[test]
 fn test_release_workflow_attaches_binaries_with_checksums() {
     // Prebuilt binaries are only trustworthy/usable if they are (a) uploaded to
     // the Release and (b) accompanied by checksums users can verify. Match on
