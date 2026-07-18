@@ -42,4 +42,13 @@ the direct test client.
 - ShellCheck, Bash syntax, CI config, documentation consistency, and workflow
   hygiene
 
+## CI follow-up
+
+The first exact-head WebRTC Interop run failed at its fast lockfile precheck,
+before compilation: removing the root package's normal `tokio-tungstenite`
+dependency changed the path package metadata recorded in
+`clients/native/Cargo.lock`. Regenerating that fixture lock removed the stale
+edge. A repository-wide `cargo metadata --locked --no-deps` sweep then passed
+for the root, native, Fortress native, Fortress WASM, and fuzz manifests.
+
 Exact-head CI and reviewer evidence remain pending publication.
