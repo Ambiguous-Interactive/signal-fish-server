@@ -5,8 +5,10 @@ compiles the registry releases `fortress-rollback` 0.10.0,
 `signal-fish-client` 0.9.0, and `signal-fish-client-godot` 0.9.0 into a Godot
 4.5 GDExtension for
 `wasm32-unknown-emscripten`, exports with the official no-thread web template,
-and drives two independent Chromium processes through the server built from the
-current checkout.
+and drives two independent browser processes through the server built from the
+current checkout. Chromium is the required pull-request gate. A weekly Firefox
+cell runs the same released-client and negative-control oracles to detect
+browser-specific drift without lengthening every pull request.
 
 The Rust `FortressWasmPeer::process` callback owns the full game/network loop.
 Each callback calls `SignalFishPollingClient::poll` exactly once, advances the
@@ -47,3 +49,9 @@ substitute for them; neither can the expected frame-progress and checksum-sample
 shortfalls after the fixed 600-callback budget. Browser logs, errors,
 diagnostics, and any available partial report are retained before peer shutdown
 on failures.
+
+Set `FORTRESS_WASM_BROWSER=firefox` to reproduce the scheduled Firefox cell;
+the default is `chromium`. Both browsers come from the exact `playwright-core`
+version in `clients/browser/package-lock.json` and are installed afresh rather
+than restored from a browser cache. A manual workflow dispatch also selects
+Firefox, allowing exact-head verification before merge.

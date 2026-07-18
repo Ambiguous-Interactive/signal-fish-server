@@ -62,8 +62,13 @@ mkdirSync(artifactDirectory, { recursive: true });
 const requireFromBrowser = createRequire(
   join(fixtureDirectory, "..", "browser", "package.json"),
 );
-const { chromium } = requireFromBrowser("playwright-core");
-const browserExecutable = chromium.executablePath();
+const browserName = process.env.FORTRESS_WASM_BROWSER ?? "chromium";
+if (!new Set(["chromium", "firefox"]).has(browserName)) {
+  throw new Error(`unsupported browser: ${browserName}`);
+}
+const playwright = requireFromBrowser("playwright-core");
+const browserType = playwright[browserName];
+const browserExecutable = browserType.executablePath();
 const browserStat = statSync(browserExecutable);
 const browserArtifact = `${browserExecutable}:${browserStat.size}`;
 const browserArtifactSha256 = createHash("sha256")
@@ -257,10 +262,12 @@ try {
 async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, pageUrl }) {
   const logs = [];
   const errors = [];
-  const server = await chromium.launchServer({
+  const launchOptions = {
     headless: true,
     executablePath: browserExecutable,
-    args: [
+  };
+  if (browserName === "chromium") {
+    launchOptions.args = [
       "--disable-background-timer-throttling",
       "--disable-backgrounding-occluded-windows",
       "--disable-frame-rate-limit",
@@ -269,8 +276,9 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
       "--disable-features=CalculateNativeWinOcclusion",
       "--enable-webgl",
       "--ignore-gpu-blocklist",
-    ],
-  });
+    ];
+  }
+  const server = await browserType.launchServer(launchOptions);
   const pid = server.process()?.pid;
   const peer = {
     role,
@@ -283,8 +291,8 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
     errors,
   };
   try {
-    assert(Number.isInteger(pid) && pid > 0, `${role}: missing independent Chromium PID`);
-    peer.browser = await chromium.connect(server.wsEndpoint());
+    assert(Number.isInteger(pid) && pid > 0, `${role}: missing independent ${browserName} PID`);
+    peer.browser = await browserType.connect(server.wsEndpoint());
     peer.context = await peer.browser.newContext();
     await peer.context.addInitScript(
     ({ config }) => {
@@ -346,7 +354,7 @@ async function browserAttestation(peer) {
         : 0,
     resultIdentity: globalThis.__FORTRESS_RESULT?.instance_nonce,
   }));
-  return { ...values, browserPid: peer.pid, browserArtifact, browserArtifactSha256 };
+  return { ...values, browserName, browserPid: peer.pid, browserArtifact, browserArtifactSha256 };
 }
 
 function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser, joinerBrowser, roomCode) {
@@ -391,6 +399,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     );
     assert(JSON.stringify(report.acceptance_thresholds) === JSON.stringify(expectedThresholds), `${name}: shared acceptance thresholds drifted`);
     assert(report.browser_process_id === browser.browserPid, `${name}: browser PID binding mismatch`);
+    assert(browser.browserName === browserName, `${name}: browser name binding mismatch`);
     assert(report.instance_nonce === browser.resultIdentity, `${name}: page/report identity mismatch`);
     assert(report.browser_artifact === `${browserArtifact}:${browserArtifactSha256}`, `${name}: browser artifact mismatch`);
     assert(browser.crossOriginIsolated === false, `${name}: page unexpectedly cross-origin isolated`);
@@ -401,7 +410,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
   assert(joinerReport.run_mode === creatorReport.run_mode, "peer run-mode mismatch");
   assert(creatorReport.instance_nonce !== joinerReport.instance_nonce, "duplicate instance nonces");
   assert(creatorReport.player_id !== joinerReport.player_id, "duplicate Signal Fish player ids");
-  assert(creatorReport.browser_process_id !== joinerReport.browser_process_id, "peers share Chromium process");
+  assert(creatorReport.browser_process_id !== joinerReport.browser_process_id, "peers share browser process");
   assert(creatorReport.expected_remote_nonce === joinerReport.instance_nonce, "creator expected-remote nonce mismatch");
   assert(joinerReport.expected_remote_nonce === creatorReport.instance_nonce, "joiner expected-remote nonce mismatch");
   assert(creatorReport.remote_player_id === joinerReport.player_id, "creator remote player mismatch");

@@ -21998,7 +21998,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     }
 
     for required in [
-        "chromium.launchServer",
+        "browserType.launchServer",
         "\"--disable-frame-rate-limit\"",
         "\"--disable-gpu-vsync\"",
         "creatorReport.browser_process_id !== joinerReport.browser_process_id",
@@ -22180,6 +22180,9 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "rust-version: 1.94.0",
         "actions/upload-artifact@v7.0.1",
         "if: failure()",
+        "schedule:",
+        "browser: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[\"firefox\"]' || '[\"chromium\"]') }}",
+        "FORTRESS_WASM_BROWSER: ${{ matrix.browser }}",
     ] {
         assert!(
             workflow.contains(required),
@@ -22188,8 +22191,31 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     }
     assert!(
         !workflow.contains("node_modules\n") && !workflow.contains("playwright-browsers"),
-        "P13 must not cache mutable/unverified Chromium installations"
+        "P13 must not cache mutable/unverified browser installations"
     );
+    for required in [
+        "process.env.FORTRESS_WASM_BROWSER ?? \"chromium\"",
+        "new Set([\"chromium\", \"firefox\"])",
+        "browserType.launchServer",
+        "browserType.connect",
+        "browser.browserName === browserName",
+        "\"peers share browser process\"",
+    ] {
+        assert!(
+            harness.contains(required),
+            "P13 harness must retain selectable Chromium/Firefox execution: `{required}`"
+        );
+    }
+    for required in [
+        "browser_name=\"${FORTRESS_WASM_BROWSER:-chromium}\"",
+        "install --with-deps \"${browser_name}\"",
+        "install \"${browser_name}\"",
+    ] {
+        assert!(
+            runner.contains(required),
+            "P13 runner must install the selected exact Playwright browser: `{required}`"
+        );
+    }
 }
 
 fn extract_ci_dep_detect_step(ci_content: &str) -> String {

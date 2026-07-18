@@ -1,6 +1,6 @@
 # Exact-release issue-242 acceptance in two genuine Godot no-thread WASM
 # exports. Godot downloads are cached only under their official SHA-512 values;
-# Chromium is installed fresh from the repository's exact npm lockfile.
+# The selected browser is installed fresh from the repository's exact npm lockfile.
 
 name: Fortress WASM Interop
 
@@ -34,6 +34,8 @@ on:
       - "scripts/run-fortress-wasm-interop.sh"
       - ".github/workflows/fortress-wasm-interop.yml"
   workflow_dispatch:
+  schedule:
+    - cron: "37 5 * * 2"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -56,9 +58,15 @@ env:
 
 jobs:
   browser-interop:
-    name: Godot no-thread Chromium E2E
+    name: Godot no-thread ${{ matrix.browser }} E2E
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["firefox"]' || '["chromium"]') }}
+    env:
+      FORTRESS_WASM_BROWSER: ${{ matrix.browser }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.0
@@ -142,7 +150,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: fortress-wasm-failure-${{ github.run_id }}
+          name: fortress-wasm-${{ matrix.browser }}-failure-${{ github.run_id }}
           path: |
             clients/fortress-wasm/artifacts/
             clients/fortress-wasm/project/build/

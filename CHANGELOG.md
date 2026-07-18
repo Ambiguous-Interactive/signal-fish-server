@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Extend the exact-release Fortress/Godot no-thread WASM interoperability gate
+  with a weekly Firefox cell. Pull requests retain the deterministic Chromium
+  gate, while the scheduled run applies the same healthy released-client and
+  expected-busted negative-control oracles to a separately attested Firefox
+  process pair.
 - Complete the H6 reconnect-race falsification matrix with a deterministic,
   test-only teardown gate. The gate proves a reconnect rejected as
   `PlayerAlreadyConnected` after its record is armed does not consume the token,
