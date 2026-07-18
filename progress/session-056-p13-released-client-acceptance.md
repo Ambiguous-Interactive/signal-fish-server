@@ -27,7 +27,7 @@ run remains an expected-`BUSTED` negative control.
 Focused local verification passed:
 
 - exact locked feature-tree inspection shows core 0.9.0, adapter 0.9.0,
-  godot-rust 0.4.5, and Fortress 0.10.0 from the standalone graph;
+  `godot-rust` 0.4.5, and Fortress 0.10.0 from the standalone graph;
 - all 286 applicable `ci_config_tests` passed (one expensive matrix ignored);
 - all six MSRV consistency script tests and the live repository check passed;
 - targeted Clippy passed with warnings denied;
