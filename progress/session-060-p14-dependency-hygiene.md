@@ -51,4 +51,17 @@ dependency changed the path package metadata recorded in
 edge. A repository-wide `cargo metadata --locked --no-deps` sweep then passed
 for the root, native, Fortress native, Fortress WASM, and fuzz manifests.
 
-Exact-head CI and reviewer evidence remain pending publication.
+The implementation head `93971e637a63db1e63ec0afac98593cbe078a7c1`
+then passed all 12 applicable pull-request workflows; the only non-success was
+the intentional Dependabot auto-merge skip. Verification Nightly's first
+attempt exposed a stochastic 1%-loss WebRTC N=8 mesh miss: 27 of 28 peer links
+formed, one SCTP INIT/ACK exchange did not recover, and the test failed loudly
+at its 360-second deadline. The isolated job retry passed without a source
+change, alongside green clean/loss matrices, WebRTC/Browser/Fortress interop,
+cross-platform nextest and lint, coverage, MSRV, Miri, AddressSanitizer, audit,
+SBOM, and documentation checks.
+
+Cursor Bugbot found no new issues on the exact implementation head. Copilot
+was explicitly requested after each push but reported that the requester quota
+was exhausted. No inline review threads were opened. PR:
+<https://github.com/Ambiguous-Interactive/signal-fish-server/pull/191>.
