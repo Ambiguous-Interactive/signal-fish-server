@@ -129,6 +129,20 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "Server-initiated WebSocket pings that missed their matching Pong deadline",
         snapshot.connections.websocket_ping_timeouts,
     );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_ping_probes_skipped_activity_total",
+        "Scheduled WebSocket liveness probes skipped because inbound activity already proved liveness",
+        snapshot.connections.websocket_ping_probes_skipped_activity,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_ping_probes_cancelled_activity_total",
+        "Outstanding WebSocket liveness probes cancelled by non-Pong inbound activity",
+        snapshot
+            .connections
+            .websocket_ping_probes_cancelled_activity,
+    );
     emit_latency_metrics(
         &mut buf,
         "signal_fish_websocket_ping_rtt",
@@ -729,6 +743,14 @@ mod tests {
         assert!(
             rendered.contains("signal_fish_websocket_ping_timeouts_total 0"),
             "expected websocket ping timeout counter line"
+        );
+        assert!(
+            rendered.contains("signal_fish_websocket_ping_probes_skipped_activity_total 0"),
+            "expected activity-skipped websocket ping counter line"
+        );
+        assert!(
+            rendered.contains("signal_fish_websocket_ping_probes_cancelled_activity_total 0"),
+            "expected activity-cancelled websocket ping counter line"
         );
         assert!(
             rendered.contains("signal_fish_websocket_ping_rtt_samples_total 0"),

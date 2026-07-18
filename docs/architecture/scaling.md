@@ -189,16 +189,18 @@ server has two independent fail-loud mechanisms:
 
 | Fault | What may still work | Default detection path | Authoritative result |
 | --- | --- | --- | --- |
-| client → server blackhole | The client can keep receiving room traffic and RFC 6455 Ping frames | The matching Pong cannot return; the next probe plus its deadline is roughly bounded by `server_ping_interval_secs + pong_timeout_secs` (10 + 5 seconds by default) | close `4003 activity_timeout`; `signal_fish_websocket_ping_timeouts_total` increments |
-| server → client blackhole, otherwise idle | The server can keep receiving application `Ping` and game traffic | The client never receives the next protocol Ping, so no matching Pong returns; the same probe bound applies | close `4003 activity_timeout` |
-| server → client blackhole under reliable relay pressure | Client writes can still reach the server while its outbound socket/data queue stops draining | Queue/socket fill plus `slow_consumer_timeout_ms` (5 seconds by default), or `max_sojourn_ms` (15 seconds by default); a socket probe can win first depending on probe phase | close `4002 slow_consumer` when delivery pressure wins, otherwise `4003 activity_timeout` |
+| client → server blackhole | The client can keep receiving room traffic and RFC 6455 Ping frames | A probe scheduled just before the last inbound activity may be skipped, so the worst-case fixed-tick bound is nearly `2 × server_ping_interval_secs + pong_timeout_secs` (25 seconds by default) | close `4003 activity_timeout`; `signal_fish_websocket_ping_timeouts_total` increments |
+| server → client blackhole, both directions otherwise idle | No inbound non-Pong frame proves liveness | The client never receives the next protocol Ping, so no matching Pong returns; the same worst-case fixed-tick bound applies | close `4003 activity_timeout` |
+| server → client blackhole while client → server traffic continues | Client writes can still reach the server, so idle-only probes are skipped or cancelled | Outbound queue/socket pressure, a socket write failure, or an application-level policy; upstream traffic alone cannot prove the reverse path | close `4002 slow_consumer` when delivery pressure wins; otherwise detection requires another policy |
 | symmetric blackhole | Neither direction carries new traffic | The next protocol probe cannot complete | close `4003 activity_timeout` |
 
 The close code describes the mechanism that won, not the physical direction of
-the fault. In particular, application Pings crossing client → server do not
-make a blocked server → client path healthy. Keep protocol Ping handling enabled
-in the WebSocket stack, treat `4002` and `4003` as terminal for that physical
-connection, and reconnect according to the client contract.
+the fault. Idle-only probes deliberately treat decoded inbound non-Pong traffic as
+liveness so application backpressure cannot hide an already-arrived Pong. This
+means continuous client → server traffic does not independently test the
+reverse path; outbound pressure/failure or an application policy owns that
+case. Keep protocol Ping handling enabled, treat `4002` and `4003` as terminal
+for that physical connection, and reconnect according to the client contract.
 
 The directional real-socket experiments use shortened probe/grace values and
 prove all three distinct cases: the unaffected direction carries traffic,

@@ -139,6 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Registered shutdown waiting also includes scheduling margin after its three
   bounded close writes, so a handler completing at the final write deadline is
   not mistaken for a leaked socket under sanitizer or production shutdown load.
+  Server transport probes are now idle-only: decoded non-Pong traffic is
+  published before awaited application processing, skips an unnecessary probe,
+  or cancels an outstanding one. Exact matching Pongs still record RTT, stale
+  Pongs still cannot satisfy a probe, and genuine silence still closes `4003`.
 
 ### Changed
 

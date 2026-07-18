@@ -715,17 +715,22 @@ probes the underlying WebSocket transport independently:
 
 ```
 
-The RFC 6455 Ping bypasses application queues; the bounded socket send buffer
-limits data already handed to TCP ahead of it. Compliant WebSocket stacks
-answer automatically; a missing matching Pong closes the socket with `4003
-activity_timeout`. Set `server_ping_interval_secs` to `0` to disable these
-server probes. Separately, the activity reaper disconnects clients that send no
-traffic for longer than `server.ping_timeout`.
+After an otherwise-idle interval, the RFC 6455 Ping bypasses application
+queues; the bounded socket send buffer limits data already handed to TCP ahead
+of it. Decoded inbound non-Pong traffic skips an unnecessary probe or cancels an
+outstanding one, and compliant WebSocket stacks answer actual probes
+automatically. A silent missing matching Pong closes the socket with `4003
+activity_timeout`. Set `server_ping_interval_secs` to `0` to disable probes.
+Separately, the activity reaper disconnects clients that send no traffic for
+longer than `server.ping_timeout`.
 
 Prometheus reports missed matching-Pong deadlines with
 `signal_fish_websocket_ping_timeouts_total`. Successful probe latency uses the
 `signal_fish_websocket_ping_rtt_*` family, including
 `signal_fish_websocket_ping_rtt_samples_total` and millisecond summary gauges.
+Activity-based decisions use
+`signal_fish_websocket_ping_probes_skipped_activity_total` and
+`signal_fish_websocket_ping_probes_cancelled_activity_total`.
 
 ## Idle Timeout
 

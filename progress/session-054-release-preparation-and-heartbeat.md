@@ -69,3 +69,74 @@ Targeted evidence:
 - `cargo test --test doc_consistency_script_tests -- --nocapture`: 5 passed.
 - `cargo test --test doc_consistency_policy_tests -- --nocapture`: 10 passed.
 - `bash scripts/check-doc-consistency.sh --skip-changelog-gate`: passed.
+
+### Idle-only WebSocket probes
+
+Red evidence:
+
+- `inbound_activity_skips_probes_until_the_connection_becomes_idle` failed in
+  1.23 seconds because the old fixed Pong-only loop emitted an RFC Ping while
+  application Ping frames were arriving every 200 ms.
+- The historical H10 failure consistently reached roughly 22.43 seconds in its
+  first reliable backpressure cycle before the sender closed `4003`, proving
+  the receive-loop head-of-line window exceeded the 10s + 5s probe contract.
+
+Green implementation:
+
+- One O(1) Tokio watch state tracks inbound generation, serial handler activity,
+  and at most one nonce/evidence record. A decoded non-Pong frame publishes
+  activity before parsing or any await; active processing keeps probes skipped.
+- Writer-side generation recheck closes the command/write race. Exact matching
+  Pongs record RTT; first post-write non-Pong activity cancels; wrong/stale Pongs
+  do nothing; genuine silence still closes 4003. Disabled probes avoid receive-
+  side state mutations.
+- Added skipped/cancelled activity counters to JSON snapshots and Prometheus,
+  documented the idle-only tradeoff and nearly `2 × interval + timeout`
+  fixed-tick worst case, and replaced the LLM heartbeat sample that taught the
+  head-of-line bug.
+- Strengthened cancellation coverage beyond the original deadline and proved a
+  later idle probe still succeeds. The state-table tests cover writer-race skip,
+  active-handler skip, first-evidence wins, wrong nonce, inclusive deadline,
+  late evidence, cancellation, and silence.
+
+Real-world evidence:
+
+- Five complete serialized H10 repetitions passed. Each ran two ~22.4s reliable
+  backpressure cycles plus the 60s volatile phase, conserved every volatile
+  offer as delivered or exact-reported dropped, recorded zero ping timeouts,
+  and exercised activity-based skipping.
+- The fifth attempted repetition exposed a separate observation flake: an
+  already-congested Linux TCP path can reset after the server's slow-consumer
+  decision before tungstenite surfaces the semantic Close. The test now accepts
+  only the two exact reset representations and only after both the server-side
+  slow-consumer metric and healthy-watcher departure independently prove the
+  intended cause. The replacement full repetition exercised this path and
+  passed reconnect, delivery, and liveness assertions.
+- Focused WebSocket unit tests: 3 passed; `server_ping_e2e`: 16 passed;
+  Prometheus renderer tests: 5 passed; targeted all-feature Clippy: passed.
+
+Adversarial audit:
+
+- Confirmed bounded race-safe state and no timeout inflation or unbounded queue.
+- Its actionable findings (post-deadline cancellation survival, fixed-tick bound,
+  non-Pong wording, and disabled-mode overhead) were implemented and retested.
+
+## Full-project verification
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --locked --all-features`: the first compile attempt exhausted the
+  runner's per-process allocation while writing an incremental dependency graph;
+  the coverage-equivalent bounded rerun with `CARGO_BUILD_JOBS=2` and
+  `CARGO_INCREMENTAL=0` passed every executed unit, integration, policy, and
+  documentation test. Only explicitly ignored nightly/on-demand tests skipped.
+- `cargo deny --all-features check`: advisories, bans, licenses, and sources
+  passed; only the repository's acknowledged duplicate-version warnings remain.
+- `bash scripts/check-ci-config.sh`, `check-doc-consistency.sh --changed-files`,
+  `check-workflow-hygiene.sh`, `check-llm-file-sizes.sh`,
+  `check-llm-example-files.sh`, and `check-msrv-consistency.sh`: passed. Reported
+  warnings are pre-existing advisory items outside this change's scope.
+- `pwsh ... scripts/check-hook-readiness.ps1`: passed with zero warnings.
+- Worktree pre-commit and pre-push PowerShell preflights: passed. The profiled
+  pre-commit run took 1,288 ms and reported its non-fatal 1,000 ms budget warning.
+- `git diff --check`: passed.

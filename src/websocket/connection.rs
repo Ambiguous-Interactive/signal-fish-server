@@ -15,10 +15,10 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngExt;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
@@ -51,43 +51,181 @@ pub(super) const REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS: u32 =
 
 struct ServerPingCommand {
     nonce: u64,
-    write_timing: oneshot::Sender<PingWriteTiming>,
+    baseline_generation: u64,
+    write_outcome: oneshot::Sender<PingWriteOutcome>,
 }
 
+#[derive(Clone, Copy, Debug)]
 struct PingWriteTiming {
-    started_at: Instant,
     completed_at: Instant,
 }
 
-#[derive(Clone, Copy)]
-struct ObservedPong {
-    nonce: u64,
-    received_at: Instant,
+#[derive(Clone, Copy, Debug)]
+enum PingWriteOutcome {
+    Written(PingWriteTiming),
+    SkippedActivity { generation: u64 },
 }
 
-fn pong_rtt_for_probe(
-    observation: Option<ObservedPong>,
-    nonce: u64,
-    write_started_at: Instant,
-    deadline_at: Instant,
-) -> Option<Duration> {
-    let pong = observation?;
-    (pong.nonce == nonce && pong.received_at >= write_started_at && pong.received_at <= deadline_at)
-        .then(|| pong.received_at.duration_since(write_started_at))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PingProbeEvidence {
+    MatchingPong { received_at: Instant },
+    InboundActivity { received_at: Instant },
 }
 
-fn try_record_active_pong(
-    observations: &mpsc::Sender<ObservedPong>,
-    active_nonce: &AtomicU64,
+#[derive(Clone, Copy, Debug)]
+struct ActivePingProbe {
+    nonce: u64,
+    started_at: Instant,
+    evidence: Option<PingProbeEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PingProbeState {
+    inbound_generation: u64,
+    inbound_processing: bool,
+    active: Option<ActivePingProbe>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PingProbeResolution {
+    MatchingPong(Duration),
+    InboundActivity { generation: u64 },
+    TimedOut,
+}
+
+fn begin_ping_probe(
+    state: &watch::Sender<PingProbeState>,
+    baseline_generation: u64,
+    nonce: u64,
+    started_at: Instant,
+) -> Result<(), u64> {
+    let mut result = Err(baseline_generation);
+    state.send_modify(|current| {
+        if current.inbound_generation == baseline_generation
+            && !current.inbound_processing
+            && current.active.is_none()
+        {
+            current.active = Some(ActivePingProbe {
+                nonce,
+                started_at,
+                evidence: None,
+            });
+            result = Ok(());
+        } else {
+            result = Err(current.inbound_generation);
+        }
+    });
+    result
+}
+
+fn record_inbound_probe_activity(state: &watch::Sender<PingProbeState>, received_at: Instant) {
+    state.send_modify(|current| {
+        current.inbound_generation = current.inbound_generation.wrapping_add(1);
+        current.inbound_processing = true;
+        if let Some(active) = current.active.as_mut() {
+            if active.evidence.is_none() && received_at >= active.started_at {
+                active.evidence = Some(PingProbeEvidence::InboundActivity { received_at });
+            }
+        }
+    });
+}
+
+struct InboundProbeActivityGuard {
+    state: watch::Sender<PingProbeState>,
+}
+
+impl InboundProbeActivityGuard {
+    fn begin(state: &watch::Sender<PingProbeState>, received_at: Instant) -> Self {
+        record_inbound_probe_activity(state, received_at);
+        Self {
+            state: state.clone(),
+        }
+    }
+}
+
+impl Drop for InboundProbeActivityGuard {
+    fn drop(&mut self) {
+        self.state.send_if_modified(|current| {
+            if current.inbound_processing {
+                current.inbound_processing = false;
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+fn try_record_matching_pong(
+    state: &watch::Sender<PingProbeState>,
     nonce: u64,
     received_at: Instant,
 ) -> bool {
-    let current_nonce = active_nonce.load(Ordering::Acquire);
-    current_nonce != 0
-        && current_nonce == nonce
-        && observations
-            .try_send(ObservedPong { nonce, received_at })
-            .is_ok()
+    let mut recorded = false;
+    state.send_if_modified(|current| {
+        let Some(active) = current.active.as_mut() else {
+            return false;
+        };
+        if active.nonce != nonce || active.evidence.is_some() || received_at < active.started_at {
+            return false;
+        }
+        active.evidence = Some(PingProbeEvidence::MatchingPong { received_at });
+        recorded = true;
+        true
+    });
+    recorded
+}
+
+fn clear_ping_probe(state: &watch::Sender<PingProbeState>, nonce: u64) {
+    state.send_if_modified(|current| {
+        if current.active.is_some_and(|active| active.nonce == nonce) {
+            current.active = None;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn resolve_ping_probe(
+    state: &watch::Sender<PingProbeState>,
+    nonce: u64,
+    deadline_at: Instant,
+    deadline_reached: bool,
+) -> Option<PingProbeResolution> {
+    let mut resolution = None;
+    state.send_if_modified(|current| {
+        let Some(active) = current.active else {
+            return false;
+        };
+        if active.nonce != nonce {
+            return false;
+        }
+
+        resolution = match active.evidence {
+            Some(PingProbeEvidence::MatchingPong { received_at }) if received_at <= deadline_at => {
+                Some(PingProbeResolution::MatchingPong(
+                    received_at.duration_since(active.started_at),
+                ))
+            }
+            Some(PingProbeEvidence::InboundActivity { received_at })
+                if received_at <= deadline_at =>
+            {
+                Some(PingProbeResolution::InboundActivity {
+                    generation: current.inbound_generation,
+                })
+            }
+            _ if deadline_reached => Some(PingProbeResolution::TimedOut),
+            _ => None,
+        };
+        if resolution.is_some() {
+            current.active = None;
+            true
+        } else {
+            false
+        }
+    });
+    resolution
 }
 
 /// Enqueue a message on this connection's own outbound queue, honoring the
@@ -542,13 +680,14 @@ pub(super) async fn handle_socket(
     // application delivery lanes. At most one probe is outstanding, so one
     // slot is sufficient and cannot accumulate stale probes.
     let (ping_command_tx, mut ping_command_rx) = mpsc::channel::<ServerPingCommand>(1);
-    // The socket reader forwards only the first Pong matching the nonce that
-    // the writer has marked active. A bounded channel preserves that match
-    // without allowing unsolicited Pongs to grow memory or overwrite it.
-    let active_ping_nonce = Arc::new(AtomicU64::new(0));
-    let active_ping_nonce_for_send = Arc::clone(&active_ping_nonce);
-    let active_ping_nonce_for_receive = Arc::clone(&active_ping_nonce);
-    let (pong_observation_tx, pong_observation_rx) = mpsc::channel::<ObservedPong>(1);
+    // One coalescing O(1) state connects ticker, writer, and reader. It records
+    // inbound activity before application handling can block, and retains only
+    // the first evidence for the single active probe.
+    let (ping_probe_state_tx, ping_probe_state_rx) = watch::channel(PingProbeState::default());
+    let ping_probe_state_for_send = ping_probe_state_tx.clone();
+    let server_ping_interval_secs = server.config().websocket_config.server_ping_interval_secs;
+    let ping_probe_state_for_receive =
+        (server_ping_interval_secs > 0).then(|| ping_probe_state_tx.clone());
 
     // Keep a clone of tx for sending auth responses
     let tx_clone = tx.clone();
@@ -685,19 +824,19 @@ pub(super) async fn handle_socket(
         return;
     };
 
-    let server_ping_interval_secs = server.config().websocket_config.server_ping_interval_secs;
     if server_ping_interval_secs > 0 {
         let pong_timeout = Duration::from_secs(server.config().websocket_config.pong_timeout_secs);
         let ping_commands = ping_command_tx.clone();
         let ping_close_signal = close_signal.clone();
         let mut ping_task_close = ping_task_close;
-        let mut pong_observations = pong_observation_rx;
-        let active_ping_nonce_for_ping = Arc::clone(&active_ping_nonce);
+        let mut probe_states = ping_probe_state_rx;
+        let probe_state_updates = ping_probe_state_tx.clone();
         let server_for_ping = server.clone();
         let effective_player_id_for_ping = Arc::clone(&effective_player_id);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(server_ping_interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut consumed_generation = probe_states.borrow().inbound_generation;
             // Start probing after one full configured interval.
             ticker.tick().await;
             loop {
@@ -709,28 +848,22 @@ pub(super) async fn handle_socket(
                     _ = ticker.tick() => {}
                 }
 
-                let nonce = random_ping_nonce();
-                // Discard unsolicited/stale Pongs before publishing this
-                // probe. The write task returns timestamps bracketing the send,
-                // so even an exact Pong observed before the write begins cannot
-                // satisfy the unpredictable probe while a fast reply received
-                // before the send future returns remains valid.
-                loop {
-                    match pong_observations.try_recv() {
-                        Ok(stale) => {
-                            tracing::debug!(
-                                stale_nonce = stale.nonce,
-                                "Discarding stale WebSocket Pong observation"
-                            );
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => return,
-                    }
+                let current_state = *probe_states.borrow_and_update();
+                let observed_generation = current_state.inbound_generation;
+                if current_state.inbound_processing || observed_generation != consumed_generation {
+                    consumed_generation = observed_generation;
+                    server_for_ping
+                        .metrics()
+                        .increment_websocket_ping_probes_skipped_activity();
+                    continue;
                 }
-                let (write_timing_tx, write_timing_rx) = oneshot::channel();
+
+                let nonce = random_ping_nonce();
+                let (write_outcome_tx, write_outcome_rx) = oneshot::channel();
                 let command = ServerPingCommand {
                     nonce,
-                    write_timing: write_timing_tx,
+                    baseline_generation: consumed_generation,
+                    write_outcome: write_outcome_tx,
                 };
                 tokio::select! {
                     reason = ping_task_close.closed() => {
@@ -743,93 +876,93 @@ pub(super) async fn handle_socket(
                         }
                     }
                 }
-                let write_timing = tokio::select! {
+                let write_outcome = tokio::select! {
                     reason = ping_task_close.closed() => {
                         tracing::debug!(?reason, "Connection closing during WebSocket Ping write");
                         break;
                     }
-                    result = write_timing_rx => {
-                        let Ok(write_timing) = result else {
+                    result = write_outcome_rx => {
+                        let Ok(write_outcome) = result else {
                             break;
                         };
-                        write_timing
+                        write_outcome
+                    }
+                };
+                let write_timing = match write_outcome {
+                    PingWriteOutcome::Written(timing) => timing,
+                    PingWriteOutcome::SkippedActivity { generation } => {
+                        consumed_generation = generation;
+                        probe_states.borrow_and_update();
+                        server_for_ping
+                            .metrics()
+                            .increment_websocket_ping_probes_skipped_activity();
+                        continue;
                     }
                 };
 
                 let deadline_at = write_timing.completed_at + pong_timeout;
                 let deadline = tokio::time::sleep_until(deadline_at);
                 tokio::pin!(deadline);
-                loop {
+                let resolution = loop {
+                    if let Some(resolution) =
+                        resolve_ping_probe(&probe_state_updates, nonce, deadline_at, false)
+                    {
+                        break resolution;
+                    }
                     tokio::select! {
                         reason = ping_task_close.closed() => {
                             tracing::debug!(?reason, "Connection closing while awaiting WebSocket Pong");
                             return;
                         }
-                        observation = pong_observations.recv() => {
-                            let Some(observation) = observation else {
+                        changed = probe_states.changed() => {
+                            if changed.is_err() {
                                 return;
-                            };
-                            if let Some(rtt) = pong_rtt_for_probe(
-                                Some(observation),
-                                nonce,
-                                write_timing.started_at,
-                                deadline_at,
-                            ) {
-                                server_for_ping
-                                    .metrics()
-                                    .record_websocket_ping_rtt(rtt)
-                                    .await;
-                                active_ping_nonce_for_ping.store(0, Ordering::Release);
-                                break;
                             }
                         }
                         () = &mut deadline => {
-                            // Receiving the observation and the timer can become
-                            // ready together. Give a Pong stamped on or before the
-                            // deadline one final observation before timing out.
-                            let observation = match pong_observations.try_recv() {
-                                Ok(observation) => Some(observation),
-                                Err(mpsc::error::TryRecvError::Empty) => None,
-                                Err(mpsc::error::TryRecvError::Disconnected) => {
-                                    active_ping_nonce_for_ping.store(0, Ordering::Release);
-                                    return;
-                                }
-                            };
-                            if let Some(rtt) = pong_rtt_for_probe(
-                                observation,
+                            break resolve_ping_probe(
+                                &probe_state_updates,
                                 nonce,
-                                write_timing.started_at,
                                 deadline_at,
-                            ) {
-                                server_for_ping
-                                    .metrics()
-                                    .record_websocket_ping_rtt(rtt)
-                                    .await;
-                                active_ping_nonce_for_ping.store(0, Ordering::Release);
-                                break;
-                            }
-                            active_ping_nonce_for_ping.store(0, Ordering::Release);
-                            if ping_close_signal.request_close(CloseReason::ActivityTimeout) {
-                                let current_player_id =
-                                    *effective_player_id_for_ping.read().await;
-                                tracing::info!(
-                                    %current_player_id,
-                                    timeout_secs = pong_timeout.as_secs(),
-                                    "WebSocket Pong timeout - closing connection"
-                                );
-                                server_for_ping
-                                    .metrics()
-                                    .increment_websocket_ping_timeouts();
-                            }
-                            return;
+                                true,
+                            )
+                            .unwrap_or(PingProbeResolution::TimedOut);
                         }
+                    }
+                };
+                match resolution {
+                    PingProbeResolution::MatchingPong(rtt) => {
+                        server_for_ping
+                            .metrics()
+                            .record_websocket_ping_rtt(rtt)
+                            .await;
+                    }
+                    PingProbeResolution::InboundActivity { generation } => {
+                        consumed_generation = generation;
+                        server_for_ping
+                            .metrics()
+                            .increment_websocket_ping_probes_cancelled_activity();
+                    }
+                    PingProbeResolution::TimedOut => {
+                        if ping_close_signal.request_close(CloseReason::ActivityTimeout) {
+                            let current_player_id = *effective_player_id_for_ping.read().await;
+                            tracing::info!(
+                                %current_player_id,
+                                timeout_secs = pong_timeout.as_secs(),
+                                "WebSocket Pong timeout - closing connection"
+                            );
+                            server_for_ping
+                                .metrics()
+                                .increment_websocket_ping_timeouts();
+                        }
+                        return;
                     }
                 }
             }
         });
     } else {
         drop(ping_task_close);
-        drop(pong_observation_rx);
+        drop(ping_probe_state_rx);
     }
 
     // Periodic per-connection RelayStats emission (protocol v3, opt-in via
@@ -960,9 +1093,19 @@ pub(super) async fn handle_socket(
                             let Some(command) = command else {
                                 break;
                             };
-                            let payload = command.nonce.to_be_bytes().to_vec().into();
                             let write_started_at = Instant::now();
-                            active_ping_nonce_for_send.store(command.nonce, Ordering::Release);
+                            if let Err(generation) = begin_ping_probe(
+                                &ping_probe_state_for_send,
+                                command.baseline_generation,
+                                command.nonce,
+                                write_started_at,
+                            ) {
+                                let _ = command.write_outcome.send(
+                                    PingWriteOutcome::SkippedActivity { generation }
+                                );
+                                continue;
+                            }
+                            let payload = command.nonce.to_be_bytes().to_vec().into();
                             match tokio::time::timeout(
                                 ping_write_timeout,
                                 sender.send(Message::Ping(payload)),
@@ -970,14 +1113,15 @@ pub(super) async fn handle_socket(
                             .await
                             {
                                 Ok(Ok(())) => {
-                                    let _ = command.write_timing.send(PingWriteTiming {
-                                        started_at: write_started_at,
-                                        completed_at: Instant::now(),
-                                    });
+                                    let _ = command.write_outcome.send(
+                                        PingWriteOutcome::Written(PingWriteTiming {
+                                            completed_at: Instant::now(),
+                                        })
+                                    );
                                     continue;
                                 }
                                 Ok(Err(err)) => {
-                                    active_ping_nonce_for_send.store(0, Ordering::Release);
+                                    clear_ping_probe(&ping_probe_state_for_send, command.nonce);
                                     tracing::debug!(
                                         error = %err,
                                         "Failed to write WebSocket Ping"
@@ -986,7 +1130,7 @@ pub(super) async fn handle_socket(
                                         .request_close(CloseReason::ActivityTimeout);
                                 }
                                 Err(_elapsed) => {
-                                    active_ping_nonce_for_send.store(0, Ordering::Release);
+                                    clear_ping_probe(&ping_probe_state_for_send, command.nonce);
                                     if send_task_close_signal
                                         .request_close(CloseReason::ActivityTimeout)
                                     {
@@ -1259,6 +1403,18 @@ pub(super) async fn handle_socket(
                     tracing::warn!(%active_player_id, "WebSocket error: {}", e);
                     break;
                 }
+            };
+            let received_at = Instant::now();
+            let _inbound_activity_guard = if !matches!(&msg, Message::Pong(_)) {
+                // Publish transport liveness before parsing or any awaited
+                // application work. Reliable delivery can backpressure the
+                // handler, but it must not hide an already-decoded frame from
+                // the idle-probe state machine.
+                ping_probe_state_for_receive
+                    .as_ref()
+                    .map(|state| InboundProbeActivityGuard::begin(state, received_at))
+            } else {
+                None
             };
 
             match msg {
@@ -1699,12 +1855,9 @@ pub(super) async fn handle_socket(
                 Message::Pong(payload) => {
                     if let Ok(bytes) = <[u8; 8]>::try_from(payload.as_ref()) {
                         let nonce = u64::from_be_bytes(bytes);
-                        try_record_active_pong(
-                            &pong_observation_tx,
-                            &active_ping_nonce_for_receive,
-                            nonce,
-                            Instant::now(),
-                        );
+                        if let Some(state) = &ping_probe_state_for_receive {
+                            try_record_matching_pong(state, nonce, received_at);
+                        }
                     }
                     // Publish the probe observation before a potentially slow
                     // activity refresh so deadline evaluation stays independent.
@@ -1790,124 +1943,74 @@ mod tests {
     }
 
     #[test]
-    fn pong_probe_accepts_matching_observation_after_write_starts() {
-        let write_started_at = Instant::now();
-        let write_completed_at = write_started_at + Duration::from_millis(2);
-        let deadline_at = write_completed_at + Duration::from_millis(5);
+    fn ping_probe_state_distinguishes_skip_pong_activity_and_timeout() {
+        let (state, _updates) = watch::channel(PingProbeState::default());
+        let started_at = Instant::now();
+        let deadline_at = started_at + Duration::from_millis(10);
 
+        let activity = InboundProbeActivityGuard::begin(&state, started_at);
+        assert_eq!(begin_ping_probe(&state, 0, 1, started_at), Err(1));
+        drop(activity);
+
+        assert_eq!(begin_ping_probe(&state, 1, 2, started_at), Ok(()));
+        assert!(!try_record_matching_pong(
+            &state,
+            99,
+            started_at + Duration::from_millis(1)
+        ));
+        assert!(try_record_matching_pong(
+            &state,
+            2,
+            started_at + Duration::from_millis(2)
+        ));
+        let activity =
+            InboundProbeActivityGuard::begin(&state, started_at + Duration::from_millis(3));
         assert_eq!(
-            pong_rtt_for_probe(
-                Some(ObservedPong {
-                    nonce: 1,
-                    received_at: write_started_at - Duration::from_millis(1),
-                }),
-                1,
-                write_started_at,
-                deadline_at,
-            ),
-            None,
+            resolve_ping_probe(&state, 2, deadline_at, false),
+            Some(PingProbeResolution::MatchingPong(Duration::from_millis(2))),
+            "the first valid probe evidence must win"
         );
+        drop(activity);
+
+        assert_eq!(begin_ping_probe(&state, 2, 3, started_at), Ok(()));
+        let activity =
+            InboundProbeActivityGuard::begin(&state, started_at + Duration::from_millis(4));
         assert_eq!(
-            pong_rtt_for_probe(
-                Some(ObservedPong {
-                    nonce: 1,
-                    received_at: write_started_at,
-                }),
-                1,
-                write_started_at,
-                deadline_at,
-            ),
-            Some(Duration::ZERO),
+            resolve_ping_probe(&state, 3, deadline_at, false),
+            Some(PingProbeResolution::InboundActivity { generation: 3 })
         );
+        drop(activity);
+
+        assert_eq!(begin_ping_probe(&state, 3, 4, started_at), Ok(()));
         assert_eq!(
-            pong_rtt_for_probe(
-                Some(ObservedPong {
-                    nonce: 1,
-                    received_at: write_started_at + Duration::from_millis(1),
-                }),
-                1,
-                write_started_at,
-                deadline_at,
-            ),
-            Some(Duration::from_millis(1)),
-        );
-        assert!(
-            write_started_at + Duration::from_millis(1) < write_completed_at,
-            "the regression case is a valid Pong observed before send completion",
-        );
-        assert_eq!(
-            pong_rtt_for_probe(
-                Some(ObservedPong {
-                    nonce: 2,
-                    received_at: write_started_at + Duration::from_millis(1),
-                }),
-                1,
-                write_started_at,
-                deadline_at,
-            ),
-            None,
-        );
-        assert_eq!(
-            pong_rtt_for_probe(
-                Some(ObservedPong {
-                    nonce: 1,
-                    received_at: deadline_at,
-                }),
-                1,
-                write_started_at,
-                deadline_at,
-            ),
-            Some(deadline_at.duration_since(write_started_at)),
-        );
-        assert_eq!(
-            pong_rtt_for_probe(
-                Some(ObservedPong {
-                    nonce: 1,
-                    received_at: deadline_at + Duration::from_nanos(1),
-                }),
-                1,
-                write_started_at,
-                deadline_at,
-            ),
-            None,
+            resolve_ping_probe(&state, 4, deadline_at, true),
+            Some(PingProbeResolution::TimedOut)
         );
     }
 
     #[test]
-    fn pong_probe_preserves_first_active_match() {
-        let active_nonce = AtomicU64::new(0);
-        let (observations, mut receiver) = mpsc::channel(1);
-        let first_received_at = Instant::now();
+    fn ping_probe_deadline_is_inclusive_and_late_evidence_cannot_satisfy_it() {
+        let (state, _updates) = watch::channel(PingProbeState::default());
+        let started_at = Instant::now();
+        let deadline_at = started_at + Duration::from_millis(5);
 
-        assert!(!try_record_active_pong(
-            &observations,
-            &active_nonce,
-            0,
-            first_received_at,
-        ));
-        active_nonce.store(7, Ordering::Release);
-        assert!(!try_record_active_pong(
-            &observations,
-            &active_nonce,
+        assert_eq!(begin_ping_probe(&state, 0, 7, started_at), Ok(()));
+        assert!(try_record_matching_pong(&state, 7, deadline_at));
+        assert_eq!(
+            resolve_ping_probe(&state, 7, deadline_at, true),
+            Some(PingProbeResolution::MatchingPong(Duration::from_millis(5)))
+        );
+
+        assert_eq!(begin_ping_probe(&state, 0, 8, started_at), Ok(()));
+        assert!(try_record_matching_pong(
+            &state,
             8,
-            first_received_at,
+            deadline_at + Duration::from_nanos(1)
         ));
-        assert!(try_record_active_pong(
-            &observations,
-            &active_nonce,
-            7,
-            first_received_at,
-        ));
-        assert!(!try_record_active_pong(
-            &observations,
-            &active_nonce,
-            7,
-            first_received_at + Duration::from_millis(1),
-        ));
-
-        let observation = receiver.try_recv().expect("first matching Pong retained");
-        assert_eq!(observation.nonce, 7);
-        assert_eq!(observation.received_at, first_received_at);
+        assert_eq!(
+            resolve_ping_probe(&state, 8, deadline_at, true),
+            Some(PingProbeResolution::TimedOut)
+        );
     }
 
     #[test]

@@ -81,29 +81,22 @@ async fn authenticate(
 
 ### Heartbeat / Ping-Pong
 
-```rust
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+Server transport probes are idle-only. Maintain one bounded/coalescing activity
+generation and at most one active unpredictable nonce:
 
-async fn connection_loop(mut sender: SplitSink<WebSocket, Message>, mut receiver: SplitStream<WebSocket>) {
-    let mut heartbeat = interval(HEARTBEAT_INTERVAL);
-    let mut last_pong = Instant::now();
+1. Immediately after decoding any non-Pong frame, publish transport activity
+   before parsing, metrics, or awaited application handling.
+2. At a scheduled tick, skip the probe if the generation changed during the
+   preceding interval.
+3. Recheck the generation when the writer begins, because the Ping command may
+   have waited behind another socket write.
+4. Once written, accept only the exact matching Pong. A decoded non-Pong frame
+   cancels the probe as fresh activity; wrong, stale, or unsolicited Pongs do
+   neither. Silence through the deadline closes `4003 activity_timeout`.
 
-    loop {
-        tokio::select! {
-            msg = receiver.next() => match msg {
-                Some(Ok(Message::Pong(_))) => last_pong = Instant::now(),
-                Some(Ok(msg)) => handle_message(msg).await,
-                Some(Err(_)) | None => break,
-            },
-            _ = heartbeat.tick() => {
-                if last_pong.elapsed() > CLIENT_TIMEOUT { break; }
-                if sender.send(Message::Ping(vec![].into())).await.is_err() { break; }
-            }
-        }
-    }
-}
-```
+Use O(1) watch/state-machine storage, keep application handling sequential, and
+never insert an unbounded transport-to-application queue. Awaiting application
+work in the receive loop is safe only because activity is published first.
 
 ### Graceful Disconnection
 
