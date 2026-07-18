@@ -35,6 +35,12 @@ Focused verification passed:
 
 - `cargo fmt --all`
 - `cargo test --locked --lib reconnect_during_teardown_preserves_token_for_retry -- --nocapture`
+- `cargo clippy --locked --lib --all-features -- -D warnings`
+- `cargo test --locked --test reconnect_window_races_e2e`
+- documentation consistency, Markdown, and internal-link checks
 
-The broader cheap local checks, exact-head CI evidence, and automated reviewer
-results will be recorded before the session is closed.
+PR #188 passed every applicable exact-head workflow at
+`bdd5857b492ecff05383ec9ad85ae423ee49ed4e` (Dependabot records skipped as
+expected). Cursor Bugbot found no issues on that exact head, Copilot was
+explicitly requested but quota-blocked, and no review threads remained. The PR
+merged as `9d945fb1922ec1c1ae53328699085b22d3912db1`.
