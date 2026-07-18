@@ -21900,7 +21900,6 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
 #[test]
 fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let root = repo_root();
-    let root_manifest = read_file(&root.join("Cargo.toml"));
     let manifest = read_file(&root.join("clients/fortress-wasm/Cargo.toml"));
     let lockfile = read_file(&root.join("clients/fortress-wasm/Cargo.lock"));
     let source = read_file(&root.join("clients/fortress-wasm/src/lib.rs"));
@@ -21912,7 +21911,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
 
     for dependency in [
         "fortress-rollback = \"=0.10.0\"",
-        "signal-fish-client = { version = \"=0.8.0\", default-features = false, features = [\"transport-godot\"] }",
+        "signal-fish-client = { version = \"=0.9.0\", default-features = false, features = [\"polling-client\"] }",
+        "signal-fish-client-godot = \"=0.9.0\"",
         "godot = { version = \"=0.4.5\", features = [\"api-custom\", \"experimental-wasm\", \"experimental-wasm-nothreads\", \"lazy-function-tables\"] }",
     ] {
         assert!(
@@ -21922,12 +21922,12 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     }
     assert_eq!(
         extract_toml_version(&manifest, "rust-version"),
-        extract_toml_version(&root_manifest, "rust-version"),
-        "the Godot/WASM fixture must track the server MSRV"
+        Some("1.94.0".to_owned())
     );
     for locked in [
         "name = \"fortress-rollback\"\nversion = \"0.10.0\"",
-        "name = \"signal-fish-client\"\nversion = \"0.8.0\"",
+        "name = \"signal-fish-client\"\nversion = \"0.9.0\"",
+        "name = \"signal-fish-client-godot\"\nversion = \"0.9.0\"",
         "name = \"godot\"\nversion = \"0.4.5\"",
     ] {
         let start = lockfile
@@ -21968,6 +21968,10 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "enqueue_joiner_ack",
         "relay_sent_sequence_hash",
         "relay_received_sequence_hash",
+        "use signal_fish_client_godot::GodotWebSocketTransport;",
+        "const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = \"0.9.0\";",
+        "signal_fish_client_godot_version: SIGNAL_FISH_CLIENT_GODOT_VERSION",
+        "const REPORT_SCHEMA_VERSION: u32 = 2;",
     ] {
         assert!(
             source.contains(required),
@@ -21998,6 +22002,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "sharedArrayBufferType === \"undefined\"",
         "workerConstructions === 0",
         "report.callback_count === report.poll_count",
+        "report.schema_version === 2",
+        "report.signal_fish_client_godot_version === \"0.9.0\"",
         "report.godot_runtime.string === \"4.5-stable (official)\"",
         "assertExactKeys(report, reportKeys",
         "report.relay_send_retries <= 8",
@@ -22011,7 +22017,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence",
         "joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence",
         "BUSTED fortress-wasm expected negative control",
-        "BUSTED fortress-wasm expected released-client characterization",
+        "HEALTHY fortress-wasm released-client interoperability",
     ] {
         assert!(
             harness.contains(required),
@@ -22032,23 +22038,20 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let released_classification = &harness[released_start..negative_start];
     let negative_classification = &harness[negative_start..negative_end];
     for required in [
-        "report.confirmed_frame >= 600",
         "report.max_admissions_per_callback > 1",
         "report.callback_intervals.mean_us >= 8_000",
-        "report.client_game_data_sent_during_run <= report.active_callback_count * 2",
-        "report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120",
-        "/non-nominal callback mean|oldest queue age|stall_count|wait_recommendations|active wall time|completed rate|sends per callback/.test(",
-        "released graph developed an unrelated healthy-gate failure",
+        "violations.length === 0",
+        "released graph failed P13 healthy gates",
     ] {
         assert!(
             released_classification.contains(required),
             "P13 released classifier is missing `{required}`"
         );
     }
-    assert_eq!(
-        released_classification.matches("violations.every").count(),
-        1,
-        "P13 released classifier must reject every unrelated healthy-gate violation"
+    assert!(
+        !released_classification.contains("violations.every")
+            && !released_classification.contains("completion bottleneck"),
+        "P13 released classifier must require health instead of accepting the old bottleneck"
     );
     for required in [
         "report.active_callback_count >= 600",
@@ -22123,6 +22126,9 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "negative \"${EXPORT_DIR}\"",
         "timeout --foreground 180s",
         "timeout --foreground",
+        "signal-fish-client v0.9.0",
+        "signal-fish-client-godot v0.9.0",
+        "HEALTHY: released Signal Fish client 0.9.0",
     ] {
         assert!(
             runner.contains(required),
@@ -22166,6 +22172,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "GODOT_TEMPLATES_SHA512:",
         "sha512sum --check",
         "cargo +\"$RUST_NIGHTLY\" clippy",
+        "rust-version: 1.94.0",
         "actions/upload-artifact@v7.0.1",
         "if: failure()",
     ] {

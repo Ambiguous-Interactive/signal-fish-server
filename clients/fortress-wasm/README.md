@@ -1,8 +1,9 @@
 # Fortress + Signal Fish Godot/WASM interoperability fixture
 
 This standalone fixture is the browser half of the issue-242 regression. It
-compiles the registry releases `fortress-rollback` 0.10.0 and
-`signal-fish-client` 0.8.0 into a Godot 4.5 GDExtension for
+compiles the registry releases `fortress-rollback` 0.10.0,
+`signal-fish-client` 0.9.0, and `signal-fish-client-godot` 0.9.0 into a Godot
+4.5 GDExtension for
 `wasm32-unknown-emscripten`, exports with the official no-thread web template,
 and drives two independent Chromium processes through the server built from the
 current checkout.
@@ -23,17 +24,12 @@ bash scripts/run-fortress-wasm-interop.sh
 ```
 
 The runner requires Emscripten 3.1.74, Godot 4.5 stable with its official web
-templates, and Rust `nightly-2026-03-01` plus `rust-src`. The exact released
-graph produces a reproducible `BUSTED` result. The complete exact-head reports
-reached confirmed frame 607, but client completions remained near one per
-callback and missed the healthy throughput gates despite multi-send adapter
-admission. Observed callback cadence also varies with runner load, and one peer
-recorded a wait recommendation; those failures are accepted only alongside the
-per-peer completion bottleneck. The characterization gate requires both peers
-to reach at least 600 confirmed frames, preserve every conservation and
-correctness gate, and avoid unrelated failures before the expected `BUSTED`
-result can pass CI. An unexpectedly healthy release is surfaced rather than
-silently classified as busted. P13 therefore remains open.
+templates, and Rust `nightly-2026-03-01` plus `rust-src`. The adapter's declared
+Rust floor is 1.94.0, intentionally higher than the standalone server crate's
+MSRV. The primary cell requires both peers to satisfy every healthy throughput,
+progress, queue-age, conservation, rollback, checksum, cadence, and runtime
+identity gate. Any missing report or invariant violation fails closed as
+`BUSTED`; only the complete two-peer result prints `HEALTHY`.
 
 The runner then executes a one-admission-per-callback negative control and
 requires the same healthy validator to classify that run as the expected

@@ -6,7 +6,7 @@ license = "MIT"
 authors = ["Ambiguous Interactive <eli@theambiguous.co>"]
 description = "Godot no-thread WASM Fortress interoperability fixture for Signal Fish Server"
 repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
-rust-version = "1.89.0"
+rust-version = "1.94.0"
 publish = false
 
 [lib]
@@ -17,7 +17,8 @@ fortress-rollback = "=0.10.0"
 godot = { version = "=0.4.5", features = ["api-custom", "experimental-wasm", "experimental-wasm-nothreads", "lazy-function-tables"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-signal-fish-client = { version = "=0.8.0", default-features = false, features = ["transport-godot"] }
+signal-fish-client = { version = "=0.9.0", default-features = false, features = ["polling-client"] }
+signal-fish-client-godot = "=0.9.0"
 uuid = { version = "1.23", features = ["serde", "v4", "js"] }
 web-time = "=1.1.0"
 

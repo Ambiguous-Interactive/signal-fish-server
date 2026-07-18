@@ -2,8 +2,9 @@
 # Signal Fish Server - MSRV Consistency Checker
 # https://github.com/Ambiguous-Interactive/signal-fish-server
 #
-# Validates that all configuration files use the same Rust version
-# as defined in Cargo.toml (the single source of truth for MSRV).
+# Validates that server configuration files use the Rust version defined in
+# Cargo.toml. The Godot/WASM fixture has a separate floor imposed by its exact
+# released adapter dependency.
 #
 # This script is run:
 # - By CI (`.github/workflows/ci.yml` msrv job)
@@ -47,6 +48,7 @@ if [ ! -f Cargo.toml ]; then
 fi
 
 MSRV=$(bash scripts/read-toml-string.sh Cargo.toml rust-version package || true)
+FORTRESS_WASM_MSRV_REQUIRED="1.94.0"
 
 if [ -z "$MSRV" ]; then
     echo -e "${RED}ERROR: Could not extract rust-version from Cargo.toml${NC}"
@@ -147,9 +149,12 @@ else
 fi
 
 # Check 6: clients/fortress-wasm/Cargo.toml (Godot/WASM interoperability fixture)
+# signal-fish-client-godot 0.9.0 requires Rust 1.94. Keep this standalone
+# fixture honest about that higher dependency-imposed floor; it builds with the
+# separately pinned nightly toolchain in fortress-wasm-interop.yml.
 if [ -f clients/fortress-wasm/Cargo.toml ]; then
     FORTRESS_WASM_MSRV=$(bash scripts/read-toml-string.sh clients/fortress-wasm/Cargo.toml rust-version package || true)
-    check_file "clients/fortress-wasm/Cargo.toml" "$MSRV" "$FORTRESS_WASM_MSRV" "rust-version"
+    check_file "clients/fortress-wasm/Cargo.toml" "$FORTRESS_WASM_MSRV_REQUIRED" "$FORTRESS_WASM_MSRV" "rust-version"
 else
     check_missing "clients/fortress-wasm/Cargo.toml"
     FAILED=$((FAILED + 1))
@@ -203,7 +208,7 @@ if [ "$FAILED" -ne 0 ]; then
     echo "   rust-version = \"$MSRV\""
     echo ""
     echo "6. Update clients/fortress-wasm/Cargo.toml:"
-    echo "   rust-version = \"$MSRV\""
+    echo "   rust-version = \"$FORTRESS_WASM_MSRV_REQUIRED\""
     echo ""
     echo "7. Update .devcontainer/Dockerfile (optional):"
     echo "   # Project MSRV: $MSRV"
@@ -214,6 +219,7 @@ if [ "$FAILED" -ne 0 ]; then
 else
     echo -e "${GREEN}SUCCESS${NC}: All $CHECKS MSRV consistency checks passed ✓"
     echo ""
-    echo "All configuration files are consistent with MSRV: $MSRV"
+    echo "All server configuration files are consistent with MSRV: $MSRV"
+    echo "Godot/WASM fixture is consistent with adapter MSRV: $FORTRESS_WASM_MSRV_REQUIRED"
     exit 0
 fi

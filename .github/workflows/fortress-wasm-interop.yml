@@ -1,4 +1,4 @@
-# Exact-release issue-242 reproduction in two genuine Godot no-thread WASM
+# Exact-release issue-242 acceptance in two genuine Godot no-thread WASM
 # exports. Godot downloads are cached only under their official SHA-512 values;
 # Chromium is installed fresh from the repository's exact npm lockfile.
 
@@ -134,7 +134,7 @@ jobs:
             --target wasm32-unknown-emscripten \
             --release \
             -- -D warnings
-      - name: Characterize released graph plus expected-busted control
+      - name: Verify released graph plus expected-busted control
         env:
           INSTALL_PLAYWRIGHT_DEPS: "1"
         run: bash scripts/run-fortress-wasm-interop.sh
@@ -161,4 +161,4 @@ jobs:
         with:
           manifest-path: clients/fortress-wasm/Cargo.toml
           arguments: --all-features
-          rust-version: 1.89.0
+          rust-version: 1.94.0

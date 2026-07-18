@@ -674,11 +674,10 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-fish-client"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a99859e8e40cc1cdf242c46986d347ee77c4a7aa0bf81f23f7fcce469512e590"
+checksum = "d4a0c8576d40f08c65d9fcac178922d2bd285925b5c532efd12be0dc8d5f7d93"
 dependencies = [
- "godot",
  "rmp",
  "rmp-serde",
  "serde",
@@ -691,6 +690,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-fish-client-godot"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b55d64089536052fa79b97ad4d4f1679a8a8df6534fe7a8e7b1085e0d41bfab"
+dependencies = [
+ "godot",
+ "signal-fish-client",
+ "tracing",
+]
+
+[[package]]
 name = "signal-fish-fortress-wasm-interop"
 version = "0.1.0"
 dependencies = [
@@ -699,6 +709,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-fish-client",
+ "signal-fish-client-godot",
  "uuid",
  "web-time",
 ]

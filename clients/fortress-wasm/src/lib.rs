@@ -11,9 +11,9 @@ use relay::{InboundRelayFrame, RelaySocket};
 use serde::{Deserialize, Serialize};
 use signal_fish_client::protocol::GameDataEncoding;
 use signal_fish_client::{
-    GodotWebSocketTransport, JoinRoomParams, SignalFishConfig, SignalFishError, SignalFishEvent,
-    SignalFishPollingClient,
+    JoinRoomParams, SignalFishConfig, SignalFishError, SignalFishEvent, SignalFishPollingClient,
 };
+use signal_fish_client_godot::GodotWebSocketTransport;
 use uuid::Uuid;
 use web_time::{Duration, Instant};
 use workload::{
@@ -22,11 +22,12 @@ use workload::{
     MIN_COMPLETED_MESSAGES_PER_SECOND, NOMINAL_FPS, TARGET_CONFIRMED_FRAMES,
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const MIN_ACTIVE_CALLBACKS: u64 = 600;
 const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;
 const RUNTIME_DEADLINE: Duration = Duration::from_secs(90);
-const SIGNAL_FISH_CLIENT_VERSION: &str = "0.8.0";
+const SIGNAL_FISH_CLIENT_VERSION: &str = "0.9.0";
+const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = "0.9.0";
 const FORTRESS_ROLLBACK_VERSION: &str = "0.10.0";
 const GODOT_RUST_VERSION: &str = "0.4.5";
 const WASM_TARGET: &str = "wasm32-unknown-emscripten";
@@ -123,6 +124,7 @@ struct Report {
     browser_artifact: String,
     build_sha: String,
     signal_fish_client_version: &'static str,
+    signal_fish_client_godot_version: &'static str,
     fortress_rollback_version: &'static str,
     godot_rust_version: &'static str,
     godot_runtime: GodotRuntimeIdentity,
@@ -633,6 +635,7 @@ impl Runtime {
             browser_artifact: self.config.browser_artifact.clone(),
             build_sha: self.config.build_sha.clone(),
             signal_fish_client_version: SIGNAL_FISH_CLIENT_VERSION,
+            signal_fish_client_godot_version: SIGNAL_FISH_CLIENT_GODOT_VERSION,
             fortress_rollback_version: FORTRESS_ROLLBACK_VERSION,
             godot_rust_version: GODOT_RUST_VERSION,
             godot_runtime: self.config.godot_runtime.clone(),
