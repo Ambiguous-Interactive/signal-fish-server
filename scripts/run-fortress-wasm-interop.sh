@@ -86,10 +86,19 @@ BUILD_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 readonly BUILD_SHA
 
 npm --prefix "${REPO_ROOT}/clients/browser" ci
+browser_name="${FORTRESS_WASM_BROWSER:-chromium}"
+readonly browser_name
+case "${browser_name}" in
+    chromium | firefox) ;;
+    *)
+        printf 'BUSTED: unsupported Fortress WASM browser: %s\n' "${browser_name}" >&2
+        exit 1
+        ;;
+esac
 if [[ "${INSTALL_PLAYWRIGHT_DEPS:-0}" == "1" ]]; then
-    node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install --with-deps chromium
+    node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install --with-deps "${browser_name}"
 else
-    node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install chromium
+    node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install "${browser_name}"
 fi
 
 timeout --foreground 180s node "${FIXTURE_ROOT}/harness.mjs" \
