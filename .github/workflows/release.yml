@@ -3,7 +3,7 @@
 # Publishes the crate to crates.io and creates a GitHub Release with changelog.
 #
 # Runs on:
-#   - Manual workflow dispatch (with version input)
+#   - Manual workflow dispatch from the default branch (version derived from Cargo.toml)
 #   - Tag pushes matching v* pattern
 #
 # Release gating:
@@ -27,24 +27,21 @@
 # Steps:
 #   1. Resolve one version/source identity and validate Cargo.toml + CHANGELOG
 #   2. Preflight: verify CI and doc-validation passed on that exact commit
-#   3. Create or validate the immutable annotated Git tag
-#   4. Call Docker Publish directly and verify version tags/platforms/OCI labels
-#   5. Dry-run and idempotently publish the crate from the tagged commit
-#   6. Generate SBOM (CycloneDX JSON) for supply-chain provenance
-#   7. Create/verify the GitHub Release and record the GHCR digest in its notes
-#   8. build-binaries: cross-compile standalone binaries for every supported
+#   3. Require crates.io credentials and dry-run the exact package
+#   4. Create or validate the immutable annotated Git tag
+#   5. Call Docker Publish directly and verify version tags/platforms/OCI labels
+#   6. Idempotently publish the crate from a clean tagged checkout
+#   7. Generate SBOM (CycloneDX JSON) for supply-chain provenance
+#   8. Create/verify the GitHub Release and record the GHCR digest in its notes
+#   9. build-binaries: cross-compile standalone binaries for every supported
 #      OS/arch (Linux/macOS/Windows x86_64+aarch64) in parallel with publish
-#   9. attach-binaries: download all binary artifacts and attach them (with
+#  10. attach-binaries: download all binary artifacts and attach them (with
 #      SHA-256 checksums) to the GitHub Release in a single upload
 
 name: Release - Publish Crate
 
 on:
   workflow_dispatch:
-    inputs:
-      release_version:
-        description: "Version to publish, e.g. 0.1.0 (must match Cargo.toml, no 'v' prefix)"
-        required: true
   push:
     tags:
       - "v*"
@@ -54,7 +51,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.release_version) || github.ref_name }}
+  group: release-publish
   cancel-in-progress: false
 
 env:
@@ -80,56 +77,11 @@ jobs:
       - name: Validate canonical release identity
         id: release
         shell: bash
-        run: |
-          set -euo pipefail
-
-          source_revision=$(git rev-parse "HEAD^{commit}")
-          cargo_version=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
-          if [ -z "$cargo_version" ]; then
-            echo "ERROR: Could not extract [package].version from Cargo.toml." >&2
-            exit 1
-          fi
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ github.event.inputs.release_version }}"
-            tag="v${version}"
-          else
-            tag="${GITHUB_REF#refs/tags/}"
-            version="${tag#v}"
-          fi
-
-          if [ "$version" != "$cargo_version" ] || [ "$tag" != "v${cargo_version}" ]; then
-            echo "ERROR: Workflow version ($version), Git tag ($tag), and Cargo.toml ($cargo_version) disagree." >&2
-            exit 1
-          fi
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: Release version is not canonical semantic version text: $version" >&2
-            exit 1
-          fi
-          escaped_version=${version//./\\.}
-          if ! grep -Eq "^## \\[${escaped_version}\\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md; then
-            echo "ERROR: CHANGELOG.md has no ## [${version}] release section, with or without a date." >&2
-            exit 1
-          fi
-
-          if [ "${{ github.event_name }}" = "push" ]; then
-            git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"
-            if [ "$(git cat-file -t "refs/tags/${tag}" 2>/dev/null || true)" != "tag" ]; then
-              echo "ERROR: Direct release tag $tag must be annotated, not lightweight." >&2
-              exit 1
-            fi
-            tag_revision=$(git rev-parse "refs/tags/${tag}^{commit}")
-            if [ "$tag_revision" != "$source_revision" ]; then
-              echo "ERROR: $tag resolves to $tag_revision, not release commit $source_revision." >&2
-              exit 1
-            fi
-          fi
-
-          {
-            echo "version=$version"
-            echo "tag=$tag"
-            echo "source_revision=$source_revision"
-          } >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_EVENT_REF: ${{ github.ref }}
+        run: bash scripts/resolve-release-source.sh
 
   preflight:
     name: Preflight
@@ -308,9 +260,84 @@ jobs:
 
           echo "All required CI checks passed. Proceeding with release."
 
+  publication-readiness:
+    name: Publication readiness
+    needs: [resolve-release, preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      crate_exists: ${{ steps.crate.outputs.exists }}
+    steps:
+      - name: Checkout publication tooling
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: publication-tools
+          sparse-checkout: |
+            scripts/check-clean-release-worktree.sh
+            scripts/check-crates-io-release.sh
+            scripts/read-toml-string.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Checkout exact release source
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-release.outputs.source_revision }}
+          path: source
+
+      - name: Check for an idempotent crates.io retry
+        id: crate
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.resolve-release.outputs.version }}
+          RELEASE_SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
+        run: bash publication-tools/scripts/check-crates-io-release.sh
+
+      - name: Require crates.io token
+        if: steps.crate.outputs.exists != 'true'
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "ERROR: CRATES_IO_TOKEN is required before release artifacts are published." >&2
+            exit 1
+          fi
+
+      - name: Read Rust toolchain
+        id: readiness-toolchain
+        shell: bash
+        run: |
+          channel=$(bash publication-tools/scripts/read-toml-string.sh source/rust-toolchain.toml channel toolchain || true)
+          if [ -z "$channel" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml." >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.readiness-toolchain.outputs.channel }}
+
+      - name: Validate publish package
+        run: cargo publish --locked --dry-run
+        working-directory: source
+
+      - name: Verify dry-run preserved a clean checkout
+        shell: bash
+        working-directory: source
+        run: bash ../publication-tools/scripts/check-clean-release-worktree.sh
+
   ensure-tag:
     name: Ensure immutable annotated tag
-    needs: [resolve-release, preflight]
+    needs: [resolve-release, publication-readiness]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -377,21 +404,34 @@ jobs:
       source_revision: ${{ needs.resolve-release.outputs.source_revision }}
 
   publish:
-    needs: [resolve-release, publish-container]
+    needs: [resolve-release, publication-readiness, publish-container]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
+      - name: Checkout publication tooling
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: publication-tools
+          sparse-checkout: |
+            scripts/check-clean-release-worktree.sh
+            scripts/read-toml-string.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Checkout repository
         uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
           ref: ${{ needs.resolve-release.outputs.source_revision }}
+          path: source
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
         run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          CHANNEL=$(bash publication-tools/scripts/read-toml-string.sh source/rust-toolchain.toml channel toolchain || true)
           if [ -z "$CHANNEL" ]; then
             echo "ERROR: Could not extract channel from rust-toolchain.toml"
             exit 1
@@ -433,71 +473,19 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: publish-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            source/target
+          key: publish-${{ runner.os }}-cargo-${{ hashFiles('source/**/Cargo.lock') }}
           restore-keys: |
             publish-${{ runner.os }}-cargo-
 
-      - name: Publish (dry-run)
-        run: cargo publish --locked --dry-run
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.working == 'true' && 'sccache' || '' }}
-          SCCACHE_GHA_ENABLED: ${{ steps.sccache-check.outputs.working == 'true' && 'true' || 'false' }}
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-          SCCACHE_STARTUP_NOTIFY_TIMEOUT: "60"
-          SCCACHE_IDLE_TIMEOUT: "0"
-
-      - name: Check for an idempotent crates.io retry
-        id: crate
+      - name: Verify clean checkout before publication
         shell: bash
-        env:
-          VERSION: ${{ needs.resolve-release.outputs.version }}
-          SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
-        run: |
-          set -euo pipefail
-
-          api_url="https://crates.io/api/v1/crates/signal-fish-server/${VERSION}"
-          user_agent="signal-fish-server-release-workflow (https://github.com/${GITHUB_REPOSITORY})"
-          status=$(curl --user-agent "$user_agent" --retry 3 --retry-all-errors --silent --show-error \
-            --output crate-version.json --write-out '%{http_code}' "$api_url")
-          case "$status" in
-            404)
-              echo "exists=false" >> "$GITHUB_OUTPUT"
-              ;;
-            200)
-              checksum=$(jq -r '.version.checksum // empty' crate-version.json)
-              if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
-                echo "ERROR: crates.io returned no valid checksum for signal-fish-server ${VERSION}." >&2
-                exit 1
-              fi
-
-              crate_file="signal-fish-server-${VERSION}.crate"
-              curl --user-agent "$user_agent" --retry 3 --retry-all-errors --fail --silent --show-error \
-                --location --output "$crate_file" \
-                "https://crates.io/api/v1/crates/signal-fish-server/${VERSION}/download"
-              actual_checksum=$(sha256sum "$crate_file" | awk '{print $1}')
-              if [ "$actual_checksum" != "$checksum" ]; then
-                echo "ERROR: Downloaded crate checksum $actual_checksum does not match crates.io $checksum." >&2
-                exit 1
-              fi
-
-              vcs_info=$(tar -xOf "$crate_file" --wildcards '*/.cargo_vcs_info.json' 2>/dev/null || true)
-              published_revision=$(printf '%s' "$vcs_info" | jq -r '.git.sha1 // empty' 2>/dev/null || true)
-              if [ "$published_revision" != "$SOURCE_REVISION" ]; then
-                echo "ERROR: signal-fish-server ${VERSION} already exists on crates.io from revision '$published_revision', expected '$SOURCE_REVISION'." >&2
-                exit 1
-              fi
-              echo "Crate ${VERSION} already exists from ${SOURCE_REVISION}; retry is safe."
-              echo "exists=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "ERROR: crates.io version lookup failed closed with HTTP ${status}." >&2
-              exit 1
-              ;;
-          esac
+        working-directory: source
+        run: bash ../publication-tools/scripts/check-clean-release-worktree.sh
 
       - name: Publish to crates.io
-        if: steps.crate.outputs.exists != 'true'
+        if: needs.publication-readiness.outputs.crate_exists != 'true'
+        working-directory: source
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: cargo publish --locked
@@ -510,10 +498,12 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         id: sbom
         run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
+        working-directory: source
         continue-on-error: true
 
       - name: Extract changelog for release
         id: changelog
+        working-directory: source
         run: |
           VERSION="${{ needs.resolve-release.outputs.version }}"
           # Extract the section for this version from CHANGELOG.md
@@ -572,7 +562,7 @@ jobs:
           tag_name: ${{ needs.resolve-release.outputs.tag }}
           name: ${{ needs.resolve-release.outputs.tag }}
           target_commitish: ${{ needs.resolve-release.outputs.source_revision }}
-          body_path: release_notes.md
+          body_path: source/release_notes.md
           draft: false
           prerelease: false
         env:
@@ -583,7 +573,7 @@ jobs:
         uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ needs.resolve-release.outputs.tag }}
-          files: sbom.cdx.json
+          files: source/sbom.cdx.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

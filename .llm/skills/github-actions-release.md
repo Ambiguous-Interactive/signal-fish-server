@@ -294,6 +294,7 @@ redundant here and strictly worse, because `always()` also runs on cancellation
 ## Related Skills
 
 - [GitHub Actions Config Tests](./github-actions-config-tests.md) — Tests that validate release workflow correctness
+- [Release Publication Safety](./github-actions-release-publication-safety.md) — Retry identity and clean worktrees
 - [GitHub Actions Scheduled Workflows](./github-actions-scheduled-workflows.md) — Cron schedules, job guards
 - [GitHub Actions Workflow Config](./github-actions-workflow-config.md) — Path filters, permissions, concurrency
 - [CI CD Troubleshooting Categories](./ci-cd-troubleshooting-categories.md) — Diagnosing CI failures
