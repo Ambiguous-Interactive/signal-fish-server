@@ -51,4 +51,4 @@ against the real server binary.
 | Fortress compatibility cell | Runtime | Result |
 |---|---|---|
 | Native | Two Rust processes over loopback WebSockets | CI-enforced healthy |
-| WASM | Godot 4.5 no-thread export in two independent headless-Chromium processes | Released 0.9.0 client/adapter must pass every healthy gate; Chromium only |
+| WASM | Godot 4.5 no-thread export in two independent headless-Chromium processes | CI-enforced healthy with released 0.9.0 client/adapter; Chromium only |

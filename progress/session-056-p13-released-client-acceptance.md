@@ -46,3 +46,17 @@ and downstream Fortress waits appeared. The follow-up keeps the real Godot
 main loop and 60 Hz engine cap but disables unused blank-frame rendering and
 Chromium's headless frame/vsync cap. This removes fixture rendering overhead
 without relaxing any acceptance threshold or introducing a synthetic clock.
+
+## Hosted result
+
+Fortress WASM workflow run `29659394663` passed on exact head `652900b`. The
+primary two-process Godot 4.5 no-thread Chromium cell printed `HEALTHY`, proving
+that both complete reports passed every existing 60 Hz cadence, 120 completed
+messages/s, confirmation, rollback, checksum, queue, conservation, loss, and
+runtime-identity invariant. The capped run then printed the expected `BUSTED`
+verdict with 22 healthy-gate violations, preserving a non-vacuous negative
+control. P13 is complete for the explicitly scoped Chromium platform cell.
+
+Cursor Bugbot found no issues on the exact head after its earlier undefined
+negative-control diagnostic finding was fixed. Copilot responded that the
+requesting user's review quota was exhausted, and no review threads remain.
