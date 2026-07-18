@@ -52,7 +52,8 @@ mkdir -p "${GODOT_BIN_DIR}" "${EXPORT_DIR}" "${ARTIFACT_DIR}"
 
 feature_tree="${ARTIFACT_DIR}/cargo-feature-tree.txt"
 cargo +"${NIGHTLY}" tree --manifest-path "${MANIFEST_PATH}" --locked -e features >"${feature_tree}"
-grep -F 'signal-fish-client v0.8.0' "${feature_tree}" >/dev/null
+grep -F 'signal-fish-client v0.9.0' "${feature_tree}" >/dev/null
+grep -F 'signal-fish-client-godot v0.9.0' "${feature_tree}" >/dev/null
 grep -F 'fortress-rollback v0.10.0' "${feature_tree}" >/dev/null
 grep -F 'godot v0.4.5' "${feature_tree}" >/dev/null
 if grep -Eq 'transport-websocket-emscripten|sync-send' "${feature_tree}"; then
@@ -96,4 +97,4 @@ timeout --foreground 180s node "${FIXTURE_ROOT}/harness.mjs" \
 timeout --foreground 180s node "${FIXTURE_ROOT}/harness.mjs" \
     negative "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
 
-printf 'BUSTED (expected): released Signal Fish client 0.8.0 does not satisfy the Godot no-thread WASM healthy gates\n'
+printf 'HEALTHY: released Signal Fish client 0.9.0 satisfies the Godot no-thread WASM healthy gates\n'

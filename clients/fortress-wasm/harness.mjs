@@ -20,7 +20,8 @@ const reportKeys = [
   "schema_version", "status", "origin", "runtime_error", "role", "run_mode",
   "instance_nonce", "expected_remote_nonce", "player_id", "remote_player_id", "room_code",
   "browser_process_id", "browser_artifact", "build_sha", "signal_fish_client_version",
-  "fortress_rollback_version", "godot_rust_version", "godot_runtime", "target", "target_os", "godot_threads",
+  "signal_fish_client_godot_version", "fortress_rollback_version", "godot_rust_version",
+  "godot_runtime", "target", "target_os", "godot_threads",
   "worker_count", "callback_count", "poll_count", "active_callback_count", "callback_intervals",
   "acceptance_thresholds", "max_admissions_per_callback", "current_frame", "confirmed_frame",
   "game_frame", "game_checksum", "frames_advanced", "rollback_count", "max_rollback_depth",
@@ -127,7 +128,7 @@ try {
   });
   const room = await waitForGlobal(creator.page, "__FORTRESS_ROOM_READY", 15_000);
   assertExactKeys(room, ["schema_version", "role", "instance_nonce", "room_code"], "room-ready");
-  assert(room.schema_version === 1, "room-ready schema mismatch");
+  assert(room.schema_version === 2, "room-ready schema mismatch");
   assert(room.role === "creator", "room-ready role mismatch");
   assert(room.instance_nonce === creatorNonce, "room-ready nonce mismatch");
   assert(typeof room.room_code === "string" && room.room_code.length > 0, "empty room code");
@@ -171,37 +172,20 @@ try {
   if (mode === "released") {
     for (const [name, report, violations] of peerHealth) {
       assert(
-        report.confirmed_frame >= 600,
-        `${name}: released graph did not complete the full 600-confirmed-frame characterization`,
-      );
-      assert(
         report.max_admissions_per_callback > 1,
-        `${name}: released characterization never attempted multi-send admission`,
+        `${name}: released graph never attempted multi-send admission`,
       );
       assert(
         report.callback_intervals.mean_us >= 8_000,
-        `${name}: released characterization observed a synthetic/too-fast callback mean`,
-      );
-      assert(violations.length > 0, `${name}: released graph unexpectedly satisfied every P13 healthy gate`);
-      assert(
-        report.client_game_data_sent_during_run <= report.active_callback_count * 2,
-        `${name}: released graph did not reproduce the per-callback completion bottleneck`,
+        `${name}: released graph observed a synthetic/too-fast callback mean`,
       );
       assert(
-        report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120,
-        `${name}: released graph did not reproduce the completed-rate bottleneck`,
-      );
-      assert(
-        violations.every((violation) =>
-          /non-nominal callback mean|oldest queue age|stall_count|wait_recommendations|active wall time|completed rate|sends per callback/.test(
-            violation,
-          ),
-        ),
-        `${name}: released graph developed an unrelated healthy-gate failure:\n${violations.join("\n")}`,
+        violations.length === 0,
+        `${name}: released graph failed P13 healthy gates:\n${violations.join("\n")}`,
       );
     }
     process.stdout.write(
-      `BUSTED fortress-wasm expected released-client characterization (${healthyViolations.length} healthy-gate violations)\n`,
+      "HEALTHY fortress-wasm released-client interoperability\n",
     );
   } else {
     for (const [name, report, violations] of peerHealth) {
@@ -279,6 +263,8 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
     args: [
       "--disable-background-timer-throttling",
       "--disable-backgrounding-occluded-windows",
+      "--disable-frame-rate-limit",
+      "--disable-gpu-vsync",
       "--disable-renderer-backgrounding",
       "--disable-features=CalculateNativeWinOcclusion",
       "--enable-webgl",
@@ -318,7 +304,7 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
     },
     {
       config: {
-        schema_version: 1,
+        schema_version: 2,
         server_url: `ws://127.0.0.1:${serverPort}/v2/ws`,
         role,
         room_code: roomCode,
@@ -369,13 +355,14 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     ["joiner", joinerReport, joinerBrowser],
   ]) {
     assertExactKeys(report, reportKeys, `${name} report`);
-    assert(report.schema_version === 1 && report.status === "complete", `${name}: incomplete schema`);
+    assert(report.schema_version === 2 && report.status === "complete", `${name}: incomplete schema`);
     assert(report.origin === "rust-gdextension", `${name}: report did not originate in Rust`);
     assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
     assert(report.role === name, `${name}: role mismatch`);
     assert(report.room_code === roomCode, `${name}: room mismatch`);
     assert(report.build_sha === buildSha, `${name}: current-checkout identity mismatch`);
-    assert(report.signal_fish_client_version === "0.8.0", `${name}: client version drift`);
+    assert(report.signal_fish_client_version === "0.9.0", `${name}: client version drift`);
+    assert(report.signal_fish_client_godot_version === "0.9.0", `${name}: Godot adapter version drift`);
     assert(report.fortress_rollback_version === "0.10.0", `${name}: Fortress version drift`);
     assert(report.godot_rust_version === "0.4.5", `${name}: godot-rust version drift`);
     assertExactKeys(

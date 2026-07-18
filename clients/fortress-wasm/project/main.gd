@@ -10,6 +10,11 @@ var result_published := false
 
 
 func _ready() -> void:
+	# The fixture has no visual oracle. Avoid spending the shared runner's two
+	# browser CPU slices on blank-frame rendering, while retaining Godot's real
+	# main loop and a production-like 60 Hz engine cap for `_process` callbacks.
+	RenderingServer.set_render_loop_enabled(false)
+	Engine.max_fps = 60
 	var config_json := JavaScriptBridge.eval(
 		"JSON.stringify(globalThis.%s ?? null)" % CONFIG_KEY,
 		true,
@@ -62,7 +67,7 @@ func _publish_bridge_error(message: String) -> void:
 		return
 	result_published = true
 	var result := {
-		"schema_version": 1,
+		"schema_version": 2,
 		"status": "complete",
 		"runtime_error": message,
 		"origin": "gdscript-bootstrap-error",

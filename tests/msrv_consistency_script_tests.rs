@@ -7,6 +7,8 @@ use std::fs;
 
 const MATCHING_CLIENT_MANIFEST: &str = "[package]\nrust-version = \"1.88.0\"\n";
 const MISMATCHED_CLIENT_MANIFEST: &str = "[package]\nrust-version = \"1.87.0\"\n";
+const MATCHING_WASM_MANIFEST: &str = "[package]\nrust-version = \"1.94.0\"\n";
+const MISMATCHED_WASM_MANIFEST: &str = "[package]\nrust-version = \"1.93.0\"\n";
 const CLIENT_MANIFESTS: [&str; 3] = [
     "clients/native/Cargo.toml",
     "clients/fortress/Cargo.toml",
@@ -86,9 +88,8 @@ channel="1.88.0"
     ];
 
     for (name, cargo_toml, toolchain_toml, clippy_toml) in cases {
-        // All standalone Rust client manifests reuse the same `[package]`
-        // rust-version shape as the root manifest, so each whitespace variant
-        // exercises their parsers too.
+        // The native fixtures reuse the server floor. The Godot/WASM fixture
+        // independently pins the higher floor imposed by its released adapter.
         let (exit_code, output) = run_msrv_script_with_files(&[
             ("Cargo.toml", cargo_toml),
             ("rust-toolchain.toml", toolchain_toml),
@@ -96,7 +97,7 @@ channel="1.88.0"
             ("Dockerfile", "FROM rust:1.88-bookworm\n"),
             ("clients/native/Cargo.toml", cargo_toml),
             ("clients/fortress/Cargo.toml", cargo_toml),
-            ("clients/fortress-wasm/Cargo.toml", cargo_toml),
+            ("clients/fortress-wasm/Cargo.toml", MATCHING_WASM_MANIFEST),
         ]);
 
         assert_eq!(
@@ -104,7 +105,8 @@ channel="1.88.0"
             "case {name} should accept valid TOML whitespace variants.\nOutput:\n{output}"
         );
         assert!(
-            output.contains("All configuration files are consistent with MSRV: 1.88.0"),
+            output.contains("All server configuration files are consistent with MSRV: 1.88.0")
+                && output.contains("Godot/WASM fixture is consistent with adapter MSRV: 1.94.0"),
             "case {name} should parse the MSRV consistently.\nOutput:\n{output}"
         );
     }
@@ -122,7 +124,7 @@ fn test_msrv_script_reports_mismatch_after_tolerant_parsing() {
         ("Dockerfile", "FROM rust:1.88-bookworm\n"),
         ("clients/native/Cargo.toml", MATCHING_CLIENT_MANIFEST),
         ("clients/fortress/Cargo.toml", MATCHING_CLIENT_MANIFEST),
-        ("clients/fortress-wasm/Cargo.toml", MATCHING_CLIENT_MANIFEST),
+        ("clients/fortress-wasm/Cargo.toml", MATCHING_WASM_MANIFEST),
     ]);
 
     assert_eq!(
@@ -145,10 +147,11 @@ fn test_msrv_script_reports_each_client_manifest_mismatch() {
             ("Dockerfile", "FROM rust:1.88-bookworm\n"),
         ];
         files.extend(CLIENT_MANIFESTS.map(|path| {
-            let contents = if path == mismatched_path {
-                MISMATCHED_CLIENT_MANIFEST
-            } else {
-                MATCHING_CLIENT_MANIFEST
+            let contents = match (path, path == mismatched_path) {
+                ("clients/fortress-wasm/Cargo.toml", true) => MISMATCHED_WASM_MANIFEST,
+                ("clients/fortress-wasm/Cargo.toml", false) => MATCHING_WASM_MANIFEST,
+                (_, true) => MISMATCHED_CLIENT_MANIFEST,
+                (_, false) => MATCHING_CLIENT_MANIFEST,
             };
             (path, contents)
         }));
@@ -180,7 +183,14 @@ fn test_msrv_script_fails_when_each_client_manifest_is_missing() {
             CLIENT_MANIFESTS
                 .into_iter()
                 .filter(|path| *path != missing_path)
-                .map(|path| (path, MATCHING_CLIENT_MANIFEST)),
+                .map(|path| {
+                    let manifest = if path == "clients/fortress-wasm/Cargo.toml" {
+                        MATCHING_WASM_MANIFEST
+                    } else {
+                        MATCHING_CLIENT_MANIFEST
+                    };
+                    (path, manifest)
+                }),
         );
 
         let (exit_code, output) = run_msrv_script_with_files(&files);
@@ -226,7 +236,7 @@ fn test_msrv_script_parses_dockerfile_from_line_variants() {
             ("Dockerfile", dockerfile),
             ("clients/native/Cargo.toml", MATCHING_CLIENT_MANIFEST),
             ("clients/fortress/Cargo.toml", MATCHING_CLIENT_MANIFEST),
-            ("clients/fortress-wasm/Cargo.toml", MATCHING_CLIENT_MANIFEST),
+            ("clients/fortress-wasm/Cargo.toml", MATCHING_WASM_MANIFEST),
         ]);
 
         assert_eq!(

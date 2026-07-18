@@ -6,8 +6,8 @@ documented protocol end to end against the real server and serve as executable d
 Each client is a **standalone package OUTSIDE the root `signal-fish-server` package** — its own `Cargo.lock`, its
 own `deny.toml`, its own CI job — so the server crate's MSRV build, lockfile, and coverage gates are untouched,
 and the root `Cargo.toml` excludes the whole `clients/` tree from `cargo package`, so the published server crate
-ships none of it. (The root panic/timeout policy scans do walk the client sources, and the root MSRV-consistency
-check pins the native client's `rust-version` to the server's — those root disciplines apply identically.)
+ships none of it. (The root panic/timeout policy scans do walk the client sources. The native fixtures track the
+server MSRV; the Godot/WASM fixture declares the higher floor required by its exact released adapter.)
 See [ADR-0004](../docs/adr/0004-native-reference-client.md) for the full rationale and PLAN.md P7 for the roadmap
 context.
 
@@ -18,7 +18,7 @@ context.
 | Native | [`native/`](native/README.md) | Rust + [webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.17 (real DTLS/SCTP data channels) | ✅ In-repo, CI-enforced (`.github/workflows/webrtc-interop.yml`) |
 | Browser | [`browser/`](browser/README.md) | TypeScript + real headless-Chromium `RTCPeerConnection` (playwright-core) | ✅ In-repo, CI-enforced (`.github/workflows/browser-interop.yml`) |
 | Fortress | [`fortress/`](fortress/README.md) | Rust + `fortress-rollback` 0.10.0 + released Signal Fish Rust client 0.8.0 | ✅ In-repo issue-242 regression, CI-enforced (`.github/workflows/fortress-interop.yml`) |
-| Fortress WASM | [`fortress-wasm/`](fortress-wasm/README.md) | Godot 4.5 no-thread WASM + Fortress 0.10.0 + released Rust client 0.8.0 | ⚠️ CI-enforced expected-`BUSTED` Chromium characterization (`.github/workflows/fortress-wasm-interop.yml`) |
+| Fortress WASM | [`fortress-wasm/`](fortress-wasm/README.md) | Godot 4.5 no-thread WASM + Fortress 0.10.0 + released client/adapter 0.9.0 | CI-enforced healthy Chromium acceptance plus expected-`BUSTED` negative control (`.github/workflows/fortress-wasm-interop.yml`) |
 
 Both clients speak the same JSONL stdout event contract and exit codes (the
 [native README](native/README.md) is canonical), so one Rust interop harness asserts over native and browser
@@ -51,4 +51,4 @@ against the real server binary.
 | Fortress compatibility cell | Runtime | Result |
 |---|---|---|
 | Native | Two Rust processes over loopback WebSockets | CI-enforced healthy |
-| WASM | Godot 4.5 no-thread export in two independent headless-Chromium processes | `BUSTED`: released 0.8.0 completes about one send/callback; P13 remains open; Chromium only |
+| WASM | Godot 4.5 no-thread export in two independent headless-Chromium processes | CI-enforced healthy with released 0.9.0 client/adapter; Chromium only |

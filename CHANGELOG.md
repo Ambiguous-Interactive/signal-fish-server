@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Advance the Fortress/Godot no-thread WASM acceptance gate to the exact
+  crates.io releases `signal-fish-client` 0.9.0 and
+  `signal-fish-client-godot` 0.9.0. The primary two-browser cell now requires
+  every P13 health invariant to pass, while the one-admission-per-callback
+  negative control must remain explicitly `BUSTED`.
+
 ## [0.5.0] - 2026-07-18
 
 ### Fixed
