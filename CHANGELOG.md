@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-18
+
 ### Added
 
 - Add a manual **Prepare Release** workflow with a `patch` / `minor` / `major`
@@ -1222,7 +1224,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional TLS/mTLS support via `rustls` (`tls` feature).
 - Optional legacy full-mesh mode (`legacy-fullmesh` feature).
 
-[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.1...v0.2.0
