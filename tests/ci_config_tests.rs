@@ -21984,6 +21984,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     );
     for required in [
         "Engine.get_version_info()",
+        "RenderingServer.set_render_loop_enabled(false)",
+        "Engine.max_fps = 60",
         "config[\"schema_version\"] = int(",
         "config[\"browser_process_id\"] = int(",
         "config[\"godot_runtime\"]",
@@ -21997,6 +21999,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
 
     for required in [
         "chromium.launchServer",
+        "\"--disable-frame-rate-limit\"",
+        "\"--disable-gpu-vsync\"",
         "creatorReport.browser_process_id !== joinerReport.browser_process_id",
         "crossOriginIsolated === false",
         "sharedArrayBufferType === \"undefined\"",

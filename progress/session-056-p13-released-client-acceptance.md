@@ -36,3 +36,13 @@ Focused local verification passed:
 
 The authoritative completion evidence is the dedicated real Godot 4.5
 no-thread Emscripten/two-Chromium workflow on the exact PR head.
+
+The first hosted 0.9.0 run disproved the old completion-bottleneck prediction:
+both peers transferred more than two sends per callback, drained six-frame
+peaks with about 42 ms maximum queue age, and preserved every exact ledger.
+However, two blank Godot render loops received only about 24 callbacks/second
+on the shared runner, so wall-clock throughput missed the unchanged 120/s gate
+and downstream Fortress waits appeared. The follow-up keeps the real Godot
+main loop and 60 Hz engine cap but disables unused blank-frame rendering and
+Chromium's headless frame/vsync cap. This removes fixture rendering overhead
+without relaxing any acceptance threshold or introducing a synthetic clock.

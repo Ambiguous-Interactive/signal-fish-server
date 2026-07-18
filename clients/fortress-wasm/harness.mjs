@@ -263,6 +263,8 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
     args: [
       "--disable-background-timer-throttling",
       "--disable-backgrounding-occluded-windows",
+      "--disable-frame-rate-limit",
+      "--disable-gpu-vsync",
       "--disable-renderer-backgrounding",
       "--disable-features=CalculateNativeWinOcclusion",
       "--enable-webgl",
