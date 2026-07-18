@@ -168,6 +168,7 @@ try {
     ["creator", creatorReport, healthViolations("creator", creatorReport)],
     ["joiner", joinerReport, healthViolations("joiner", joinerReport)],
   ];
+  const healthyViolations = peerHealth.flatMap(([, , violations]) => violations);
   if (mode === "released") {
     for (const [name, report, violations] of peerHealth) {
       assert(

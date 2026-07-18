@@ -22016,6 +22016,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "relay_sent_sequence_hash === joinerReport.relay_received_sequence_hash",
         "joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence",
         "joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence",
+        "const healthyViolations = peerHealth.flatMap",
         "BUSTED fortress-wasm expected negative control",
         "HEALTHY fortress-wasm released-client interoperability",
     ] {
