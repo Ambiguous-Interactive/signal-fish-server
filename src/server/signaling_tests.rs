@@ -2610,6 +2610,100 @@ async fn reconnect_room_full_failure_releases_claim_for_retry() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_during_teardown_preserves_token_for_retry() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+
+    let room_id = create_db_room(&server, existing).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(reconnecting, "reconnecting"))
+        .await
+        .expect("add reconnecting player");
+    for player_id in [existing, reconnecting] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player_id, room_id)
+            .await;
+    }
+
+    // Production v3 joins pre-issue the token that disconnect later arms. Seed
+    // that same state directly so the test knows the exact wire token before
+    // opening the deterministic teardown gate.
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager.pre_issue_token(reconnecting, room_id).await;
+    let gate = server.install_reconnect_teardown_test_gate();
+    let teardown = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            server.disconnect_client(&reconnecting).await;
+        })
+    };
+
+    timeout(Duration::from_secs(5), gate.wait_until_armed())
+        .await
+        .expect("disconnect must arm the reconnect record before the deterministic gate");
+    assert!(
+        manager.has_pending_reconnection(&reconnecting).await,
+        "the gated teardown must have armed a pending reconnect record"
+    );
+    assert!(
+        server.connection_manager.has_client(&reconnecting),
+        "the old connection must still be registered at the teardown boundary"
+    );
+
+    let first_attempt = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        !first_attempt,
+        "reconnect during teardown must reject while the old connection is registered"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::PlayerAlreadyConnected);
+        }
+        other => panic!("expected PlayerAlreadyConnected during teardown, got {other:?}"),
+    }
+    manager
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("PlayerAlreadyConnected must leave the reconnect token valid");
+
+    gate.release();
+    timeout(Duration::from_secs(5), teardown)
+        .await
+        .expect("released teardown must complete")
+        .expect("teardown task must not panic");
+    assert!(
+        !server.connection_manager.has_client(&reconnecting),
+        "released teardown must remove the old connection"
+    );
+    assert!(
+        manager.has_pending_reconnection(&reconnecting).await,
+        "completed teardown must leave the unconsumed record pending"
+    );
+
+    let second_attempt = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        second_attempt,
+        "the same token must succeed after teardown completes"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+            assert_eq!(payload.room_id, room_id);
+        }
+        other => panic!("expected Reconnected after teardown retry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_reassign_failure_rolls_back_membership_and_releases_claim() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;

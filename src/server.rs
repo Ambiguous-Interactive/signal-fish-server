@@ -23,6 +23,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 use tokio::time::Duration;
@@ -115,6 +117,8 @@ pub struct EnhancedGameServer {
     pending_durable_player_detaches: Arc<DashMap<(RoomId, PlayerId), ()>>,
     #[cfg(test)]
     fail_retain_room_publication_snapshot: AtomicBool,
+    #[cfg(test)]
+    reconnect_teardown_test_gate: StdMutex<Option<Arc<ReconnectTeardownTestGate>>>,
     /// Spectator lifecycle manager
     spectator_service: SpectatorService,
     /// Transport-level security options (TLS, token binding, etc.)
@@ -131,6 +135,28 @@ pub struct EnhancedGameServer {
     /// until both socket halves have completed their bounded close path.
     active_socket_tasks: AtomicUsize,
     active_socket_tasks_notify: Notify,
+}
+
+/// Test-only synchronization point for the narrow interval after a reconnect
+/// record is armed but before the old connection is removed. Production has no
+/// hook or branch at this boundary; `cfg(test)` keeps the deterministic H6 race
+/// harness out of release builds.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ReconnectTeardownTestGate {
+    armed: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl ReconnectTeardownTestGate {
+    pub(crate) async fn wait_until_armed(&self) {
+        self.armed.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 #[derive(Debug, Error)]
@@ -339,6 +365,8 @@ impl EnhancedGameServer {
             pending_durable_player_detaches: Arc::new(DashMap::new()),
             #[cfg(test)]
             fail_retain_room_publication_snapshot: AtomicBool::new(false),
+            #[cfg(test)]
+            reconnect_teardown_test_gate: StdMutex::new(None),
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
@@ -704,6 +732,11 @@ impl EnhancedGameServer {
             self.discard_pre_issued_reconnection_token(player_id).await;
         }
 
+        #[cfg(test)]
+        if registered_reconnect {
+            self.pause_after_reconnect_registration_for_test().await;
+        }
+
         if self.is_draining() {
             self.connection_manager
                 .request_close_for(player_id, CloseReason::Shutdown);
@@ -801,6 +834,29 @@ impl EnhancedGameServer {
     pub(crate) fn fail_retain_room_publication_snapshot_for_test(&self, fail: bool) {
         self.fail_retain_room_publication_snapshot
             .store(fail, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_reconnect_teardown_test_gate(&self) -> Arc<ReconnectTeardownTestGate> {
+        let gate = Arc::new(ReconnectTeardownTestGate::default());
+        *self
+            .reconnect_teardown_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    #[cfg(test)]
+    async fn pause_after_reconnect_registration_for_test(&self) {
+        let gate = self
+            .reconnect_teardown_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(gate) = gate {
+            gate.armed.notify_one();
+            gate.release.notified().await;
+        }
     }
 
     pub(crate) fn should_retain_room_publication_snapshot(&self) -> bool {
