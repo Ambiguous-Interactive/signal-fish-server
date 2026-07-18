@@ -3,7 +3,7 @@
 ## Scope
 
 Repair the two independent failure classes exposed by generated release PR
-#182, make both classes deterministic under local and CI validation, and carry
+PR #182, make both classes deterministic under local and CI validation, and carry
 the remediation through an exact-head green pull request and reviewer closure.
 
 ## Baseline evidence
@@ -139,4 +139,8 @@ Adversarial audit:
 - `pwsh ... scripts/check-hook-readiness.ps1`: passed with zero warnings.
 - Worktree pre-commit and pre-push PowerShell preflights: passed. The profiled
   pre-commit run took 1,288 ms and reported its non-fatal 1,000 ms budget warning.
+- The first published exact-head Markdownlint run exposed two reconstructed
+  changelog double blanks and a paragraph-leading `#182` parsed as a heading.
+  Those three formatting defects were reproduced from the job log, corrected,
+  and `bash scripts/check-markdown.sh` passed locally before republishing.
 - `git diff --check`: passed.

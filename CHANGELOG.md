@@ -1199,7 +1199,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Architecture Decision Record (ADR) documentation scaffolding under `docs/adr/`.
 - Added ADR index integration in `docs/README.md` and `docs/architecture.md`.
 
-
 ## [0.1.1] - 2026-02-23
 
 ### Changed
@@ -1222,7 +1221,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker image support.
 - Optional TLS/mTLS support via `rustls` (`tls` feature).
 - Optional legacy full-mesh mode (`legacy-fullmesh` feature).
-
 
 [Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.3.0...v0.4.0
