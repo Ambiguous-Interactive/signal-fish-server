@@ -143,4 +143,9 @@ Adversarial audit:
   changelog double blanks and a paragraph-leading `#182` parsed as a heading.
   Those three formatting defects were reproduced from the job log, corrected,
   and `bash scripts/check-markdown.sh` passed locally before republishing.
+- The next macOS Nextest run exposed a Bash 3.2 portability difference: under
+  `set -u`, expanding a declared-but-empty array fails before the first release
+  is appended. The checker now cardinality-guards its only pre-population array
+  expansion and removes the unused parallel date array; the macOS CI lane is
+  the permanent regression oracle for the platform's system Bash.
 - `git diff --check`: passed.

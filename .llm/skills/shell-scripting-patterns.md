@@ -194,6 +194,10 @@ done
 **Docker RUN commands and POSIX scripts use `/bin/sh` (dash on Debian), not bash.**
 Bash-specific features silently fail or behave differently under `/bin/sh`.
 
+macOS still supplies Bash 3.2. With `set -u`, it can reject `"${items[@]}"`
+when `items=()` is empty; cardinality-guard the expansion and keep a macOS CI
+lane for scripts that use arrays.
+
 ### Brace Expansion Does Not Work in `/bin/sh`
 
 ```bash
@@ -274,6 +278,7 @@ use that when adding `--quiet` or deciding which messages must still print on wa
 - [ ] `IFS` uses single-character delimiter (not multi-char like `:::`)
 - [ ] Shellcheck passes; tested locally before pushing to CI
 - [ ] No bash-isms in `/bin/sh` scripts or Dockerfile `RUN` commands
+- [ ] Empty Bash arrays are guarded before expansion under `set -u`
 - [ ] `find` commands use `-type f` when targeting files
 - [ ] Log messages match actual search scope (recursive vs. non-recursive)
 - [ ] `--quiet` suppresses banner, info, success, and summary — never errors or warnings

@@ -378,7 +378,6 @@ validate_changelog() {
     # Parse every bracketed level-two heading, not just valid ones, so malformed
     # releases cannot disappear from the comparison chain.
     local -a versions=()
-    local -a release_dates=()
     local heading version release_date seen_version
     local release_heading_pattern='^## \[((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\] - ([0-9]{4}-[0-9]{2}-[0-9]{2})$'
     while IFS= read -r heading; do
@@ -397,13 +396,16 @@ validate_changelog() {
         if ! is_real_changelog_date "$release_date"; then
             action_error "CHANGELOG.md release [$version] has invalid calendar date $release_date"
         fi
-        for seen_version in "${versions[@]}"; do
-            if [ "$seen_version" = "$version" ]; then
-                action_error "CHANGELOG.md has duplicate dated release section for $version"
-            fi
-        done
+        # Bash 3.2 (the macOS system Bash) reports a declared-but-empty array as
+        # unbound under `set -u`. Do not expand the array before its first item.
+        if [ "${#versions[@]}" -gt 0 ]; then
+            for seen_version in "${versions[@]}"; do
+                if [ "$seen_version" = "$version" ]; then
+                    action_error "CHANGELOG.md has duplicate dated release section for $version"
+                fi
+            done
+        fi
         versions+=("$version")
-        release_dates+=("$release_date")
     done < <(grep -E '^## \[' <<< "$changelog" || true)
 
     if [ "${#versions[@]}" -eq 0 ]; then
@@ -454,7 +456,7 @@ validate_changelog() {
         previous_version="${versions[index + 1]}"
         if [[ "$release_ref" =~ /compare/v([0-9]+\.[0-9]+\.[0-9]+)\.\.\.v${version}([#?].*)?$ ]]; then
             linked_previous="${BASH_REMATCH[1]}"
-            if [[ ! " ${versions[*]} " =~ " $linked_previous " ]]; then
+            if [[ " ${versions[*]} " != *" $linked_previous "* ]]; then
                 action_error "[$version] compare link references unknown previous version v$linked_previous (link: $release_ref)"
             fi
         fi
