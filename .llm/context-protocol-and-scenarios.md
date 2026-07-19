@@ -24,7 +24,7 @@ Canonical sample: [v3-server-messages.jsonl](code-samples/protocol/v3-server-mes
 
 1. Define in `src/protocol/messages.rs` -> handler in `src/server.rs`
    or `src/server/` submodule -> serialization tests -> e2e tests
-2. Follow [Mandatory Workflow and Checklists](skills/mandatory-workflow.md) for validation.
+2. Follow [Mandatory Workflow and Checklists](skills/mandatory-workflow/SKILL.md) for validation.
 
 ### Adding a Configuration Option
 

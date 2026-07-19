@@ -53,7 +53,7 @@
 #     - CI-only analysis tools MAY use nightly if required by the tool
 #     - Nightly is NEVER used for building production artifacts
 #
-#   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
+#   See also: .llm/skills/msrv-management/SKILL.md (Nightly-Only CI Tools section)
 #
 # Promotion Criteria:
 #   Miri should become gating, and both jobs should become required

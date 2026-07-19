@@ -203,6 +203,12 @@ for (my $i = 0; $i < scalar(@lines); $i++) {
         $base =~ s{^.*/}{};
         my $stem = $base;
         $stem =~ s/\.md$//;
+        if (lc($base) eq 'skill.md') {
+            my $skill_dir = $target_no_anchor;
+            $skill_dir =~ s{/SKILL\.md$}{}i;
+            $skill_dir =~ s{^.*/}{};
+            $stem = $skill_dir;
+        }
 
         my $normalized_text = normalize($text);
         my $normalized_stem = normalize($stem);

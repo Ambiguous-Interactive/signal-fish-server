@@ -2,12 +2,12 @@
 # LLM Skill Example Extraction Checker
 #
 # Enforces the repository policy that skills must not embed in-file example
-# sections. Each example must live in its own *-example-*.md skill file and be
-# linked from the parent skill.
+# sections. Detailed examples belong in a skill's `references/` directory and
+# must be linked from its `SKILL.md` entrypoint.
 #
 # Usage:
 #   ./scripts/check-llm-example-files.sh
-#   ./scripts/check-llm-example-files.sh --files .llm/skills/foo.md
+#   ./scripts/check-llm-example-files.sh --files .llm/skills/foo/SKILL.md
 #
 # Exit codes:
 #   0 = Pass (no inline example sections found)
@@ -75,7 +75,7 @@ else
     fi
     while IFS= read -r file; do
         FILES_TO_CHECK+=("$file")
-    done < <(find "$LLM_SKILLS_DIR" -maxdepth 1 -type f -name "*.md" | LC_ALL=C sort)
+    done < <(find "$LLM_SKILLS_DIR" -mindepth 2 -maxdepth 2 -type f -name "SKILL.md" | LC_ALL=C sort)
 fi
 
 echo -e "${BLUE}LLM Example Extraction Checker${NC}"
@@ -98,13 +98,12 @@ for file in "${FILES_TO_CHECK[@]}"; do
 
     case "$file" in
         */index.md) continue ;;
-        *-example-*.md) continue ;;
     esac
 
     CHECKED=$((CHECKED + 1))
 
     # Detect headings that define inline example sections, which are disallowed.
-    # Allowed location for examples is dedicated *-example-*.md files.
+    # Allowed location for detailed examples is the skill's references directory.
     if MATCHES=$(grep -En '^[[:space:]]*#{2,6}[[:space:]]+((Real-World[[:space:]]+)?Examples?|Example([[:space:]:-]|$))' "$file" || true); then
         if [ -n "$MATCHES" ]; then
             while IFS= read -r match; do
@@ -113,7 +112,7 @@ for file in "${FILES_TO_CHECK[@]}"; do
                 heading=${match#*:}
                 error "$file:$line_no: inline example heading is disallowed -> $heading"
             done <<< "$MATCHES"
-            echo "        Move each example into a dedicated *-example-*.md file and link it from the parent skill."
+            echo "        Move each example into the skill's references/ directory and link it from SKILL.md."
             echo ""
         fi
     fi
@@ -136,10 +135,10 @@ if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "Policy:"
     echo "  - Parent skills may summarize examples and link out"
-    echo "  - Each concrete example must live in its own *-example-*.md file"
+    echo "  - Each concrete example must live in the skill's references/ directory"
     echo ""
     echo "How to fix:"
-    echo "  1. Create one *-example-*.md file per example"
+    echo "  1. Create one focused references/example-*.md file per example"
     echo "  2. Replace inline example sections with links"
     echo "  3. Re-run ./scripts/check-llm-example-files.sh"
     exit 1

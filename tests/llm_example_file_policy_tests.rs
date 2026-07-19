@@ -77,8 +77,8 @@ fn test_llm_example_policy_checker_data_driven_cases() {
         ScriptCase {
             name: "passes_when_parent_skill_links_examples",
             files: vec![(
-                ".llm/skills/ci-guide.md",
-                "# Skill: CI Guide\n\n## Real-World Cases\n\n- [example](./ci-guide-example-cache.md)\n",
+                ".llm/skills/ci-guide/SKILL.md",
+                "# CI Guide\n\n## Real-World Cases\n\n- [example](references/example-cache.md)\n",
             )],
             args: vec![],
             expected_exit: 0,
@@ -90,21 +90,21 @@ fn test_llm_example_policy_checker_data_driven_cases() {
         ScriptCase {
             name: "fails_when_inline_example_heading_exists",
             files: vec![(
-                ".llm/skills/ci-guide.md",
-                "# Skill: CI Guide\n\n## Real-World Examples\n\n### Example 1: Cache mismatch\n",
+                ".llm/skills/ci-guide/SKILL.md",
+                "# CI Guide\n\n## Real-World Examples\n\n### Example 1: Cache mismatch\n",
             )],
             args: vec![],
             expected_exit: 1,
             must_contain: vec![
                 "inline example heading is disallowed",
-                "Move each example into a dedicated *-example-*.md file",
+                "Move each example into the skill's references/ directory",
             ],
         },
         ScriptCase {
-            name: "skips_dedicated_example_files",
+            name: "skips_reference_example_files",
             files: vec![(
-                ".llm/skills/ci-guide-example-cache.md",
-                "# Skill: Example\n\n## Example\n\nDetails\n",
+                ".llm/skills/ci-guide/references/example-cache.md",
+                "# Example\n\n## Example\n\nDetails\n",
             )],
             args: vec![],
             expected_exit: 0,

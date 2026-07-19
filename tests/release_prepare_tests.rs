@@ -112,18 +112,16 @@ impl Fixture {
             vec!["add", "."],
             vec!["commit", "--quiet", "-m", "released baseline"],
         ] {
-            let status = Command::new("git")
+            let status = git_at(&root)
                 .args(arguments)
-                .current_dir(&root)
                 .status()
                 .expect("initialize fixture release history");
             assert!(status.success(), "fixture Git setup failed");
         }
-        let status = Command::new("git")
+        let status = git_at(&root)
             .args(["tag", "-a"])
             .arg(format!("v{version}"))
             .args(["-m", "released baseline"])
-            .current_dir(&root)
             .status()
             .expect("create fixture release tag");
         assert!(status.success(), "fixture release tag setup failed");
@@ -137,6 +135,7 @@ impl Fixture {
             .arg(script)
             .args(arguments)
             .current_dir(&self.root)
+            .env_remove("GIT_INDEX_FILE")
             .env("PREPARE_RELEASE_CARGO_BIN", "true")
             .env("PREPARE_RELEASE_DOC_CHECK", "true")
             .output()
@@ -149,10 +148,17 @@ impl Fixture {
             .arg(script)
             .args(arguments)
             .current_dir(&self.root)
+            .env_remove("GIT_INDEX_FILE")
             .env("PREPARE_RELEASE_CARGO_BIN", "true")
             .output()
             .expect("run prepare-release.sh with real document checker")
     }
+}
+
+fn git_at(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root).env_remove("GIT_INDEX_FILE");
+    command
 }
 
 fn write(path: &Path, content: &str) {
@@ -335,9 +341,8 @@ fn prepare_release_rejects_invalid_tag_baselines_before_mutation() {
     for tag_kind in ["missing", "lightweight", "non-ancestor", "target-exists"] {
         let fixture = Fixture::new("1.2.3");
         if tag_kind != "target-exists" {
-            let status = Command::new("git")
+            let status = git_at(&fixture.root)
                 .args(["tag", "--delete", "v1.2.3"])
-                .current_dir(&fixture.root)
                 .status()
                 .expect("delete fixture tag");
             assert!(status.success());
@@ -345,39 +350,34 @@ fn prepare_release_rejects_invalid_tag_baselines_before_mutation() {
         match tag_kind {
             "missing" => {}
             "lightweight" => {
-                assert!(Command::new("git")
+                assert!(git_at(&fixture.root)
                     .args(["tag", "v1.2.3"])
-                    .current_dir(&fixture.root)
                     .status()
                     .expect("create lightweight tag")
                     .success());
             }
             "non-ancestor" => {
-                let tree = Command::new("git")
+                let tree = git_at(&fixture.root)
                     .args(["rev-parse", "HEAD^{tree}"])
-                    .current_dir(&fixture.root)
                     .output()
                     .expect("resolve fixture tree");
                 assert!(tree.status.success());
                 let tree = String::from_utf8(tree.stdout).expect("tree hash is UTF-8");
-                let commit = Command::new("git")
+                let commit = git_at(&fixture.root)
                     .args(["commit-tree", tree.trim(), "-m", "unrelated release"])
-                    .current_dir(&fixture.root)
                     .output()
                     .expect("create unrelated commit");
                 assert!(commit.status.success());
                 let commit = String::from_utf8(commit.stdout).expect("commit hash is UTF-8");
-                assert!(Command::new("git")
+                assert!(git_at(&fixture.root)
                     .args(["tag", "-a", "v1.2.3", commit.trim(), "-m", "unrelated"])
-                    .current_dir(&fixture.root)
                     .status()
                     .expect("create unrelated annotated tag")
                     .success());
             }
             "target-exists" => {
-                assert!(Command::new("git")
+                assert!(git_at(&fixture.root)
                     .args(["tag", "-a", "v1.2.4", "-m", "already released"])
-                    .current_dir(&fixture.root)
                     .status()
                     .expect("create target tag")
                     .success());

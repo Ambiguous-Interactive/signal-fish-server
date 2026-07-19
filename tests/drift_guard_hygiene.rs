@@ -7,7 +7,7 @@
 //! guard passes while the live config has silently lost the setting — the exact
 //! regression those guards exist to catch. The fix is to assert against the
 //! comment-stripped view (`read_live_file` / `strip_comment_lines`). See
-//! `.llm/skills/ci-config-live-view-tests.md`.
+//! `.llm/skills/ci-config-live-view-tests/SKILL.md`.
 //!
 //! This scanner is a *conservative tripwire*, not a verifier. It flags the one
 //! unambiguous, high-frequency footgun: a variable read via raw `read_file` from
@@ -310,7 +310,7 @@ fn test_ci_config_presence_checks_use_live_view() {
          `let v_live = strip_comment_lines(&v);` and move the presence assertion to `v_live`).\n\
          If the raw read is genuinely required for a presence check, justify it with an inline \
          `// live-view-exempt: <reason>` comment in the function.\n\
-         See .llm/skills/ci-config-live-view-tests.md.",
+         See .llm/skills/ci-config-live-view-tests/SKILL.md.",
         violations.join("\n")
     );
 }

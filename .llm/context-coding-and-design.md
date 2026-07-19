@@ -1,7 +1,7 @@
 # Software Design Philosophy
 
-See [Rust Idioms and Patterns](skills/rust-idioms-and-patterns.md) and
-[SOLID Principles Enforcement](skills/solid-principles-enforcement.md) for full details.
+See [Rust Idioms and Patterns](skills/rust-idioms-and-patterns/SKILL.md) and
+[SOLID Principles Enforcement](skills/solid-principles-enforcement/SKILL.md) for full details.
 
 - Code should be self-documenting -- only comment "why", never "what"
 - Apply SOLID, DRY, and Clean Architecture consistently
@@ -11,14 +11,14 @@ See [Rust Idioms and Patterns](skills/rust-idioms-and-patterns.md) and
 
 ## Rust Coding Standards
 
-Performance: [Rust Performance Optimization](skills/rust-performance-optimization.md)
-and [Async Rust Best Practices](skills/async-rust-best-practices.md)
+Performance: [Rust Performance Optimization](skills/rust-performance-optimization/SKILL.md)
+and [Async Rust Best Practices](skills/async-rust-best-practices/SKILL.md)
 
-Error handling: [Error Handling Guide](skills/error-handling-guide.md)
+Error handling: [Error Handling Guide](skills/error-handling-guide/SKILL.md)
 
-Defensive programming: [Defensive Programming](skills/defensive-programming.md)
+Defensive programming: [Defensive Programming](skills/defensive-programming/SKILL.md)
 
-Linting: [Clippy and Linting](skills/clippy-and-linting.md)
+Linting: [Clippy and Linting](skills/clippy-and-linting/SKILL.md)
 
 Key rules:
 

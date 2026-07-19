@@ -157,7 +157,7 @@ for file in "${FILES_TO_CHECK[@]}"; do
             echo "::error file=$file::LLM file exceeds ${MAX_LINES}-line limit ($LINE_COUNT lines)"
         fi
         echo "       Split into focused sub-files of ≤${MAX_LINES} lines."
-        echo "       See .llm/skills/manage-skills.md for guidance."
+        echo "       See .llm/skills/manage-skills/SKILL.md for guidance."
         VIOLATIONS=$((VIOLATIONS + 1))
     else
         # Report files in the documented warning zone as informational.

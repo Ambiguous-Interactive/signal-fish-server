@@ -64,7 +64,7 @@ jobs:
       #     - If cargo-fuzz/libFuzzer requires newer nightly sanitizer features
       #     - If the nightly version becomes unavailable or broken
       #
-      #   See also: .llm/skills/msrv-management.md (Nightly-Only CI Tools section)
+      #   See also: .llm/skills/msrv-management/SKILL.md (Nightly-Only CI Tools section)
       - name: Install nightly Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:

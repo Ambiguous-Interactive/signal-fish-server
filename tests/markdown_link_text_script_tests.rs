@@ -19,6 +19,7 @@ fn run_checker_with_fixture(files: &[(&str, &str)], args: &[&str]) -> (i32, Stri
     let init = bash_command()
         .arg("-lc")
         .arg("git init -q && git config user.email test@example.com && git config user.name test")
+        .env_remove("GIT_INDEX_FILE")
         .current_dir(temp_root.path())
         .output()
         .unwrap_or_else(|e| panic!("Failed to initialize temporary git repo: {e}"));
@@ -35,6 +36,7 @@ fn run_checker_with_fixture(files: &[(&str, &str)], args: &[&str]) -> (i32, Stri
     let add = bash_command()
         .arg("-lc")
         .arg("git add .")
+        .env_remove("GIT_INDEX_FILE")
         .current_dir(temp_root.path())
         .output()
         .unwrap_or_else(|e| panic!("Failed to stage fixture files: {e}"));
@@ -51,6 +53,7 @@ fn run_checker_with_fixture(files: &[(&str, &str)], args: &[&str]) -> (i32, Stri
     }
 
     let output = command
+        .env_remove("GIT_INDEX_FILE")
         .current_dir(temp_root.path())
         .output()
         .unwrap_or_else(|e| {
@@ -105,20 +108,20 @@ fn test_markdown_link_text_checker_data_driven_cases() {
             name: "fails_on_filename_style_link_text",
             files: vec![(
                 "docs/a.md",
-                "See [testing-core-patterns](../.llm/skills/testing-core-patterns.md).\n",
+                "See [testing](../.llm/skills/testing/SKILL.md).\n",
             )],
             args: vec![],
             expected_exit: 1,
             must_contain: vec![
                 "Found 1 filename-style internal markdown link(s).",
-                "[testing-core-patterns](../.llm/skills/testing-core-patterns.md) -> [Testing Core Patterns]",
+                "[testing](../.llm/skills/testing/SKILL.md) -> [Testing]",
             ],
         },
         ScriptCase {
             name: "passes_on_human_readable_link_text",
             files: vec![(
                 "docs/a.md",
-                "See [Testing Core Patterns](../.llm/skills/testing-core-patterns.md).\n",
+                "See [Testing Core Patterns](../.llm/skills/testing/SKILL.md).\n",
             )],
             args: vec![],
             expected_exit: 0,
@@ -128,7 +131,7 @@ fn test_markdown_link_text_checker_data_driven_cases() {
             name: "fix_mode_rewrites_filename_style_link",
             files: vec![(
                 "docs/a.md",
-                "See [testing-core-patterns](../.llm/skills/testing-core-patterns.md).\n",
+                "See [testing](../.llm/skills/testing/SKILL.md).\n",
             )],
             args: vec!["--fix"],
             expected_exit: 0,

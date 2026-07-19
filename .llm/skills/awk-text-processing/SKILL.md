@@ -1,0 +1,275 @@
+---
+name: awk-text-processing
+description: >-
+  Apply project guidance for awk text processing. Use when writing AWK scripts for CI/CD
+  workflows, processing multi-line content, or ensuring AWK portability across gawk (local) and
+  mawk (Ubuntu CI).
+---
+
+# AWK Text Processing
+
+## When to Use
+
+- Extracting structured data from files (code blocks, logs, etc.)
+- Processing multi-line content with NUL delimiters
+- Ensuring POSIX AWK compatibility for CI environments
+- Validating configuration files with AWK
+
+## When NOT to Use
+
+- Complex data processing (use dedicated tools: jq, yq, etc.)
+- Application logic (AWK is for CI automation only)
+
+---
+
+## TL;DR
+
+- Ubuntu CI uses `mawk` (not `gawk`) — test portability locally
+- Use `printf "%c", 0` for NUL bytes (not `"\0"` — mawk incompatible)
+- Use POSIX `sub()` instead of gawk's `match()` with capture groups
+- Use token-boundary patterns (`/^[Rr]ust([[:space:],]|$)/`) for language info strings
+- Use NUL byte delimiters (`\0`) to preserve multi-line blocks through pipelines
+
+---
+
+## AWK Multi-Line Content Processing
+
+### The Problem: Newline Separators Break Multi-Line Blocks
+
+```bash
+# WRONG: Each line becomes a separate record
+awk '/^```+[Rr]ust([[:space:],]|$)/ {in_block=1; next}
+     /^```+$/ && in_block {print content; content=""; in_block=0; next}
+     in_block {content = content "\n" $0}' file.md | while read -r block; do
+  validate "$block"  # Only gets first line!
+done
+```
+
+**Why this fails:** AWK's default `RS="\n"` and pipeline `while read` both split on newlines.
+
+### The Solution: NUL Byte Delimiters
+
+```bash
+# CORRECT: Entire block arrives as one record
+awk '
+  /^```+[Rr]ust([[:space:],]|$)/ {
+    in_block = 1
+    content = ""
+    next
+  }
+  /^```+$/ && in_block {
+    # CRITICAL: Use printf "%c", 0 (POSIX compatible)
+    printf "%s%c", content, 0
+    in_block = 0
+    next
+  }
+  in_block {
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
+  }
+  END {
+    # CRITICAL: Handle unclosed blocks at EOF
+    if (in_block) {
+      printf "%s%c", content, 0
+    }
+  }
+' file.md | while IFS= read -r -d '' block; do
+  validate "$block"
+done
+```
+
+Key patterns:
+
+1. **NUL byte output**: `printf "%s%c", content, 0` (POSIX compatible)
+2. **NUL byte input**: `while IFS= read -r -d '' block`
+3. **Empty first line**: Track `seen_content` separately before appending
+4. **EOF handling**: `END` block handles unclosed blocks
+
+---
+
+## AWK Portability: gawk vs mawk
+
+### Incompatibilities to Avoid
+
+```awk
+# WRONG: gawk-specific (fails on mawk)
+printf "%s\0", content           # mawk doesn't support "\0" escape
+if (match($0, /pattern (group)/, arr)) { value = arr[1] }  # no capture groups
+```
+
+```awk
+# CORRECT: POSIX-compatible (works on both)
+printf "%s%c", content, 0        # NUL byte using %c format
+attrs = $0
+sub(/^prefix/, "", attrs)        # Remove prefix, keep rest
+```
+
+### Portability Checklist
+
+- [ ] Test with `mawk` (Ubuntu default): `mawk 'script' file.txt`
+- [ ] Use `printf "%c", 0` for NUL bytes (not `"\0"`)
+- [ ] Use `sub()` for extraction (not `match()` with capture groups)
+- [ ] Avoid gawk-specific features (BEGINFILE, ENDFILE, etc.)
+
+---
+
+## AWK Pattern Design
+
+### Token-Boundary vs Exact Matching
+
+```awk
+# FRAGILE: Only matches specific formats
+/^```rust$/ { ... }
+# Fails on: ```Rust, ```rust,ignore, ```rust ignore
+
+# ROBUST: Matches rust/Rust with attributes without overmatching rust-like words
+/^```+[Rr]ust([[:space:],]|$)/ {
+  attrs = $0
+  sub(/^```+[Rr]ust,?/, "", attrs)  # Extract attributes using POSIX sub()
+  sub(/^[[:space:]]+/, "", attrs)
+}
+```
+
+| Scenario | Pattern Type | Example |
+|----------|--------------|---------|
+| Code fence detection | Token boundary | `/^```+[Rr]ust([[:space:],]\|$)/` |
+| Closing fence | Exact | `/^```$/` |
+| Strict validation | Exact | `/^```Rust,ignore$/` |
+
+### Keep Cross-Language Token Boundaries in Sync
+
+When a shell/AWK script and a Rust test parse the same token (for example, URL extraction),
+use the same boundary semantics in both places.
+
+```awk
+# ❌ DRIFT: only excludes literal spaces, not tabs
+/https:\/\/img\.shields\.io\/[^"' )>]+/
+
+# ✅ PARITY: excludes all whitespace via POSIX class
+/https:\/\/img\.shields\.io\/[^"'[:space:])>]+/
+```
+
+If Rust uses `char::is_whitespace()`, AWK should normally use `[[:space:]]` for equivalent behavior.
+
+---
+
+## Multi-Field AWK Output
+
+```awk
+awk '
+  /^```+[Rr]ust([[:space:],]|$)/ {
+    in_block = 1; block_start = NR; content = ""; seen_content = 0
+    attrs = $0
+    sub(/^```+[Rr]ust,?/, "", attrs)
+    sub(/^[[:space:]]+/, "", attrs)
+    if (attrs == "") attrs = "none"
+    next
+  }
+  /^```$/ && in_block {
+    # Canonical field separator is TAB; records end with NUL.
+    printf "%s\t%s\t%s%c", block_start, attrs, content, 0
+    in_block = 0; next
+  }
+  in_block {
+    if (seen_content) content = content "\n" $0
+    else { content = $0; seen_content = 1 }
+  }
+  END {
+    if (in_block) { printf "%s\t%s\t%s%c", block_start, attrs, content, 0 }
+  }
+' file.md | while IFS=$'\t' read -r -d '' record; do
+  # NOTE: IFS is a character set, not a string — use single-char delimiter
+  echo "$record"
+done
+```
+
+**Important**: `IFS=':::'` does NOT split on `:::` — bash `IFS` treats each character
+independently (`IFS=':'`). Use the canonical `IFS=$'\t'` tab separator or another single character.
+
+---
+
+## Debugging AWK Scripts
+
+```bash
+# Print all AWK variables at key points
+awk '
+  /pattern/ {
+    print "DEBUG: NR=" NR ", in_block=" in_block > "/dev/stderr"
+  }
+' file.md
+
+# Test pattern matching interactively
+echo '```rust ignore' | awk '/^```+[Rr]ust([[:space:],]|$)/ {print "MATCH"}'
+
+# Test attribute extraction
+echo '```rust,ignore no_run' | awk '
+  /^```+[Rr]ust([[:space:],]|$)/ {
+    attrs = $0
+    sub(/^```+[Rr]ust,?/, "", attrs)
+    sub(/^[[:space:]]+/, "", attrs)
+    print "Attributes: [" attrs "]"
+  }
+'
+
+# Visualize NUL delimiters
+awk 'BEGIN { printf "field1%cfield2%c", 0, 0 }' | od -c
+```
+
+---
+
+## Common Pitfalls
+
+### Pitfall 1: Forgetting END Block
+
+```awk
+# WRONG: Unclosed blocks at EOF are lost
+/^```$/ { printf "%s%c", content, 0; in_block=0 }
+# If file ends without closing ```, content is lost!
+
+# CORRECT: END block handles unclosed blocks
+END { if (in_block) printf "%s%c", content, 0 }
+```
+
+### Pitfall 2: Empty First Line
+
+```awk
+# WRONG: First line becomes leading newline
+in_block { content = content "\n" $0 }
+
+# CORRECT: Track seen content separately from accumulated text
+in_block {
+  if (seen_content) content = content "\n" $0
+  else { content = $0; seen_content = 1 }
+}
+```
+
+### Pitfall 3: AWK Apostrophes in YAML Inline Scripts
+
+Never embed AWK containing apostrophes inside single-quoted bash strings in YAML `run: |`
+blocks. Shellcheck parses the YAML-embedded script as bash, and single quotes inside AWK
+break shellcheck's quoting analysis.
+
+**Solution:** Extract AWK programs to external files in `.github/scripts/` and invoke with
+`awk -f .github/scripts/script.awk`. Prefer external files for AWK programs longer than ~10 lines.
+
+### Pitfall 4: AWK Range Pattern Self-Matching
+
+Range patterns (e.g., `/start/,/end/`) can match references to the target block name in other
+jobs, capturing too many lines. Use flag-based state machines instead: set a flag on the start
+pattern, clear it on the end, and process lines only when the flag is set.
+
+### Pitfall 5: Prefix Pattern Over-Matching
+
+`/^```[Rr]ust/` also matches `` ```rustic `` or `` ```rusty ``. Match a token
+boundary instead: strip the backticks and test the info string with
+`/^[Rr]ust([[:space:],]|$)/`, or use `/^```+[Rr]ust([[:space:],]|$)/` for
+simple backtick-prefix cases. For full CommonMark behavior, including 0-3 leading
+spaces and long fences, use the canonical extractor script.
+
+---
+
+## See Also
+
+- [Shell Scripting Patterns](../shell-scripting-patterns/SKILL.md) — bash idioms, error handling, portable scripts
+- [GitHub Actions Awk](../github-actions-awk/SKILL.md) — AWK examples in workflow YAML
+- [CI CD Troubleshooting Scripts](../ci-cd-troubleshooting/references/scripts-and-tests.md) — Debugging CI script failures
