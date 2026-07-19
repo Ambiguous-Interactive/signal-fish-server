@@ -72,7 +72,15 @@ negative controls explicitly disable retries. The extension is opt-in because
 non-reference peers do not negotiate `PairRetry`; the homogeneous netem matrix
 enables one attempt without changing general matchbox/browser interop.
 
-Local follow-up verification passed 57 native-client unit tests, native
+Cursor Bugbot then caught an asymmetric-open bookkeeping gap in the first
+retry implementation: the receiver could close a live generation while the
+logical `connected_pairs` set still counted it. Current connectivity and the
+one-per-obligation public pair event are now separate. A rebuild clears current
+connectivity and exchange state; the fresh generation restores it without a
+duplicate `p2p_pair_connected` event. Genuine terminal/removal paths clear
+both sets, and a focused state-transition regression covers all three edges.
+
+Local follow-up verification passed 58 native-client unit tests, native
 Clippy with warnings denied, both root/native formatting checks, and the root
 WebRTC matrix compile. The healthy native N=3 mesh scenario and the intentional
 crippled-ICE relay-fallback negative control both pass as real multi-process

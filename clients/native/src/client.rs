@@ -103,6 +103,15 @@ fn retryable_missing_peers(
         .collect()
 }
 
+fn note_current_pair_connected(
+    connected: &mut BTreeSet<PlayerId>,
+    reported: &mut BTreeSet<PlayerId>,
+    peer: PlayerId,
+) -> bool {
+    connected.insert(peer);
+    reported.insert(peer)
+}
+
 /// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
 /// `Ping` mandatory for every client (the server evicts idle connections);
 /// this driver models that contract so anyone using it as a template
@@ -215,6 +224,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pair_roles: BTreeMap::new(),
         pair_retry_attempts: BTreeMap::new(),
         connected_pairs: BTreeSet::new(),
+        pair_connected_reported: BTreeSet::new(),
         ice_gathering_complete: BTreeSet::new(),
         last_ice_servers: Vec::new(),
         transport_status: None,
@@ -627,9 +637,14 @@ struct Orchestrator<'a> {
     pair_roles: BTreeMap<PlayerId, bool>,
     /// Latest coordinated retry attempt applied per peer.
     pair_retry_attempts: BTreeMap<PlayerId, u8>,
-    /// Peers whose pair fully connected (both channels open) at some point.
-    /// Drives the `--exchange` obligations and the Appendix G resolution.
+    /// Peers whose current generation has both channels open. Drives the
+    /// `--exchange` obligations and Appendix G resolution.
     connected_pairs: BTreeSet<PlayerId>,
+    /// Peers whose logical `p2p_pair_connected` event was emitted for the
+    /// current room obligation. A coordinated rebuild clears current
+    /// connectivity but retains this set so the fresh generation is not
+    /// misreported as a second logical pair.
+    pair_connected_reported: BTreeSet<PlayerId>,
     /// Peers whose current connection generation emitted the terminal local
     /// ICE gathering callback. Harness-held success uses this as the exact
     /// outbound signal-ledger boundary.
@@ -1393,6 +1408,7 @@ impl Orchestrator<'_> {
                 });
                 if is_terminal_peer_connection_state(&state) {
                     self.connected_pairs.remove(&peer);
+                    self.pair_connected_reported.remove(&peer);
                     self.ice_gathering_complete.remove(&peer);
                     self.sent_labels.remove(&peer);
                     self.received_labels.remove(&peer);
@@ -1518,6 +1534,7 @@ impl Orchestrator<'_> {
             FatalError::protocol(format!("pair retry from unplanned peer {peer}"))
         })?;
         self.pair_retry_attempts.insert(peer, attempt);
+        self.connected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.sent_labels.remove(&peer);
         self.received_labels.remove(&peer);
@@ -1564,6 +1581,7 @@ impl Orchestrator<'_> {
         self.pair_roles.remove(&peer);
         self.pair_retry_attempts.remove(&peer);
         self.connected_pairs.remove(&peer);
+        self.pair_connected_reported.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
         self.sent_labels.remove(&peer);
@@ -1670,8 +1688,11 @@ impl Orchestrator<'_> {
     /// Both channels toward `peer` are open: emit the pair event, run the
     /// optional exchange, and check the all-pairs resolution condition.
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        let first_connection = self.connected_pairs.insert(peer);
-        if first_connection {
+        if note_current_pair_connected(
+            &mut self.connected_pairs,
+            &mut self.pair_connected_reported,
+            peer,
+        ) {
             emit(&Event::P2pPairConnected { peer });
         }
         if self.cli.exchange && self.exchange_released {
@@ -1997,9 +2018,9 @@ mod tests {
         authoritative_peer_delta, changed_transport_status, clear_departed_membership_plan,
         connection_targets_for_plan, consume_join_accountability_preface, harness_aware_base_wake,
         is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
-        next_handshake_message, p2p_retry_delay, require_finalized_membership_plan,
-        requires_authoritative_finalization_plan, resolve_drop_ice_from,
-        restore_reconnected_member, retryable_missing_peers,
+        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
+        require_finalized_membership_plan, requires_authoritative_finalization_plan,
+        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
         should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
         should_resolve_connected_pair, validate_json_negotiated_server_message,
         EXIT_PROTOCOL_ERROR,
@@ -2216,6 +2237,34 @@ mod tests {
             vec![retryable]
         );
         assert!(retryable_missing_peers(&expected, &connected_pairs, &attempts, 0).is_empty());
+    }
+
+    #[test]
+    fn retry_reconnects_current_pair_without_duplicate_logical_event() {
+        let peer = PlayerId::from_u128(2);
+        let mut connected = BTreeSet::new();
+        let mut reported = BTreeSet::new();
+        assert!(note_current_pair_connected(
+            &mut connected,
+            &mut reported,
+            peer
+        ));
+
+        connected.remove(&peer);
+        assert!(!note_current_pair_connected(
+            &mut connected,
+            &mut reported,
+            peer
+        ));
+        assert!(connected.contains(&peer));
+
+        connected.remove(&peer);
+        reported.remove(&peer);
+        assert!(note_current_pair_connected(
+            &mut connected,
+            &mut reported,
+            peer
+        ));
     }
 
     #[test]
