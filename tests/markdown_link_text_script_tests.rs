@@ -105,6 +105,13 @@ struct ScriptCase {
 fn test_markdown_link_text_checker_data_driven_cases() {
     let cases = vec![
         ScriptCase {
+            name: "passes_when_repository_has_no_markdown_files",
+            files: vec![("placeholder.txt", "no markdown\n")],
+            args: vec![],
+            expected_exit: 0,
+            must_contain: vec!["[OK] No filename-style internal markdown links found."],
+        },
+        ScriptCase {
             name: "fails_on_filename_style_link_text",
             files: vec![(
                 "docs/a.md",

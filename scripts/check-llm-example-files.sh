@@ -89,34 +89,36 @@ else
 fi
 echo ""
 
-for file in "${FILES_TO_CHECK[@]}"; do
-    if [ ! -f "$file" ]; then
-        warn "Skipping non-existent file: $file"
-        MISSING_INPUTS=$((MISSING_INPUTS + 1))
-        continue
-    fi
-
-    case "$file" in
-        */index.md) continue ;;
-    esac
-
-    CHECKED=$((CHECKED + 1))
-
-    # Detect headings that define inline example sections, which are disallowed.
-    # Allowed location for detailed examples is the skill's references directory.
-    if MATCHES=$(grep -En '^[[:space:]]*#{2,6}[[:space:]]+((Real-World[[:space:]]+)?Examples?|Example([[:space:]:-]|$))' "$file" || true); then
-        if [ -n "$MATCHES" ]; then
-            while IFS= read -r match; do
-                [ -z "$match" ] && continue
-                line_no=${match%%:*}
-                heading=${match#*:}
-                error "$file:$line_no: inline example heading is disallowed -> $heading"
-            done <<< "$MATCHES"
-            echo "        Move each example into the skill's references/ directory and link it from SKILL.md."
-            echo ""
+if [ "${#FILES_TO_CHECK[@]}" -gt 0 ]; then
+    for file in "${FILES_TO_CHECK[@]}"; do
+        if [ ! -f "$file" ]; then
+            warn "Skipping non-existent file: $file"
+            MISSING_INPUTS=$((MISSING_INPUTS + 1))
+            continue
         fi
-    fi
-done
+
+        case "$file" in
+            */index.md) continue ;;
+        esac
+
+        CHECKED=$((CHECKED + 1))
+
+        # Detect headings that define inline example sections, which are disallowed.
+        # Allowed location for detailed examples is the skill's references directory.
+        if MATCHES=$(grep -En '^[[:space:]]*#{2,6}[[:space:]]+((Real-World[[:space:]]+)?Examples?|Example([[:space:]:-]|$))' "$file" || true); then
+            if [ -n "$MATCHES" ]; then
+                while IFS= read -r match; do
+                    [ -z "$match" ] && continue
+                    line_no=${match%%:*}
+                    heading=${match#*:}
+                    error "$file:$line_no: inline example heading is disallowed -> $heading"
+                done <<< "$MATCHES"
+                echo "        Move each example into the skill's references/ directory and link it from SKILL.md."
+                echo ""
+            fi
+        fi
+    done
+fi
 
 echo ""
 if [ "$FILE_ARGS_MODE" -eq 1 ]; then
