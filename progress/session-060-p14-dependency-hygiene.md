@@ -94,9 +94,11 @@ state; scenarios without coordinated retry retain their exact one-report rule.
 
 A delayed Bugbot result on that head identified two further generation edges.
 The channel oracle now permits one additional open/exchange generation only
-for each observed retry marker on that exact peer while retaining the required
-final generation and exact event schema. Separately, a genuinely new initial
-pairing refreshes its full establishment/retry window; only
+for a peer with an observed retry marker while retaining the required final
+generation and exact event schema. Sent and received copies of the same
+attempt collapse to that one-peer fact, matching the client's attempt-number
+deduplication and the matrix's one-retry budget. Separately, a genuinely new
+initial pairing refreshes its full establishment/retry window; only
 `PairGeneration::Retry` preserves the existing deadline. The timer regression
 covers both policies so preventing retry extension cannot shorten a later
 `NewPeer` or authoritative-plan addition.

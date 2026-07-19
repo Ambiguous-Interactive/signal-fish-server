@@ -530,7 +530,7 @@ fn assert_exact_channel_ledger(
     events: &[Value],
     event: &str,
     expected_peers: &BTreeSet<&str>,
-    retry_markers_by_peer: &BTreeMap<&str, usize>,
+    retried_peers: &BTreeSet<&str>,
     player_id: &str,
     who: &str,
 ) {
@@ -582,9 +582,10 @@ fn assert_exact_channel_ledger(
     for peer in expected_peers {
         for label in CHANNEL_LABELS {
             let count = counts.get(&(*peer, label)).copied().unwrap_or_default();
-            let max_generations = retry_markers_by_peer.get(peer).copied().unwrap_or_default() + 1;
+            let retried = retried_peers.contains(peer);
+            let max_generations = usize::from(retried) + 1;
             assert!(
-                channel_generation_count_is_valid(count, max_generations - 1),
+                channel_generation_count_is_valid(count, retried),
                 "{who}: expected 1..={max_generations} {event} generations for ({peer}, {label}); got {count}; ledger={counts:?}"
             );
         }
@@ -596,18 +597,18 @@ fn assert_exact_channel_ledger(
     );
 }
 
-fn channel_generation_count_is_valid(count: usize, retry_markers: usize) -> bool {
-    (1..=retry_markers + 1).contains(&count)
+fn channel_generation_count_is_valid(count: usize, retried: bool) -> bool {
+    (1..=usize::from(retried) + 1).contains(&count)
 }
 
 #[test]
 fn channel_generation_ledger_expands_only_for_observed_retry_markers() {
-    assert!(channel_generation_count_is_valid(1, 0));
-    assert!(!channel_generation_count_is_valid(0, 0));
-    assert!(!channel_generation_count_is_valid(2, 0));
-    assert!(channel_generation_count_is_valid(1, 1));
-    assert!(channel_generation_count_is_valid(2, 1));
-    assert!(!channel_generation_count_is_valid(3, 1));
+    assert!(channel_generation_count_is_valid(1, false));
+    assert!(!channel_generation_count_is_valid(0, false));
+    assert!(!channel_generation_count_is_valid(2, false));
+    assert!(channel_generation_count_is_valid(1, true));
+    assert!(channel_generation_count_is_valid(2, true));
+    assert!(!channel_generation_count_is_valid(3, true));
 }
 
 fn assert_exact_signal_ledger(
@@ -898,12 +899,12 @@ fn assert_client_barrier(
         scenario.topology.label()
     );
 
-    let mut retry_markers_by_peer = BTreeMap::<&str, usize>::new();
+    let mut retried_peers = BTreeSet::<&str>::new();
     for (event, peer_field) in [("signal_sent", "to"), ("signal_received", "from")] {
         for signal in events_named(window, event) {
             if string_field(signal, "kind", who) == "pair_retry" {
                 let peer = string_field(signal, peer_field, who);
-                *retry_markers_by_peer.entry(peer).or_default() += 1;
+                retried_peers.insert(peer);
             }
         }
     }
@@ -919,7 +920,7 @@ fn assert_client_barrier(
         window,
         "channel_open",
         &expected_connections,
-        &retry_markers_by_peer,
+        &retried_peers,
         player_id,
         who,
     );
@@ -927,7 +928,7 @@ fn assert_client_barrier(
         window,
         "channel_message_sent",
         &expected_connections,
-        &retry_markers_by_peer,
+        &retried_peers,
         player_id,
         who,
     );
@@ -935,7 +936,7 @@ fn assert_client_barrier(
         window,
         "channel_message",
         &expected_connections,
-        &retry_markers_by_peer,
+        &retried_peers,
         player_id,
         who,
     );
