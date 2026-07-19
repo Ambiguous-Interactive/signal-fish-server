@@ -52,16 +52,32 @@ edge. A repository-wide `cargo metadata --locked --no-deps` sweep then passed
 for the root, native, Fortress native, Fortress WASM, and fuzz manifests.
 
 The implementation head `93971e637a63db1e63ec0afac98593cbe078a7c1`
-then passed all 12 applicable pull-request workflows; the only non-success was
-the intentional Dependabot auto-merge skip. Verification Nightly's first
-attempt exposed a stochastic 1%-loss WebRTC N=8 mesh miss: 27 of 28 peer links
-formed, one SCTP INIT/ACK exchange did not recover, and the test failed loudly
-at its 360-second deadline. The isolated job retry passed without a source
-change, alongside green clean/loss matrices, WebRTC/Browser/Fortress interop,
-cross-platform nextest and lint, coverage, MSRV, Miri, AddressSanitizer, audit,
-SBOM, and documentation checks.
+then passed all 12 applicable pull-request workflows after an isolated retry;
+the only non-success was the intentional Dependabot auto-merge skip. The first
+Verification Nightly attempt had exposed a 1%-loss WebRTC N=8 mesh miss: 27 of
+28 peer links formed, one SCTP INIT/ACK exchange did not recover, and the test
+failed loudly at its 360-second deadline.
 
-Cursor Bugbot found no new issues on the exact implementation head. Copilot
-was explicitly requested after each push but reported that the requester quota
-was exhausted. No inline review threads were opened. PR:
+The documentation-only head reproduced that same failure with a different
+client. That recurrence proved the earlier retry was not sufficient evidence:
+ICE remains `connected` when webrtc-rs exhausts the SCTP INIT/ACK handshake, so
+the reference client receives no terminal peer-connection state and never
+rebuilds the wedged link. The follow-up closes that class with one bounded,
+coordinated pair rebuild before the P2P deadline. A `PairRetry` marker crosses
+the server's ordered opaque signaling relay before the fresh Offer; both sides
+discard the old engine generation and retain the server-authored glare role.
+Retry attempts are generation-deduplicated and budgeted, connected peers do
+not emit duplicate logical pair events, and deliberate crippled/pair-partition
+negative controls explicitly disable retries. The extension is opt-in because
+non-reference peers do not negotiate `PairRetry`; the homogeneous netem matrix
+enables one attempt without changing general matchbox/browser interop.
+
+Local follow-up verification passed 57 native-client unit tests, native
+Clippy with warnings denied, both root/native formatting checks, and the root
+WebRTC matrix compile. The healthy native N=3 mesh scenario and the intentional
+crippled-ICE relay-fallback negative control both pass as real multi-process
+runs. The matrix's signal oracle still requires every sent signal to arrive
+exactly once and every Offer to have exactly one Answer, including retry
+generations. Cursor Bugbot found no issues on the pre-fix heads; Copilot was
+explicitly requested after each push but reported quota exhaustion. PR:
 <https://github.com/Ambiguous-Interactive/signal-fish-server/pull/191>.

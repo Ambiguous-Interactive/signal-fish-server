@@ -706,8 +706,14 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
     // one connected pair (>= 1 rule => true), the crippled member with zero
     // (=> false + fallback). 6 s comfortably covers the healthy pair's
     // loopback establishment.
-    const HEALTHY_ARGS: &[&str] = &["--p2p-timeout-secs", "6"];
-    const CRIPPLED_ARGS: &[&str] = &["--p2p-timeout-secs", "6", "--cripple-ice"];
+    const HEALTHY_ARGS: &[&str] = &["--p2p-timeout-secs", "6", "--p2p-retry-count", "0"];
+    const CRIPPLED_ARGS: &[&str] = &[
+        "--p2p-timeout-secs",
+        "6",
+        "--p2p-retry-count",
+        "0",
+        "--cripple-ice",
+    ];
     let run = run_three_clients(
         "mesh",
         "interop-fallback3",

@@ -249,6 +249,10 @@ fn client_args(
     }
     if scenario.uses_netem() {
         args.push("--disable-mdns".to_string());
+        args.extend(["--p2p-retry-count".to_string(), "1".to_string()]);
+    }
+    if scenario.crippled_ordinal().is_some() || scenario.partition_pair().is_some() {
+        args.extend(["--p2p-retry-count".to_string(), "0".to_string()]);
     }
     if let Some((left, right)) = scenario.partition_pair() {
         let target = if ordinal == left {
@@ -655,18 +659,29 @@ fn assert_exact_signal_ledger(
                         .copied()
                         .unwrap_or_default()
             };
+            let offers = kind_count("offer");
+            let answers = kind_count("answer");
+            let retries = kind_count("pair_retry");
             assert_eq!(
-                kind_count("offer"),
-                1,
-                "{} edge {left}<->{right}: exact offer ledger",
+                answers,
+                offers,
+                "{} edge {left}<->{right}: every offer has one answer",
                 topology.label()
             );
-            assert_eq!(
-                kind_count("answer"),
-                1,
-                "{} edge {left}<->{right}: exact answer ledger",
-                topology.label()
-            );
+            if retries == 0 {
+                assert_eq!(
+                    offers,
+                    1,
+                    "{} edge {left}<->{right}: exact initial offer ledger",
+                    topology.label()
+                );
+            } else {
+                assert!(
+                    (2..=retries + 1).contains(&offers),
+                    "{} edge {left}<->{right}: {retries} retry markers produced {offers} offer generations",
+                    topology.label()
+                );
+            }
             assert!(
                 kind_count("ice_candidate") > 0,
                 "{} edge {left}<->{right}: at least one trickle-ICE candidate",
