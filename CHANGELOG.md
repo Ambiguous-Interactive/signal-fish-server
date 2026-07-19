@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Repackage the repository's AI-agent guidance as portable Agent Skills with
+  discoverable metadata, colocated references and scripts, a generated catalog,
+  and structural validation. Update every workflow, hook, test, and document
+  that consumes the skill library to use the new layout.
 - Native reference clients can now coordinate bounded rebuilds of an
   incomplete WebRTC pair before the P2P deadline, allowing homogeneous clients
   to recover when packet loss leaves ICE connected but the SCTP data-channel

@@ -125,6 +125,16 @@ struct ScriptCase {
 fn test_llm_file_size_checker_data_driven_cases() {
     let cases = vec![
         ScriptCase {
+            name: "passes_when_llm_tree_has_no_markdown_files",
+            files: vec![fixture_file(".llm/placeholder.txt", String::new())],
+            args: vec![],
+            expected_exit: 0,
+            must_contain: vec![
+                "[INFO] Checked 0 file(s) in .llm/",
+                "[OK] All 0 LLM file(s) are within the 300-line limit.",
+            ],
+        },
+        ScriptCase {
             name: "passes_when_all_files_within_limit",
             files: vec![fixture_file(".llm/skills/ok.md", make_lines(42))],
             args: vec![],

@@ -282,7 +282,7 @@ The workflow ensures:
 
 - Workflow definition: `.github/workflows/doc-validation.yml`
 - Project guidelines: `.llm/context.md`
-- Testing standards: `.llm/skills/testing-core-patterns.md`
+- Testing standards: `.llm/skills/testing/SKILL.md`
 
 ## License
 

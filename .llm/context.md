@@ -23,7 +23,9 @@
 ## Skills Index
 
 - Generated skill catalog: [skills/index.md](skills/index.md)
-- Regenerate after skill changes: `./scripts/generate-skills-index.sh`
+- Select skills by their catalog descriptions, then read the chosen `SKILL.md` completely.
+- Regenerate after skill changes:
+  `python3 .llm/skills/manage-skills/scripts/generate_skills_index.py`
 
 ---
 
@@ -39,17 +41,17 @@ Start here:
     +-- Room/Player Logic? ----------> src/server.rs, src/server/, tests/integration_tests.rs
   |                                  context-architecture-and-files.md (Architectural Invariants)
     +-- Security/Auth/Sessions? -----> src/auth/, src/security/
-    |                                  skills/web-service-security-auth.md
-    |                                  skills/websocket-session-hijacking.md
-    +-- Deployment/Containers? ------> skills/container-docker.md
-    +-- CI/CD/GitHub Actions? -------> skills/github-actions-workflow-config.md
-    |                                  skills/ci-cd-troubleshooting-index.md
-    +-- Mutation testing slow/timeout? -> skills/mutation-testing-performance.md
-    +-- Dependencies/Supply Chain? --> skills/supply-chain-audit-policy.md
-    |                                  skills/dependency-management-cargo.md
-    |                                  skills/msrv-management.md
-    +-- Performance Issue? ----------> skills/rust-performance-optimization.md
-    +-- Hosting/Provider/Scaling? ---> skills/graceful-degradation-deployment.md
+    |                                  skills/web-service-security/SKILL.md
+    |                                  skills/websocket-session-security/SKILL.md
+    +-- Deployment/Containers? ------> skills/containers/SKILL.md
+    +-- CI/CD/GitHub Actions? -------> skills/github-actions-workflow-config/SKILL.md
+    |                                  skills/ci-cd-troubleshooting/SKILL.md
+    +-- Mutation testing slow/timeout? -> skills/mutation-testing-performance/SKILL.md
+    +-- Dependencies/Supply Chain? --> skills/supply-chain-security/SKILL.md
+    |                                  skills/dependency-management/SKILL.md
+    |                                  skills/msrv-management/SKILL.md
+    +-- Performance Issue? ----------> skills/rust-performance-optimization/SKILL.md
+    +-- Hosting/Provider/Scaling? ---> skills/graceful-degradation/SKILL.md
 ```
 
 ### Should I Add a Test?
@@ -62,14 +64,14 @@ YES - ALWAYS. Every change requires comprehensive tests.
   +-- Error recovery (cleanup, partial states)
 
 CRITICAL: Any test failure = bug to fix. No "flaky" tests.
--> See skills/testing-core-patterns.md for full methodology.
+-> See skills/testing/SKILL.md for full methodology.
 ```
 
 ---
 
 ## Mandatory Workflow (Every Change)
 
-See [Mandatory Workflow and Checklists](skills/mandatory-workflow.md) for full details.
+See [Mandatory Workflow and Checklists](skills/mandatory-workflow/SKILL.md) for full details.
 
 ```bash
 # Rust changes (ALWAYS run in order)

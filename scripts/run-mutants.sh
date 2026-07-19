@@ -32,7 +32,7 @@
 #   - Keep --in-place (a /tmp scratch build recompiles all deps cold; --copy-target
 #     deep-copies the multi-GB target). Both regress the per-shard time.
 #   - Keep {mutant-count, shard-count N, per-shard timeout, per-mutant budget}
-#     feasible together; see .llm/skills/mutation-testing-performance.md.
+#     feasible together; see .llm/skills/mutation-testing-performance/SKILL.md.
 #
 # Usage:
 #   bash scripts/run-mutants.sh --shard <k>/<N>       # run one shard (CI + local)

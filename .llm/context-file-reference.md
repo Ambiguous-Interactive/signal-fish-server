@@ -85,6 +85,8 @@
 | File/Directory                         | Purpose                                      | When to Modify              |
 | -------------------------------------- | -------------------------------------------- | --------------------------- |
 | `.llm/context.md`                      | Central assistant policy and quick reference | Updating agent guidance     |
-| `.llm/skills/`                         | Skill-specific instructions                  | Adding/updating workflows   |
-| `.llm/code-samples/`                   | Canonical reusable documentation samples     | Shared examples in markdown |
+| `.llm/skills/*/SKILL.md`               | Discoverable skill entrypoints                | Adding/updating workflows   |
+| `.llm/skills/*/references/`            | Skill-specific on-demand detail               | Updating conditional detail |
+| `.llm/skills/*/scripts/`               | Skill-specific deterministic tooling          | Updating repeated workflows |
+| `.llm/code-samples/`                   | Shared central-context samples                 | Cross-skill/context examples |
 | `.llm/code-samples/protocol/*.jsonl`   | Protocol message sample payloads             | Protocol docs changes       |

@@ -73,7 +73,7 @@ a drop guard to release abandoned claims and completes the claim as soon as
 connection reassignment succeeds.
 
 Session-plan topology/transport selection invariants are documented in
-[Protocol v3 Session-Plan Selection](skills/protocol-v3-session-plan.md).
+[Protocol v3 Session-Plan Selection](skills/protocol-v3-session-plan/SKILL.md).
 
 Protocol v3 `TransportStatus` is informational, but still a negotiated-capability
 boundary: accept reports only from v3 connections and only for transports present

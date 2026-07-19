@@ -3098,8 +3098,8 @@ fn test_markdown_guidance_avoids_stale_md060_references() {
     // instruct contributors to rely on MD060 behavior.
     let root = repo_root();
     let guidance_files = [
-        ".llm/skills/markdown-best-practices-linting.md",
-        ".llm/skills/ci-cd-troubleshooting-linting.md",
+        ".llm/skills/markdown-best-practices/SKILL.md",
+        ".llm/skills/ci-cd-troubleshooting/references/linting-and-documentation.md",
         "docs/development.md",
         "docs/adr/ci-cd-preventative-measures.md",
         "scripts/check-markdown.sh",
@@ -3329,7 +3329,7 @@ fn test_markdownlint_install_guidance_includes_local_and_global_options() {
         "scripts/check-markdown.sh",
         "scripts/enable-hooks.sh",
         "docs/git-hooks-guide.md",
-        ".llm/skills/markdown-best-practices-linting.md",
+        ".llm/skills/markdown-best-practices/SKILL.md",
     ];
 
     let mut missing_local = Vec::new();
@@ -3393,7 +3393,7 @@ fn test_enable_hooks_helper_fails_closed_and_points_to_powershell_repair() {
 #[test]
 fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
     let root = repo_root();
-    let guidance_path = root.join(".llm/skills/git-hooks-checks.md");
+    let guidance_path = root.join(".llm/skills/git-hooks/references/checks.md");
     let content = read_file(&guidance_path);
 
     assert!(
@@ -3414,14 +3414,14 @@ fn test_git_hook_skill_guidance_keeps_linter_failure_output_visible() {
 #[test]
 fn test_git_hook_skill_external_code_sample_links_exist() {
     let root = repo_root();
-    let skill_path = root.join(".llm/skills/git-hooks-checks.md");
+    let skill_path = root.join(".llm/skills/git-hooks/references/checks.md");
     let content = read_file(&skill_path);
 
     let sample_files = [
-        ".llm/code-samples/git-hooks/pre-commit-fast.sh",
-        ".llm/code-samples/git-hooks/performance-patterns.sh",
-        ".llm/code-samples/git-hooks/ci-hook-validation-tests.rs",
-        ".llm/code-samples/git-hooks/debugging-snippets.sh",
+        ".llm/skills/git-hooks/references/pre-commit-fast.sh",
+        ".llm/skills/git-hooks/references/performance-patterns.sh",
+        ".llm/skills/git-hooks/references/ci-hook-validation-tests.rs",
+        ".llm/skills/git-hooks/references/debugging-snippets.sh",
     ];
 
     let mut issues = Vec::new();
@@ -3435,8 +3435,11 @@ fn test_git_hook_skill_external_code_sample_links_exist() {
             ));
         }
 
-        let markdown_link = sample.replacen(".llm/", "../", 1);
-        if !content.contains(&markdown_link) {
+        let markdown_link = Path::new(sample)
+            .file_name()
+            .expect("sample path should have a filename")
+            .to_string_lossy();
+        if !content.contains(markdown_link.as_ref()) {
             issues.push(format!(
                 "{} does not reference expected link target: {}",
                 skill_path.display(),
@@ -5050,7 +5053,7 @@ printf '%s\n' "$digest"
 #[test]
 fn test_permissions_guidance_avoids_incorrect_default_claim() {
     let root = repo_root();
-    let skill_path = root.join(".llm/skills/github-actions-workflow-config.md");
+    let skill_path = root.join(".llm/skills/github-actions-workflow-config/SKILL.md");
     let content = read_file(&skill_path);
 
     assert!(
@@ -5103,7 +5106,7 @@ fn test_skill_trigger_lines_do_not_form_accidental_setext_headings() {
 #[test]
 fn test_link_hook_snippet_initializes_failures_and_matches_behavior() {
     let root = repo_root();
-    let skill_path = root.join(".llm/skills/markdown-best-practices-links.md");
+    let skill_path = root.join(".llm/skills/markdown-best-practices/references/link-validation.md");
     let content = read_file(&skill_path);
 
     assert!(
@@ -5127,8 +5130,8 @@ fn test_async_network_skills_avoid_unwrap_in_server_startup_examples() {
     // Prevent panic-prone patterns in best-practice guidance snippets.
     let root = repo_root();
     let files = [
-        ".llm/skills/async-rust-best-practices.md",
-        ".llm/skills/graceful-degradation-deployment.md",
+        ".llm/skills/async-rust-best-practices/SKILL.md",
+        ".llm/skills/graceful-degradation/SKILL.md",
     ];
 
     let panic_patterns = [
@@ -7300,6 +7303,13 @@ fn test_markdown_technical_terms_consistency() {
 
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
+
+            // Portable Agent Skills require lowercase kebab-case values in the YAML `name`
+            // field, even when the corresponding product name has branded capitalization.
+            if file.file_name().is_some_and(|name| name == "SKILL.md") && line.starts_with("name:")
+            {
+                continue;
+            }
 
             // Track fenced code block state per CommonMark spec:
             // - Opening fence: 3+ backticks, may have info string (e.g., ```rust)
@@ -18164,7 +18174,9 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
 
     for required_trigger in [
         "scripts/generate-skills-index.sh",
-        ":(glob).llm/skills/*.md",
+        ".llm/skills/manage-skills/scripts/generate_skills_index.py",
+        ".llm/skills/manage-skills/scripts/validate_skills.py",
+        ":(glob).llm/skills/*/SKILL.md",
     ] {
         assert!(
             content_live.contains(required_trigger),
@@ -18174,7 +18186,18 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
     assert!(
         !content.contains("$_ -eq \".llm/context.md\""),
         ".llm/context.md edits must not trigger skills index regeneration; \
-         the generated index is derived only from .llm/skills/*.md and the generator script."
+         the generated index is derived only from nested SKILL.md files and the generator script."
+    );
+
+    let metadata_gate = content_live
+        .split("$metadataPolicyTriggered")
+        .nth(1)
+        .and_then(|suffix| suffix.split("Complete-PreCommit").next())
+        .expect("metadata policy gate must precede its early exit");
+    assert!(
+        metadata_gate.contains("$script:SkillsIndexToolingFiles -contains $_"),
+        "generator and validator-only commits must enter skills-index freshness checks \
+         instead of exiting at the non-Markdown metadata gate."
     );
 
     assert!(
@@ -19600,6 +19623,7 @@ fn test_no_workflow_action_uses_commit_hash_ref() {
 
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
+
             let trimmed = line.trim();
 
             let Some(uses_value) = extract_uses_value(trimmed) else {
@@ -20141,7 +20165,8 @@ const SPELLING_EXCLUSION_MARKERS: &[&str] = &["http://", "https://"];
 
 /// Files that contain British spellings as reference data (e.g., comparison tables
 /// or test data). These files are excluded from the scan to avoid false positives.
-const SPELLING_EXCLUSION_FILES: &[&str] = &["ci_config_tests.rs", "documentation-standards.md"];
+const SPELLING_EXCLUSION_FILES: &[&str] = &["ci_config_tests.rs"];
+const SPELLING_EXCLUSION_PATHS: &[&str] = &[".llm/skills/documentation/SKILL.md"];
 
 #[test]
 fn test_no_british_english_spellings() {
@@ -20166,17 +20191,23 @@ fn test_no_british_english_spellings() {
         let files = find_files_with_extension(&dir, extension, &["target", ".git", "third_party"]);
 
         for file_path in &files {
+            let relative_path = file_path
+                .strip_prefix(&root)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .replace('\\', "/");
             // Skip files that contain British spellings as reference data
             // (e.g., test data, comparison tables in documentation).
-            if file_path
-                .file_name()
-                .map(|name| {
-                    let name_str = name.to_string_lossy();
-                    SPELLING_EXCLUSION_FILES
-                        .iter()
-                        .any(|excluded| name_str == *excluded)
-                })
-                .unwrap_or(false)
+            if SPELLING_EXCLUSION_PATHS.contains(&relative_path.as_str())
+                || file_path
+                    .file_name()
+                    .map(|name| {
+                        let name_str = name.to_string_lossy();
+                        SPELLING_EXCLUSION_FILES
+                            .iter()
+                            .any(|excluded| name_str == *excluded)
+                    })
+                    .unwrap_or(false)
             {
                 continue;
             }
@@ -20185,12 +20216,6 @@ fn test_no_british_english_spellings() {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-
-            let relative_path = file_path
-                .strip_prefix(&root)
-                .unwrap_or(file_path)
-                .display()
-                .to_string();
 
             for (line_number, line) in content.lines().enumerate() {
                 let line_lower = line.to_lowercase();
@@ -21405,7 +21430,7 @@ fn test_deny_toml_bans_known_problematic_crates() {
         "deny.toml is missing [[bans.deny]] entries for known-problematic crates:\n\
          {}\n\n\
          Add [[bans.deny]] entries with name and reason fields for each.\n\
-         See .llm/skills/supply-chain-audit-policy.md for the proactive ban list policy.",
+         See .llm/skills/supply-chain-security/SKILL.md for the proactive ban list policy.",
         missing
             .iter()
             .map(|c| format!("  - {c}"))
@@ -21704,7 +21729,7 @@ const REQUIRED_AUDIT_SKILL_SECTIONS: &[(&str, &str)] = &[
 #[test]
 fn test_dep_skill_contains_watch_list_section() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+    let content = read_file(&root.join(".llm/skills/dependency-management/SKILL.md"));
 
     let mut missing = Vec::new();
     for &(section, desc) in REQUIRED_DEP_SKILL_SECTIONS {
@@ -21732,7 +21757,7 @@ fn test_dep_skill_contains_watch_list_section() {
 #[test]
 fn test_dep_skill_contains_ban_policy_referencing_deny_toml() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+    let content = read_file(&root.join(".llm/skills/dependency-management/SKILL.md"));
 
     assert!(
         content.contains("deny.toml"),
@@ -21750,7 +21775,7 @@ fn test_dep_skill_contains_ban_policy_referencing_deny_toml() {
 #[test]
 fn test_dep_skill_watch_list_references_real_crates() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/dependency-management-cargo.md"));
+    let content = read_file(&root.join(".llm/skills/dependency-management/SKILL.md"));
 
     let mut missing = Vec::new();
     let mut not_in_table = Vec::new();
@@ -21790,7 +21815,7 @@ fn test_dep_skill_watch_list_references_real_crates() {
 #[test]
 fn test_audit_skill_contains_monitoring_obligations() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/supply-chain-audit-policy.md"));
+    let content = read_file(&root.join(".llm/skills/supply-chain-security/SKILL.md"));
 
     let mut missing = Vec::new();
     for &(section, desc) in REQUIRED_AUDIT_SKILL_SECTIONS {
@@ -21811,7 +21836,7 @@ fn test_audit_skill_contains_monitoring_obligations() {
 #[test]
 fn test_audit_skill_monitoring_references_tools() {
     let root = repo_root();
-    let content = read_file(&root.join(".llm/skills/supply-chain-audit-policy.md"));
+    let content = read_file(&root.join(".llm/skills/supply-chain-security/SKILL.md"));
 
     let required_tool_refs = [
         ("cargo deny check", "primary policy gate"),
@@ -22301,7 +22326,7 @@ fn test_agent_github_access_policy_is_extension_first() {
         "CLAUDE.md",
         ".github/copilot-instructions.md",
         ".llm/context.md",
-        ".llm/skills/mandatory-workflow.md",
+        ".llm/skills/mandatory-workflow/SKILL.md",
     ];
 
     for relative_path in policy_files {
@@ -22919,7 +22944,7 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 //
 // These tests lock the mutation-testing-speed configuration in place forever so
 // the per-shard wall-clock stays well under the timeout. The full rationale and
-// the measured numbers live in .llm/skills/mutation-testing-performance.md; the
+// the measured numbers live in .llm/skills/mutation-testing-performance/SKILL.md; the
 // machinery is split across:
 //   - .cargo/mutants.toml          (oracle: --lib, no --all-features; scope)
 //   - Cargo.toml [profile.mutants] (debug=0, incremental=true, inherits dev)
@@ -22932,7 +22957,7 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // ===========================================================================
 
 // Mutation-speed budget constants. These are the CONTRACT from
-// .llm/skills/mutation-testing-performance.md. Treat them as a unit: changing
+// .llm/skills/mutation-testing-performance/SKILL.md. Treat them as a unit: changing
 // one without re-measuring the others can make a shard exceed its timeout.
 //
 // Total mutants generated by `cargo mutants --list` over the scoped modules in
@@ -23290,7 +23315,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         violations.is_empty(),
         "Mutation-testing fast-linker / in-place policy violations:\n\n{}\n\n\
          Why this matters: each shard must finish well under its timeout; mold + --in-place + \
-         slice sharding are the measured levers (see .llm/skills/mutation-testing-performance.md), \
+         slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
          Verify: bash scripts/run-mutants.sh --shard 0/36 --print-cmd",
@@ -23389,7 +23414,7 @@ fn test_mutation_workflow_uses_optimized_build_profile() {
         violations.is_empty(),
         "Mutation-testing build-profile policy violations:\n\n{}\n\n\
          Why this matters: the per-mutant build/relink cost dominates the 343-mutant run; this \
-         profile (see .llm/skills/mutation-testing-performance.md) trims it. \n\
+         profile (see .llm/skills/mutation-testing-performance/SKILL.md) trims it. \n\
          Fix: restore the listed fields to [profile.mutants] in Cargo.toml.\n\
          Verify: cargo test --test ci_config_tests test_mutation_workflow_uses_optimized_build_profile",
         violations.join("\n")
@@ -23502,7 +23527,7 @@ fn test_mutation_shard_matrix_is_complete_contiguous_partition() {
 fn test_mutation_shard_budget_is_feasible_vs_timeout() {
     // Keep {mutant-count, shard-count N, per-mutant budget, per-shard timeout}
     // feasible TOGETHER. The constants above are the contract from
-    // .llm/skills/mutation-testing-performance.md.
+    // .llm/skills/mutation-testing-performance/SKILL.md.
 
     let workflow = read_mutation_workflow();
     let shards = parse_mutation_shard_matrix(&workflow);
@@ -23572,7 +23597,7 @@ fn test_mutation_shard_budget_is_feasible_vs_timeout() {
          ceil({MUTATION_TOTAL_MUTANTS}/{n})={mutants_per_shard} mutants ≈ {worst_shard_secs}s; it must be \
          <= {MUTATION_TARGET_SECS}s (soft target) AND <= {timeout_minutes}*60={timeout_secs}s (hard \
          timeout), with the timeout in [{MUTATION_TIMEOUT_FLOOR_MIN}, {MUTATION_TIMEOUT_CEILING_MIN}] min.\n\
-         These constants are the contract in .llm/skills/mutation-testing-performance.md; \
+         These constants are the contract in .llm/skills/mutation-testing-performance/SKILL.md; \
          re-measure before changing them.\n\
          Fix: adjust the shard count / timeout in .github/workflows/mutation.yml.\n\
          Verify: cargo test --test ci_config_tests test_mutation_shard_budget_is_feasible_vs_timeout",
@@ -23675,7 +23700,7 @@ fn test_mutation_oracle_does_not_use_all_features() {
          additional_cargo_args, not additional_cargo_test_args) keeps the oracle to fast \
          in-crate unit tests, exercises the scoped trace adapters, and avoids building ~20 \
          integration-test binaries per mutant; --all-features adds heavy deps with no signal. \
-         See .llm/skills/mutation-testing-performance.md.\n\
+         See .llm/skills/mutation-testing-performance/SKILL.md.\n\
          Fix: keep `additional_cargo_args = [\"--lib\", \"--features\", \
          \"trace-validation\"]`, `test_tool = \"nextest\"`, and \
          remove any --all-features from .cargo/mutants.toml and scripts/run-mutants.sh.\n\
@@ -24078,7 +24103,7 @@ fn test_mutation_total_mutants_constant_matches_list() {
          per-shard timeout in .github/workflows/mutation.yml may need to change to keep each \
          shard <5 min.\n\
          3. Re-measure MUTATION_PER_MUTANT_BUDGET_SECS if the scope change altered build cost.\n\
-         See .llm/skills/mutation-testing-performance.md (the feasibility contract).\n\
+         See .llm/skills/mutation-testing-performance/SKILL.md (the feasibility contract).\n\
          Verify: cargo mutants --list | grep -c ."
     );
 }

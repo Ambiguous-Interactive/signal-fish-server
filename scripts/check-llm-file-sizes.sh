@@ -134,12 +134,13 @@ CHECKED=0
 VIOLATIONS=0
 MISSING_INPUTS=0
 
-for file in "${FILES_TO_CHECK[@]}"; do
-    if [ ! -f "$file" ]; then
-        warn "Skipping non-existent file: $file"
-        MISSING_INPUTS=$((MISSING_INPUTS + 1))
-        continue
-    fi
+if [ "${#FILES_TO_CHECK[@]}" -gt 0 ]; then
+    for file in "${FILES_TO_CHECK[@]}"; do
+        if [ ! -f "$file" ]; then
+            warn "Skipping non-existent file: $file"
+            MISSING_INPUTS=$((MISSING_INPUTS + 1))
+            continue
+        fi
 
     # Skip the auto-generated skills index; its size is controlled by the
     # number of skills, not by manual editing.
@@ -151,31 +152,32 @@ for file in "${FILES_TO_CHECK[@]}"; do
     CHECKED=$((CHECKED + 1))
     FILE_SIZE_RECORDS+=("${LINE_COUNT}"$'\t'"${file}")
 
-    if [ "$LINE_COUNT" -gt "$MAX_LINES" ]; then
-        error "$file: $LINE_COUNT lines (max: $MAX_LINES — exceeds by $((LINE_COUNT - MAX_LINES)))"
-        if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-            echo "::error file=$file::LLM file exceeds ${MAX_LINES}-line limit ($LINE_COUNT lines)"
-        fi
-        echo "       Split into focused sub-files of ≤${MAX_LINES} lines."
-        echo "       See .llm/skills/manage-skills.md for guidance."
-        VIOLATIONS=$((VIOLATIONS + 1))
-    else
-        # Report files in the documented warning zone as informational.
-        HEADROOM=$((MAX_LINES - LINE_COUNT))
-        if [ "$HEADROOM" -eq 0 ] && [ "$LINE_COUNT" -gt 0 ]; then
-            warn "$file: $LINE_COUNT lines (at limit — next added line will fail)"
+        if [ "$LINE_COUNT" -gt "$MAX_LINES" ]; then
+            error "$file: $LINE_COUNT lines (max: $MAX_LINES — exceeds by $((LINE_COUNT - MAX_LINES)))"
             if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-                echo "::warning file=$file::LLM file is at the ${MAX_LINES}-line limit"
+                echo "::error file=$file::LLM file exceeds ${MAX_LINES}-line limit ($LINE_COUNT lines)"
             fi
-        elif [ "$HEADROOM" -le "$WARN_HEADROOM" ] && [ "$LINE_COUNT" -gt 0 ]; then
-            LINES_WORD="lines"; [ "$HEADROOM" -eq 1 ] && LINES_WORD="line"
-            warn "$file: $LINE_COUNT lines (${HEADROOM} ${LINES_WORD} from limit — consider trimming)"
-            if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-                echo "::warning file=$file::LLM file is close to limit (${LINE_COUNT}/${MAX_LINES} lines)"
+            echo "       Split into focused sub-files of ≤${MAX_LINES} lines."
+            echo "       See .llm/skills/manage-skills/SKILL.md for guidance."
+            VIOLATIONS=$((VIOLATIONS + 1))
+        else
+            # Report files in the documented warning zone as informational.
+            HEADROOM=$((MAX_LINES - LINE_COUNT))
+            if [ "$HEADROOM" -eq 0 ] && [ "$LINE_COUNT" -gt 0 ]; then
+                warn "$file: $LINE_COUNT lines (at limit — next added line will fail)"
+                if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+                    echo "::warning file=$file::LLM file is at the ${MAX_LINES}-line limit"
+                fi
+            elif [ "$HEADROOM" -le "$WARN_HEADROOM" ] && [ "$LINE_COUNT" -gt 0 ]; then
+                LINES_WORD="lines"; [ "$HEADROOM" -eq 1 ] && LINES_WORD="line"
+                warn "$file: $LINE_COUNT lines (${HEADROOM} ${LINES_WORD} from limit — consider trimming)"
+                if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+                    echo "::warning file=$file::LLM file is close to limit (${LINE_COUNT}/${MAX_LINES} lines)"
+                fi
             fi
         fi
-    fi
-done
+    done
+fi
 
 echo ""
 if [ "$FILE_ARGS_MODE" -eq 1 ]; then

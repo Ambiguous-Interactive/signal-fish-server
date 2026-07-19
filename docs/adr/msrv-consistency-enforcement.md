@@ -80,7 +80,7 @@ Standalone script that:
 
 ### 3. LLM Agent Guidance
 
-Created comprehensive skill: `.llm/skills/msrv-management.md`
+Created comprehensive skill: `.llm/skills/msrv-management/SKILL.md`
 
 This skill provides AI agents with:
 

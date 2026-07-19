@@ -114,12 +114,13 @@ trap 'rm -f "$TMP_REPORT"' EXIT
 CHECKED=0
 MISSING=0
 
-for file in "${FILES_TO_CHECK[@]}"; do
-    if [ ! -f "$file" ]; then
-        echo -e "${YELLOW}[WARN]${NC} Skipping non-existent file: $file"
-        MISSING=$((MISSING + 1))
-        continue
-    fi
+if [ "${#FILES_TO_CHECK[@]}" -gt 0 ]; then
+    for file in "${FILES_TO_CHECK[@]}"; do
+        if [ ! -f "$file" ]; then
+            echo -e "${YELLOW}[WARN]${NC} Skipping non-existent file: $file"
+            MISSING=$((MISSING + 1))
+            continue
+        fi
 
     case "$file" in
         *.md) ;;
@@ -203,6 +204,12 @@ for (my $i = 0; $i < scalar(@lines); $i++) {
         $base =~ s{^.*/}{};
         my $stem = $base;
         $stem =~ s/\.md$//;
+        if (lc($base) eq 'skill.md') {
+            my $skill_dir = $target_no_anchor;
+            $skill_dir =~ s{/SKILL\.md$}{}i;
+            $skill_dir =~ s{^.*/}{};
+            $stem = $skill_dir;
+        }
 
         my $normalized_text = normalize($text);
         my $normalized_stem = normalize($stem);
@@ -237,7 +244,8 @@ if ($fix_mode && $violations > 0) {
     close $out;
 }
 PERL
-done
+    done
+fi
 
 VIOLATION_COUNT=$(wc -l < "$TMP_REPORT" | tr -d '[:space:]')
 

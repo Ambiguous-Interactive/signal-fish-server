@@ -1,6 +1,6 @@
 # Documentation Requirements
 
-See [Documentation Standards](skills/documentation-standards.md) for full standards.
+See [Documentation Standards](skills/documentation/SKILL.md) for full standards.
 
 Every feature/bugfix requires: doc comments with examples, CHANGELOG entry,
 README updates if user-facing.
@@ -19,7 +19,7 @@ Config and binary wire-format drift rules:
   separate fenced blocks with appropriate tags, not one `yaml` block.
 - **`.lychee.toml` `exclude` patterns are regex, not globs** -- escape `.` as `\\.`,
   use `.*` not `*`, anchor with `^`. See
-  [CI/CD Troubleshooting Pattern 13](skills/ci-cd-troubleshooting-links.md).
+  [CI/CD Troubleshooting Pattern 13](skills/ci-cd-troubleshooting/references/link-checking.md).
 - **Lychee self-scans `.toml` files** -- use `--exclude-path .lychee.toml` or add exclusions.
 - **TOML/JSON/YAML "before/after" examples need separate blocks** -- duplicate table headers
   (e.g., two `[dependencies]`) in one block is invalid and will fail CI validation.

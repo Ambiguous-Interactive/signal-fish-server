@@ -1,7 +1,7 @@
 # Testing Requirements
 
-See [Core Testing Patterns](skills/testing-core-patterns.md) and
-[Testing Tools and Frameworks](skills/testing-tools-and-frameworks.md) for full methodology.
+See [Core Testing Patterns](skills/testing/SKILL.md) and
+[Testing Tools and Frameworks](skills/testing/references/tools-and-frameworks.md) for full methodology.
 
 - Every feature/bugfix requires exhaustive tests (happy, negative, edge, concurrent, recovery)
 - Data-driven/table-driven tests preferred for validation functions
@@ -95,5 +95,5 @@ slow job cancels a healthy-but-loaded run, which is non-determinism by the same
 definition above. This is why the mutation-testing shards keep a timeout _floor_
 (generous headroom over the measured per-shard wall-clock) rather than the
 tightest value that "usually" passes. See
-[Mutation Testing Performance](skills/mutation-testing-performance.md) for the
+[Mutation Testing Performance](skills/mutation-testing-performance/SKILL.md) for the
 feasibility contract and `MUTPERF-001` in `PLAN.md`.

@@ -213,7 +213,7 @@ if [ "$FAILED" -ne 0 ]; then
     echo "7. Update .devcontainer/Dockerfile (optional):"
     echo "   # Project MSRV: $MSRV"
     echo ""
-    echo "See .llm/skills/msrv-management.md for detailed guidance."
+    echo "See .llm/skills/msrv-management/SKILL.md for detailed guidance."
     echo ""
     exit 1
 else
