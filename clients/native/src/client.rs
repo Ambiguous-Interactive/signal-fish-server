@@ -137,13 +137,11 @@ fn arm_pair_window(
     if !generation.arms_p2p_window() {
         return;
     }
-    let original_deadline = *deadline.get_or_insert(now + timeout);
-    if retry_count > 0 && retry_at.is_none() {
-        let candidate = now + p2p_retry_delay(timeout.as_secs());
-        if candidate < original_deadline {
-            *retry_at = Some(candidate);
-        }
-    }
+    let fresh_deadline = now + timeout;
+    *deadline = Some(fresh_deadline);
+    *retry_at = (retry_count > 0)
+        .then(|| now + p2p_retry_delay(timeout.as_secs()))
+        .filter(|candidate| *candidate < fresh_deadline);
 }
 
 /// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
@@ -2338,7 +2336,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_generation_preserves_the_original_p2p_window() {
+    fn retry_preserves_the_p2p_window_while_initial_pairing_refreshes_it() {
         assert!(PairGeneration::Initial.arms_p2p_window());
         assert!(!PairGeneration::Retry.arms_p2p_window());
 
@@ -2357,6 +2355,17 @@ mod tests {
         );
         assert_eq!(deadline, Some(original_deadline));
         assert_eq!(retry_at, Some(original_retry));
+
+        arm_pair_window(
+            &mut deadline,
+            &mut retry_at,
+            PairGeneration::Initial,
+            1,
+            Duration::from_secs(30),
+            started + Duration::from_secs(20),
+        );
+        assert_eq!(deadline, Some(started + Duration::from_secs(50)));
+        assert_eq!(retry_at, Some(started + Duration::from_secs(35)));
     }
 
     #[test]

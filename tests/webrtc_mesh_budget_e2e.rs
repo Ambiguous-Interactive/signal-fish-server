@@ -530,6 +530,7 @@ fn assert_exact_channel_ledger(
     events: &[Value],
     event: &str,
     expected_peers: &BTreeSet<&str>,
+    retry_markers_by_peer: &BTreeMap<&str, usize>,
     player_id: &str,
     who: &str,
 ) {
@@ -580,10 +581,11 @@ fn assert_exact_channel_ledger(
     }
     for peer in expected_peers {
         for label in CHANNEL_LABELS {
-            assert_eq!(
-                counts.get(&(*peer, label)),
-                Some(&1),
-                "{who}: expected exactly one {event} for ({peer}, {label}); ledger={counts:?}"
+            let count = counts.get(&(*peer, label)).copied().unwrap_or_default();
+            let max_generations = retry_markers_by_peer.get(peer).copied().unwrap_or_default() + 1;
+            assert!(
+                channel_generation_count_is_valid(count, max_generations - 1),
+                "{who}: expected 1..={max_generations} {event} generations for ({peer}, {label}); got {count}; ledger={counts:?}"
             );
         }
     }
@@ -592,6 +594,20 @@ fn assert_exact_channel_ledger(
         expected_peers.len() * CHANNEL_LABELS.len(),
         "{who}: {event} contains stray ledger entries: {counts:?}"
     );
+}
+
+fn channel_generation_count_is_valid(count: usize, retry_markers: usize) -> bool {
+    (1..=retry_markers + 1).contains(&count)
+}
+
+#[test]
+fn channel_generation_ledger_expands_only_for_observed_retry_markers() {
+    assert!(channel_generation_count_is_valid(1, 0));
+    assert!(!channel_generation_count_is_valid(0, 0));
+    assert!(!channel_generation_count_is_valid(2, 0));
+    assert!(channel_generation_count_is_valid(1, 1));
+    assert!(channel_generation_count_is_valid(2, 1));
+    assert!(!channel_generation_count_is_valid(3, 1));
 }
 
 fn assert_exact_signal_ledger(
@@ -882,6 +898,16 @@ fn assert_client_barrier(
         scenario.topology.label()
     );
 
+    let mut retry_markers_by_peer = BTreeMap::<&str, usize>::new();
+    for (event, peer_field) in [("signal_sent", "to"), ("signal_received", "from")] {
+        for signal in events_named(window, event) {
+            if string_field(signal, "kind", who) == "pair_retry" {
+                let peer = string_field(signal, peer_field, who);
+                *retry_markers_by_peer.entry(peer).or_default() += 1;
+            }
+        }
+    }
+
     assert_exact_peer_events(
         window,
         "p2p_pair_connected",
@@ -893,6 +919,7 @@ fn assert_client_barrier(
         window,
         "channel_open",
         &expected_connections,
+        &retry_markers_by_peer,
         player_id,
         who,
     );
@@ -900,6 +927,7 @@ fn assert_client_barrier(
         window,
         "channel_message_sent",
         &expected_connections,
+        &retry_markers_by_peer,
         player_id,
         who,
     );
@@ -907,6 +935,7 @@ fn assert_client_barrier(
         window,
         "channel_message",
         &expected_connections,
+        &retry_markers_by_peer,
         player_id,
         who,
     );

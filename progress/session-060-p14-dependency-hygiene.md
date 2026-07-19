@@ -92,6 +92,15 @@ and the initial-versus-retry deadline policy. The netem oracle accepts only
 deduplicated real transport transitions and still requires the final expected
 state; scenarios without coordinated retry retain their exact one-report rule.
 
+A delayed Bugbot result on that head identified two further generation edges.
+The channel oracle now permits one additional open/exchange generation only
+for each observed retry marker on that exact peer while retaining the required
+final generation and exact event schema. Separately, a genuinely new initial
+pairing refreshes its full establishment/retry window; only
+`PairGeneration::Retry` preserves the existing deadline. The timer regression
+covers both policies so preventing retry extension cannot shorten a later
+`NewPeer` or authoritative-plan addition.
+
 The otherwise-green exact head then exposed the two equivalent Windows
 surfaces of a connection-reset race in the directional-partition oracle. The
 test already allowed raw `Io(ConnectionReset)` after observing the
