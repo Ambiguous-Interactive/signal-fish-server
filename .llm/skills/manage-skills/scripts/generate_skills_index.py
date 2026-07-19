@@ -14,6 +14,10 @@ from validate_skills import SKILLS_DIR, validate_library
 
 INDEX_PATH = SKILLS_DIR / "index.md"
 
+# The dependency-light pre-commit hook mirrors this renderer in PowerShell.
+# Keep New-SkillsIndexContent and New-WorktreeSkillsIndexContent in sync when
+# changing the catalog format.
+
 
 def render_index() -> str:
     metadata, errors = validate_library()

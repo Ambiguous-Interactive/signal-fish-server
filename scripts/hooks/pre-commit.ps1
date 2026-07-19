@@ -35,6 +35,11 @@ $script:HookPolicyFiles = @(
     "scripts/hooks/pre-commit-rust.ps1",
     "scripts/hooks/pre-push.ps1"
 )
+$script:SkillsIndexToolingFiles = @(
+    "scripts/generate-skills-index.sh",
+    ".llm/skills/manage-skills/scripts/generate_skills_index.py",
+    ".llm/skills/manage-skills/scripts/validate_skills.py"
+)
 $script:HookPolicyChangedFiles = @()
 
 . (Join-Path $PSScriptRoot "native-process.ps1")
@@ -624,7 +629,7 @@ function Test-FastHookSource {
 
 function Add-StagedContentPreload {
     $skillsIndexTriggered = @($script:StagedFiles | Where-Object {
-            $_ -eq "scripts/generate-skills-index.sh" -or
+            $script:SkillsIndexToolingFiles -contains $_ -or
             ($_.StartsWith(".llm/skills/") -and $_.EndsWith(".md"))
         }).Count -gt 0
     $preloadPaths = @($script:StagedFiles | Where-Object {
@@ -1099,9 +1104,10 @@ function Repair-SkillsIndexIfNeeded {
             $_ -eq ".llm/skills/index.md" -or
             ($_.StartsWith(".llm/skills/") -and $_.EndsWith("/SKILL.md"))
         })
-    $triggered = @($script:StagedFiles | Where-Object {
-            $_ -eq "scripts/generate-skills-index.sh" -or
-            $_ -eq ".llm/skills/manage-skills/scripts/generate_skills_index.py" -or
+    $skillsToolingChanged = @($script:StagedFiles | Where-Object {
+            $script:SkillsIndexToolingFiles -contains $_
+        }).Count -gt 0
+    $triggered = $skillsToolingChanged -or @($script:StagedFiles | Where-Object {
             $_ -eq ".llm/skills/index.md" -or
             ($_.StartsWith(".llm/skills/") -and $_.EndsWith("/SKILL.md"))
         }).Count -gt 0
@@ -1112,7 +1118,7 @@ function Repair-SkillsIndexIfNeeded {
 
     $indexCoversChangedSkills = $false
     if (
-        ($script:StagedFiles -notcontains "scripts/generate-skills-index.sh") -and
+        (-not $skillsToolingChanged) -and
         ($script:StagedFiles -contains ".llm/skills/index.md")
     ) {
         if ($script:InspectWorktree) {
@@ -1132,7 +1138,7 @@ function Repair-SkillsIndexIfNeeded {
 
     if ($script:InspectWorktree) {
         if (
-            ($script:StagedFiles -notcontains "scripts/generate-skills-index.sh") -and
+            (-not $skillsToolingChanged) -and
             (Test-WorktreeSkillsIndexDefinitelyFresh -ChangedSkillFiles $changedSkillFiles)
         ) {
             Pass "Skills index freshness"
@@ -1161,7 +1167,7 @@ function Repair-SkillsIndexIfNeeded {
     }
 
     if (
-        ($script:StagedFiles -notcontains "scripts/generate-skills-index.sh") -and
+        (-not $skillsToolingChanged) -and
         (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $changedSkillFiles)
     ) {
         Pass "Skills index freshness"
@@ -1591,7 +1597,7 @@ if ($changedProductionRustFiles.Count -eq 0) {
 }
 
 $metadataPolicyTriggered = @($allChangedFiles | Where-Object {
-        $_ -eq "scripts/generate-skills-index.sh" -or
+        $script:SkillsIndexToolingFiles -contains $_ -or
         ($_.StartsWith(".llm/") -and $_.EndsWith(".md")) -or
         $_ -eq "README.md"
     }).Count -gt 0

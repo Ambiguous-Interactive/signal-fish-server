@@ -18175,6 +18175,7 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
     for required_trigger in [
         "scripts/generate-skills-index.sh",
         ".llm/skills/manage-skills/scripts/generate_skills_index.py",
+        ".llm/skills/manage-skills/scripts/validate_skills.py",
         ":(glob).llm/skills/*/SKILL.md",
     ] {
         assert!(
@@ -18186,6 +18187,17 @@ fn test_pre_commit_hook_skills_index_freshness_triggers_cover_key_paths() {
         !content.contains("$_ -eq \".llm/context.md\""),
         ".llm/context.md edits must not trigger skills index regeneration; \
          the generated index is derived only from nested SKILL.md files and the generator script."
+    );
+
+    let metadata_gate = content_live
+        .split("$metadataPolicyTriggered")
+        .nth(1)
+        .and_then(|suffix| suffix.split("Complete-PreCommit").next())
+        .expect("metadata policy gate must precede its early exit");
+    assert!(
+        metadata_gate.contains("$script:SkillsIndexToolingFiles -contains $_"),
+        "generator and validator-only commits must enter skills-index freshness checks \
+         instead of exiting at the non-Markdown metadata gate."
     );
 
     assert!(
