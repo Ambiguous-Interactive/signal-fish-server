@@ -42,7 +42,6 @@ tokio = { version = "1.52", features = [
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
-tokio-tungstenite = "0.29"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -143,7 +142,7 @@ trybuild = "1.0"
 # actually parsing them, rather than approximating a parser with fragile quote/
 # indent heuristics. `default-features = false` drops the encoding_rs dependency
 # (UTF-8 input only), which is all the test fixtures and on-disk workflows need.
-saphyr = { version = "0.0.9", default-features = false }
+saphyr = { version = "0.0.11", default-features = false }
 
 [[bin]]
 name = "signal-fish-server"

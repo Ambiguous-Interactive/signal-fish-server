@@ -107,7 +107,7 @@ fi
 if [ "$FULL_MODE" = true ]; then
     echo ""
     echo -e "${BLUE}[INFO]${NC} Running full cargo-deny checks (licenses, bans, sources)..."
-    if cargo deny check --all-features; then
+    if cargo deny --all-features check; then
         echo -e "${GREEN}[OK]${NC} All cargo-deny checks passed."
     else
         echo -e "${RED}[FAIL]${NC} cargo-deny checks failed."

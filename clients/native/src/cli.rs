@@ -114,6 +114,13 @@ pub struct Cli {
     #[arg(long, default_value_t = 15)]
     pub p2p_timeout_secs: u64,
 
+    /// Maximum coordinated rebuilds for a planned pair whose data channels do
+    /// not open. Retries use the server's opaque Signal relay and preserve the
+    /// plan's glare role. Fault-injection tests that require a permanently
+    /// missing pair set this to 0.
+    #[arg(long, default_value_t = 0)]
+    pub p2p_retry_count: u8,
+
     /// Soft cap: exit nonzero if the flag-driven success criteria are still
     /// unmet after this many seconds.
     #[arg(long, default_value_t = 30)]
@@ -286,6 +293,7 @@ mod tests {
         assert_eq!(cli.runtime, RuntimeFlavor::Multi);
         assert_eq!(cli.runtime.as_str(), "multi");
         assert_eq!(cli.tick_stall_ms, 0, "fault injection is off by default");
+        assert_eq!(cli.p2p_retry_count, 0, "pair retry is opt-in");
         assert_eq!(cli.drop_ice_from, None);
         assert!(!cli.disable_mdns);
         assert_eq!(cli.success_release_file, None);

@@ -129,6 +129,8 @@ pub enum SignalKind {
     Offer,
     Answer,
     IceCandidate,
+    /// Reference-client coordination for rebuilding an incomplete pair.
+    PairRetry,
     /// Anything not matching the matchbox `PeerSignal` convention.
     Other,
 }
@@ -146,6 +148,7 @@ impl SignalKind {
             Some("Offer") => Self::Offer,
             Some("Answer") => Self::Answer,
             Some("IceCandidate") => Self::IceCandidate,
+            Some("PairRetry") => Self::PairRetry,
             _ => Self::Other,
         }
     }
@@ -347,6 +350,10 @@ mod tests {
         assert_eq!(
             SignalKind::classify(&json!({"IceCandidate": "x"})),
             SignalKind::IceCandidate
+        );
+        assert_eq!(
+            SignalKind::classify(&json!({"PairRetry": 1})),
+            SignalKind::PairRetry
         );
         assert_eq!(SignalKind::classify(&json!("Offer")), SignalKind::Other);
         assert_eq!(

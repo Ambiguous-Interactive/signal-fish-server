@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native reference clients can now coordinate bounded rebuilds of an
+  incomplete WebRTC pair before the P2P deadline, allowing homogeneous clients
+  to recover when packet loss leaves ICE connected but the SCTP data-channel
+  handshake stalled.
+
+- Refresh the compatible runtime, TLS, parser, and test-tool dependency set
+  while keeping Axum and the WebSocket test client on one aligned Tungstenite
+  version. Remove the redundant production declaration of the test-only
+  `tokio-tungstenite` client. Restore the local full supply-chain audit on
+  current cargo-deny by passing its global feature option before the `check`
+  subcommand.
 - Extend the exact-release Fortress/Godot no-thread WASM interoperability gate
   with a weekly Firefox cell. Pull requests retain the deterministic Chromium
   gate, while the scheduled run applies the same healthy released-client and

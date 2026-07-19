@@ -22,8 +22,11 @@
 //!    compatible servers), trickling ICE through `Signal`. The overall WebRTC
 //!    transport status resolves (Appendix G) when all expected pairs are
 //!    connected (a departure that removes the last unconnected expected pair
-//!    counts), or at `--p2p-timeout-secs` — `connected: true` iff at least
-//!    one pair is connected at that moment; a zero-pair resolution also emits
+//!    counts), or at `--p2p-timeout-secs`. Before that deadline, an incomplete
+//!    pair can get configured, bounded coordinated rebuilds so an
+//!    ICE-connected but stalled SCTP association cannot wedge forever. At
+//!    resolution, `connected: true`
+//!    iff at least one pair is connected at that moment; a zero-pair resolution also emits
 //!    `fallback_engaged`. Membership churn reports later real state changes;
 //!    unchanged states remain suppressed.
 //! 6. **Relay floor** — `GameData` keeps flowing over the WebSocket before,
@@ -78,6 +81,68 @@ const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 const EXIT_LINGER: Duration = Duration::from_millis(250);
 /// Poll cadence for an optional harness-controlled success release file.
 const SUCCESS_RELEASE_POLL: Duration = Duration::from_millis(100);
+
+/// Retry early enough to leave the original P2P window useful, while allowing
+/// ordinary ICE/DTLS/SCTP setup to settle first. The 15-second ceiling is also
+/// deliberately puts long-window retries beyond the nightly netem harness's
+/// 10-second loss window.
+fn p2p_retry_delay(p2p_timeout_secs: u64) -> Duration {
+    Duration::from_secs((p2p_timeout_secs / 2).clamp(1, 15))
+}
+
+fn retryable_missing_peers(
+    expected: &BTreeSet<PlayerId>,
+    connected: &BTreeSet<PlayerId>,
+    attempts: &BTreeMap<PlayerId, u8>,
+    retry_count: u8,
+) -> Vec<PlayerId> {
+    expected
+        .difference(connected)
+        .copied()
+        .filter(|peer| attempts.get(peer).copied().unwrap_or(0) < retry_count)
+        .collect()
+}
+
+fn note_current_pair_connected(
+    connected: &mut BTreeSet<PlayerId>,
+    reported: &mut BTreeSet<PlayerId>,
+    retrying: &mut BTreeSet<PlayerId>,
+    peer: PlayerId,
+) -> bool {
+    connected.insert(peer);
+    retrying.remove(&peer);
+    reported.insert(peer)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PairGeneration {
+    Initial,
+    Retry,
+}
+
+impl PairGeneration {
+    fn arms_p2p_window(self) -> bool {
+        self == Self::Initial
+    }
+}
+
+fn arm_pair_window(
+    deadline: &mut Option<Instant>,
+    retry_at: &mut Option<Instant>,
+    generation: PairGeneration,
+    retry_count: u8,
+    timeout: Duration,
+    now: Instant,
+) {
+    if !generation.arms_p2p_window() {
+        return;
+    }
+    let fresh_deadline = now + timeout;
+    *deadline = Some(fresh_deadline);
+    *retry_at = (retry_count > 0)
+        .then(|| now + p2p_retry_delay(timeout.as_secs()))
+        .filter(|candidate| *candidate < fresh_deadline);
+}
 
 /// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
 /// `Ping` mandatory for every client (the server evicts idle connections);
@@ -188,11 +253,16 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pending_membership_plans: BTreeMap::new(),
         webrtc_plan_seen: false,
         expected_peers: BTreeSet::new(),
+        pair_roles: BTreeMap::new(),
+        pair_retry_attempts: BTreeMap::new(),
         connected_pairs: BTreeSet::new(),
+        pair_connected_reported: BTreeSet::new(),
+        retrying_pairs: BTreeSet::new(),
         ice_gathering_complete: BTreeSet::new(),
         last_ice_servers: Vec::new(),
         transport_status: None,
         p2p_deadline: None,
+        p2p_retry_at: None,
         // Late joiners arm the relay probe on entry (see RELAY_SEND_SETTLE):
         // the GameStarting trigger pre-dates the join and never re-fires.
         relay_send_at: (cli.relay_payload.is_some() && lobby_state == LobbyState::Finalized)
@@ -595,9 +665,24 @@ struct Orchestrator<'a> {
     webrtc_plan_seen: bool,
     /// Peers the authoritative plan names (plus compatible `NewPeer` deltas).
     expected_peers: BTreeSet<PlayerId>,
-    /// Peers whose pair fully connected (both channels open) at some point.
-    /// Drives the `--exchange` obligations and the Appendix G resolution.
+    /// Server-authored glare role for each planned peer; retained so a
+    /// coordinated retry reproduces the same initiator/responder assignment.
+    pair_roles: BTreeMap<PlayerId, bool>,
+    /// Latest coordinated retry attempt applied per peer.
+    pair_retry_attempts: BTreeMap<PlayerId, u8>,
+    /// Peers whose current generation has both channels open. Drives the
+    /// `--exchange` obligations and Appendix G resolution.
     connected_pairs: BTreeSet<PlayerId>,
+    /// Peers whose logical `p2p_pair_connected` event was emitted for the
+    /// current room obligation. A coordinated rebuild clears current
+    /// connectivity but retains this set so the fresh generation is not
+    /// misreported as a second logical pair.
+    pair_connected_reported: BTreeSet<PlayerId>,
+    /// Peers whose previous generation was discarded for a coordinated retry
+    /// and whose replacement is not connected yet. This blocks success during
+    /// the reconnect gap without turning partial-connectivity fallback into an
+    /// all-pairs requirement after the original P2P window expires.
+    retrying_pairs: BTreeSet<PlayerId>,
     /// Peers whose current connection generation emitted the terminal local
     /// ICE gathering callback. Harness-held success uses this as the exact
     /// outbound signal-ledger boundary.
@@ -608,6 +693,8 @@ struct Orchestrator<'a> {
     transport_status: Option<bool>,
     /// When the P2P establishment window expires (set at first pairing).
     p2p_deadline: Option<Instant>,
+    /// When to rebuild any still-incomplete planned pair.
+    p2p_retry_at: Option<Instant>,
     /// When to send the `--relay-payload` GameData (trigger + settle; the
     /// trigger is GameStarting, or room entry for a Finalized-room late join).
     relay_send_at: Option<Instant>,
@@ -764,6 +851,9 @@ impl Orchestrator<'_> {
         if let Some(at) = self.p2p_deadline {
             wake = wake.min(at);
         }
+        if let Some(at) = self.p2p_retry_at {
+            wake = wake.min(at);
+        }
         if let Some(at) = self.linger_until {
             wake = wake.min(at);
         }
@@ -818,10 +908,16 @@ impl Orchestrator<'_> {
             self.send_relay_payload().await?;
         }
 
+        if self.p2p_retry_at.is_some_and(|at| now >= at) {
+            self.retry_incomplete_pairs(now).await?;
+        }
+
         if self.p2p_deadline.is_some_and(|at| now >= at) {
             // The current P2P window expired: report any real state change.
             self.resolve_transport_status().await?;
             self.p2p_deadline = None;
+            self.p2p_retry_at = None;
+            self.retrying_pairs.clear();
         }
 
         self.process_exchange_gate(now).await?;
@@ -1136,6 +1232,9 @@ impl Orchestrator<'_> {
                     self.remove_pair_obligation(peer).await;
                 }
                 for peer in &plan.peers {
+                    if plan.transport == Transport::WebRtc && peer.player_id != self.my_id {
+                        self.pair_roles.insert(peer.player_id, peer.initiate);
+                    }
                     if plan.transport == Transport::WebRtc && added.remove(&peer.player_id) {
                         self.establish_pair(peer.player_id, peer.initiate).await?;
                     }
@@ -1159,6 +1258,7 @@ impl Orchestrator<'_> {
                     you_initiate,
                 });
                 // Same pairing path as a plan peer (late join, Appendix E).
+                self.pair_roles.insert(peer_id, you_initiate);
                 self.establish_pair(peer_id, you_initiate).await?;
             }
             ServerMessage::Signal { from, signal } => {
@@ -1348,6 +1448,7 @@ impl Orchestrator<'_> {
                 });
                 if is_terminal_peer_connection_state(&state) {
                     self.connected_pairs.remove(&peer);
+                    self.pair_connected_reported.remove(&peer);
                     self.ice_gathering_complete.remove(&peer);
                     self.sent_labels.remove(&peer);
                     self.received_labels.remove(&peer);
@@ -1390,6 +1491,25 @@ impl Orchestrator<'_> {
     /// Pair with `peer` per the server's directive: create the connection,
     /// offer when told to, then drain any defensively buffered signals.
     async fn establish_pair(&mut self, peer: PlayerId, initiate: bool) -> Result<(), FatalError> {
+        self.establish_pair_link(peer, initiate, PairGeneration::Initial)
+            .await?;
+        if let Some(buffered) = self.pending_signals.remove(&peer) {
+            for signal in buffered {
+                self.apply_signal(peer, signal).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Create one link generation without recursively draining signals. Retry
+    /// handling calls this after clearing the old generation; normal pairing
+    /// uses [`Self::establish_pair`] to add the defensive signal drain.
+    async fn establish_pair_link(
+        &mut self,
+        peer: PlayerId,
+        initiate: bool,
+        generation: PairGeneration,
+    ) -> Result<(), FatalError> {
         if peer == self.my_id {
             tracing::warn!(%peer, "server asked us to pair with ourselves; ignoring");
             return Ok(());
@@ -1406,10 +1526,20 @@ impl Orchestrator<'_> {
         if needs_connection {
             self.ice_gathering_complete.remove(&peer);
         }
-        if (newly_expected || needs_connection) && !self.connected_pairs.contains(&peer) {
-            self.p2p_deadline =
-                Some(Instant::now() + Duration::from_secs(self.cli.p2p_timeout_secs));
+        if generation.arms_p2p_window()
+            && (newly_expected || needs_connection)
+            && !self.connected_pairs.contains(&peer)
+        {
+            arm_pair_window(
+                &mut self.p2p_deadline,
+                &mut self.p2p_retry_at,
+                generation,
+                self.cli.p2p_retry_count,
+                Duration::from_secs(self.cli.p2p_timeout_secs),
+                Instant::now(),
+            );
         }
+        self.pair_roles.entry(peer).or_insert(initiate);
         let ice_servers = self.last_ice_servers.clone();
         match self.engine.pair_with(peer, initiate, &ice_servers).await {
             Ok(Some(offer_sdp)) => {
@@ -1425,17 +1555,90 @@ impl Orchestrator<'_> {
                 });
             }
         }
-        if let Some(buffered) = self.pending_signals.remove(&peer) {
-            for signal in buffered {
-                self.apply_signal(peer, signal).await?;
-            }
+        Ok(())
+    }
+
+    /// Ask the peer to rebuild the same planned link, then rebuild locally.
+    /// The marker is sent first; the server preserves per-sender FIFO, so a
+    /// responder processes it and installs its fresh peer connection before
+    /// the initiator's new Offer arrives.
+    async fn request_pair_retry(&mut self, peer: PlayerId, attempt: u8) -> Result<(), FatalError> {
+        self.send_signal(peer, SignalKind::PairRetry, json!({ "PairRetry": attempt }))
+            .await?;
+        self.rebuild_pair(peer, attempt).await
+    }
+
+    /// Apply a local or remote retry exactly once per attempt number.
+    async fn rebuild_pair(&mut self, peer: PlayerId, attempt: u8) -> Result<(), FatalError> {
+        if self
+            .pair_retry_attempts
+            .get(&peer)
+            .is_some_and(|current| *current >= attempt)
+        {
+            return Ok(());
         }
+        if self.p2p_deadline.is_none() {
+            tracing::debug!(%peer, attempt, "ignoring pair retry after the original P2P window");
+            return Ok(());
+        }
+        let initiate = *self.pair_roles.get(&peer).ok_or_else(|| {
+            FatalError::protocol(format!("pair retry from unplanned peer {peer}"))
+        })?;
+        self.pair_retry_attempts.insert(peer, attempt);
+        self.retrying_pairs.insert(peer);
+        self.connected_pairs.remove(&peer);
+        self.ice_gathering_complete.remove(&peer);
+        self.sent_labels.remove(&peer);
+        self.received_labels.remove(&peer);
+        self.pending_signals.remove(&peer);
+        self.engine.remove_peer(peer).await.map_err(|error| {
+            FatalError::connection(format!(
+                "close incomplete peer connection {peer}: {error:#}"
+            ))
+        })?;
+        if self.webrtc_plan_seen && self.transport_status.is_some() {
+            self.resolve_transport_status().await?;
+        }
+        self.establish_pair_link(peer, initiate, PairGeneration::Retry)
+            .await
+    }
+
+    async fn retry_incomplete_pairs(&mut self, now: Instant) -> Result<(), FatalError> {
+        self.p2p_retry_at = None;
+        let retryable = retryable_missing_peers(
+            &self.expected_peers,
+            &self.connected_pairs,
+            &self.pair_retry_attempts,
+            self.cli.p2p_retry_count,
+        );
+        for peer in retryable {
+            let attempt = self
+                .pair_retry_attempts
+                .get(&peer)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            self.request_pair_retry(peer, attempt).await?;
+        }
+        let another_retry_possible = !retryable_missing_peers(
+            &self.expected_peers,
+            &self.connected_pairs,
+            &self.pair_retry_attempts,
+            self.cli.p2p_retry_count,
+        )
+        .is_empty();
+        self.p2p_retry_at =
+            another_retry_possible.then(|| now + p2p_retry_delay(self.cli.p2p_timeout_secs));
         Ok(())
     }
 
     async fn remove_pair_obligation(&mut self, peer: PlayerId) {
         self.expected_peers.remove(&peer);
+        self.pair_roles.remove(&peer);
+        self.pair_retry_attempts.remove(&peer);
         self.connected_pairs.remove(&peer);
+        self.pair_connected_reported.remove(&peer);
+        self.retrying_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
         self.sent_labels.remove(&peer);
@@ -1455,6 +1658,9 @@ impl Orchestrator<'_> {
     ) -> Result<(), FatalError> {
         let kind = SignalKind::classify(&signal);
         emit(&Event::SignalReceived { from, kind });
+        if kind == SignalKind::PairRetry {
+            return self.apply_signal(from, signal).await;
+        }
         if !self.engine.is_paired(from) {
             if should_buffer_signal_for_unpaired_peer(&self.expected_peers, from) {
                 self.pending_signals
@@ -1510,6 +1716,20 @@ impl Orchestrator<'_> {
                     }
                 }
             }
+            SignalKind::PairRetry => match signal.get("PairRetry").and_then(|value| value.as_u64())
+            {
+                Some(attempt) if attempt > 0 && attempt <= u64::from(self.cli.p2p_retry_count) => {
+                    self.rebuild_pair(from, attempt as u8)
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error.message))
+                }
+                Some(attempt) => Err(anyhow::anyhow!(
+                    "PairRetry attempt {attempt} is outside the configured retry budget"
+                )),
+                None => Err(anyhow::anyhow!(
+                    "PairRetry payload is not a positive integer"
+                )),
+            },
             SignalKind::Other => Err(anyhow::anyhow!(
                 "signal does not match the matchbox PeerSignal convention"
             )),
@@ -1525,8 +1745,14 @@ impl Orchestrator<'_> {
     /// Both channels toward `peer` are open: emit the pair event, run the
     /// optional exchange, and check the all-pairs resolution condition.
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        self.connected_pairs.insert(peer);
-        emit(&Event::P2pPairConnected { peer });
+        if note_current_pair_connected(
+            &mut self.connected_pairs,
+            &mut self.pair_connected_reported,
+            &mut self.retrying_pairs,
+            peer,
+        ) {
+            emit(&Event::P2pPairConnected { peer });
+        }
         if self.cli.exchange && self.exchange_released {
             self.send_exchange(peer).await?;
         }
@@ -1534,6 +1760,9 @@ impl Orchestrator<'_> {
         // one late pair is enough to change the overall any-pair state.
         if should_resolve_connected_pair(self.transport_status, self.all_expected_pairs_connected())
         {
+            if self.all_expected_pairs_connected() {
+                self.p2p_retry_at = None;
+            }
             self.resolve_transport_status().await?;
         }
         Ok(())
@@ -1680,6 +1909,9 @@ impl Orchestrator<'_> {
             ));
         }
         if self.webrtc_session_expected() {
+            for peer in &self.retrying_pairs {
+                unmet.push(format!("pair retry in progress for {peer}"));
+            }
             if self.transport_status.is_none() {
                 unmet.push("transport status not resolved".to_string());
             }
@@ -1832,6 +2064,8 @@ fn harness_aware_base_wake(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use tokio::time::Duration;
+
     use serde_json::json;
     use signal_fish_server::protocol::{
         DeliveryCountersByClass, DeliveryReportPayload, GameDataEncoding, LobbyState, PlayerId,
@@ -1842,14 +2076,16 @@ mod tests {
     use crate::wire;
 
     use super::{
-        authoritative_peer_delta, changed_transport_status, clear_departed_membership_plan,
-        connection_targets_for_plan, consume_join_accountability_preface, harness_aware_base_wake,
+        arm_pair_window, authoritative_peer_delta, changed_transport_status,
+        clear_departed_membership_plan, connection_targets_for_plan,
+        consume_join_accountability_preface, harness_aware_base_wake,
         is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
-        next_handshake_message, require_finalized_membership_plan,
-        requires_authoritative_finalization_plan, resolve_drop_ice_from,
-        restore_reconnected_member, should_buffer_signal_for_unpaired_peer,
-        should_defer_success_at_run_deadline, should_resolve_connected_pair,
-        validate_json_negotiated_server_message, EXIT_PROTOCOL_ERROR,
+        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
+        require_finalized_membership_plan, requires_authoritative_finalization_plan,
+        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
+        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
+        should_resolve_connected_pair, validate_json_negotiated_server_message, PairGeneration,
+        EXIT_PROTOCOL_ERROR,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -2041,6 +2277,95 @@ mod tests {
             &BTreeSet::from([peer]),
             peer
         ));
+    }
+
+    #[test]
+    fn pair_retry_delay_is_early_and_bounded() {
+        assert_eq!(p2p_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(p2p_retry_delay(15), Duration::from_secs(7));
+        assert_eq!(p2p_retry_delay(180), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn pair_retry_targets_only_missing_peers_with_budget() {
+        let connected = PlayerId::from_u128(2);
+        let exhausted = PlayerId::from_u128(3);
+        let retryable = PlayerId::from_u128(4);
+        let expected = BTreeSet::from([connected, exhausted, retryable]);
+        let connected_pairs = BTreeSet::from([connected]);
+        let attempts = BTreeMap::from([(exhausted, 1)]);
+        assert_eq!(
+            retryable_missing_peers(&expected, &connected_pairs, &attempts, 1),
+            vec![retryable]
+        );
+        assert!(retryable_missing_peers(&expected, &connected_pairs, &attempts, 0).is_empty());
+    }
+
+    #[test]
+    fn retry_reconnects_current_pair_without_duplicate_logical_event() {
+        let peer = PlayerId::from_u128(2);
+        let mut connected = BTreeSet::new();
+        let mut reported = BTreeSet::new();
+        let mut retrying = BTreeSet::new();
+        assert!(note_current_pair_connected(
+            &mut connected,
+            &mut reported,
+            &mut retrying,
+            peer
+        ));
+
+        connected.remove(&peer);
+        retrying.insert(peer);
+        assert!(!note_current_pair_connected(
+            &mut connected,
+            &mut reported,
+            &mut retrying,
+            peer
+        ));
+        assert!(connected.contains(&peer));
+        assert!(retrying.is_empty());
+
+        connected.remove(&peer);
+        reported.remove(&peer);
+        assert!(note_current_pair_connected(
+            &mut connected,
+            &mut reported,
+            &mut retrying,
+            peer
+        ));
+    }
+
+    #[test]
+    fn retry_preserves_the_p2p_window_while_initial_pairing_refreshes_it() {
+        assert!(PairGeneration::Initial.arms_p2p_window());
+        assert!(!PairGeneration::Retry.arms_p2p_window());
+
+        let started = tokio::time::Instant::now();
+        let original_deadline = started + Duration::from_secs(30);
+        let original_retry = started + Duration::from_secs(15);
+        let mut deadline = Some(original_deadline);
+        let mut retry_at = Some(original_retry);
+        arm_pair_window(
+            &mut deadline,
+            &mut retry_at,
+            PairGeneration::Retry,
+            1,
+            Duration::from_secs(30),
+            started + Duration::from_secs(10),
+        );
+        assert_eq!(deadline, Some(original_deadline));
+        assert_eq!(retry_at, Some(original_retry));
+
+        arm_pair_window(
+            &mut deadline,
+            &mut retry_at,
+            PairGeneration::Initial,
+            1,
+            Duration::from_secs(30),
+            started + Duration::from_secs(20),
+        );
+        assert_eq!(deadline, Some(started + Duration::from_secs(50)));
+        assert_eq!(retry_at, Some(started + Duration::from_secs(35)));
     }
 
     #[test]

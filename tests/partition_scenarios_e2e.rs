@@ -233,6 +233,22 @@ async fn complete_while_servicing_healthy<T>(
     }
 }
 
+#[cfg(any(windows, test))]
+fn is_windows_reset_after_authoritative_cause(
+    error: &tokio_tungstenite::tungstenite::Error,
+) -> bool {
+    matches!(
+        error,
+        tokio_tungstenite::tungstenite::Error::Io(error)
+            if error.kind() == std::io::ErrorKind::ConnectionReset
+    ) || matches!(
+        error,
+        tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake
+        )
+    )
+}
+
 async fn observe_until_close(ws: &mut WsStream) -> CloseObservation {
     let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
     let mut observation = CloseObservation::default();
@@ -244,15 +260,15 @@ async fn observe_until_close(ws: &mut WsStream) -> CloseObservation {
         let frame = match next {
             Ok(frame) => frame,
             #[cfg(windows)]
-            Err(tokio_tungstenite::tungstenite::Error::Io(error))
-                if error.kind() == std::io::ErrorKind::ConnectionReset =>
-            {
+            Err(error) if is_windows_reset_after_authoritative_cause(&error) => {
                 // ChaosProxy deliberately tears down both pumps when either
                 // half observes EOF. Windows may surface WSAECONNRESET before
-                // tungstenite exposes the already-forwarded close frame (the
-                // same platform behavior covered by server_ping_e2e). Every
-                // caller has already observed the authoritative server cause
-                // metric before resuming the paused direction.
+                // tungstenite exposes the already-forwarded close frame,
+                // either as a raw I/O reset or its protocol-level
+                // ResetWithoutClosingHandshake wrapper (the same platform
+                // behavior covered by server_ping_e2e). Every caller has
+                // already observed the authoritative server cause metric
+                // before resuming the paused direction.
                 observation.transport_reset_after_cause = true;
                 return observation;
             }
@@ -268,6 +284,23 @@ async fn observe_until_close(ws: &mut WsStream) -> CloseObservation {
             _ => {}
         }
     }
+}
+
+#[test]
+fn windows_partition_reset_classifier_covers_both_tungstenite_surfaces() {
+    let io_reset = tokio_tungstenite::tungstenite::Error::Io(std::io::Error::from(
+        std::io::ErrorKind::ConnectionReset,
+    ));
+    let protocol_reset = tokio_tungstenite::tungstenite::Error::Protocol(
+        tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+    );
+    let unrelated = tokio_tungstenite::tungstenite::Error::Io(std::io::Error::from(
+        std::io::ErrorKind::TimedOut,
+    ));
+
+    assert!(is_windows_reset_after_authoritative_cause(&io_reset));
+    assert!(is_windows_reset_after_authoritative_cause(&protocol_reset));
+    assert!(!is_windows_reset_after_authoritative_cause(&unrelated));
 }
 
 async fn assert_room_healed(

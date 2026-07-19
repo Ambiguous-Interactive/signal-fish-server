@@ -21205,6 +21205,18 @@ fn test_check_advisories_script_exists() {
     );
 
     assert!(
+        content.contains("cargo deny --all-features check"),
+        "scripts/check-advisories.sh --full must pass --all-features before the \
+         cargo-deny subcommand."
+    );
+
+    assert!(
+        !content.contains("cargo deny check --all-features"),
+        "scripts/check-advisories.sh must not pass the cargo-deny global \
+         --all-features option after the check subcommand."
+    );
+
+    assert!(
         content.contains("set -euo pipefail") || content.contains("set -eu"),
         "scripts/check-advisories.sh must use strict error handling (set -euo pipefail)."
     );

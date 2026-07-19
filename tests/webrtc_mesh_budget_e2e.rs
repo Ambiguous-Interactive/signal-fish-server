@@ -249,6 +249,10 @@ fn client_args(
     }
     if scenario.uses_netem() {
         args.push("--disable-mdns".to_string());
+        args.extend(["--p2p-retry-count".to_string(), "1".to_string()]);
+    }
+    if scenario.crippled_ordinal().is_some() || scenario.partition_pair().is_some() {
+        args.extend(["--p2p-retry-count".to_string(), "0".to_string()]);
     }
     if let Some((left, right)) = scenario.partition_pair() {
         let target = if ordinal == left {
@@ -526,6 +530,7 @@ fn assert_exact_channel_ledger(
     events: &[Value],
     event: &str,
     expected_peers: &BTreeSet<&str>,
+    retried_peers: &BTreeSet<&str>,
     player_id: &str,
     who: &str,
 ) {
@@ -576,10 +581,12 @@ fn assert_exact_channel_ledger(
     }
     for peer in expected_peers {
         for label in CHANNEL_LABELS {
-            assert_eq!(
-                counts.get(&(*peer, label)),
-                Some(&1),
-                "{who}: expected exactly one {event} for ({peer}, {label}); ledger={counts:?}"
+            let count = counts.get(&(*peer, label)).copied().unwrap_or_default();
+            let retried = retried_peers.contains(peer);
+            let max_generations = usize::from(retried) + 1;
+            assert!(
+                channel_generation_count_is_valid(count, retried),
+                "{who}: expected 1..={max_generations} {event} generations for ({peer}, {label}); got {count}; ledger={counts:?}"
             );
         }
     }
@@ -588,6 +595,20 @@ fn assert_exact_channel_ledger(
         expected_peers.len() * CHANNEL_LABELS.len(),
         "{who}: {event} contains stray ledger entries: {counts:?}"
     );
+}
+
+fn channel_generation_count_is_valid(count: usize, retried: bool) -> bool {
+    (1..=usize::from(retried) + 1).contains(&count)
+}
+
+#[test]
+fn channel_generation_ledger_expands_only_for_observed_retry_markers() {
+    assert!(channel_generation_count_is_valid(1, false));
+    assert!(!channel_generation_count_is_valid(0, false));
+    assert!(!channel_generation_count_is_valid(2, false));
+    assert!(channel_generation_count_is_valid(1, true));
+    assert!(channel_generation_count_is_valid(2, true));
+    assert!(!channel_generation_count_is_valid(3, true));
 }
 
 fn assert_exact_signal_ledger(
@@ -655,18 +676,29 @@ fn assert_exact_signal_ledger(
                         .copied()
                         .unwrap_or_default()
             };
+            let offers = kind_count("offer");
+            let answers = kind_count("answer");
+            let retries = kind_count("pair_retry");
             assert_eq!(
-                kind_count("offer"),
-                1,
-                "{} edge {left}<->{right}: exact offer ledger",
+                answers,
+                offers,
+                "{} edge {left}<->{right}: every offer has one answer",
                 topology.label()
             );
-            assert_eq!(
-                kind_count("answer"),
-                1,
-                "{} edge {left}<->{right}: exact answer ledger",
-                topology.label()
-            );
+            if retries == 0 {
+                assert_eq!(
+                    offers,
+                    1,
+                    "{} edge {left}<->{right}: exact initial offer ledger",
+                    topology.label()
+                );
+            } else {
+                assert!(
+                    (2..=retries + 1).contains(&offers),
+                    "{} edge {left}<->{right}: {retries} retry markers produced {offers} offer generations",
+                    topology.label()
+                );
+            }
             assert!(
                 kind_count("ice_candidate") > 0,
                 "{} edge {left}<->{right}: at least one trickle-ICE candidate",
@@ -867,6 +899,16 @@ fn assert_client_barrier(
         scenario.topology.label()
     );
 
+    let mut retried_peers = BTreeSet::<&str>::new();
+    for (event, peer_field) in [("signal_sent", "to"), ("signal_received", "from")] {
+        for signal in events_named(window, event) {
+            if string_field(signal, "kind", who) == "pair_retry" {
+                let peer = string_field(signal, peer_field, who);
+                retried_peers.insert(peer);
+            }
+        }
+    }
+
     assert_exact_peer_events(
         window,
         "p2p_pair_connected",
@@ -878,6 +920,7 @@ fn assert_client_barrier(
         window,
         "channel_open",
         &expected_connections,
+        &retried_peers,
         player_id,
         who,
     );
@@ -885,6 +928,7 @@ fn assert_client_barrier(
         window,
         "channel_message_sent",
         &expected_connections,
+        &retried_peers,
         player_id,
         who,
     );
@@ -892,18 +936,41 @@ fn assert_client_barrier(
         window,
         "channel_message",
         &expected_connections,
+        &retried_peers,
         player_id,
         who,
     );
 
-    let status = single_event(window, "transport_status_sent", who);
-    assert_eq!(string_field(status, "transport", who), "webrtc");
+    let statuses = events_named(window, "transport_status_sent");
+    assert!(!statuses.is_empty(), "{who}: no own transport status");
+    let own_states: Vec<bool> = statuses
+        .iter()
+        .map(|status| {
+            assert_eq!(string_field(status, "transport", who), "webrtc");
+            status
+                .get("connected")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| panic!("{who}: own transport status lacks connected: {status}"))
+        })
+        .collect();
     assert_eq!(
-        status.get("connected").and_then(Value::as_bool),
-        Some(expected_connected),
-        "{who}: own transport status"
+        own_states.last(),
+        Some(&expected_connected),
+        "{who}: final own transport status"
     );
-    let mut peer_status_counts = BTreeMap::<&str, usize>::new();
+    assert!(
+        own_states.windows(2).all(|states| states[0] != states[1]),
+        "{who}: duplicate own transport status: {own_states:?}"
+    );
+    if !scenario.uses_netem() {
+        assert_eq!(
+            own_states.len(),
+            1,
+            "{who}: status transitions require the retry-enabled netem scenario"
+        );
+    }
+
+    let mut peer_statuses = BTreeMap::<&str, Vec<bool>>::new();
     for peer_status in events_named(window, "peer_transport_status") {
         assert_eq!(
             string_field(peer_status, "transport", who),
@@ -912,22 +979,38 @@ fn assert_client_barrier(
         );
         let peer = string_field(peer_status, "peer", who);
         assert!(room_peers.contains(peer), "{who}: stray peer status {peer}");
-        *peer_status_counts.entry(peer).or_default() += 1;
-        let expected_peer_connected =
-            !expected_connected_peers(peer, all_ids, host_id, scenario.topology, fault).is_empty();
-        assert_eq!(
-            peer_status.get("connected").and_then(Value::as_bool),
-            Some(expected_peer_connected),
-            "{who}: peer transport status for {peer}"
-        );
+        let connected = peer_status
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                panic!("{who}: peer transport status lacks connected: {peer_status}")
+            });
+        peer_statuses.entry(peer).or_default().push(connected);
     }
     assert_eq!(
-        peer_status_counts.keys().copied().collect::<BTreeSet<_>>(),
+        peer_statuses.keys().copied().collect::<BTreeSet<_>>(),
         room_peers,
         "{who}: exact peer transport-status set"
     );
-    for (peer, count) in peer_status_counts {
-        assert_eq!(count, 1, "{who}: duplicate transport status from {peer}");
+    for (peer, states) in peer_statuses {
+        let expected_peer_connected =
+            !expected_connected_peers(peer, all_ids, host_id, scenario.topology, fault).is_empty();
+        assert_eq!(
+            states.last(),
+            Some(&expected_peer_connected),
+            "{who}: final peer transport status for {peer}"
+        );
+        assert!(
+            states.windows(2).all(|states| states[0] != states[1]),
+            "{who}: duplicate transport status from {peer}: {states:?}"
+        );
+        if !scenario.uses_netem() {
+            assert_eq!(
+                states.len(),
+                1,
+                "{who}: peer status transitions require the retry-enabled netem scenario"
+            );
+        }
     }
 
     single_event(window, "game_data_sent", who);

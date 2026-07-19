@@ -62,6 +62,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--disable-mdns` | off | Test harness only: expose raw host candidates instead of mDNS names so unicast packet-loss experiments do not fault their discovery control plane. Normal candidate privacy is unchanged when omitted |
 | `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
 | `--p2p-timeout-secs <S>` | `15` | Window for WebRTC pair establishment before the overall transport status resolves |
+| `--p2p-retry-count <N>` | `0` | Bounded coordinated rebuilds for a planned pair whose data channels do not open. Both endpoints must support the reference client's `PairRetry` signal extension; homogeneous recovery tests opt in, while general interoperability stays matchbox-only |
 | `--run-for-secs <S>` | `30` | Soft cap: exit 1 if the flag-driven success criteria are still unmet |
 | `--max-runtime-secs <S>` | `60` | Hard watchdog: abort with exit 4 no matter what (the no-hang guarantee) |
 | `--success-release-file <PATH>` | — | Test harness only: after success criteria hold, emit `success_criteria_met` and stay connected until PATH exists; the normal bounded exit behavior is unchanged when omitted |
@@ -121,7 +122,7 @@ process continues to its normal bounded exit.
 | `game_starting` | `is_authority` | Lobby finalized (this client's own authority flag); never re-broadcast to late joiners |
 | `session_plan` | `topology`, `transport`, `host`, `peers[{player_id, initiate}]`, `ice_servers_count`, `fallback` | The full authoritative per-recipient v3 directive; Relay/Relay carries no peers |
 | `new_peer` | `peer_id`, `you_initiate` | Compatible incremental pairing directive (the universal server uses full plans) |
-| `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`other`) |
+| `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`pair_retry`/`other`) |
 | `signal_received` | `from`, `kind` | Inbound `Signal` arrived (emitted even when `--cripple-ice` then drops it) |
 | `ice_candidate_dropped` | `from` | Native-only `--drop-ice-from` discarded this peer's inbound candidate after `signal_received` made the signaling hop observable. The older shared `--cripple-ice` contract remains unchanged and does not emit this event |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
@@ -173,6 +174,12 @@ string (interop with minimal clients).
 
 ## Transport-status semantics
 
+- Before status resolution, an incomplete pair is rebuilt at most
+  `--p2p-retry-count` times. A `PairRetry` marker crosses the same ordered
+  signaling relay before the fresh Offer, so both endpoints discard the old
+  generation while retaining the server-authored glare role. The default is
+  zero because this coordination extension is only safe when both endpoints
+  implement it; matchbox/browser interoperability must not assume that.
 - The overall WebRTC status resolves when every currently expected pair is connected or at
   `--p2p-timeout-secs`. `connected: true` iff **at least one** pair is connected; a zero-pair resolution also
   emits `fallback_engaged`.
