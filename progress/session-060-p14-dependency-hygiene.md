@@ -92,6 +92,15 @@ and the initial-versus-retry deadline policy. The netem oracle accepts only
 deduplicated real transport transitions and still requires the final expected
 state; scenarios without coordinated retry retain their exact one-report rule.
 
+The otherwise-green exact head then exposed the two equivalent Windows
+surfaces of a connection-reset race in the directional-partition oracle. The
+test already allowed raw `Io(ConnectionReset)` after observing the
+authoritative server cause metric, but Tungstenite can wrap that same reset as
+`Protocol(ResetWithoutClosingHandshake)` before surfacing the forwarded close
+frame. The shared classifier now recognizes both forms, rejects unrelated I/O
+errors, and has a focused data-driven regression; the semantic server-cause
+and healed-room proofs remain mandatory.
+
 Local follow-up verification passed 59 native-client unit tests, native
 Clippy with warnings denied, both root/native formatting checks, and the root
 WebRTC matrix compile. The healthy native N=3 mesh scenario and the intentional
