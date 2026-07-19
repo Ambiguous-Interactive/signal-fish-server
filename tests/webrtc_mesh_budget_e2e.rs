@@ -911,14 +911,36 @@ fn assert_client_barrier(
         who,
     );
 
-    let status = single_event(window, "transport_status_sent", who);
-    assert_eq!(string_field(status, "transport", who), "webrtc");
+    let statuses = events_named(window, "transport_status_sent");
+    assert!(!statuses.is_empty(), "{who}: no own transport status");
+    let own_states: Vec<bool> = statuses
+        .iter()
+        .map(|status| {
+            assert_eq!(string_field(status, "transport", who), "webrtc");
+            status
+                .get("connected")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| panic!("{who}: own transport status lacks connected: {status}"))
+        })
+        .collect();
     assert_eq!(
-        status.get("connected").and_then(Value::as_bool),
-        Some(expected_connected),
-        "{who}: own transport status"
+        own_states.last(),
+        Some(&expected_connected),
+        "{who}: final own transport status"
     );
-    let mut peer_status_counts = BTreeMap::<&str, usize>::new();
+    assert!(
+        own_states.windows(2).all(|states| states[0] != states[1]),
+        "{who}: duplicate own transport status: {own_states:?}"
+    );
+    if !scenario.uses_netem() {
+        assert_eq!(
+            own_states.len(),
+            1,
+            "{who}: status transitions require the retry-enabled netem scenario"
+        );
+    }
+
+    let mut peer_statuses = BTreeMap::<&str, Vec<bool>>::new();
     for peer_status in events_named(window, "peer_transport_status") {
         assert_eq!(
             string_field(peer_status, "transport", who),
@@ -927,22 +949,38 @@ fn assert_client_barrier(
         );
         let peer = string_field(peer_status, "peer", who);
         assert!(room_peers.contains(peer), "{who}: stray peer status {peer}");
-        *peer_status_counts.entry(peer).or_default() += 1;
-        let expected_peer_connected =
-            !expected_connected_peers(peer, all_ids, host_id, scenario.topology, fault).is_empty();
-        assert_eq!(
-            peer_status.get("connected").and_then(Value::as_bool),
-            Some(expected_peer_connected),
-            "{who}: peer transport status for {peer}"
-        );
+        let connected = peer_status
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                panic!("{who}: peer transport status lacks connected: {peer_status}")
+            });
+        peer_statuses.entry(peer).or_default().push(connected);
     }
     assert_eq!(
-        peer_status_counts.keys().copied().collect::<BTreeSet<_>>(),
+        peer_statuses.keys().copied().collect::<BTreeSet<_>>(),
         room_peers,
         "{who}: exact peer transport-status set"
     );
-    for (peer, count) in peer_status_counts {
-        assert_eq!(count, 1, "{who}: duplicate transport status from {peer}");
+    for (peer, states) in peer_statuses {
+        let expected_peer_connected =
+            !expected_connected_peers(peer, all_ids, host_id, scenario.topology, fault).is_empty();
+        assert_eq!(
+            states.last(),
+            Some(&expected_peer_connected),
+            "{who}: final peer transport status for {peer}"
+        );
+        assert!(
+            states.windows(2).all(|states| states[0] != states[1]),
+            "{who}: duplicate transport status from {peer}: {states:?}"
+        );
+        if !scenario.uses_netem() {
+            assert_eq!(
+                states.len(),
+                1,
+                "{who}: peer status transitions require the retry-enabled netem scenario"
+            );
+        }
     }
 
     single_event(window, "game_data_sent", who);

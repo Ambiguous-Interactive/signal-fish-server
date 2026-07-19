@@ -80,7 +80,19 @@ connectivity and exchange state; the fresh generation restores it without a
 duplicate `p2p_pair_connected` event. Genuine terminal/removal paths clear
 both sets, and a focused state-transition regression covers all three edges.
 
-Local follow-up verification passed 58 native-client unit tests, native
+The next exact-head Bugbot pass found the remaining two edges of that same
+rebuild transition: a live-to-retrying pair could leave the aggregate status
+stale and disappear from exchange obligations long enough to satisfy the exit
+criteria, while creating the replacement generation restarted the P2P timeout.
+The retry gap is now explicit state that blocks success until the replacement
+connects or the original window expires. Rebuilding immediately re-resolves a
+previously reported aggregate status, and retry generations cannot arm or
+extend either P2P timer. Focused regressions pin both the reconnect transition
+and the initial-versus-retry deadline policy. The netem oracle accepts only
+deduplicated real transport transitions and still requires the final expected
+state; scenarios without coordinated retry retain their exact one-report rule.
+
+Local follow-up verification passed 59 native-client unit tests, native
 Clippy with warnings denied, both root/native formatting checks, and the root
 WebRTC matrix compile. The healthy native N=3 mesh scenario and the intentional
 crippled-ICE relay-fallback negative control both pass as real multi-process

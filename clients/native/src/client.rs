@@ -106,10 +106,44 @@ fn retryable_missing_peers(
 fn note_current_pair_connected(
     connected: &mut BTreeSet<PlayerId>,
     reported: &mut BTreeSet<PlayerId>,
+    retrying: &mut BTreeSet<PlayerId>,
     peer: PlayerId,
 ) -> bool {
     connected.insert(peer);
+    retrying.remove(&peer);
     reported.insert(peer)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PairGeneration {
+    Initial,
+    Retry,
+}
+
+impl PairGeneration {
+    fn arms_p2p_window(self) -> bool {
+        self == Self::Initial
+    }
+}
+
+fn arm_pair_window(
+    deadline: &mut Option<Instant>,
+    retry_at: &mut Option<Instant>,
+    generation: PairGeneration,
+    retry_count: u8,
+    timeout: Duration,
+    now: Instant,
+) {
+    if !generation.arms_p2p_window() {
+        return;
+    }
+    let original_deadline = *deadline.get_or_insert(now + timeout);
+    if retry_count > 0 && retry_at.is_none() {
+        let candidate = now + p2p_retry_delay(timeout.as_secs());
+        if candidate < original_deadline {
+            *retry_at = Some(candidate);
+        }
+    }
 }
 
 /// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
@@ -225,6 +259,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pair_retry_attempts: BTreeMap::new(),
         connected_pairs: BTreeSet::new(),
         pair_connected_reported: BTreeSet::new(),
+        retrying_pairs: BTreeSet::new(),
         ice_gathering_complete: BTreeSet::new(),
         last_ice_servers: Vec::new(),
         transport_status: None,
@@ -645,6 +680,11 @@ struct Orchestrator<'a> {
     /// connectivity but retains this set so the fresh generation is not
     /// misreported as a second logical pair.
     pair_connected_reported: BTreeSet<PlayerId>,
+    /// Peers whose previous generation was discarded for a coordinated retry
+    /// and whose replacement is not connected yet. This blocks success during
+    /// the reconnect gap without turning partial-connectivity fallback into an
+    /// all-pairs requirement after the original P2P window expires.
+    retrying_pairs: BTreeSet<PlayerId>,
     /// Peers whose current connection generation emitted the terminal local
     /// ICE gathering callback. Harness-held success uses this as the exact
     /// outbound signal-ledger boundary.
@@ -878,6 +918,8 @@ impl Orchestrator<'_> {
             // The current P2P window expired: report any real state change.
             self.resolve_transport_status().await?;
             self.p2p_deadline = None;
+            self.p2p_retry_at = None;
+            self.retrying_pairs.clear();
         }
 
         self.process_exchange_gate(now).await?;
@@ -1451,7 +1493,8 @@ impl Orchestrator<'_> {
     /// Pair with `peer` per the server's directive: create the connection,
     /// offer when told to, then drain any defensively buffered signals.
     async fn establish_pair(&mut self, peer: PlayerId, initiate: bool) -> Result<(), FatalError> {
-        self.establish_pair_link(peer, initiate).await?;
+        self.establish_pair_link(peer, initiate, PairGeneration::Initial)
+            .await?;
         if let Some(buffered) = self.pending_signals.remove(&peer) {
             for signal in buffered {
                 self.apply_signal(peer, signal).await?;
@@ -1467,6 +1510,7 @@ impl Orchestrator<'_> {
         &mut self,
         peer: PlayerId,
         initiate: bool,
+        generation: PairGeneration,
     ) -> Result<(), FatalError> {
         if peer == self.my_id {
             tracing::warn!(%peer, "server asked us to pair with ourselves; ignoring");
@@ -1484,13 +1528,18 @@ impl Orchestrator<'_> {
         if needs_connection {
             self.ice_gathering_complete.remove(&peer);
         }
-        if (newly_expected || needs_connection) && !self.connected_pairs.contains(&peer) {
-            self.p2p_deadline =
-                Some(Instant::now() + Duration::from_secs(self.cli.p2p_timeout_secs));
-            if self.cli.p2p_retry_count > 0 && self.p2p_retry_at.is_none() {
-                self.p2p_retry_at =
-                    Some(Instant::now() + p2p_retry_delay(self.cli.p2p_timeout_secs));
-            }
+        if generation.arms_p2p_window()
+            && (newly_expected || needs_connection)
+            && !self.connected_pairs.contains(&peer)
+        {
+            arm_pair_window(
+                &mut self.p2p_deadline,
+                &mut self.p2p_retry_at,
+                generation,
+                self.cli.p2p_retry_count,
+                Duration::from_secs(self.cli.p2p_timeout_secs),
+                Instant::now(),
+            );
         }
         self.pair_roles.entry(peer).or_insert(initiate);
         let ice_servers = self.last_ice_servers.clone();
@@ -1530,10 +1579,15 @@ impl Orchestrator<'_> {
         {
             return Ok(());
         }
+        if self.p2p_deadline.is_none() {
+            tracing::debug!(%peer, attempt, "ignoring pair retry after the original P2P window");
+            return Ok(());
+        }
         let initiate = *self.pair_roles.get(&peer).ok_or_else(|| {
             FatalError::protocol(format!("pair retry from unplanned peer {peer}"))
         })?;
         self.pair_retry_attempts.insert(peer, attempt);
+        self.retrying_pairs.insert(peer);
         self.connected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.sent_labels.remove(&peer);
@@ -1544,7 +1598,11 @@ impl Orchestrator<'_> {
                 "close incomplete peer connection {peer}: {error:#}"
             ))
         })?;
-        self.establish_pair_link(peer, initiate).await
+        if self.webrtc_plan_seen && self.transport_status.is_some() {
+            self.resolve_transport_status().await?;
+        }
+        self.establish_pair_link(peer, initiate, PairGeneration::Retry)
+            .await
     }
 
     async fn retry_incomplete_pairs(&mut self, now: Instant) -> Result<(), FatalError> {
@@ -1582,6 +1640,7 @@ impl Orchestrator<'_> {
         self.pair_retry_attempts.remove(&peer);
         self.connected_pairs.remove(&peer);
         self.pair_connected_reported.remove(&peer);
+        self.retrying_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
         self.sent_labels.remove(&peer);
@@ -1691,6 +1750,7 @@ impl Orchestrator<'_> {
         if note_current_pair_connected(
             &mut self.connected_pairs,
             &mut self.pair_connected_reported,
+            &mut self.retrying_pairs,
             peer,
         ) {
             emit(&Event::P2pPairConnected { peer });
@@ -1851,6 +1911,9 @@ impl Orchestrator<'_> {
             ));
         }
         if self.webrtc_session_expected() {
+            for peer in &self.retrying_pairs {
+                unmet.push(format!("pair retry in progress for {peer}"));
+            }
             if self.transport_status.is_none() {
                 unmet.push("transport status not resolved".to_string());
             }
@@ -2015,14 +2078,15 @@ mod tests {
     use crate::wire;
 
     use super::{
-        authoritative_peer_delta, changed_transport_status, clear_departed_membership_plan,
-        connection_targets_for_plan, consume_join_accountability_preface, harness_aware_base_wake,
+        arm_pair_window, authoritative_peer_delta, changed_transport_status,
+        clear_departed_membership_plan, connection_targets_for_plan,
+        consume_join_accountability_preface, harness_aware_base_wake,
         is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
         next_handshake_message, note_current_pair_connected, p2p_retry_delay,
         require_finalized_membership_plan, requires_authoritative_finalization_plan,
         resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
         should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
-        should_resolve_connected_pair, validate_json_negotiated_server_message,
+        should_resolve_connected_pair, validate_json_negotiated_server_message, PairGeneration,
         EXIT_PROTOCOL_ERROR,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
@@ -2244,27 +2308,55 @@ mod tests {
         let peer = PlayerId::from_u128(2);
         let mut connected = BTreeSet::new();
         let mut reported = BTreeSet::new();
+        let mut retrying = BTreeSet::new();
         assert!(note_current_pair_connected(
             &mut connected,
             &mut reported,
+            &mut retrying,
             peer
         ));
 
         connected.remove(&peer);
+        retrying.insert(peer);
         assert!(!note_current_pair_connected(
             &mut connected,
             &mut reported,
+            &mut retrying,
             peer
         ));
         assert!(connected.contains(&peer));
+        assert!(retrying.is_empty());
 
         connected.remove(&peer);
         reported.remove(&peer);
         assert!(note_current_pair_connected(
             &mut connected,
             &mut reported,
+            &mut retrying,
             peer
         ));
+    }
+
+    #[test]
+    fn retry_generation_preserves_the_original_p2p_window() {
+        assert!(PairGeneration::Initial.arms_p2p_window());
+        assert!(!PairGeneration::Retry.arms_p2p_window());
+
+        let started = tokio::time::Instant::now();
+        let original_deadline = started + Duration::from_secs(30);
+        let original_retry = started + Duration::from_secs(15);
+        let mut deadline = Some(original_deadline);
+        let mut retry_at = Some(original_retry);
+        arm_pair_window(
+            &mut deadline,
+            &mut retry_at,
+            PairGeneration::Retry,
+            1,
+            Duration::from_secs(30),
+            started + Duration::from_secs(10),
+        );
+        assert_eq!(deadline, Some(original_deadline));
+        assert_eq!(retry_at, Some(original_retry));
     }
 
     #[test]
