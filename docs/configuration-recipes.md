@@ -268,7 +268,9 @@ If you instead restrict metrics at a reverse proxy (an IP allowlist, see the
 
 ## Batching tuning
 
-Outbound WebSocket messages are batched to improve throughput. Tune the batch
+Outbound WebSocket batching is **opt-in** (`enable_batching` defaults to
+`false`) because the flush timer adds up to `batch_interval_ms` of latency to
+every relay hop. Enable it for bulk/throughput deployments, then tune the batch
 size and flush interval.
 
 ```json
@@ -302,15 +304,16 @@ export SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS=5000
 export SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS=15000
 ```
 
-When to use: the defaults (`batch_size=10`, `batch_interval_ms=16`, about one
-frame interval at 60 fps) suit most games. Raise `batch_size` and
-`batch_interval_ms` to favor throughput under heavy fan-out; lower
-`batch_interval_ms` to favor latency. `batch_interval_ms` must be `> 0` when
-`enable_batching` is `true` (a zero flush interval is rejected at startup). Set
-`enable_batching=false` only for latency-critical, low-volume traffic where the
-per-flush delay matters more than syscall amortization. Keep `idle_timeout_secs`
-positive in production — it reclaims zombie sockets (`0` disables it);
-`auth_timeout_secs` must be between 5 and 60.
+When to use: enable batching only for throughput-oriented deployments (heavy
+fan-out of bulk data) where fewer, larger writes matter more than per-hop
+latency. It is **off by default** so real-time relay traffic (rollback game data
+is `reliable`) is never held by the timer. When enabled, only `latest` traffic
+waits up to `batch_interval_ms` to coalesce same-key values; `reliable`,
+`volatile`, and control are still flushed immediately. Raise `batch_size` and
+`batch_interval_ms` to favor throughput. `batch_interval_ms` must be `> 0` and
+`max_sojourn_ms` must exceed it when `enable_batching` is `true` (both enforced
+at startup). Keep `idle_timeout_secs` positive in production — it reclaims zombie
+sockets (`0` disables it); `auth_timeout_secs` must be between 5 and 60.
 
 High-rate game data (rollback netcode): choose the v3 JSON delivery class by
 meaning. Keep commands and critical events `reliable`; send frequently replaced

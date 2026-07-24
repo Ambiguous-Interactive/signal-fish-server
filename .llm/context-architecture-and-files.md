@@ -87,3 +87,24 @@ the recipient's transport capabilities (peer status is useful to any v3 client).
 self-declared metadata for the v2 handoff surface. It is preserved for backward
 compatibility and must not be treated as proof of negotiated v3 `direct` or
 `webrtc` transport capability.
+
+Accepted sockets set `TCP_NODELAY`: every accepted WebSocket socket must disable
+Nagle so small bidirectional relay frames are not stalled ~40-90 ms by the
+Nagle x delayed-ACK interaction. `TCP_NODELAY` is per-connection and not reliably
+inherited from the listen socket, so it is set on each accepted stream, not in
+`bind_tcp_listener`. Both serve paths funnel through one seam — the plain
+`axum::serve` stack via `websocket::bind_serve_listener` (`tap_io`) and the TLS
+stack via `websocket::ConfiguredAcceptor` — both calling
+`configure_accepted_socket`, so tests and production share identical semantics.
+This complements (does not conflict with) the bounded-send-buffer
+control-priority contract in `bind_tcp_listener`. Known gap: the optional
+`legacy-fullmesh` matchbox port exposes no nodelay knob.
+
+The outbound batch timer must never delay latency-sensitive traffic. Batching is
+opt-in (`websocket.enable_batching` defaults to `false`). When enabled, only
+`DeliveryClass::Latest` may wait for a fuller batch (to coalesce same-key
+values); control, `Reliable`, and `Volatile` are released as soon as they reach
+the front in `OutboundReceiver::try_pop_batched`. The non-batched `recv()` path
+preserves every queue semantic (priority lanes, generations, latest coalescing,
+gap reports, sojourn eviction) — the batch timer adds only the idle wait. The
+per-hop latency budget lives in `docs/architecture/scaling.md`.
