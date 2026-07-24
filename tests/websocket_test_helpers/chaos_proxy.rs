@@ -145,6 +145,8 @@ impl ChaosProxy {
                     // Listener error: stop accepting; existing pumps live on.
                     return;
                 };
+                // Match production accepted sockets (issue #197).
+                let _ = client.set_nodelay(true);
                 // A killed proxy stays killed: never pump a late connection.
                 if *accept_control.kill.borrow() != KillMode::None {
                     drop(client);
@@ -247,7 +249,11 @@ async fn connect_upstream(
     if let Some(bytes) = recv_buffer_bytes {
         socket.set_recv_buffer_size(bytes)?;
     }
-    socket.connect(upstream).await
+    let stream = socket.connect(upstream).await?;
+    // Match production accepted sockets: disable Nagle so the proxy hop does not
+    // inject delayed-ACK stalls into latency measurements (issue #197).
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
 }
 
 impl Drop for ChaosProxy {

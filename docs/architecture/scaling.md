@@ -173,13 +173,27 @@ freeze after the queue is full.
 
 ### Batching latency
 
-With batching enabled, a sparse message may wait up to
-`websocket.batch_interval_ms` (16 ms by default) for the timer; a full
-`batch_size` flushes earlier. The low-rate two-player matrix measured roughly
-20 ms p99 end to end, consistent with one default batch interval plus local
-processing. This is not a universal latency floor: under dense traffic the
-size trigger can flush sooner, while network and scheduler delay can dominate
-it. Lower the interval only after measuring the syscall/throughput tradeoff.
+Batching is opt-in: `websocket.enable_batching` defaults to `false`, so
+latency-sensitive relay traffic (rollback game data is `DeliveryClass::Reliable`)
+is never held by the flush timer. Combined with `TCP_NODELAY` on every accepted
+socket (below), a sparse relay hop is bounded by network and local processing
+rather than a batch timer or Nagle stall — integration testing measured
+round-trip latency fall from ~46 ms to ~12-20 ms once default batching was
+removed.
+
+When batching is enabled for bulk/throughput deployments, only
+`DeliveryClass::Latest` waits — up to `websocket.batch_interval_ms` (16 ms by
+default) — for a fuller batch so same-key values can coalesce; control,
+`Reliable`, and `Volatile` are still released immediately. A full `batch_size`
+flushes earlier. Enabling batching therefore adds at most one `batch_interval_ms`
+per hop, and only to `Latest` traffic. Raise the interval only after measuring
+the syscall/throughput tradeoff, and keep `max_sojourn_ms > batch_interval_ms`
+(enforced at startup).
+
+Accepted sockets disable Nagle (`TCP_NODELAY`) on both the plain (`axum::serve`)
+and TLS (`axum_server`) serve paths, so small bidirectional frames avoid the
+~40-90 ms Nagle x delayed-ACK stall on loopback. A WebSocket sink flush does not
+disable Nagle; the option is set explicitly on each accepted stream.
 
 ## Directional partition detection
 

@@ -50,6 +50,61 @@ is_truthy() {
     esac
 }
 
+prepare_worktree_cache_dirs() {
+    local cache_dir
+    local uid
+    local gid
+    local cache_dirs=(
+        target
+        node_modules
+        clients/browser/node_modules
+    )
+
+    uid="$(id -u)"
+    gid="$(id -g)"
+
+    echo "[setup] Preparing named-volume cache directories..."
+    for cache_dir in "${cache_dirs[@]}"; do
+        if ! sudo install -d -m 0755 -o "$uid" -g "$gid" "$cache_dir"; then
+            echo "[setup] ERROR: could not initialize cache directory '$cache_dir'."
+            echo "[setup] Rebuild the dev container so its named volumes are recreated."
+            return 1
+        fi
+    done
+    echo "[setup] Named-volume cache directories ready."
+}
+
+configure_git_safe_directory() {
+    local git_probe
+    local repo_dir
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "[setup] Warning: git is unavailable; repository hooks cannot be configured."
+        return 0
+    fi
+
+    repo_dir="$(pwd -P)"
+    if git_probe="$(git -C "$repo_dir" rev-parse --show-toplevel 2>&1)"; then
+        return 0
+    fi
+
+    if [[ "$git_probe" != *"detected dubious ownership"* ]]; then
+        echo "[setup] Warning: workspace is not an accessible Git repository; hooks will be skipped."
+        echo "[setup]   $git_probe"
+        return 0
+    fi
+
+    echo "[setup] Trusting the bind-mounted workspace for container-local Git operations."
+    if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq -- "$repo_dir"; then
+        git config --global --add safe.directory "$repo_dir"
+    fi
+
+    if ! git -C "$repo_dir" rev-parse --show-toplevel >/dev/null; then
+        echo "[setup] ERROR: Git still rejects the workspace after configuring safe.directory."
+        return 1
+    fi
+}
+
 remove_user_npm_prefix_config() {
     local user_npmrc="${HOME:-}/.npmrc"
     local tmp_npmrc
@@ -220,7 +275,6 @@ verify_required_rust_tools() {
 
 make_project_scripts_executable() {
     local chmod_log
-    local chmod_probe
     local first_script
 
     if [[ ! -d "scripts" ]]; then
@@ -232,19 +286,13 @@ make_project_scripts_executable() {
         return 0
     fi
 
-    chmod_probe="$(mktemp scripts/.chmod-probe.XXXXXX 2>/dev/null || true)"
-    if [[ -z "$chmod_probe" ]]; then
-        echo "[setup] Warning: could not create chmod probe in scripts/. Skipping executable-bit normalization."
-        return 0
-    fi
-
-    if ! chmod +x "$chmod_probe" 2>/dev/null; then
-        rm -f "$chmod_probe"
+    # Probe an existing bind-mounted file. A newly created file can accept
+    # chmod on Docker Desktop even when existing Windows-hosted files cannot.
+    if ! chmod +x "$first_script" 2>/dev/null; then
         echo "[setup] Warning: workspace mount does not allow chmod; skipping scripts/**/*.sh executable-bit normalization."
         echo "[setup] This is common on Windows bind mounts. Scripts can still be run with: bash scripts/<name>.sh"
         return 0
     fi
-    rm -f "$chmod_probe"
 
     chmod_log="$(mktemp)"
     if find scripts -type f -name '*.sh' -exec chmod +x {} + 2>"$chmod_log"; then
@@ -257,6 +305,9 @@ make_project_scripts_executable() {
     sed -n '1,10p' "$chmod_log" | sed 's/^/[setup]   /'
     rm -f "$chmod_log"
 }
+
+prepare_worktree_cache_dirs
+configure_git_safe_directory
 
 if ! install_codex_cli; then
     echo "[setup] Warning: Codex CLI installation failed after retries; continuing setup."

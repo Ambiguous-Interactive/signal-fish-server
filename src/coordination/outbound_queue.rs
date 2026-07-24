@@ -1427,7 +1427,13 @@ impl OutboundReceiver {
         let mut decrement_batch = false;
         let mut crossed_barrier = false;
         let item = if let Some(front) = state.legacy.front() {
-            let ready = front.is_control()
+            // A `Latest` front waits up to `batch_interval` (unless the lane is
+            // already `batch_size` deep) so a superseding same-key value can
+            // still coalesce. Control, Reliable, and Volatile are
+            // latency-sensitive: released immediately, and they never start a
+            // batch, so a Latest queued behind them keeps its own coalesce wait
+            // (issue #198). `class() == None` is control.
+            let ready = front.class() != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || state.legacy.len() >= batch_size
                 || now >= front.enqueued_at + batch_interval;
@@ -1436,7 +1442,7 @@ impl OutboundReceiver {
                     front.enqueued_at + batch_interval,
                 ));
             }
-            if !front.is_control() && self.batch_remaining == 0 {
+            if front.class() == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
                 self.batch_remaining = state.legacy.len().min(batch_size);
             }
             decrement_batch = self.batch_remaining > 0;
@@ -1456,10 +1462,10 @@ impl OutboundReceiver {
             .front()
             .is_some_and(|item| item.generation == state.receive_generation)
         {
-            let Some((front_is_control, front_enqueued_at)) = state
+            let Some((front_class, front_enqueued_at)) = state
                 .data
                 .front()
-                .map(|front| (front.is_control(), front.enqueued_at))
+                .map(|front| (front.class(), front.enqueued_at))
             else {
                 return Err(BatchedPopState::Empty);
             };
@@ -1468,7 +1474,10 @@ impl OutboundReceiver {
                 .iter()
                 .take_while(|item| item.generation == state.receive_generation)
                 .count();
-            let ready = front_is_control
+            // Same rule as the legacy lane: only a `Latest` front waits (and
+            // starts a batch); control/Reliable/Volatile release immediately and
+            // never arm one, so a trailing Latest keeps its coalesce wait (#198).
+            let ready = front_class != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || phase_len >= batch_size
                 || now >= front_enqueued_at + batch_interval;
@@ -1477,10 +1486,10 @@ impl OutboundReceiver {
                     front_enqueued_at + batch_interval,
                 ));
             }
-            if !front_is_control && self.batch_remaining == 0 {
+            if front_class == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
                 self.batch_remaining = phase_len.min(batch_size);
             }
-            decrement_batch = !front_is_control;
+            decrement_batch = self.batch_remaining > 0;
             state.data.pop_front()
         } else if state
             .barriers
@@ -2134,31 +2143,122 @@ mod tests {
         assert_eq!(message_id(&successor), 2);
     }
 
+    /// Regression: issue #198 — the outbound batch timer must never delay
+    /// latency-sensitive traffic. Only `Latest` waits for a fuller batch (to
+    /// coalesce); `Reliable` and `Volatile` are released immediately, on both
+    /// the pre-v3 legacy FIFO lane and the v3 data lane. Under the paused clock
+    /// an idle-hold shows up as elapsed virtual time; the release must be
+    /// instantaneous (`Duration::ZERO`).
+    #[tokio::test(start_paused = true)]
+    async fn regression_198_latency_sensitive_data_bypasses_batch_timer() {
+        for v3 in [false, true] {
+            for class in [DeliveryClass::Reliable, DeliveryClass::Volatile] {
+                let (tx, mut rx) = channel(4, 4);
+                if v3 {
+                    tx.set_protocol_version(3);
+                }
+                tx.try_enqueue_data(data(1, class, None, 1)).unwrap();
+
+                let started = Instant::now();
+                let item = rx
+                    .recv_batched(10, std::time::Duration::from_millis(16))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(message_id(&item), 1);
+                assert_eq!(
+                    started.elapsed(),
+                    std::time::Duration::ZERO,
+                    "class {class:?} (v3={v3}) must not be held by the 16ms batch timer (#198)"
+                );
+            }
+        }
+    }
+
+    /// Regression: issue #198 refinement — a `Reliable` release must not start a
+    /// batch, so a `Latest` queued behind it keeps its own coalesce wait instead
+    /// of riding out immediately. Proves the batch is armed only by a `Latest`
+    /// front.
+    #[tokio::test(start_paused = true)]
+    async fn regression_198_latest_behind_reliable_still_coalesces() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
+            .unwrap();
+        tx.try_enqueue_data(data(2, DeliveryClass::Latest, Some(10), 2))
+            .unwrap();
+
+        // The Reliable front is released immediately without arming a batch.
+        let started = Instant::now();
+        let first = rx
+            .recv_batched(4, std::time::Duration::from_secs(10))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message_id(&first), 1);
+        assert_eq!(
+            started.elapsed(),
+            std::time::Duration::ZERO,
+            "Reliable must not be held by the batch timer (#198)"
+        );
+
+        // The trailing Latest now waits its coalesce window; a newer same-key
+        // value supersedes it during the wait.
+        let waiter = tokio::spawn(async move {
+            let report = rx
+                .recv_batched(4, std::time::Duration::from_secs(10))
+                .await
+                .unwrap()
+                .unwrap();
+            let successor = rx
+                .recv_batched(4, std::time::Duration::from_secs(10))
+                .await
+                .unwrap()
+                .unwrap();
+            (report, successor)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "a Latest behind a Reliable must still wait to coalesce"
+        );
+
+        tx.try_enqueue_data(data(3, DeliveryClass::Latest, Some(10), 3))
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+
+        let (gap, successor) = waiter.await.unwrap();
+        assert_eq!(report(gap).gaps[0].from_seq, 2);
+        assert_eq!(message_id(&successor), 3);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn batching_wait_preserves_pre_v3_fifo_across_message_kinds() {
+        // Pre-v3 FIFO is preserved and, per issue #198, latency-sensitive
+        // Reliable data is not held by the batch timer: the data frame and the
+        // trailing control frame are both delivered immediately, in order.
         let (tx, mut rx) = channel(4, 1);
         tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
             .unwrap();
         tx.try_enqueue_control(message(2)).unwrap();
 
-        let waiter = tokio::spawn(async move {
-            let first = rx
-                .recv_batched(4, std::time::Duration::from_secs(10))
-                .await
-                .unwrap()
-                .unwrap();
-            let second = rx
-                .recv_batched(4, std::time::Duration::from_secs(10))
-                .await
-                .unwrap()
-                .unwrap();
-            (message_id(&first), message_id(&second))
-        });
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-
-        tokio::time::advance(std::time::Duration::from_secs(10)).await;
-        assert_eq!(waiter.await.unwrap(), (1, 2));
+        let started = Instant::now();
+        let first = rx
+            .recv_batched(4, std::time::Duration::from_secs(10))
+            .await
+            .unwrap()
+            .unwrap();
+        let second = rx
+            .recv_batched(4, std::time::Duration::from_secs(10))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((message_id(&first), message_id(&second)), (1, 2));
+        assert_eq!(
+            started.elapsed(),
+            std::time::Duration::ZERO,
+            "Reliable data and control must not be held by the batch timer (#198)"
+        );
     }
 
     #[tokio::test]

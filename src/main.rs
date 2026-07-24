@@ -285,6 +285,8 @@ async fn main() -> anyhow::Result<()> {
         let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?
             .into_std()?;
         let serve_result = axum_server::from_tcp_rustls(listener, tls_config)?
+            // Disable Nagle on the raw TCP stream before the TLS handshake (#197).
+            .map(|rustls| rustls.acceptor(websocket::ConfiguredAcceptor))
             .handle(tls_handle)
             .serve(make_service)
             .await;
@@ -296,7 +298,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start the server over plain TCP (typically behind a reverse proxy).
-    let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
+    // Accepted sockets are configured for low-latency relay (#197).
+    let listener = websocket::bind_serve_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
     tracing::info!(
         %addr,
         cors_origins = %cfg.security.cors_origins,

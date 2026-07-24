@@ -2,9 +2,10 @@ use crate::database::DatabaseConfig;
 use crate::server::{EnhancedGameServer, ServerConfig};
 use axum::extract::State;
 use axum::routing::get;
+use axum::serve::ListenerExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 use super::handler::{websocket_handler, websocket_handler_v3};
 use super::metrics::{metrics_handler, prometheus_metrics_handler};
@@ -38,6 +39,68 @@ pub fn bind_tcp_listener(
         "Bound TCP listener with bounded WebSocket kernel handoff"
     );
     Ok(listener)
+}
+
+/// Disable Nagle's algorithm on an accepted connection so small,
+/// latency-sensitive relay frames are flushed immediately instead of being held
+/// by the Nagle × delayed-ACK interaction (~40-90 ms on loopback).
+///
+/// `TCP_NODELAY` is a per-connection option and is **not** reliably inherited
+/// from the listening socket on Linux, so it must be applied to every accepted
+/// stream rather than once in [`bind_tcp_listener`]. This is the single place
+/// that configures an accepted socket: the plain `axum::serve` path reaches it
+/// through [`bind_serve_listener`] (`tap_io`) and the TLS path through
+/// [`ConfiguredAcceptor`], so both stacks share identical semantics. A socket
+/// that refuses `TCP_NODELAY` is still served — we warn rather than drop it. See
+/// the "accepted sockets set TCP_NODELAY" Architectural Invariant in `.llm/`.
+pub(crate) fn configure_accepted_socket(stream: &TcpStream) {
+    if let Err(err) = stream.set_nodelay(true) {
+        tracing::warn!(%err, "failed to set TCP_NODELAY on accepted socket");
+    }
+}
+
+/// Bind a plain-TCP listener whose accepted sockets are configured for
+/// low-latency relay: a bounded send buffer (via [`bind_tcp_listener`]) plus
+/// `TCP_NODELAY` (via the crate-internal `configure_accepted_socket`).
+///
+/// This is the single seam every plain `axum::serve` path uses — the production
+/// server, the `run_server` convenience entry point, and the integration-test
+/// harness — so they share identical accepted-socket semantics and a regression
+/// in the nodelay wiring fails tests instead of silently shipping (issue #197).
+pub fn bind_serve_listener(
+    addr: SocketAddr,
+    socket_send_buffer_bytes: u32,
+) -> std::io::Result<axum::serve::TapIo<TcpListener, fn(&mut TcpStream)>> {
+    Ok(bind_tcp_listener(addr, socket_send_buffer_bytes)?
+        .tap_io(configure_accepted_socket_io as fn(&mut TcpStream)))
+}
+
+/// `tap_io` adapter for [`configure_accepted_socket`]: `tap_io` hands a
+/// `&mut TcpStream`, and using a named `fn` (rather than a closure) keeps the
+/// returned listener type nameable so [`bind_serve_listener`] can hand back a
+/// concrete `TapIo`.
+fn configure_accepted_socket_io(stream: &mut TcpStream) {
+    configure_accepted_socket(stream);
+}
+
+/// `axum_server` acceptor that applies `configure_accepted_socket` to the raw
+/// TCP stream before the TLS handshake, so the TLS serve path shares the exact
+/// accepted-socket configuration (and warn-and-continue semantics) of the plain
+/// `tap_io` path (issue #197).
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConfiguredAcceptor;
+
+#[cfg(feature = "tls")]
+impl<S> axum_server::accept::Accept<TcpStream, S> for ConfiguredAcceptor {
+    type Stream = TcpStream;
+    type Service = S;
+    type Future = std::future::Ready<std::io::Result<(TcpStream, S)>>;
+
+    fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
+        configure_accepted_socket(&stream);
+        std::future::ready(Ok((stream, service)))
+    }
 }
 
 /// Create the nestable Axum router with WebSocket support.
@@ -144,8 +207,8 @@ pub async fn run_server(
     // Create router with CORS configuration
     let app = create_standalone_router(&cors_origins).with_state(game_server);
 
-    // Start server
-    let listener = bind_tcp_listener(addr, socket_send_buffer_bytes)?;
+    // Accepted sockets are configured for low-latency relay (issue #197).
+    let listener = bind_serve_listener(addr, socket_send_buffer_bytes)?;
     tracing::info!(%addr, "Starting enhanced Signal Fish server");
     tracing::info!(
         deployment_mode = "single_instance",
@@ -202,6 +265,76 @@ mod tests {
             accepted <= MAX_EFFECTIVE_BYTES,
             "accepted socket SO_SNDBUF {accepted} exceeded the configured \
              two-times effective ceiling {MAX_EFFECTIVE_BYTES}"
+        );
+    }
+
+    /// Regression: issue #197 — accepted WebSocket sockets must disable Nagle's
+    /// algorithm (`TCP_NODELAY`) so small bidirectional relay frames are not
+    /// stalled ~40-90 ms by the Nagle × delayed-ACK interaction on loopback.
+    ///
+    /// Exercises the real production seam [`bind_serve_listener`] (used by the
+    /// server, `run_server`, and the test harness), so deleting the nodelay
+    /// wiring fails this test rather than shipping silently.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn regression_197_accepted_socket_disables_nagle() {
+        use axum::serve::Listener;
+
+        let listener =
+            bind_serve_listener("127.0.0.1:0".parse().expect("parse loopback address"), 0)
+                .expect("bind listener");
+        let addr = listener.local_addr().expect("read listener address");
+        let accept = tokio::spawn(async move {
+            let mut listener = listener;
+            let (io, _) = listener.accept().await;
+            io.nodelay().expect("read TCP_NODELAY on accepted socket")
+        });
+
+        let client = TcpStream::connect(addr)
+            .await
+            .expect("connect loopback client");
+        let nodelay = accept.await.expect("accept task panicked");
+        drop(client);
+
+        assert!(
+            nodelay,
+            "accepted socket must have TCP_NODELAY enabled to avoid Nagle × \
+             delayed-ACK relay stalls (issue #197)"
+        );
+    }
+
+    /// Regression: issue #197 — the TLS serve path must disable Nagle on the raw
+    /// TCP stream before the handshake. Exercises [`ConfiguredAcceptor`], the
+    /// acceptor `main` installs on the `axum_server` TLS stack.
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn regression_197_tls_acceptor_disables_nagle() {
+        use axum_server::accept::Accept;
+
+        let listener = bind_tcp_listener("127.0.0.1:0".parse().expect("parse loopback address"), 0)
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("read listener address");
+        let accept = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept loopback client");
+            let (stream, ()) = ConfiguredAcceptor
+                .accept(stream, ())
+                .await
+                .expect("configured acceptor");
+            stream
+                .nodelay()
+                .expect("read TCP_NODELAY on accepted socket")
+        });
+
+        let client = TcpStream::connect(addr)
+            .await
+            .expect("connect loopback client");
+        let nodelay = accept.await.expect("accept task panicked");
+        drop(client);
+
+        assert!(
+            nodelay,
+            "TLS ConfiguredAcceptor must enable TCP_NODELAY on the raw stream (issue #197)"
         );
     }
 }

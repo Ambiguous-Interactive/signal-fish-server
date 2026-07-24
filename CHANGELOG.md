@@ -39,6 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every P13 health invariant to pass, while the one-admission-per-callback
   negative control must remain explicitly `BUSTED`.
 
+### Fixed
+
+- Disable Nagle's algorithm (`TCP_NODELAY`) on every accepted WebSocket socket,
+  on both the plain and TLS serve paths, so small bidirectional relay frames are
+  no longer stalled ~40-90 ms by the Nagle x delayed-ACK interaction on loopback
+  (#197). The plain `axum::serve` path and the integration-test harness share one
+  `bind_serve_listener` seam, and the TLS stack uses a matching
+  `ConfiguredAcceptor`, so tests and production configure accepted sockets
+  identically.
+- Stop the outbound batch timer from adding a per-hop frame of latency to
+  real-time relay traffic (#198). Batching is now opt-in
+  (`websocket.enable_batching` defaults to `false`), and even when enabled only
+  `latest` game data waits to coalesce same-key values — `reliable`, `volatile`,
+  and control frames are released immediately. Integration testing measured
+  round-trip latency fall from ~46 ms to ~12-20 ms; throughput deployments retain
+  batching by opting in.
+
 ## [0.5.0] - 2026-07-18
 
 ### Fixed

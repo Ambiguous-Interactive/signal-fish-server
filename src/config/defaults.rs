@@ -397,7 +397,11 @@ pub fn default_relay_type() -> String {
 // =============================================================================
 
 pub const fn default_enable_batching() -> bool {
-    true // Enable batching by default for better performance
+    // Latency-first default. Batching holds a latency-sensitive frame for up to
+    // `batch_interval_ms`, adding a per-hop delay to real-time relay traffic
+    // (issue #198). Opt in (`SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING=true`) for
+    // bulk/throughput deployments that prefer fewer, larger writes.
+    false
 }
 
 pub const fn default_batch_size() -> usize {

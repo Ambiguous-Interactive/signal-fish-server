@@ -96,7 +96,7 @@
     "credential_ttl_secs": 3600
   },
   "websocket": {
-    "enable_batching": true,
+    "enable_batching": false,
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,

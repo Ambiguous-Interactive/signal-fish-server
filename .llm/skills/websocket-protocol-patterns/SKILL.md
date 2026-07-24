@@ -230,8 +230,28 @@ For load tests, measure: connections/sec, message throughput, P50/P95/P99 latenc
 
 ---
 
+## Socket-level latency (Nagle and batching)
+
+Real-time relay frames are small and latency-sensitive. Two defaults protect them:
+
+- **`TCP_NODELAY` on every accepted socket.** Nagle's algorithm plus delayed ACK
+  can stall small bidirectional frames ~40-90 ms on loopback. `TCP_NODELAY` is
+  per-connection and not reliably inherited from the listen socket, so set it on
+  each accepted stream. Both serve paths funnel through one seam
+  (`websocket::bind_serve_listener` for plain `axum::serve`,
+  `websocket::ConfiguredAcceptor` for the TLS stack), so tests and production
+  share identical socket semantics. A WebSocket sink flush does NOT disable
+  Nagle — the option must be set explicitly.
+- **Outbound batching is opt-in.** The batch timer holds a frame up to
+  `batch_interval_ms`; `enable_batching` is `false` by default so real-time
+  traffic is never delayed. When enabled for throughput, only
+  `DeliveryClass::Latest` waits to coalesce — control, `Reliable`, and
+  `Volatile` are released immediately.
+
 ## Agent Checklist
 
+- [ ] Accepted sockets set `TCP_NODELAY` via `bind_serve_listener` / `ConfiguredAcceptor` (no Nagle stalls)
+- [ ] Batching is opt-in; the batch timer never delays latency-sensitive traffic — only `Latest` waits to coalesce
 - [ ] WebSocket upgrade validates auth before upgrading when possible
 - [ ] Heartbeat ping-pong runs at regular intervals with client timeout
 - [ ] Graceful close sends a close frame with appropriate code

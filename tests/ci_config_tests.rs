@@ -22791,6 +22791,78 @@ fn test_devcontainer_installs_required_modern_ci_tools() {
 }
 
 #[test]
+fn test_devcontainer_uses_portable_release_binary_and_fast_workspace_volumes() {
+    let root = repo_root();
+    let dockerfile_content = read_live_file(&root.join(".devcontainer/Dockerfile"));
+    let devcontainer_json = read_live_file(&root.join(".devcontainer/devcontainer.json"));
+    let post_create_content = read_live_file(&root.join(".devcontainer/post-create.sh"));
+
+    for target in [
+        r#"lychee_target="x86_64-unknown-linux-musl""#,
+        r#"lychee_target="aarch64-unknown-linux-musl""#,
+        r#"cargo_binstall_target="x86_64-unknown-linux-musl""#,
+        r#"cargo_binstall_target="aarch64-unknown-linux-musl""#,
+    ] {
+        assert!(
+            dockerfile_content.contains(target),
+            ".devcontainer/Dockerfile must install the portable lychee artifact: {target}"
+        );
+    }
+    for target in [
+        r#"lychee_target="x86_64-unknown-linux-gnu""#,
+        r#"lychee_target="aarch64-unknown-linux-gnu""#,
+    ] {
+        assert!(
+            !dockerfile_content.contains(target),
+            ".devcontainer/Dockerfile must not install glibc-sensitive lychee artifact: {target}"
+        );
+    }
+
+    for cache_id in [
+        "signal-fish-cargo-registry",
+        "signal-fish-cargo-git",
+        "signal-fish-cargo-install-target",
+    ] {
+        assert!(
+            dockerfile_content.contains(cache_id),
+            ".devcontainer/Dockerfile must retain the BuildKit cache: {cache_id}"
+        );
+    }
+    assert!(
+        dockerfile_content.contains("USER vscode"),
+        ".devcontainer/Dockerfile must install Rust tooling as the non-root runtime user"
+    );
+    assert!(
+        !dockerfile_content.contains("chown -R vscode:vscode /usr/local/cargo /usr/local/rustup"),
+        ".devcontainer/Dockerfile must not duplicate toolchains in a recursive chown layer"
+    );
+
+    for mount in [
+        "source=${devcontainerId}-cargo-target,target=${containerWorkspaceFolder}/target,type=volume",
+        "source=${devcontainerId}-root-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume",
+        "source=${devcontainerId}-browser-node-modules,target=${containerWorkspaceFolder}/clients/browser/node_modules,type=volume",
+    ] {
+        assert!(
+            devcontainer_json.contains(mount),
+            ".devcontainer/devcontainer.json must use the fast named volume: {mount}"
+        );
+    }
+
+    for fragment in [
+        "prepare_worktree_cache_dirs",
+        "sudo install -d -m 0755",
+        "clients/browser/node_modules",
+        "configure_git_safe_directory",
+        "safe.directory",
+    ] {
+        assert!(
+            post_create_content.contains(fragment),
+            ".devcontainer/post-create.sh must initialize named-volume ownership: {fragment}"
+        );
+    }
+}
+
+#[test]
 fn test_tooling_parity_is_enforced_in_local_and_ci_paths() {
     let root = repo_root();
     let parity_script_path = root.join("scripts/check-tooling-parity.sh");
@@ -22856,10 +22928,16 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
     let required_fragments = [
         "cargo install --locked cargo-binstall",
         "cargo binstall --no-confirm --locked",
+        r#"--target "$cargo_binstall_target""#,
         "Acquire::Retries=5",
         "curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)",
         "ENV CARGO_NET_RETRY=10",
         "ENV CARGO_HTTP_TIMEOUT=120",
+        "musl-tools",
+        r#"rustup target add "$cargo_binstall_target""#,
+        "signal-fish-cargo-registry",
+        "signal-fish-cargo-git",
+        "signal-fish-cargo-install-target",
         "cargo-deny",
         "cargo-tarpaulin",
         "cargo-watch",
