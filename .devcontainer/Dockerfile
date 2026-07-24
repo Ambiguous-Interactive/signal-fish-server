@@ -11,8 +11,8 @@ ARG ACTIONLINT_VERSION=1.7.12
 ARG ACTIONLINT_AMD64_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 ARG ACTIONLINT_ARM64_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
 ARG LYCHEE_VERSION=0.24.2
-ARG LYCHEE_X86_64_SHA256=1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
-ARG LYCHEE_AARCH64_SHA256=91a7bd65685da41b90ccb9bc867a3d649a7818042dae04ff405e55a25bddee4c
+ARG LYCHEE_X86_64_MUSL_SHA256=73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5
+ARG LYCHEE_AARCH64_MUSL_SHA256=5d0b0e3aeab240f41920c633a6eaf97599be6eedda034b36e858ede7dba5e535
 ARG POWERSHELL_VERSION=7.6.2
 ARG POWERSHELL_X64_SHA256=6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292
 ARG POWERSHELL_ARM64_SHA256=a8d4e386dfafda385d0604045eed03ce6f3a843d45fc8f0b9588b836ca17cdb8
@@ -42,6 +42,7 @@ RUN apt-get update -o Acquire::Retries=5 \
     fd-find \
     ripgrep \
     shellcheck \
+    musl-tools \
     tzdata \
     yamllint \
     zlib1g \
@@ -58,8 +59,8 @@ RUN set -eux; \
     amd64) \
     actionlint_arch="amd64"; \
     actionlint_sha256="$ACTIONLINT_AMD64_SHA256"; \
-    lychee_target="x86_64-unknown-linux-gnu"; \
-    lychee_sha256="$LYCHEE_X86_64_SHA256"; \
+    lychee_target="x86_64-unknown-linux-musl"; \
+    lychee_sha256="$LYCHEE_X86_64_MUSL_SHA256"; \
     powershell_arch="x64"; \
     powershell_sha256="$POWERSHELL_X64_SHA256"; \
     yq_arch="amd64"; \
@@ -68,8 +69,8 @@ RUN set -eux; \
     arm64) \
     actionlint_arch="arm64"; \
     actionlint_sha256="$ACTIONLINT_ARM64_SHA256"; \
-    lychee_target="aarch64-unknown-linux-gnu"; \
-    lychee_sha256="$LYCHEE_AARCH64_SHA256"; \
+    lychee_target="aarch64-unknown-linux-musl"; \
+    lychee_sha256="$LYCHEE_AARCH64_MUSL_SHA256"; \
     powershell_arch="arm64"; \
     powershell_sha256="$POWERSHELL_ARM64_SHA256"; \
     yq_arch="arm64"; \
@@ -123,6 +124,11 @@ RUN set -eux; \
     python3 -c 'import z3; print("z3", z3.get_version_string())'; \
     pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSEdition; $PSVersionTable.PSVersion.ToString()'
 
+# The base image makes the shared Cargo and rustup roots writable by vscode.
+# Install developer toolchains as the final non-root user so ownership is
+# correct without a recursive chown layer that duplicates the toolchains.
+USER vscode
+
 # Rust components
 RUN rustup component add \
     rustfmt \
@@ -141,10 +147,25 @@ ENV CARGO_HTTP_TIMEOUT=120
 
 # Cargo tools (installed globally, available to all users). Heavy tools go on
 # the cargo-binstall path (prebuilt binaries) to keep no-cache rebuilds fast.
+# BuildKit caches retain registry metadata and compilation outputs across layer
+# invalidations without baking those caches into the final image.
 # cargo-mutants (mutation testing) and cargo-fuzz (coverage-guided fuzzing) back
 # the mutation.yml / fuzz.yml CI jobs; keep them in dev/CI parity.
-RUN cargo install --locked cargo-binstall \
-    && cargo binstall --no-confirm --locked \
+RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
+    --mount=type=cache,id=signal-fish-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked,uid=1000,gid=1000 \
+    --mount=type=cache,id=signal-fish-cargo-install-target-${TARGETARCH}-v2,target=/tmp/cargo-install-target,sharing=locked,uid=1000,gid=1000 \
+    export CARGO_TARGET_DIR=/tmp/cargo-install-target \
+    && case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+    amd64) cargo_binstall_target="x86_64-unknown-linux-musl" ;; \
+    arm64) cargo_binstall_target="aarch64-unknown-linux-musl" ;; \
+    *) \
+    echo "Unsupported target architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; \
+    exit 1; \
+    ;; \
+    esac \
+    && rustup target add "$cargo_binstall_target" \
+    && cargo install --locked cargo-binstall \
+    && cargo binstall --no-confirm --locked --target "$cargo_binstall_target" \
     cargo-deny \
     cargo-tarpaulin \
     cargo-watch \
@@ -162,14 +183,13 @@ RUN cargo install --locked cargo-binstall \
     && cargo llvm-cov --version \
     && cargo-nextest --version \
     && cargo mutants --version \
-    && cargo fuzz --help >/dev/null \
-    && rm -rf /usr/local/cargo/registry/cache /usr/local/cargo/registry/src
+    && cargo fuzz --help >/dev/null
 
-# Fix ownership so the non-root "vscode" user (set via remoteUser in
-# devcontainer.json) can write to the cargo registry and rustup toolchains.
-# Without this, cargo fetch / cargo check in postCreateCommand fails with
-# "Permission denied" because the directories above were populated by root.
-RUN chown -R vscode:vscode /usr/local/cargo /usr/local/rustup
+# Cache mounts above are external to the image. Remove any registry state
+# inherited from the base image so the final development image stays lean.
+RUN rm -rf /usr/local/cargo/registry/cache \
+    /usr/local/cargo/registry/src \
+    /usr/local/cargo/git
 
 # Mold linker configuration — works on both x86_64 and aarch64
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang

@@ -4,9 +4,11 @@
 # Verifies:
 #   1. doc-validation workflow tool versions match devcontainer Dockerfile ARGs.
 #   2. Devcontainer installs required modern tooling (yq, taplo, fd).
-#   3. Devcontainer feature set includes Docker CLI support with resilient settings.
-#   4. Devcontainer uses cargo-binstall for heavy cargo tools to keep rebuilds fast.
-#   5. Post-create keeps required Rust tool verification and opt-in warm-up behavior.
+#   3. Release binaries and image-build caches remain portable and efficient.
+#   4. Devcontainer feature set includes Docker CLI support with resilient settings.
+#   5. Workspace build/dependency outputs use fast named volumes.
+#   6. Devcontainer uses cargo-binstall for heavy cargo tools to keep rebuilds fast.
+#   7. Post-create keeps required Rust tool verification and opt-in warm-up behavior.
 #
 # Usage:
 #   ./scripts/check-tooling-parity.sh
@@ -198,6 +200,19 @@ assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "Acquire::Retries=5" "Devcont
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)" "Devcontainer release-binary downloads enable curl retries"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ENV CARGO_NET_RETRY=10" "Devcontainer configures Cargo network retries"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ENV CARGO_HTTP_TIMEOUT=120" "Devcontainer configures Cargo HTTP timeout"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'lychee_target="x86_64-unknown-linux-musl"' "Devcontainer uses portable x86_64 MUSL lychee binary"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'lychee_target="aarch64-unknown-linux-musl"' "Devcontainer uses portable aarch64 MUSL lychee binary"
+assert_not_contains_literal "$DEVCONTAINER_DOCKERFILE" 'lychee_target="x86_64-unknown-linux-gnu"' "Devcontainer avoids glibc-sensitive x86_64 lychee binary"
+assert_not_contains_literal "$DEVCONTAINER_DOCKERFILE" 'lychee_target="aarch64-unknown-linux-gnu"' "Devcontainer avoids glibc-sensitive aarch64 lychee binary"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "signal-fish-cargo-registry" "Devcontainer retains Cargo registry downloads in a BuildKit cache"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "signal-fish-cargo-install-target" "Devcontainer retains Cargo tool compilation outputs in a BuildKit cache"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo_binstall_target="x86_64-unknown-linux-musl"' "Devcontainer uses portable x86_64 MUSL Cargo tool binaries"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo_binstall_target="aarch64-unknown-linux-musl"' "Devcontainer uses portable aarch64 MUSL Cargo tool binaries"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo binstall --no-confirm --locked --target "$cargo_binstall_target"' "Devcontainer applies the portable target to cargo-binstall"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "musl-tools" "Devcontainer supports source fallback for MUSL Cargo tools"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'rustup target add "$cargo_binstall_target"' "Devcontainer installs the MUSL Rust standard library for binstall fallback"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "USER vscode" "Devcontainer installs Rust tooling as the non-root runtime user"
+assert_not_contains_literal "$DEVCONTAINER_DOCKERFILE" "chown -R vscode:vscode /usr/local/cargo /usr/local/rustup" "Devcontainer avoids a large recursive ownership layer"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-deny --version" "Devcontainer smoke checks cargo-deny"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-tarpaulin --version" "Devcontainer smoke checks cargo-tarpaulin"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo-watch --version" "Devcontainer smoke checks cargo-watch"
@@ -212,6 +227,12 @@ assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "yq --version;" "Devcontainer
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "taplo --version" "Devcontainer smoke checks taplo"
 assert_contains_literal "$DEVCONTAINER_JSON" "ghcr.io/devcontainers/features/docker-outside-of-docker:1" "Devcontainer enables Docker CLI feature"
 assert_contains_literal "$DEVCONTAINER_JSON" '"moby": false' "Devcontainer uses Docker CE path for docker-outside-of-docker reliability"
+assert_contains_literal "$DEVCONTAINER_JSON" 'source=${devcontainerId}-cargo-target,target=${containerWorkspaceFolder}/target,type=volume' "Devcontainer uses a named volume for Cargo build outputs"
+assert_contains_literal "$DEVCONTAINER_JSON" 'source=${devcontainerId}-root-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume' "Devcontainer uses a named volume for root Node dependencies"
+assert_contains_literal "$DEVCONTAINER_JSON" 'source=${devcontainerId}-browser-node-modules,target=${containerWorkspaceFolder}/clients/browser/node_modules,type=volume' "Devcontainer uses a named volume for browser-client Node dependencies"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "prepare_worktree_cache_dirs" "Post-create initializes named-volume ownership"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "configure_git_safe_directory" "Post-create trusts the bind-mounted workspace for Git"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "safe.directory" "Post-create handles Git dubious-ownership protection"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "verify_required_rust_tools" "Post-create verifies required Rust tools"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! install_codex_cli; then" "Post-create treats Codex install failures as non-fatal"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "run_with_retries 3 5 cargo fetch" "Post-create retries cargo dependency prefetch"

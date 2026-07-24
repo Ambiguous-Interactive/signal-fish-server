@@ -30,6 +30,13 @@
         "RUST_LOG": "debug",
         "RUST_BACKTRACE": "1"
     },
+    // Keep high-churn build/dependency trees off Windows/macOS bind mounts.
+    // Per-devcontainer volumes survive rebuilds without colliding across clones.
+    "mounts": [
+        "source=${devcontainerId}-cargo-target,target=${containerWorkspaceFolder}/target,type=volume",
+        "source=${devcontainerId}-root-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume",
+        "source=${devcontainerId}-browser-node-modules,target=${containerWorkspaceFolder}/clients/browser/node_modules,type=volume"
+    ],
     // Post-create setup
     "postCreateCommand": "bash .devcontainer/post-create.sh",
     // VS Code customizations
