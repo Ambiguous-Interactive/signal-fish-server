@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-24
+
 ### Changed
 
 - Repackage the repository's AI-agent guidance as portable Agent Skills with
@@ -1283,7 +1285,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional TLS/mTLS support via `rustls` (`tls` feature).
 - Optional legacy full-mesh mode (`legacy-fullmesh` feature).
 
-[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.3.0...v0.4.0
