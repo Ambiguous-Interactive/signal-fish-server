@@ -24,7 +24,10 @@ pub struct RunningTestServer {
 #[allow(dead_code)]
 impl RunningTestServer {
     pub async fn spawn(server: Arc<EnhancedGameServer>, router: axum::Router) -> Self {
-        let listener = signal_fish_server::websocket::bind_tcp_listener(
+        // Configure accepted sockets exactly as production does (issue #197), so
+        // latency-sensitive e2e tests observe production socket semantics.
+        use axum::serve::Listener;
+        let listener = signal_fish_server::websocket::bind_serve_listener(
             "127.0.0.1:0".parse().expect("parse test listener address"),
             server.config().websocket_config.socket_send_buffer_bytes,
         )

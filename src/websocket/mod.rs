@@ -26,7 +26,11 @@ mod token_binding;
 // Re-export public API to maintain backward compatibility
 pub use handler::{websocket_handler, websocket_handler_v3};
 pub use metrics::{metrics_handler, prometheus_metrics_handler, MetricsQuery};
-pub use routes::{bind_tcp_listener, create_router, create_standalone_router, run_server};
+#[cfg(feature = "tls")]
+pub use routes::ConfiguredAcceptor;
+pub use routes::{
+    bind_serve_listener, bind_tcp_listener, create_router, create_standalone_router, run_server,
+};
 
 /// Upper bound on each best-effort WebSocket close-path write.
 ///
