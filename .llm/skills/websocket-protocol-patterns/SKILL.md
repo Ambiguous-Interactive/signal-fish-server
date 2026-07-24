@@ -250,8 +250,8 @@ Real-time relay frames are small and latency-sensitive. Two defaults protect the
 
 ## Agent Checklist
 
-- [ ] Accepted sockets set `TCP_NODELAY` (via `bind_serve_listener` / `ConfiguredAcceptor`) so real-time frames dodge Nagle x delayed-ACK stalls
-- [ ] The outbound batch timer never holds latency-sensitive traffic — batching is opt-in and only `DeliveryClass::Latest` waits to coalesce
+- [ ] Accepted sockets set `TCP_NODELAY` via `bind_serve_listener` / `ConfiguredAcceptor` (no Nagle stalls)
+- [ ] Batching is opt-in; the batch timer never delays latency-sensitive traffic — only `Latest` waits to coalesce
 - [ ] WebSocket upgrade validates auth before upgrading when possible
 - [ ] Heartbeat ping-pong runs at regular intervals with client timeout
 - [ ] Graceful close sends a close frame with appropriate code

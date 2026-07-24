@@ -61,7 +61,7 @@ pub(crate) fn configure_accepted_socket(stream: &TcpStream) {
 
 /// Bind a plain-TCP listener whose accepted sockets are configured for
 /// low-latency relay: a bounded send buffer (via [`bind_tcp_listener`]) plus
-/// `TCP_NODELAY` (via [`configure_accepted_socket`]).
+/// `TCP_NODELAY` (via the crate-internal `configure_accepted_socket`).
 ///
 /// This is the single seam every plain `axum::serve` path uses — the production
 /// server, the `run_server` convenience entry point, and the integration-test
@@ -83,7 +83,7 @@ fn configure_accepted_socket_io(stream: &mut TcpStream) {
     configure_accepted_socket(stream);
 }
 
-/// `axum_server` acceptor that applies [`configure_accepted_socket`] to the raw
+/// `axum_server` acceptor that applies `configure_accepted_socket` to the raw
 /// TCP stream before the TLS handshake, so the TLS serve path shares the exact
 /// accepted-socket configuration (and warn-and-continue semantics) of the plain
 /// `tap_io` path (issue #197).

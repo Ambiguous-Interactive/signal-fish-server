@@ -322,7 +322,7 @@ Complete reference of all configuration options with environment variable overri
 
 ```
 
-- `enable_batching` - Opt-in outbound batching (off by default; on holds a latency-sensitive frame up to `batch_interval_ms` per hop in exchange for fewer, larger writes)
+- `enable_batching` - Opt-in outbound batching (off by default; on adds up to `batch_interval_ms` latency per hop)
 - `batch_size` - Max messages per batch
 - `batch_interval_ms` - Batch flush interval
 - `auth_timeout_secs` - Seconds to wait for auth after connect
