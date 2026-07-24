@@ -362,19 +362,28 @@ mod tests {
             },
             Case {
                 name: "sojourn ceiling below batching interval",
-                mutate: |config| config.max_sojourn_ms = config.batch_interval_ms - 1,
+                mutate: |config| {
+                    config.enable_batching = true;
+                    config.max_sojourn_ms = config.batch_interval_ms - 1;
+                },
                 expect_ok: false,
                 expect_error_containing: "max_sojourn_ms",
             },
             Case {
                 name: "sojourn ceiling equals batching interval",
-                mutate: |config| config.max_sojourn_ms = config.batch_interval_ms,
+                mutate: |config| {
+                    config.enable_batching = true;
+                    config.max_sojourn_ms = config.batch_interval_ms;
+                },
                 expect_ok: false,
                 expect_error_containing: "max_sojourn_ms",
             },
             Case {
                 name: "sojourn ceiling one millisecond above batching interval",
-                mutate: |config| config.max_sojourn_ms = config.batch_interval_ms + 1,
+                mutate: |config| {
+                    config.enable_batching = true;
+                    config.max_sojourn_ms = config.batch_interval_ms + 1;
+                },
                 expect_ok: true,
                 expect_error_containing: "",
             },
@@ -450,7 +459,11 @@ mod tests {
     #[test]
     fn defaults_match_documented_values() {
         let config = WebSocketConfig::default();
-        assert!(config.enable_batching);
+        assert!(
+            !config.enable_batching,
+            "batching is off by default so real-time relay traffic is not held by \
+             the flush timer (issue #198); throughput deployments opt in"
+        );
         assert_eq!(config.batch_size, 10);
         assert_eq!(config.batch_interval_ms, 16);
         assert_eq!(config.auth_timeout_secs, 10);

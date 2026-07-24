@@ -478,7 +478,7 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING",
         path: "websocket.enable_batching",
-        default: Some("true"),
+        default: Some("false"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__BATCH_SIZE",
@@ -592,6 +592,11 @@ const README_REQUIRED_CONFIG_ROWS: &[ConfigReferenceRow] = &[
         env: "SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH",
         path: "security.require_metrics_auth",
         default: Some("true"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING",
+        path: "websocket.enable_batching",
+        default: Some("false"),
     },
 ];
 

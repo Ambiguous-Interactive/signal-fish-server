@@ -175,7 +175,9 @@ pub(super) async fn send_batch(
         .await?;
         batch_size += 1;
     }
-    if batch_size > 0 {
+    // Only a real batch (2+ messages) is a "batch"; with batching off the writer
+    // drains one message per call, which is a normal send, not a flush.
+    if batch_size > 1 {
         tracing::trace!(%player_id, batch_size, "Flushed message batch");
     }
     Ok(())

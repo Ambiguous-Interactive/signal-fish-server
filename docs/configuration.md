@@ -192,7 +192,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__TURN__URLS` | `turn.urls` | `[]` | JSON array of TURN server URLs (e.g. `turn:turn.example.com:3478`) |
 | `SIGNAL_FISH__TURN__STUN_URLS` | `turn.stun_urls` | `["stun:stun.l.google.com:19302"]` | JSON array of STUN URLs advertised on WebRTC plans |
 | `SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS` | `turn.credential_ttl_secs` | `3600` | Lifetime in seconds of a minted TURN credential |
-| `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `true` | Enable outbound message batching |
+| `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `false` | Opt-in outbound message batching (off keeps real-time relay latency low; on trades up to `batch_interval_ms` per hop for fewer writes) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
@@ -304,7 +304,7 @@ Complete reference of all configuration options with environment variable overri
 
 {
   "websocket": {
-    "enable_batching": true,
+    "enable_batching": false,
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
@@ -322,7 +322,7 @@ Complete reference of all configuration options with environment variable overri
 
 ```
 
-- `enable_batching` - Batch outbound messages for better throughput
+- `enable_batching` - Opt-in outbound batching (off by default; on holds a latency-sensitive frame up to `batch_interval_ms` per hop in exchange for fewer, larger writes)
 - `batch_size` - Max messages per batch
 - `batch_interval_ms` - Batch flush interval
 - `auth_timeout_secs` - Seconds to wait for auth after connect

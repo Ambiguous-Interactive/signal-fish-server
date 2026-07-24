@@ -222,7 +222,7 @@ On startup the server looks for `config.json` in the working directory. See
     "credential_ttl_secs": 3600
   },
   "websocket": {
-    "enable_batching": true,
+    "enable_batching": false,
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
@@ -282,7 +282,7 @@ complete reference.
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`        | `65536`   | Max WebSocket message size in bytes                 |
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES`         | `security.max_signal_bytes`        | `16384`   | Max serialized size of a v3 `Signal` payload        |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `24`      | Max concurrent connections from one IP              |
-| `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `true`    | Enable outbound message batching                    |
+| `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `false`   | Opt-in outbound batching (off keeps relay latency low) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch                              |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Seconds to wait for auth after connect              |
