@@ -48,7 +48,7 @@ jobs:
         target: [decode_protocol, validate_inputs]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       # Nightly Toolchain Strategy:
       #   cargo-fuzz/libFuzzer requires NIGHTLY Rust: the sanitizer instrumentation
@@ -82,7 +82,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2.83.4
+        uses: taiki-e/install-action@v2.85.2
         with:
           tool: cargo-fuzz
 

@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5 # Short timeout - this is a fast validation step
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Install shellcheck
         run: |
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15 # Generous timeout for building documentation with all features
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -160,7 +160,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15 # Generous timeout for running all doc tests with features
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -190,7 +190,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20 # Longer timeout - validates multiple languages (Rust, JSON, YAML, TOML, Bash)
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -631,7 +631,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10 # Moderate timeout for checking all external and internal links
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       # Use lychee for comprehensive link checking (external + internal + anchors)
       - name: Check all links with lychee
         uses: lycheeverse/lychee-action@v2.9.0
@@ -684,7 +684,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10 # Moderate timeout for future implementation of code reference validation
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Check inline code references
         run: |
           echo "Inline code reference validation - placeholder for future implementation"

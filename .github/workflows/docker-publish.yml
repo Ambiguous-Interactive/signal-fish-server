@@ -72,7 +72,7 @@ jobs:
       is_backfill: ${{ steps.identity.outputs.is_backfill }}
     steps:
       - name: Checkout publication tooling
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -85,7 +85,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout exact source
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_ref || inputs.release_tag || github.ref }}
@@ -208,7 +208,7 @@ jobs:
       digest: ${{ steps.verify.outputs.digest || steps.rolling-digest.outputs.digest }}
     steps:
       - name: Checkout publication tooling
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -221,7 +221,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout exact source
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.source_revision }}
           path: source
@@ -233,7 +233,7 @@ jobs:
         uses: docker/setup-buildx-action@v4.2.0
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
