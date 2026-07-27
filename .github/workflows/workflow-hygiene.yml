@@ -63,7 +63,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Run workflow hygiene checks
         env:
           SIGNAL_FISH_CHECK_ACTION_REF_TAGS: "1"

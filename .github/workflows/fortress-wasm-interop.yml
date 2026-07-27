@@ -69,7 +69,7 @@ jobs:
       FORTRESS_WASM_BROWSER: ${{ matrix.browser }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -163,7 +163,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
