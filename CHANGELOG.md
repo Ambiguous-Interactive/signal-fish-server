@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore the weekly Firefox cell of the Fortress/Godot no-thread WASM
+  interoperability gate. Headless Firefox has no GPU-backed WebGL, so its
+  blocklist refused a software context and the Godot web export aborted at boot
+  reporting WebGL2 as missing; the harness now forces the software context for
+  Firefox exactly as it already did for Chromium. A bounded wait for a page
+  global also reports the page's captured errors instead of a bare timeout, so
+  a boot failure is legible from the workflow log without downloading artifacts.
+
 ## [0.5.1] - 2026-07-24
 
 ### Changed

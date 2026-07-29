@@ -131,7 +131,7 @@ try {
     expectedRemoteNonce: joinerNonce,
     pageUrl,
   });
-  const room = await waitForGlobal(creator.page, "__FORTRESS_ROOM_READY", 15_000);
+  const room = await waitForGlobal(creator, "__FORTRESS_ROOM_READY", 15_000);
   assertExactKeys(room, ["schema_version", "role", "instance_nonce", "room_code"], "room-ready");
   assert(room.schema_version === 2, "room-ready schema mismatch");
   assert(room.role === "creator", "room-ready role mismatch");
@@ -147,8 +147,8 @@ try {
   });
 
   [creatorReport, joinerReport] = await Promise.all([
-    waitForGlobal(creator.page, "__FORTRESS_RESULT", 105_000),
-    waitForGlobal(joiner.page, "__FORTRESS_RESULT", 105_000),
+    waitForGlobal(creator, "__FORTRESS_RESULT", 105_000),
+    waitForGlobal(joiner, "__FORTRESS_RESULT", 105_000),
   ]);
   await new Promise((accept) => setTimeout(accept, 250));
   const creatorBrowser = await browserAttestation(creator);
@@ -277,6 +277,18 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
       "--enable-webgl",
       "--ignore-gpu-blocklist",
     ];
+  } else {
+    // Firefox parity for the Chromium arguments above. A headless runner has no
+    // GPU, and Firefox's blocklist then refuses a software WebGL context, so the
+    // Godot web export aborts at boot on a missing WebGL2 feature instead of
+    // rendering. `webgl.force-enabled` is the single pref that restores the
+    // llvmpipe context; the timer prefs keep background throttling off so the
+    // measured 60 Hz callback cadence stays comparable across browsers.
+    launchOptions.firefoxUserPrefs = {
+      "webgl.force-enabled": true,
+      "dom.min_background_timeout_value": 4,
+      "dom.timeout.enable_budget_timer_throttling": false,
+    };
   }
   const server = await browserType.launchServer(launchOptions);
   const pid = server.process()?.pid;
@@ -464,9 +476,20 @@ function healthViolations(name, report) {
   return failures;
 }
 
-async function waitForGlobal(page, key, timeout) {
-  await page.waitForFunction((name) => globalThis[name] !== undefined, key, { timeout });
-  return page.evaluate((name) => globalThis[name], key);
+async function waitForGlobal(peer, key, timeout) {
+  try {
+    await peer.page.waitForFunction((name) => globalThis[name] !== undefined, key, { timeout });
+  } catch (error) {
+    // A bare Playwright timeout hides why the page never got there (a missing
+    // browser feature, a WASM trap, a WebSocket close). Surface whatever the
+    // page reported so the CI log alone explains the failure.
+    const observed = peer.errors.length > 0 ? peer.errors.join("\n") : "(none captured)";
+    throw new Error(
+      `${peer.role}: ${key} never appeared within ${timeout}ms; page errors:\n${observed}`,
+      { cause: error },
+    );
+  }
+  return peer.page.evaluate((name) => globalThis[name], key);
 }
 
 async function persistPeerArtifacts(peer, knownReport) {

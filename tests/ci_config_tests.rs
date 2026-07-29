@@ -22183,8 +22183,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "P13 runner must preserve diagnostics for both released and negative browser cells"
     );
     for required in [
-        "waitForGlobal(creator.page, \"__FORTRESS_RESULT\", 105_000)",
-        "waitForGlobal(joiner.page, \"__FORTRESS_RESULT\", 105_000)",
+        "waitForGlobal(creator, \"__FORTRESS_RESULT\", 105_000)",
+        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", 105_000)",
     ] {
         assert!(
             harness.contains(required),
@@ -22241,6 +22241,16 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         assert!(
             harness.contains(required),
             "P13 harness must retain selectable Chromium/Firefox execution: `{required}`"
+        );
+    }
+    // A headless runner has no GPU, so Firefox's blocklist refuses a software
+    // WebGL context and the Godot web export aborts at boot on missing WebGL2.
+    // Chromium gets `--enable-webgl --ignore-gpu-blocklist`; Firefox needs the
+    // pref below or the scheduled cell fails before the game ever starts.
+    for required in ["firefoxUserPrefs", "\"webgl.force-enabled\": true"] {
+        assert!(
+            harness.contains(required),
+            "P13 headless Firefox must force a software WebGL2 context: `{required}`"
         );
     }
     for required in [

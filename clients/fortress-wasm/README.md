@@ -55,3 +55,10 @@ the default is `chromium`. Both browsers come from the exact `playwright-core`
 version in `clients/browser/package-lock.json` and are installed afresh rather
 than restored from a browser cache. A manual workflow dispatch also selects
 Firefox, allowing exact-head verification before merge.
+
+The Godot web export requires a WebGL2 context, and CI runners have no GPU.
+Chromium reaches its software rasterizer through `--enable-webgl
+--ignore-gpu-blocklist`; Firefox refuses a software context until
+`webgl.force-enabled` is set, and otherwise aborts at boot reporting WebGL2 as
+missing. The harness sets the equivalent option for whichever browser it
+launches, so neither cell depends on runner graphics hardware.
