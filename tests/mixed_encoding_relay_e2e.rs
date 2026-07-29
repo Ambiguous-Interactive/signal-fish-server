@@ -434,6 +434,7 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     let fallback_auditor = Arc::clone(&auditor);
     let fallback_reader = tokio::spawn(async move {
         let (_, mut stream) = fallback.split();
+        let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + EXPERIMENT_DEADLINE;
         let mut reports = 0u64;
         let mut errors = 0u64;
@@ -441,7 +442,11 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
             let frame = tokio::time::timeout_at(deadline, stream.next())
                 .await
                 .unwrap_or_else(|_| {
-                    panic!("fallback recipient timed out after {reports} reports/{errors} errors")
+                    panic!(
+                        "fallback recipient timed out after {reports}/{BURST} reports and \
+                         {errors} advisories in {:?}",
+                        started.elapsed()
+                    )
                 })
                 .unwrap_or_else(|| {
                     panic!("fallback recipient closed without a semantic close frame")
@@ -450,12 +455,28 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
             match frame {
                 Message::Text(text) => match fallback_auditor.record_text_frame("P2", &text) {
                     ServerMessage::DeliveryReport(_) => reports += 1,
-                    ServerMessage::Error { error_code, .. } => {
+                    ServerMessage::Error {
+                        error_code,
+                        message,
+                    } => {
+                        // `SlowConsumer` here is not a stray advisory: the server
+                        // only ever emits it as a farewell frame immediately
+                        // before eviction, so seeing it means this recipient is
+                        // being dropped. Report the counters and elapsed time
+                        // with it — a bare `assert_eq!` on the code says nothing
+                        // about how far the experiment got, which is the first
+                        // thing needed to tell a genuine amplification eviction
+                        // from a link that simply never kept pace. See issue
+                        // #212.
                         assert_eq!(
                             error_code,
                             Some(
                                 signal_fish_server::protocol::ErrorCode::UnsupportedGameDataFormat
-                            )
+                            ),
+                            "fallback recipient received `{error_code:?}` after {reports}/{BURST} \
+                             reports and {errors} advisories, {:?} into a {EXPERIMENT_DEADLINE:?} \
+                             budget: {message}",
+                            started.elapsed(),
                         );
                         errors += 1;
                     }
