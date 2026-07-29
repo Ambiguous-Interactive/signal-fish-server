@@ -62,8 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accelerated adapter (fixed with `webgl.force-enabled`), and Playwright's
   Firefox dependency list installs no GL driver at all — unlike its Chromium and
   WebKit lists — so there was nothing for the loader to resolve even once the
-  blocklist was bypassed. The workflow now installs Mesa's software rasterizer
-  for that cell and the harness pins `LIBGL_ALWAYS_SOFTWARE`. Both browsers are
+  blocklist was bypassed, and headless Firefox still needs an X display to
+  resolve that driver at all. The workflow now installs Mesa's software
+  rasterizer plus Xvfb, the runner script gives the Firefox harness a virtual
+  display, and the harness pins `LIBGL_ALWAYS_SOFTWARE`. Both browsers are
   probed for a WebGL2 context before the export loads, so the failure is
   reported with the browser's own reason, and a bounded wait for a page global
   now reports the page's captured errors instead of a bare timeout.

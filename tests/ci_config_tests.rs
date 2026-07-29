@@ -22408,12 +22408,21 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
             "P13 headless Firefox must force a software WebGL2 context: `{required}`"
         );
     }
-    // Playwright's Firefox dependency list carries no GL packages, so bypassing
-    // the blocklist is useless without a driver for the loader to resolve.
+    // Firefox resolves Mesa's llvmpipe through an X display even when headless,
+    // and has no software WebGL fallback of its own. Without both the driver and
+    // a display it reports FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS and the Godot
+    // export aborts at boot. Reproduced locally with `env -u DISPLAY`.
+    for required in ["libgl1-mesa-dri", "xvfb"] {
+        assert!(
+            workflow.contains(required),
+            "P13 Firefox cell must install `{required}`; without it the Godot export \
+             aborts at boot on missing WebGL2 even with the prefs set"
+        );
+    }
     assert!(
-        workflow.contains("libgl1-mesa-dri"),
-        "P13 must install Mesa's software rasterizer for the Firefox cell; without it \
-         the Godot export aborts at boot on missing WebGL2 even with the prefs set"
+        runner.contains("xvfb-run"),
+        "P13 must run the Firefox harness under an X display; headless Firefox still \
+         needs one to resolve a software GL driver"
     );
     for required in [
         "browser_name=\"${FORTRESS_WASM_BROWSER:-chromium}\"",

@@ -58,13 +58,24 @@ Firefox, allowing exact-head verification before merge.
 
 The Godot web export requires a WebGL2 context, and CI runners have no GPU.
 Chromium reaches its own software rasterizer (SwiftShader) through
-`--enable-webgl --ignore-gpu-blocklist`. Firefox needs two separate things:
-`webgl.force-enabled` to bypass the blocklist that refuses WebGL without an
-accelerated adapter, **and** an actual software GL driver — Playwright's Firefox
-dependency list installs no GL packages at all, unlike its Chromium and WebKit
-lists, so the workflow installs Mesa's rasterizer (`libgl1-mesa-dri` and
-friends) for that cell and the harness pins `LIBGL_ALWAYS_SOFTWARE`. Missing
-either half leaves the export aborting at boot with WebGL2 reported as missing.
+`--enable-webgl --ignore-gpu-blocklist`. Firefox has no such fallback: it asks
+the platform for a GL device and, finding none, reports
+`Exhausted GL driver options (FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS)`. It
+needs all three of:
+
+1. `webgl.force-enabled`, to bypass the blocklist that refuses WebGL without an
+   accelerated adapter;
+2. a software GL driver — Playwright's Firefox dependency list installs no GL
+   packages at all, unlike its Chromium and WebKit lists, so the workflow
+   installs Mesa's rasterizer (`libgl1-mesa-dri` and friends);
+3. an **X display**, which headless Firefox still uses to resolve that driver.
+   `scripts/run-fortress-wasm-interop.sh` runs the Firefox harness under
+   `xvfb-run`.
+
+Missing any one of them leaves the export aborting at boot with WebGL2 reported
+as missing. This is what made the cell environment-dependent — a workstation
+with `DISPLAY` set passes while a CI runner without one fails; reproduce the CI
+condition locally with `env -u DISPLAY`.
 
 Both browsers are probed for a WebGL2 context before the export is loaded, so
 that failure is reported with the browser's own

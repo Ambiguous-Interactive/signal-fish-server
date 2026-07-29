@@ -378,15 +378,15 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
   }
 }
 
-/// Fail before loading the export if the browser cannot give it a WebGL2
-/// context, reporting the browser's own reason.
-///
-/// The Godot web export needs WebGL2 and aborts at boot without it. Left to
-/// itself that surfaces as a bare 15-second wait for a page global, which is
-/// how the Firefox cell stayed unexplained across several runs. A canvas
-/// records `webglcontextcreationerror` with a `statusMessage` naming the actual
-/// obstacle (blocklisted adapter, no driver, failed context), so ask for it
-/// directly and put it in the failure.
+// Fail before loading the export if the browser cannot give it a WebGL2
+// context, reporting the browser's own reason.
+//
+// The Godot web export needs WebGL2 and aborts at boot without it. Left to
+// itself that surfaces as a bare 15-second wait for a page global, which is
+// how the Firefox cell stayed unexplained across several runs. A canvas
+// records `webglcontextcreationerror` with a `statusMessage` naming the actual
+// obstacle (blocklisted adapter, no driver, failed context), so ask for it
+// directly and put it in the failure.
 async function assertWebGl2Available(peer) {
   const probe = await peer.page.evaluate(() => {
     const canvas = document.createElement("canvas");

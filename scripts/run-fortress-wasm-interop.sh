@@ -101,9 +101,28 @@ else
     node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install "${browser_name}"
 fi
 
-timeout --foreground 180s node "${FIXTURE_ROOT}/harness.mjs" \
+# Firefox has no software WebGL fallback of its own: it asks the platform for a
+# GL device and, finding none, reports
+# `Exhausted GL driver options (FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS)` — which
+# aborts the Godot web export at boot on missing WebGL2. Even headless, it
+# resolves Mesa's llvmpipe through an X display, so give it one. Chromium needs
+# nothing here because it carries SwiftShader.
+#
+# This is what made the cell environment-dependent: a workstation with DISPLAY
+# set passes, a CI runner without one fails. Reproduced exactly by running the
+# harness with `env -u DISPLAY`.
+harness_launcher=()
+if [[ "${browser_name}" == "firefox" ]]; then
+    if ! command -v xvfb-run >/dev/null 2>&1; then
+        printf 'BUSTED: xvfb-run is required for the Firefox cell\n' >&2
+        exit 1
+    fi
+    harness_launcher=(xvfb-run -a --server-args="-screen 0 1280x1024x24")
+fi
+
+timeout --foreground 180s "${harness_launcher[@]}" node "${FIXTURE_ROOT}/harness.mjs" \
     released "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
-timeout --foreground 180s node "${FIXTURE_ROOT}/harness.mjs" \
+timeout --foreground 180s "${harness_launcher[@]}" node "${FIXTURE_ROOT}/harness.mjs" \
     negative "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
 
 printf 'HEALTHY: released Signal Fish client 0.9.0 satisfies the Godot no-thread WASM healthy gates\n'
