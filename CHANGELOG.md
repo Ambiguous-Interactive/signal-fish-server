@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symbolization was active, so an unsymbolized report is self-describing rather
   than an undiagnosable stack of raw addresses.
 - Bump the pinned GitHub Actions group (`actions/checkout` 7.0.1,
-  `taiki-e/install-action` 2.85.2, and `actions/upload-artifact`), carrying
-  Dependabot #202 forward.
+  `taiki-e/install-action` 2.85.4, `docker/login-action` 4.6.0,
+  `mozilla-actions/sccache-action` 0.0.11, and `actions/upload-artifact`),
+  carrying Dependabot #202 and #215 forward.
 - Refresh the compatible dependency set (Tokio 1.53.1, serde 1.0.229, futures
   0.3.33, clap 4.6.4, hdrhistogram 7.6.0 and others). The `tokio-tungstenite`
   0.30, `serial_test` 4.0, `base64` 0.23, and `syn` 3.0 declarations proposed
@@ -37,7 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a 1.89.0 MSRV, the third adds a second `base64` used by nothing but
   this crate, and the fourth removes `syn::Arm::guard` without deduplicating
   anything. The locked graph keeps exactly one WebSocket and one base64
-  implementation.
+  implementation. Dependabot #214 re-proposes all four; each rejection was
+  re-measured against the current graph rather than carried forward on the
+  earlier note — the PR's own lockfile adds `tokio-tungstenite`/`tungstenite`
+  0.30 beside the 0.29 pair axum still requires and a second `base64`,
+  `serial_test` 4.0.1 declares `rust-version = 1.93.1`, and compiling against
+  `syn` 3.0 fails with `no field 'guard' on type '&Arm'` while syn 2 stays in
+  the graph for `bytecheck_derive`, `derive_more-impl`, and `educe` regardless.
 
 ### Fixed
 
