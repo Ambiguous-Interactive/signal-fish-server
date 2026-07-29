@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Count the teardown's final delivery report as its own registered close-write
+  step, so `REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS` is 4 and the derived
+  `registered_connection_shutdown_settle_timeout()` (and the binary's graceful
+  shutdown budget) still covers the whole sequence. A wedged socket can therefore
+  take one more `CONNECTION_CLOSE_WRITE_TIMEOUT` (1 s) to reclaim; a healthy one
+  is unaffected.
 - Require every workflow `apt-get update` to first drop the Azure CLI and
   Microsoft prod source lists, enforced by a sweep test over all workflows.
   Those mirrors periodically break `apt-get update` on GitHub runners; five call

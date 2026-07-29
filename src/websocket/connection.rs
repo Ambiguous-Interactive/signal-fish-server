@@ -41,6 +41,9 @@ fn random_ping_nonce() -> u64 {
 #[repr(u32)]
 enum RegisteredConnectionCloseStep {
     FlushQueuedMessages,
+    /// The coalesced unsupported-format report, written after the drain because
+    /// the drain itself can discover further undeliverable payloads.
+    FinalDeliveryReport,
     SemanticCloseFrame,
     SinkClose,
     Count,
@@ -334,6 +337,42 @@ where
     tokio::time::timeout(CLOSE_WRITE_TIMEOUT, operation).await
 }
 
+/// Write whatever exact omission accounting is still coalesced for this
+/// recipient, once no further frame will carry it.
+///
+/// Best-effort by nature — a wedged socket is one reason this path runs — but on
+/// a healthy teardown it means the last burst of undeliverable data is still
+/// reported rather than dying with the connection. Callers must invoke this
+/// after the last queued write on their path, because each write can discover
+/// further undeliverable payloads whose advisory (and therefore whose report
+/// flush) the rate limiter may suppress.
+async fn flush_pending_unsupported_report(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    rx: &OutboundReceiver,
+    player_id: &PlayerId,
+) {
+    let Some(report) = rx.take_pending_unsupported_report() else {
+        return;
+    };
+    let report = ServerMessage::DeliveryReport(Box::new(report));
+    // Counted as its own step in `RegisteredConnectionCloseStep`, so the derived
+    // shutdown settle timeout covers this budget too.
+    match registered_close_write_timeout(
+        RegisteredConnectionCloseStep::FinalDeliveryReport,
+        send_immediate_server_message(sender, &report),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::debug!(%player_id, error = %err, "Failed to flush final delivery report");
+        }
+        Err(_elapsed) => {
+            tracing::debug!(%player_id, "Timed out flushing final delivery report");
+        }
+    }
+}
+
 /// Final actions of the send task once a server-side close was requested.
 ///
 /// - Slow consumer: the queue contents are abandoned **by design** (the
@@ -370,31 +409,12 @@ async fn finalize_closed_connection(
     #[cfg(feature = "trace-validation")]
     close_signal.record_trace_queue_closed();
 
-    // Emit whatever exact omission accounting is still coalesced for this
-    // recipient before the terminal frames. It is best-effort — a wedged socket
-    // is exactly why this path runs — but on a healthy teardown it means the
-    // last burst of undeliverable data is still reported rather than lost with
-    // the connection.
-    if let Some(report) = rx.take_pending_unsupported_report() {
-        let report = ServerMessage::DeliveryReport(Box::new(report));
-        match tokio::time::timeout(
-            CLOSE_WRITE_TIMEOUT,
-            send_immediate_server_message(sender, &report),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::debug!(%player_id, error = %err, "Failed to flush final delivery report");
-            }
-            Err(_elapsed) => {
-                tracing::debug!(%player_id, "Timed out flushing final delivery report");
-            }
-        }
-    }
-
     match reason {
         Some(CloseReason::SlowConsumer) => {
+            // Nothing more will be written from the queue on this path — it is
+            // abandoned below — so the coalesced omissions are flushed here,
+            // before the counters that make the farewell terminal.
+            flush_pending_unsupported_report(sender, rx, player_id).await;
             // `send_batch` pops messages one at a time, so a cancelled
             // in-flight write leaves everything unsent inside the batcher;
             // the count below misses at most the single message that was
@@ -516,6 +536,11 @@ async fn finalize_closed_connection(
                     );
                 }
             }
+            // After the drain, not before it: the drain itself writes queued
+            // items and can discover further undeliverable payloads, and a
+            // suppressed advisory leaves those coalesced. Flushing first would
+            // leave exactly the tail this change exists to preserve unreported.
+            flush_pending_unsupported_report(sender, rx, player_id).await;
         }
     }
 

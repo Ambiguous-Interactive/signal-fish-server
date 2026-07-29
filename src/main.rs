@@ -522,8 +522,9 @@ mod cli_tests {
         );
         assert_eq!(
             websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS,
-            3,
-            "registered shutdown close uses flush, semantic close, and sink close budgets"
+            4,
+            "registered shutdown close uses flush, final delivery report, semantic close, \
+             and sink close budgets"
         );
         assert!(
             websocket::REGISTERED_SHUTDOWN_SETTLE_MARGIN > Duration::ZERO,
