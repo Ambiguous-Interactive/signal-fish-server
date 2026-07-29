@@ -1727,6 +1727,13 @@ them into additional priority reports. A client must retain prior ranges and
 authorize a hole only when their non-overlapping union covers every missing
 sequence; one report or range need not cover the entire hole alone.
 
+**No reason has a privileged shape.** A range may span any number of sequences,
+one report may carry several ranges of the same reason, and reasons may be mixed
+in one report. A client must not require a single-sequence range or a single gap
+for any reason, `unsupported_format` included: the exactness a client can rely on
+is that the reported ranges never overlap and that each loss counter advances by
+exactly the number of sequences the same report attributes to it.
+
 Gap-bearing reports are event-driven even when
 `websocket.delivery_stats_interval_secs` is zero. Queue-policy reports for
 `latest` / `volatile` travel on the active generation's strict-priority control

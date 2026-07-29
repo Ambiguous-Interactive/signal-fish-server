@@ -71,7 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single gap per report) and would have rejected the server's own frames as
   accountability violations; they now validate the ranges, with tests proving a
   coalesced range is accepted only when the counters move by exactly the
-  sequences it names.
+  sequences it names. The **published** `signal-fish-client` 0.9.0 carries the
+  same over-strict check and needs the same change
+  (`signal-fish-client-rust` issue #81): `docs/protocol.md` has never promised a
+  shape for these reports — it requires clients to authorize a hole from the
+  union of ranges, and `DeliveryGap` is defined as an inclusive range — so the
+  server now emits what the documented contract always allowed. Until a client
+  release ships, a 0.9.0 client reports an accountability violation instead of
+  recording the gap, and only on the error path that produces these reports at
+  all: a convertible payload is still delivered as a JSON fallback with no
+  report, so this needs an unrepresentable (reserved/`rkyv`) or malformed
+  payload to trigger.
 - Make the chaos proxy's bandwidth fault rate-accurate. Pacing slept a fixed
   interval per chunk, so the pump's own read/write/scheduling latency was added
   to every period and the achieved rate drifted below nominal under load — a
