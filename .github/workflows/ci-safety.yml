@@ -234,8 +234,8 @@ jobs:
 
       # Without a symbolizer every sanitizer frame prints as a raw
       # `binary+0xADDRESS` offset. That is what made the 2026-07-27
-      # LeakSanitizer report on PR #202 undiagnosable: 22 indirect leaks, not
-      # one nameable frame, even after downloading the run artifacts. rustup's
+      # LeakSanitizer report on PR #202 undiagnosable (issue #209): 22 indirect
+      # leaks, not one nameable frame, even after downloading artifacts. rustup's
       # llvm-tools component does NOT ship llvm-symbolizer, so this searches the
       # runner's system LLVM instead. Best-effort by design: a missing
       # symbolizer degrades reports rather than failing an otherwise-green lane.

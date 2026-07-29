@@ -898,11 +898,21 @@ struct FortressWasmExtension;
 
 // SAFETY: godot-rust requires this marker to register generated GDExtension
 // callbacks. The implementation supplies no raw pointers or custom lifecycle code.
-// This is the only permitted unsafe site in the fixture; `unsafe_code = "deny"`
-// in Cargo.toml rejects any other.
+//
+// This is the fixture's only permitted unsafe site. The allow sits on the module
+// rather than the item because `#[gdextension]` is an attribute proc-macro and
+// re-emits the impl without item-level attributes, so an `#[allow]` on the impl
+// itself does not reach the expanded code. Scoping it to a module holding this
+// one item keeps `unsafe_code = "deny"` (Cargo.toml) live for the rest of the
+// crate.
 #[allow(unsafe_code)]
-#[gdextension]
-unsafe impl ExtensionLibrary for FortressWasmExtension {}
+mod extension_registration {
+    use super::{ExtensionLibrary, FortressWasmExtension};
+    use godot::init::gdextension;
+
+    #[gdextension]
+    unsafe impl ExtensionLibrary for FortressWasmExtension {}
+}
 
 #[cfg(test)]
 #[allow(clippy::panic)]
