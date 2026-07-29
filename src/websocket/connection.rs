@@ -2204,7 +2204,15 @@ mod tests {
         let app =
             super::super::routes::create_router("http://localhost:3000").with_state(game_server);
 
-        tokio::spawn(async move {
+        // The handle is kept and torn down below rather than detached. A
+        // detached `axum::serve` task owns the `Router`, and therefore the
+        // `Arc<EnhancedGameServer>` and its DashMap shards, for as long as it
+        // lives — which is until the test runtime is dropped. With
+        // `--test-threads=1` that teardown races process exit, and
+        // LeakSanitizer intermittently reports the server's shards as leaked
+        // (issue #209: 22 indirect / 0 direct, `EnhancedGameServer::new` at
+        // server.rs:262 reached from this test).
+        let server_task = tokio::spawn(async move {
             if let Err(e) = axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -2215,66 +2223,78 @@ mod tests {
             }
         });
 
-        // Poll the server until it accepts a WebSocket connection, rather than a
-        // fixed startup sleep (zero-flakiness policy, .llm/context-testing.md): a
-        // fixed sleep flakes when an oversubscribed runner has not bound the
-        // listener yet. The happy path connects on the first attempt (typically
-        // within a few ms of the spawn); the generous deadline only bites under
-        // pathological load.
-        let url = format!("ws://{addr}/ws");
-        let ready_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
-        let ws_stream = loop {
-            match tokio::time::timeout(tokio::time::Duration::from_secs(5), connect_async(&url))
-                .await
-            {
-                Ok(Ok((stream, _response))) => break stream,
-                outcome => {
-                    anyhow::ensure!(
-                        tokio::time::Instant::now() < ready_deadline,
-                        "WebSocket server did not become ready within 30s: {outcome:?}"
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Every `?` below must still reach the teardown, so the exchange runs
+        // inside its own future and its result is returned after the abort.
+        let exchange: anyhow::Result<()> = async {
+            // Poll the server until it accepts a WebSocket connection, rather than a
+            // fixed startup sleep (zero-flakiness policy, .llm/context-testing.md): a
+            // fixed sleep flakes when an oversubscribed runner has not bound the
+            // listener yet. The happy path connects on the first attempt (typically
+            // within a few ms of the spawn); the generous deadline only bites under
+            // pathological load.
+            let url = format!("ws://{addr}/ws");
+            let ready_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+            let ws_stream = loop {
+                match tokio::time::timeout(tokio::time::Duration::from_secs(5), connect_async(&url))
+                    .await
+                {
+                    Ok(Ok((stream, _response))) => break stream,
+                    outcome => {
+                        anyhow::ensure!(
+                            tokio::time::Instant::now() < ready_deadline,
+                            "WebSocket server did not become ready within 30s: {outcome:?}"
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    }
                 }
+            };
+            let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+            // Send join room message
+            let join_message = ClientMessage::JoinRoom {
+                game_name: "test_game".to_string(),
+                room_code: None,
+                player_name: "TestPlayer".to_string(),
+                max_players: Some(4),
+                supports_authority: Some(true),
+                relay_transport: None,
+            };
+
+            let json_message =
+                serde_json::to_string(&join_message).context("serialize join message")?;
+            ws_sender
+                .send(TungsteniteMessage::Text(json_message.into()))
+                .await
+                .context("send join message")?;
+
+            // Receive response with timeout — propagate the elapsed, closed-stream,
+            // and transport-error cases instead of swallowing any of them.
+            let msg = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_receiver.next())
+                .await
+                .context("timed out waiting for join response after 5s")?
+                .context("websocket closed before sending a join response")?
+                .context("receive websocket message")?;
+
+            let TungsteniteMessage::Text(text) = msg else {
+                anyhow::bail!("expected a Text websocket frame, got {msg:?}");
+            };
+            let server_message: ServerMessage =
+                serde_json::from_str(&text).context("deserialize server message")?;
+            match server_message {
+                ServerMessage::RoomJoined(_) => Ok(()),
+                ServerMessage::RoomJoinFailed { reason, .. } => {
+                    anyhow::bail!("room join failed: {reason}")
+                }
+                other => anyhow::bail!("unexpected server message: {other:?}"),
             }
-        };
-        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-
-        // Send join room message
-        let join_message = ClientMessage::JoinRoom {
-            game_name: "test_game".to_string(),
-            room_code: None,
-            player_name: "TestPlayer".to_string(),
-            max_players: Some(4),
-            supports_authority: Some(true),
-            relay_transport: None,
-        };
-
-        let json_message =
-            serde_json::to_string(&join_message).context("serialize join message")?;
-        ws_sender
-            .send(TungsteniteMessage::Text(json_message.into()))
-            .await
-            .context("send join message")?;
-
-        // Receive response with timeout — propagate the elapsed, closed-stream,
-        // and transport-error cases instead of swallowing any of them.
-        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_receiver.next())
-            .await
-            .context("timed out waiting for join response after 5s")?
-            .context("websocket closed before sending a join response")?
-            .context("receive websocket message")?;
-
-        let TungsteniteMessage::Text(text) = msg else {
-            anyhow::bail!("expected a Text websocket frame, got {msg:?}");
-        };
-        let server_message: ServerMessage =
-            serde_json::from_str(&text).context("deserialize server message")?;
-        match server_message {
-            ServerMessage::RoomJoined(_) => Ok(()),
-            ServerMessage::RoomJoinFailed { reason, .. } => {
-                anyhow::bail!("room join failed: {reason}")
-            }
-            other => anyhow::bail!("unexpected server message: {other:?}"),
         }
+        .await;
+
+        // Drop the server before returning: `abort()` only marks the task, so
+        // await it to be sure its future — and the last `Arc` to the server —
+        // is released while the runtime is still up.
+        server_task.abort();
+        let _ = server_task.await;
+        exchange
     }
 }
