@@ -131,7 +131,7 @@ try {
     expectedRemoteNonce: joinerNonce,
     pageUrl,
   });
-  const room = await waitForGlobal(creator.page, "__FORTRESS_ROOM_READY", 15_000);
+  const room = await waitForGlobal(creator, "__FORTRESS_ROOM_READY", 15_000);
   assertExactKeys(room, ["schema_version", "role", "instance_nonce", "room_code"], "room-ready");
   assert(room.schema_version === 2, "room-ready schema mismatch");
   assert(room.role === "creator", "room-ready role mismatch");
@@ -147,8 +147,8 @@ try {
   });
 
   [creatorReport, joinerReport] = await Promise.all([
-    waitForGlobal(creator.page, "__FORTRESS_RESULT", 105_000),
-    waitForGlobal(joiner.page, "__FORTRESS_RESULT", 105_000),
+    waitForGlobal(creator, "__FORTRESS_RESULT", 105_000),
+    waitForGlobal(joiner, "__FORTRESS_RESULT", 105_000),
   ]);
   await new Promise((accept) => setTimeout(accept, 250));
   const creatorBrowser = await browserAttestation(creator);
@@ -277,6 +277,40 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
       "--enable-webgl",
       "--ignore-gpu-blocklist",
     ];
+  } else {
+    // Firefox parity for the Chromium arguments above. A CI runner has no GPU,
+    // and the Godot web export aborts at boot on a missing WebGL2 feature
+    // rather than rendering, so Firefox has to be pushed onto a software GL
+    // stack from both directions:
+    //
+    //   - `webgl.force-enabled` bypasses the blocklist that refuses WebGL when
+    //     no accelerated adapter is present. On a host that already resolves a
+    //     software GL driver this alone is enough (verified by pref bisection:
+    //     `webgl.forbid-software`, `gfx.webrender.*`, and
+    //     `disable-fail-if-major-performance-caveat` each fail on their own).
+    //   - `gfx.webrender.software` / `.all` keep compositing off the GPU path.
+    //   - `LIBGL_ALWAYS_SOFTWARE` / `GALLIUM_DRIVER` force Mesa to load
+    //     llvmpipe. Bypassing the blocklist does nothing if the loader never
+    //     resolves a driver: Playwright's Firefox dependency list ships no GL
+    //     packages at all (unlike its Chromium and WebKit lists), so the
+    //     workflow installs Mesa's software rasterizer alongside these.
+    //
+    // The timer prefs keep background throttling off so the measured 60 Hz
+    // callback cadence stays comparable across browsers.
+    launchOptions.firefoxUserPrefs = {
+      "webgl.force-enabled": true,
+      "webgl.forbid-software": false,
+      "webgl.disable-fail-if-major-performance-caveat": true,
+      "gfx.webrender.software": true,
+      "gfx.webrender.all": true,
+      "dom.min_background_timeout_value": 4,
+      "dom.timeout.enable_budget_timer_throttling": false,
+    };
+    launchOptions.env = {
+      ...process.env,
+      LIBGL_ALWAYS_SOFTWARE: "1",
+      GALLIUM_DRIVER: "llvmpipe",
+    };
   }
   const server = await browserType.launchServer(launchOptions);
   const pid = server.process()?.pid;
@@ -333,6 +367,7 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
     });
     peer.page.on("pageerror", (error) => errors.push(`pageerror: ${error.stack ?? error}`));
     peer.page.on("crash", () => errors.push("page crashed"));
+    await assertWebGl2Available(peer);
     await peer.page.goto(pageUrl, { waitUntil: "load", timeout: 15_000 });
     return peer;
   } catch (error) {
@@ -341,6 +376,45 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
     await closePeer(peer);
     throw error;
   }
+}
+
+// Fail before loading the export if the browser cannot give it a WebGL2
+// context, reporting the browser's own reason.
+//
+// The Godot web export needs WebGL2 and aborts at boot without it. Left to
+// itself that surfaces as a bare 15-second wait for a page global, which is
+// how the Firefox cell stayed unexplained across several runs. A canvas
+// records `webglcontextcreationerror` with a `statusMessage` naming the actual
+// obstacle (blocklisted adapter, no driver, failed context), so ask for it
+// directly and put it in the failure.
+async function assertWebGl2Available(peer) {
+  const probe = await peer.page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    let statusMessage = null;
+    canvas.addEventListener(
+      "webglcontextcreationerror",
+      (event) => {
+        statusMessage = event.statusMessage ?? "(no statusMessage)";
+      },
+      { once: true },
+    );
+    const gl = canvas.getContext("webgl2");
+    if (!gl) return { available: false, statusMessage, renderer: null };
+    const debug = gl.getExtension("WEBGL_debug_renderer_info");
+    return {
+      available: true,
+      statusMessage,
+      renderer: debug
+        ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL)
+        : gl.getParameter(gl.RENDERER),
+    };
+  });
+  peer.logs.push(`webgl2: available=${probe.available} renderer=${probe.renderer}`);
+  assert(
+    probe.available,
+    `${peer.role}: ${browserName} cannot create a WebGL2 context, which the Godot ` +
+      `web export requires to boot: ${probe.statusMessage ?? "(no reason reported)"}`,
+  );
 }
 
 async function browserAttestation(peer) {
@@ -464,9 +538,20 @@ function healthViolations(name, report) {
   return failures;
 }
 
-async function waitForGlobal(page, key, timeout) {
-  await page.waitForFunction((name) => globalThis[name] !== undefined, key, { timeout });
-  return page.evaluate((name) => globalThis[name], key);
+async function waitForGlobal(peer, key, timeout) {
+  try {
+    await peer.page.waitForFunction((name) => globalThis[name] !== undefined, key, { timeout });
+  } catch (error) {
+    // A bare Playwright timeout hides why the page never got there (a missing
+    // browser feature, a WASM trap, a WebSocket close). Surface whatever the
+    // page reported so the CI log alone explains the failure.
+    const observed = peer.errors.length > 0 ? peer.errors.join("\n") : "(none captured)";
+    throw new Error(
+      `${peer.role}: ${key} never appeared within ${timeout}ms; page errors:\n${observed}`,
+      { cause: error },
+    );
+  }
+  return peer.page.evaluate((name) => globalThis[name], key);
 }
 
 async function persistPeerArtifacts(peer, knownReport) {

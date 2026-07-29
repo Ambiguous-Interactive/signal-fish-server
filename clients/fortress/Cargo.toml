@@ -9,6 +9,10 @@ repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
 rust-version = "1.89.0"
 publish = false
 
+# Matches the server crate: this interop fixture carries no `unsafe` block.
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 fortress-rollback = "=0.10.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -55,3 +55,32 @@ the default is `chromium`. Both browsers come from the exact `playwright-core`
 version in `clients/browser/package-lock.json` and are installed afresh rather
 than restored from a browser cache. A manual workflow dispatch also selects
 Firefox, allowing exact-head verification before merge.
+
+The Godot web export requires a WebGL2 context, and CI runners have no GPU.
+Chromium reaches its own software rasterizer (SwiftShader) through
+`--enable-webgl --ignore-gpu-blocklist`. Firefox has no such fallback: it asks
+the platform for a GL device and, finding none, reports
+`Exhausted GL driver options (FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS)`. It
+needs two things:
+
+1. `webgl.force-enabled`, to bypass the blocklist that refuses WebGL without an
+   accelerated adapter;
+2. an **X display**, which headless Firefox still uses to resolve a Mesa GL
+   driver. `scripts/run-fortress-wasm-interop.sh` runs the Firefox harness under
+   `xvfb-run`.
+
+The display is what made the cell environment-dependent — a workstation with
+`DISPLAY` set passes while a CI runner without one fails. Reproduce the CI
+condition locally with `env -u DISPLAY`, which yields
+`Exhausted GL driver options (FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS)`.
+
+The workflow also pins the Mesa/EGL packages. That is defensive rather than
+operative: the current `ubuntu-24.04` image already ships `libgl1-mesa-dri`,
+`libglx-mesa0`, `xvfb`, and `xauth`, and a CI bisection showed those packages
+alone did **not** fix the cell — only adding the display did. They are pinned so
+the cell does not depend on what a future image happens to carry, since
+`playwright install --with-deps firefox` contributes no GL packages of its own.
+
+Both browsers are probed for a WebGL2 context before the export is loaded, so
+that failure is reported with the browser's own
+`webglcontextcreationerror` reason instead of a bare wait for a page global.

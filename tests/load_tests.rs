@@ -24,23 +24,81 @@
 /// nightly `tests/relay_delivery_soak.rs` /
 /// `tests/delivery_concurrency_stress.rs` lanes.
 ///
-/// KNOWN-BROKEN (as of the nightly-verification lane's introduction):
-/// `test_load_room_creation_throughput` and
-/// `test_load_sustained_concurrent_connections` fail deterministically under
-/// the shared test-server defaults — they request 250-500 rooms in a single
-/// game against `max_rooms_per_game: 100` and trip the room-creation rate
-/// limits, so their ">=95% success" assertions cannot hold. They are
-/// excluded from `.github/workflows/verification-nightly.yml` until
-/// repaired; only `test_load_message_latency_distribution` runs there.
+/// REPAIRED (issue #207). Every room-based cell here used to build a room code
+/// of the wrong length — `LOAD000000` (10 chars), `MLAT0000` (8), `MEM0000` (7)
+/// — while the server requires **exactly** `ProtocolConfig::room_code_length`
+/// (6). `handle_join_room` signals a rejected join only by leaving the player
+/// roomless, so this failed silently in two different ways: the two throughput
+/// cells recorded 0% success and were excluded from CI as "known-broken", while
+/// `test_load_message_latency_distribution` ran green in the nightly lane while
+/// measuring broadcasts into empty rooms.
+///
+/// The earlier diagnosis recorded here — `max_rooms_per_game: 100` plus room
+/// creation rate limits — was wrong: `check_room_creation` is keyed per player
+/// and every cell uses a fresh UUID per client, so it never bound. The room cap
+/// is a real second limit for the 250-500 room cells, and `create_load_test_server`
+/// raises it, but code length was what zeroed them out.
+///
+/// All codes now come from `load_room_code`, and the cells assert that players
+/// actually entered a room, so a future validation change fails loudly instead
+/// of quietly making these vacuous again.
 mod test_helpers;
 
+use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::server::ServerConfig;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use test_helpers::{create_test_server, create_test_server_with_config};
+use test_helpers::{create_test_server, create_test_server_with_config, test_server_config};
 use tokio::sync::{mpsc, Barrier};
 use tokio::time::timeout;
+
+/// Build a room code this server will actually accept.
+///
+/// `validate_room_code_with_config` requires a code of **exactly**
+/// `ProtocolConfig::room_code_length` alphanumeric characters (6 by default),
+/// and `handle_join_room` rejects anything else without returning an error to
+/// the caller. Every cell in this file used to build longer codes — `LOAD000000`
+/// (10), `MLAT0000` (8), `MEM0000` (7) — so no player ever entered a room: the
+/// two throughput cells failed their success assertions and were excluded from
+/// CI, while the latency cell "passed" while measuring broadcasts to empty
+/// rooms. Codes are built here so their length is one checked decision rather
+/// than six independent `format!` strings.
+fn load_room_code(prefix: char, index: u32) -> String {
+    // Checked against the same `ProtocolConfig` the load servers below are
+    // built with, rather than a second copy of the constant, so a change to the
+    // configured length cannot leave this helper silently disagreeing.
+    let required = ProtocolConfig::default().room_code_length;
+    let code = format!("{prefix}{index:05}");
+    assert_eq!(
+        code.len(),
+        required,
+        "load-test room code `{code}` is not the {required} characters the server \
+         requires; widen the index format or shorten the prefix"
+    );
+    code
+}
+
+/// Server sized for the throughput cells rather than for functional tests.
+///
+/// `test_server_config()` caps a game at 100 rooms. That is a correctness limit
+/// for functional tests, not a throughput budget, and it silently bounded what
+/// the throughput cells below could measure: they request 250-500 rooms in a
+/// single game, so most creations were rejected by the cap and their ">=95%
+/// success" assertions could never hold. These cells measure how fast the
+/// handler path creates rooms and sustains connections, so the room ceiling
+/// rises to the production default (`default_max_rooms_per_game()`); every
+/// other value stays at the shared test default.
+async fn create_load_test_server() -> Arc<signal_fish_server::server::EnhancedGameServer> {
+    create_test_server_with_config(
+        ServerConfig {
+            max_rooms_per_game: signal_fish_server::config::defaults::default_max_rooms_per_game(),
+            ..test_server_config()
+        },
+        ProtocolConfig::default(),
+    )
+    .await
+}
 
 /// Performance metrics collector
 #[derive(Default)]
@@ -115,7 +173,10 @@ impl PerformanceMetrics {
             0
         };
 
-        let throughput = if duration.as_secs() > 0 {
+        // Guard on the fractional duration, not `as_secs()`: a sub-second run
+        // has `as_secs() == 0`, so the fast cells used to report "0.00 ops/sec"
+        // for a run that completed thousands of operations.
+        let throughput = if duration.as_secs_f64() > 0.0 {
             total as f64 / duration.as_secs_f64()
         } else {
             0.0
@@ -235,7 +296,7 @@ async fn test_load_concurrent_websocket_connections() {
 #[tokio::test]
 #[ignore]
 async fn test_load_room_creation_throughput() {
-    let server = Arc::new(create_test_server().await);
+    let server = Arc::new(create_load_test_server().await);
     let metrics = Arc::new(PerformanceMetrics::new());
 
     let num_rooms = 500; // Create 500 rooms
@@ -264,7 +325,7 @@ async fn test_load_room_creation_throughput() {
                 server_clone.connect_client(player_id, tx).await;
 
                 // Create unique room
-                let room_code = format!("LOAD{batch:04}{i:02}");
+                let room_code = load_room_code('L', (batch * concurrent_creates + i) as u32);
                 let result = timeout(
                     Duration::from_secs(5),
                     server_clone.handle_join_room(
@@ -314,7 +375,11 @@ async fn test_load_room_creation_throughput() {
 
     assert!(
         successful as f64 / total as f64 >= 0.95,
-        "At least 95% of room creations should succeed"
+        "At least 95% of room creations should succeed, got {successful}/{total} \
+         ({:.1}%) over {num_rooms} requested rooms in one game — a shortfall this \
+         large usually means a server limit rejected the load rather than the \
+         handler path being slow",
+        (successful as f64 / total as f64) * 100.0
     );
 
     println!("Room creation throughput: {throughput:.2} rooms/sec (target: 100)");
@@ -325,7 +390,7 @@ async fn test_load_room_creation_throughput() {
 #[tokio::test]
 #[ignore]
 async fn test_load_sustained_concurrent_connections() {
-    let server = Arc::new(create_test_server().await);
+    let server = Arc::new(create_load_test_server().await);
     let metrics = Arc::new(PerformanceMetrics::new());
 
     let num_clients = 1000;
@@ -351,7 +416,7 @@ async fn test_load_sustained_concurrent_connections() {
             server_clone.connect_client(player_id, tx).await;
 
             // Join a room
-            let room_code = format!("SUST{:04}", i / 4); // 4 players per room
+            let room_code = load_room_code('S', i / 4); // 4 players per room
             let _ = server_clone
                 .handle_join_room(
                     &player_id,
@@ -417,7 +482,11 @@ async fn test_load_sustained_concurrent_connections() {
 
     assert!(
         successful as f64 / total as f64 >= 0.95,
-        "At least 95% of operations should succeed under sustained load"
+        "At least 95% of operations should succeed under sustained load, got \
+         {successful}/{total} ({:.1}%) across {num_clients} clients — a shortfall \
+         this large usually means a server limit rejected the load rather than the \
+         handler path being slow",
+        (successful as f64 / total as f64) * 100.0
     );
 
     let avg_latency = metrics.total_latency_ms.load(Ordering::Relaxed) / successful as u64;
@@ -430,7 +499,10 @@ async fn test_load_sustained_concurrent_connections() {
 #[tokio::test]
 #[ignore]
 async fn test_load_message_latency_distribution() {
-    let server = Arc::new(create_test_server().await);
+    // Uses the load server for headroom: this cell creates exactly as many rooms
+    // as the shared config's `max_rooms_per_game` allows, so any shift in room
+    // cleanup timing would push the last creation over a zero-margin limit.
+    let server = Arc::new(create_load_test_server().await);
 
     let num_rooms = 100;
     let players_per_room = 4;
@@ -450,7 +522,7 @@ async fn test_load_message_latency_distribution() {
 
     // Create rooms with players
     for room_idx in 0..num_rooms {
-        let room_code = format!("MLAT{room_idx:04}");
+        let room_code = load_room_code('M', room_idx);
         let mut player_ids = Vec::new();
         let mut receivers = Vec::new();
 
@@ -476,8 +548,27 @@ async fn test_load_message_latency_distribution() {
             receivers.push(rx);
         }
 
-        // Verify all players joined
+        // Verify all players joined. This assertion is the point of the cell:
+        // `handle_join_room` reports a rejected join only by leaving the player
+        // roomless, so without it a broadcast measured against empty rooms reads
+        // as a fast pass. That is exactly how this cell ran green in CI while
+        // measuring nothing.
         tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut joined_rooms = Vec::new();
+        for player_id in &player_ids {
+            let room = server.get_client_room(player_id).await.unwrap_or_else(|| {
+                panic!(
+                    "player {player_id} never entered room {room_code}; the broadcast \
+                     latency below would be measured against an empty room"
+                )
+            });
+            joined_rooms.push(room);
+        }
+        assert!(
+            joined_rooms.windows(2).all(|pair| pair[0] == pair[1]),
+            "players for room {room_code} landed in different rooms ({joined_rooms:?}); \
+             a broadcast would not fan out to all {players_per_room} of them"
+        );
 
         // Each player sends messages and we measure broadcast latency
         for player_id in &player_ids {
@@ -572,7 +663,7 @@ async fn test_load_stress_to_failure() {
                 let result = timeout(Duration::from_secs(10), async {
                     server_clone.connect_client(player_id, tx).await;
 
-                    let room_code = format!("STRESS{:04}", i / 4);
+                    let room_code = load_room_code('T', i / 4);
                     server_clone
                         .handle_join_room(
                             &player_id,
@@ -655,7 +746,7 @@ async fn test_load_memory_usage() {
 
             server_clone.connect_client(player_id, tx).await;
 
-            let room_code = format!("MEM{:04}", i / 4);
+            let room_code = load_room_code('E', i / 4);
             let _ = server_clone
                 .handle_join_room(
                     &player_id,
@@ -790,7 +881,7 @@ async fn test_load_rate_limiting() {
     let start = Instant::now();
 
     for i in 0..attempts {
-        let room_code = format!("RATE{i:04}");
+        let room_code = load_room_code('R', i);
         server
             .handle_join_room(
                 &player_id,

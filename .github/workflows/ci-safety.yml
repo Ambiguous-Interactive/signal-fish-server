@@ -117,7 +117,7 @@ jobs:
       CARGO_TARGET_DIR: target/miri
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Install Rust nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -216,7 +216,7 @@ jobs:
       CARGO_TARGET_DIR: target/asan
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -231,6 +231,41 @@ jobs:
           prefix-key: "ci-safety-nightly-v2"
           workspaces: ". -> target/asan"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      # Without a symbolizer every sanitizer frame prints as a raw
+      # `binary+0xADDRESS` offset. That is what made the 2026-07-27
+      # LeakSanitizer report on PR #202 undiagnosable (issue #209): 22 indirect
+      # leaks, not one nameable frame, even after downloading artifacts. rustup's
+      # llvm-tools component does NOT ship llvm-symbolizer, so this searches the
+      # runner's system LLVM instead. Best-effort by design: a missing
+      # symbolizer degrades reports rather than failing an otherwise-green lane.
+      - name: Locate llvm-symbolizer for sanitizer reports
+        shell: bash
+        run: |
+          set -uo pipefail
+          symbolizer=""
+          for candidate in llvm-symbolizer llvm-symbolizer-20 llvm-symbolizer-19 \
+                           llvm-symbolizer-18 llvm-symbolizer-17; do
+            if resolved="$(command -v "$candidate" 2>/dev/null)"; then
+              symbolizer="$resolved"
+              break
+            fi
+          done
+          if [ -z "$symbolizer" ]; then
+            for candidate in /usr/lib/llvm-*/bin/llvm-symbolizer; do
+              if [ -x "$candidate" ]; then
+                symbolizer="$candidate"
+                break
+              fi
+            done
+          fi
+          if [ -n "$symbolizer" ]; then
+            echo "ASAN_SYMBOLIZER_PATH=$symbolizer" >> "$GITHUB_ENV"
+            echo "sanitizer reports will be symbolized by $symbolizer"
+          else
+            echo "WARNING: no llvm-symbolizer found; sanitizer frames will be raw"
+            echo "addresses. Install LLVM on the runner to make reports actionable."
+          fi
 
       - name: Run tests with AddressSanitizer
         run: |
@@ -255,6 +290,7 @@ jobs:
           echo "sha: ${{ github.sha }}"
           echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
           echo "ASAN_OPTIONS: ${ASAN_OPTIONS:-<unset>}"
+          echo "ASAN_SYMBOLIZER_PATH: ${ASAN_SYMBOLIZER_PATH:-<unset — frames below are raw addresses>}"
           echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           if [ ! -f asan-output.txt ]; then
             echo "asan-output.txt is missing"

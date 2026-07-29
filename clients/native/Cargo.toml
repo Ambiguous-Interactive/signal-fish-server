@@ -9,6 +9,10 @@ repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
 rust-version = "1.89.0"
 publish = false
 
+# Matches the server crate: this reference client carries no `unsafe` block.
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 # Protocol types come straight from the server crate (zero wire drift).
 signal-fish-server = { path = "../.." }

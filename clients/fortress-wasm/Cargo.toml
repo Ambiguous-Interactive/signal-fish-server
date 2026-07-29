@@ -26,6 +26,14 @@ web-time = "=1.1.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(published_docs)"] }
+# `deny` rather than the `forbid` used by the server and the other client
+# packages: godot-rust requires exactly one `unsafe impl ExtensionLibrary`
+# marker. It lives in the `extension_registration` module in src/lib.rs, which
+# carries the only `#[allow(unsafe_code)]` in the crate (the allow must sit on
+# the module, not the item — `#[gdextension]` re-emits the impl without
+# item-level attributes). Any unsafe site outside that module is a compile
+# error.
+unsafe_code = "deny"
 
 [lints.clippy]
 unwrap_used = "deny"

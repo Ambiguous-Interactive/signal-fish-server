@@ -9,8 +9,10 @@
 //!   direction's pump so bytes accumulate in kernel socket buffers (a stalled
 //!   reader, without touching the client's task).
 //! - [`throttle`](ChaosProxy::throttle): pace a direction to a byte rate
-//!   (chunked writes with a pre-write pacing sleep — the injected workload
-//!   shape, not a synchronization primitive).
+//!   (chunked writes released against a virtual clock — see
+//!   [`next_chunk_release`] — so the achieved rate converges on nominal instead
+//!   of drifting below it on a loaded machine; the injected workload shape, not
+//!   a synchronization primitive).
 //! - [`fragment_writes`](ChaosProxy::fragment_writes): forward one byte per
 //!   write so frames arrive maximally fragmented.
 //! - [`rst_all`](ChaosProxy::rst_all): abort every proxied connection with a
@@ -300,6 +302,39 @@ fn spawn_connection(control: &Arc<ProxyControl>, client: TcpStream, server: TcpS
     });
 }
 
+/// When a throttled pump may release its next chunk.
+///
+/// Pacing is a **virtual clock**, not a fixed sleep per chunk. Sleeping
+/// `bytes / rate` after every read adds the pump's own read/write/scheduling
+/// latency to every period, so the achieved rate is always *below* nominal and
+/// drifts further the busier the machine is. That made the injected fault
+/// inaccurate in exactly the direction that breaks experiments: on a loaded CI
+/// runner a nominal "32 KiB/s" link delivered materially less, the server's
+/// sojourn bound tripped, and `mixed_encoding_relay_e2e`'s throttled recipient
+/// was evicted as a slow consumer — the outcome that experiment exists to prove
+/// does *not* happen. It failed this way on `main` in run 30187497311 and again
+/// on PR #208.
+///
+/// Scheduling each chunk against a running virtual clock lets a late iteration
+/// be absorbed by the next one, so the long-run rate converges on nominal.
+/// Catch-up credit is capped at one chunk period: a pump that fell far behind
+/// (a `pause()`, or the process being descheduled) restarts the clock instead
+/// of bursting to "make up" arbitrary lost time.
+fn next_chunk_release(
+    previous: Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+    pacing: Duration,
+) -> tokio::time::Instant {
+    let target = previous.unwrap_or(now) + pacing;
+    // Comparing `target + pacing` against `now` keeps this in Instant addition
+    // only — subtracting a Duration from an Instant can underflow.
+    if target + pacing < now {
+        now
+    } else {
+        target
+    }
+}
+
 /// Copy bytes `from` -> `to`, honoring the direction's pause / throttle /
 /// fragmentation switches and ending immediately on a kill signal, EOF, or a
 /// socket error (all of which tear down the whole connection).
@@ -313,6 +348,8 @@ async fn pump(
     let mut pause_rx = controls.paused.subscribe();
     let mut kill_rx = control.kill.subscribe();
     let mut buffer = vec![0u8; 8 * 1024];
+    // Virtual clock for throttled pacing; see `next_chunk_release`.
+    let mut release_at: Option<tokio::time::Instant> = None;
 
     loop {
         // Park while paused; a kill preempts the park.
@@ -385,14 +422,20 @@ async fn pump(
         let throttle = controls.throttle_bytes_per_sec.load(Ordering::Relaxed);
         if throttle > 0 {
             let pacing = Duration::from_secs_f64(received as f64 / throttle as f64);
+            let release = next_chunk_release(release_at, tokio::time::Instant::now(), pacing);
+            release_at = Some(release);
             tokio::select! {
                 _ = kill_rx.changed() => {
                     if *kill_rx.borrow() != KillMode::None {
                         return;
                     }
                 }
-                () = tokio::time::sleep(pacing) => {}
+                () = tokio::time::sleep_until(release) => {}
             }
+        } else {
+            // Restart the virtual clock when the throttle is lifted so a later
+            // re-throttle does not inherit stale credit.
+            release_at = None;
         }
 
         let fragment = controls.fragment_writes.load(Ordering::Relaxed);
@@ -550,6 +593,44 @@ mod tests {
             elapsed >= Duration::from_millis(500),
             "2 KiB through a 2 KiB/s throttle finished in {elapsed:?} — throttle not applied"
         );
+    }
+
+    /// The pacing clock must converge on the nominal rate rather than drifting
+    /// below it, which is what evicted a throttled recipient in
+    /// `mixed_encoding_relay_e2e` on a loaded runner. Exercised as pure
+    /// arithmetic over synthetic instants so the property is deterministic
+    /// instead of a timing race.
+    #[tokio::test]
+    async fn chunk_pacing_compensates_for_late_iterations() {
+        let pacing = Duration::from_millis(32);
+        let start = tokio::time::Instant::now();
+
+        // First chunk under a fresh clock: one full period from now.
+        assert_eq!(next_chunk_release(None, start, pacing), start + pacing);
+
+        // On time: the next release is one period after the previous one, so
+        // the schedule stays anchored to the virtual clock rather than to the
+        // moment this iteration happened to run.
+        let previous = start + pacing;
+        assert_eq!(
+            next_chunk_release(Some(previous), previous, pacing),
+            previous + pacing
+        );
+
+        // Slightly late (this iteration ran a third of a period behind): the
+        // release stays on the virtual schedule, which is now in the past, so
+        // the chunk goes immediately and the lost time is absorbed. A fixed
+        // per-chunk sleep would instead add the lateness to every period.
+        let late = previous + pacing + pacing / 3;
+        let release = next_chunk_release(Some(previous), late, pacing);
+        assert_eq!(release, previous + pacing);
+        assert!(release < late, "a late iteration must release immediately");
+
+        // Far behind (a pause, or the process descheduled for many periods):
+        // credit is dropped and the clock restarts, so catching up can never
+        // burst an unbounded amount of traffic through the throttle.
+        let stalled = previous + pacing * 50;
+        assert_eq!(next_chunk_release(Some(previous), stalled, pacing), stalled);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

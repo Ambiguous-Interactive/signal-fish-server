@@ -69,7 +69,7 @@ jobs:
       FORTRESS_WASM_BROWSER: ${{ matrix.browser }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -142,6 +142,32 @@ jobs:
             --target wasm32-unknown-emscripten \
             --release \
             -- -D warnings
+      # The Godot web export needs WebGL2, and Firefox — unlike Chromium, which
+      # carries SwiftShader — has no software fallback of its own: it needs a
+      # real Mesa GL stack AND an X display to resolve it through, even headless.
+      #
+      # The operative fix is the display (see the xvfb-run wrapper in
+      # scripts/run-fortress-wasm-interop.sh). This install is defensive: on the
+      # current ubuntu-24.04 image libgl1, libglx-mesa0, libgl1-mesa-dri, xvfb,
+      # and xauth are all already present and only the libegl1/libegl-mesa0
+      # loader packages are new. Pinning the whole set keeps the cell from
+      # depending on whatever a future runner image happens to ship, since
+      # `playwright install --with-deps firefox` contributes no GL packages of
+      # its own (its Chromium list carries libgbm1 and its WebKit list carries
+      # libgl1/libegl1, but the Firefox list has none).
+      - name: Install Mesa software GL and Xvfb for headless Firefox
+        if: matrix.browser == 'firefox'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same cleanup every other apt site in this repo performs: those
+          # mirrors periodically break `apt-get update` on GitHub runners, which
+          # would fail this step and take the Firefox cell red again.
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 libegl-mesa0 \
+            xvfb xauth
       - name: Verify released graph plus expected-busted control
         env:
           INSTALL_PLAYWRIGHT_DEPS: "1"
@@ -163,7 +189,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:

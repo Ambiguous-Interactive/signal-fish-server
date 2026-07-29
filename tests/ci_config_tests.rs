@@ -1418,6 +1418,156 @@ const REQUIRED_RELEASE_TARGETS: &[(&str, &str)] = &[
     ("aarch64-pc-windows-msvc", "Windows ARM64"),
 ];
 
+/// Every git-tracked package manifest must declare an explicit `unsafe_code`
+/// lint policy under `[lints.rust]` (issue #205).
+///
+/// The signaling server and its reference clients contain no `unsafe` block.
+/// That was true by habit, not by construction — nothing stopped a future
+/// change from introducing one silently. Discovery is dynamic (`git ls-files`)
+/// so a package added later cannot opt out by omission, which is the failure
+/// mode this guards: a manifest that simply never mentions the policy.
+///
+/// `forbid` is required everywhere except packages listed in
+/// `DENY_UNSAFE_PACKAGES`, which need a small, reviewed number of unsafe sites
+/// (godot-rust's `unsafe impl ExtensionLibrary` marker) and therefore use
+/// `deny` plus a local `#[allow(unsafe_code)]` at each site.
+#[test]
+fn test_every_package_manifest_declares_an_unsafe_code_policy() {
+    /// Packages permitted to use `deny` instead of `forbid`, with the reason.
+    const DENY_UNSAFE_PACKAGES: &[(&str, &str)] = &[(
+        "clients/fortress-wasm/Cargo.toml",
+        "godot-rust requires one `unsafe impl ExtensionLibrary` marker",
+    )];
+    /// Asserted present so a broken discovery cannot pass vacuously.
+    const REQUIRED_MANIFESTS: &[&str] = &[
+        "Cargo.toml",
+        "clients/fortress/Cargo.toml",
+        "clients/fortress-wasm/Cargo.toml",
+        "clients/native/Cargo.toml",
+        "fuzz/Cargo.toml",
+    ];
+
+    let root = repo_root();
+    let manifests = tracked_package_manifests(&root);
+    let mut checked: Vec<String> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+
+    for relative in &manifests {
+        let manifest = read_file(&root.join(relative));
+        // Only packages carry lints; a pure `[workspace]` manifest has none.
+        if !manifest.lines().any(|line| line.trim() == "[package]") {
+            continue;
+        }
+        checked.push(relative.clone());
+        let expected = if DENY_UNSAFE_PACKAGES
+            .iter()
+            .any(|(path, _)| path == relative)
+        {
+            "deny"
+        } else {
+            "forbid"
+        };
+        match unsafe_code_lint_level(&manifest) {
+            Some(level) if level == expected => {}
+            Some(level) => problems.push(format!(
+                "  - {relative}  declares `unsafe_code = \"{level}\"`, expected \"{expected}\""
+            )),
+            None => problems.push(format!(
+                "  - {relative}  has no `unsafe_code` entry under [lints.rust]"
+            )),
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "Package manifest(s) missing the no-unsafe policy (issue #205):\n{}\n\n\
+         Add `unsafe_code = \"forbid\"` under a `[lints.rust]` table. If the package \
+         genuinely requires an unsafe site, use \"deny\" instead, add a local \
+         `#[allow(unsafe_code)]` with a SAFETY comment at that site, and record the \
+         package in DENY_UNSAFE_PACKAGES in this test.",
+        problems.join("\n")
+    );
+    for required in REQUIRED_MANIFESTS {
+        assert!(
+            checked.iter().any(|relative| relative == required),
+            "expected to check `{required}`, but only checked {checked:?}; manifest \
+             discovery may be broken or the package moved"
+        );
+    }
+}
+
+/// Read the `unsafe_code` level from a manifest's `[lints.rust]` table.
+///
+/// A small section scan rather than a toml dependency, matching the style of
+/// the MSRV and lockfile guards in this repository.
+fn unsafe_code_lint_level(manifest: &str) -> Option<String> {
+    let mut in_lints_rust = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_lints_rust = trimmed == "[lints.rust]";
+            continue;
+        }
+        if !in_lints_rust {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("unsafe_code") else {
+            continue;
+        };
+        let rest = rest.trim_start().strip_prefix('=')?.trim();
+        // Accept both `unsafe_code = "forbid"` and the table form
+        // `unsafe_code = { level = "forbid", .. }`.
+        let value = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"'));
+        return match value {
+            Some(level) => Some(level.to_string()),
+            None => rest
+                .split("level")
+                .nth(1)
+                .and_then(|s| s.split('"').nth(1))
+                .map(str::to_string),
+        };
+    }
+    None
+}
+
+/// Repository-relative paths of every git-tracked `Cargo.toml`.
+///
+/// Uses git rather than a filesystem walk so vendored/ignored manifests under
+/// `target/` are excluded and any newly committed package is picked up with no
+/// list to maintain.
+///
+/// `*/Cargo.toml` reaches **any** depth, not just one level: git pathspec globs
+/// do not set `FNM_PATHNAME`, so `*` matches `/`. It therefore covers
+/// `clients/fortress/Cargo.toml` as well as `fuzz/Cargo.toml`. This reads like
+/// a shell glob, where it would mean one level only — `REQUIRED_MANIFESTS`
+/// names a two-level path precisely so a wrong assumption here fails loudly
+/// instead of silently shrinking the guard's coverage.
+fn tracked_package_manifests(root: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--", "Cargo.toml", "*/Cargo.toml"])
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("`git ls-files` failed ({error}); this guard requires a git checkout")
+        });
+    assert!(
+        output.status.success(),
+        "`git ls-files` exited with {}; this guard requires a git checkout",
+        output.status
+    );
+    let manifests: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.replace('\\', "/"))
+        .collect();
+    assert!(
+        !manifests.is_empty(),
+        "`git ls-files` returned no Cargo.toml paths; this guard requires a git checkout"
+    );
+    manifests
+}
+
 #[test]
 fn test_msrv_consistency_across_config_files() {
     // This test prevents the MSRV inconsistency issue that was fixed in commit d9eac0f
@@ -2031,6 +2181,58 @@ fn test_display_name_matches_template_non_matrix_no_match() {
     assert!(
         !display_name_matches_template("Test", "Lint (${{ matrix.os }})"),
         "\"Test\" should NOT match template \"Lint (${{{{ matrix.os }}}})\""
+    );
+}
+
+/// Every `apt-get update` in a workflow must first drop the Azure CLI and
+/// Microsoft prod source lists.
+///
+/// Those mirrors periodically break `apt-get update` on GitHub runners, which
+/// fails the whole step. Five call sites already did this; a sixth added in
+/// this session did not, and would have taken the just-restored Firefox WASM
+/// cell red again on the next mirror hiccup. Checking every site keeps the
+/// convention from being a thing each author has to remember.
+#[test]
+fn test_workflow_apt_update_sites_drop_broken_microsoft_mirrors() {
+    const CLEANUP: &str = "sudo rm -f /etc/apt/sources.list.d/azure-cli.list                            /etc/apt/sources.list.d/microsoft-prod.list";
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+
+    for entry in collect_workflow_files(&workflows_dir) {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let lines: Vec<&str> = content.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.trim().starts_with("sudo apt-get update") {
+                continue;
+            }
+            checked += 1;
+            // The cleanup is expected immediately before, allowing for the
+            // comment lines authors put above it.
+            let preceding = lines[index.saturating_sub(6)..index].join("\n");
+            if !preceding.contains("/etc/apt/sources.list.d/azure-cli.list")
+                || !preceding.contains("/etc/apt/sources.list.d/microsoft-prod.list")
+            {
+                problems.push(format!("  - {filename}:{}", index + 1));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "`sudo apt-get update` without first removing the Azure CLI / Microsoft prod \
+         source lists:\n{}\n\nThose mirrors periodically break `apt-get update` on \
+         GitHub runners and fail the step. Add this line immediately before it:\n\n    \
+         {CLEANUP}",
+        problems.join("\n")
+    );
+    assert!(
+        checked >= 5,
+        "expected to check at least five `apt-get update` sites, found {checked}; \
+         workflow discovery may be broken"
     );
 }
 
@@ -22183,8 +22385,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "P13 runner must preserve diagnostics for both released and negative browser cells"
     );
     for required in [
-        "waitForGlobal(creator.page, \"__FORTRESS_RESULT\", 105_000)",
-        "waitForGlobal(joiner.page, \"__FORTRESS_RESULT\", 105_000)",
+        "waitForGlobal(creator, \"__FORTRESS_RESULT\", 105_000)",
+        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", 105_000)",
     ] {
         assert!(
             harness.contains(required),
@@ -22243,6 +22445,39 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
             "P13 harness must retain selectable Chromium/Firefox execution: `{required}`"
         );
     }
+    // A headless runner has no GPU, so Firefox's blocklist refuses a software
+    // WebGL context and the Godot web export aborts at boot on missing WebGL2.
+    // Chromium gets `--enable-webgl --ignore-gpu-blocklist`; Firefox needs the
+    // pref below or the scheduled cell fails before the game ever starts.
+    for required in [
+        "firefoxUserPrefs",
+        "\"webgl.force-enabled\": true",
+        "LIBGL_ALWAYS_SOFTWARE",
+        "assertWebGl2Available",
+    ] {
+        assert!(
+            harness.contains(required),
+            "P13 headless Firefox must force a software WebGL2 context: `{required}`"
+        );
+    }
+    // Firefox has no software WebGL fallback of its own and resolves Mesa's
+    // llvmpipe through an X display even when headless; without one it reports
+    // FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS and the Godot export aborts at
+    // boot. Reproduced locally with `env -u DISPLAY`. The display is the
+    // operative fix — a CI bisection showed the GL packages alone did not help —
+    // but both are pinned so the cell cannot regress on either axis.
+    for required in ["libgl1-mesa-dri", "xvfb"] {
+        assert!(
+            workflow.contains(required),
+            "P13 Firefox cell must install `{required}`; without it the Godot export \
+             aborts at boot on missing WebGL2 even with the prefs set"
+        );
+    }
+    assert!(
+        runner.contains("xvfb-run"),
+        "P13 must run the Firefox harness under an X display; headless Firefox still \
+         needs one to resolve a software GL driver"
+    );
     for required in [
         "browser_name=\"${FORTRESS_WASM_BROWSER:-chromium}\"",
         "install --with-deps \"${browser_name}\"",

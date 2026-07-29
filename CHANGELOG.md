@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Enforce the no-unsafe property that the server and its reference clients
+  already held by habit: every package manifest now declares an explicit
+  `unsafe_code` lint policy (`forbid`, or `deny` for the Godot fixture that
+  needs one `unsafe impl ExtensionLibrary` marker), and a git-discovery policy
+  test fails when a package omits it (issue #205).
+
+### Changed
+
+- Require every workflow `apt-get update` to first drop the Azure CLI and
+  Microsoft prod source lists, enforced by a sweep test over all workflows.
+  Those mirrors periodically break `apt-get update` on GitHub runners; five call
+  sites already did this by convention and a sixth did not.
+- Symbolize AddressSanitizer/LeakSanitizer reports by locating the runner's
+  `llvm-symbolizer` (rustup's `llvm-tools` component does not ship one). The
+  lookup is best-effort and the diagnostic step now states whether
+  symbolization was active, so an unsymbolized report is self-describing rather
+  than an undiagnosable stack of raw addresses.
+- Bump the pinned GitHub Actions group (`actions/checkout` 7.0.1,
+  `taiki-e/install-action` 2.85.2, and `actions/upload-artifact`), carrying
+  Dependabot #202 forward.
+- Refresh the compatible dependency set (Tokio 1.53.1, serde 1.0.229, futures
+  0.3.33, clap 4.6.4, hdrhistogram 7.6.0 and others). The `tokio-tungstenite`
+  0.30, `serial_test` 4.0, `base64` 0.23, and `syn` 3.0 declarations proposed
+  alongside them are deliberately not taken: the first duplicates the
+  Tungstenite stack Axum still pins to 0.29, the second requires rustc 1.93.1
+  against a 1.89.0 MSRV, the third adds a second `base64` used by nothing but
+  this crate, and the fourth removes `syn::Arm::guard` without deduplicating
+  anything. The locked graph keeps exactly one WebSocket and one base64
+  implementation.
+
+### Fixed
+
+- Make the chaos proxy's bandwidth fault rate-accurate. Pacing slept a fixed
+  interval per chunk, so the pump's own read/write/scheduling latency was added
+  to every period and the achieved rate drifted below nominal under load — a
+  "32 KiB/s" link delivered measurably less on a busy machine. Chunks are now
+  released against a virtual clock with catch-up credit capped at one period, so
+  a late iteration is absorbed rather than compounding and a long stall cannot
+  burst. This does not resolve the pre-existing H14 slow-consumer flake tracked
+  in issue #212; that experiment's assertion now reports its counters, elapsed
+  time, and the server's own message instead of a bare code mismatch.
+- Repair the load-test suite, which was measuring nothing. Every cell built a
+  room code of the wrong length (10, 8, or 7 characters against the server's
+  required 6), and `handle_join_room` reports a rejected join only by leaving
+  the player roomless. The two throughput cells therefore recorded 0% success
+  and had been excluded from CI as "known-broken" against an incorrect
+  diagnosis, while the nightly latency cell passed while broadcasting into
+  empty rooms. Codes now come from one checked helper, the room ceiling is
+  sized for the cells that need it, and the cells assert that players actually
+  entered a room. All three run in the nightly load lane (issue #207).
+
+- Restore the weekly Firefox cell of the Fortress/Godot no-thread WASM
+  interoperability gate, which had failed on every run since it was added. Two
+  causes: Firefox's blocklist refuses a WebGL context without an accelerated
+  adapter (`webgl.force-enabled`), and — unlike Chromium, which carries
+  SwiftShader — Firefox has no software fallback of its own, so even headless it
+  needs an X display to resolve a Mesa GL driver. The runner script now runs the
+  Firefox harness under `xvfb-run`; the workflow additionally pins the Mesa/EGL
+  packages as defensive hardening. Both browsers are probed for a WebGL2 context
+  before the export loads, so the failure is reported with the browser's own
+  reason, and a bounded wait for a page global now reports the page's captured
+  errors instead of a bare timeout.
+
 ## [0.5.1] - 2026-07-24
 
 ### Changed
