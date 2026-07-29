@@ -66,7 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   experiment passes under the single-core contention that reproduced the CI
   failure. Wire-visible for protocol v3 only: reports may now carry several
   `unsupported_format` ranges, which the documented "union of ranges covers
-  every missing sequence" contract already required clients to handle.
+  every missing sequence" contract already required clients to handle. Both
+  in-repo reference clients validated the old shape (`from_seq == to_seq` and a
+  single gap per report) and would have rejected the server's own frames as
+  accountability violations; they now validate the ranges, with tests proving a
+  coalesced range is accepted only when the counters move by exactly the
+  sequences it names.
 - Make the chaos proxy's bandwidth fault rate-accurate. Pacing slept a fixed
   interval per chunk, so the pump's own read/write/scheduling latency was added
   to every period and the achieved rate drifted below nominal under load — a
