@@ -311,6 +311,10 @@ pub(super) async fn send_queued(
         )
         .await?;
         if carries_queued_report {
+            // This report frame is on the wire, so the frontier it advanced at
+            // pop time now describes what the recipient has seen and a coalesced
+            // report may be built on it.
+            receiver.confirm_report_frontier();
             write_pending_unsupported_report(sender, receiver, player_id).await?;
         }
         Ok(disposition)
