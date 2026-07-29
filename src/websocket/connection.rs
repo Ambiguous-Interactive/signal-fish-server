@@ -2312,11 +2312,20 @@ mod tests {
         if remaining != 0 {
             tracing::warn!(remaining, "test server retained WebSocket handlers");
         }
-        match tokio::time::timeout(settle, server_task).await {
+        // `&mut` matters: passing the handle by value would drop it on timeout,
+        // and dropping a `JoinHandle` detaches the task rather than cancelling
+        // it — leaving the serve task and any still-registered handlers alive,
+        // which is the exact failure mode this teardown exists to prevent.
+        let mut server_task = server_task;
+        match tokio::time::timeout(settle, &mut server_task).await {
             Ok(joined) => {
                 joined.context("test server task panicked")?;
             }
-            Err(_) => anyhow::bail!("test server task did not stop after connection drain"),
+            Err(_) => {
+                server_task.abort();
+                let _ = server_task.await;
+                anyhow::bail!("test server task did not stop after connection drain");
+            }
         }
         exchange
     }
