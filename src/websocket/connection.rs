@@ -2201,22 +2201,29 @@ mod tests {
         )
         .await
         .context("create game server")?;
+        // Shut the server down at the end instead of leaving it running.
+        // Aborting the serve task alone is not enough: the upgraded WebSocket
+        // handler is its own task holding room, queue, and reconnection state,
+        // so the whole server stays live and LeakSanitizer intermittently
+        // reports all of it at process exit (issue #209 — 29 allocations
+        // spanning `EnhancedGameServer::new`, `handle_join_room`,
+        // `handle_socket`, and `register_disconnection`, all of it this one
+        // server). This mirrors `RunningTestServer::shutdown` in
+        // tests/test_helpers.rs, which integration tests already use and whose
+        // `Drop` asserts it was called.
+        let server_for_shutdown = std::sync::Arc::clone(&game_server);
         let app =
             super::super::routes::create_router("http://localhost:3000").with_state(game_server);
 
-        // The handle is kept and torn down below rather than detached. A
-        // detached `axum::serve` task owns the `Router`, and therefore the
-        // `Arc<EnhancedGameServer>` and its DashMap shards, for as long as it
-        // lives — which is until the test runtime is dropped. With
-        // `--test-threads=1` that teardown races process exit, and
-        // LeakSanitizer intermittently reports the server's shards as leaked
-        // (issue #209: 22 indirect / 0 direct, `EnhancedGameServer::new` at
-        // server.rs:262 reached from this test).
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server_task = tokio::spawn(async move {
             if let Err(e) = axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),
             )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
             .await
             {
                 tracing::error!("Test server failed: {}", e);
@@ -2290,11 +2297,27 @@ mod tests {
         }
         .await;
 
-        // Drop the server before returning: `abort()` only marks the task, so
-        // await it to be sure its future — and the last `Arc` to the server —
-        // is released while the runtime is still up.
-        server_task.abort();
-        let _ = server_task.await;
+        // Teardown, in the same order as `RunningTestServer::shutdown`: stop
+        // accepting, close registered connections, wait for their handler tasks
+        // to actually finish, then join the serve task. Dropping the client
+        // sockets above is not sufficient on its own — the server-side handler
+        // has to observe the close and unwind before its state is released.
+        let settle = crate::websocket::registered_connection_shutdown_settle_timeout();
+        let _drain = server_for_shutdown.begin_shutdown_drain();
+        let _ = shutdown_tx.send(());
+        server_for_shutdown.close_connections_for_shutdown();
+        let remaining = server_for_shutdown
+            .wait_for_shutdown_connections(settle)
+            .await;
+        if remaining != 0 {
+            tracing::warn!(remaining, "test server retained WebSocket handlers");
+        }
+        match tokio::time::timeout(settle, server_task).await {
+            Ok(joined) => {
+                joined.context("test server task panicked")?;
+            }
+            Err(_) => anyhow::bail!("test server task did not stop after connection drain"),
+        }
         exchange
     }
 }
