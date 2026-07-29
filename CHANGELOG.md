@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Require every workflow `apt-get update` to first drop the Azure CLI and
+  Microsoft prod source lists, enforced by a sweep test over all workflows.
+  Those mirrors periodically break `apt-get update` on GitHub runners; five call
+  sites already did this by convention and a sixth did not.
 - Symbolize AddressSanitizer/LeakSanitizer reports by locating the runner's
   `llvm-symbolizer` (rustup's `llvm-tools` component does not ship one). The
   lookup is best-effort and the diagnostic step now states whether

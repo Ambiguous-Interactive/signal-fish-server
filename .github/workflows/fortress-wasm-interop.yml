@@ -160,6 +160,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Same cleanup every other apt site in this repo performs: those
+          # mirrors periodically break `apt-get update` on GitHub runners, which
+          # would fail this step and take the Firefox cell red again.
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 libegl-mesa0 \

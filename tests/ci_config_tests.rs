@@ -2184,6 +2184,58 @@ fn test_display_name_matches_template_non_matrix_no_match() {
     );
 }
 
+/// Every `apt-get update` in a workflow must first drop the Azure CLI and
+/// Microsoft prod source lists.
+///
+/// Those mirrors periodically break `apt-get update` on GitHub runners, which
+/// fails the whole step. Five call sites already did this; a sixth added in
+/// this session did not, and would have taken the just-restored Firefox WASM
+/// cell red again on the next mirror hiccup. Checking every site keeps the
+/// convention from being a thing each author has to remember.
+#[test]
+fn test_workflow_apt_update_sites_drop_broken_microsoft_mirrors() {
+    const CLEANUP: &str = "sudo rm -f /etc/apt/sources.list.d/azure-cli.list                            /etc/apt/sources.list.d/microsoft-prod.list";
+    let root = repo_root();
+    let workflows_dir = root.join(".github/workflows");
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+
+    for entry in collect_workflow_files(&workflows_dir) {
+        let path = entry.path();
+        let content = read_file(&path);
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let lines: Vec<&str> = content.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.trim().starts_with("sudo apt-get update") {
+                continue;
+            }
+            checked += 1;
+            // The cleanup is expected immediately before, allowing for the
+            // comment lines authors put above it.
+            let preceding = lines[index.saturating_sub(6)..index].join("\n");
+            if !preceding.contains("/etc/apt/sources.list.d/azure-cli.list")
+                || !preceding.contains("/etc/apt/sources.list.d/microsoft-prod.list")
+            {
+                problems.push(format!("  - {filename}:{}", index + 1));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "`sudo apt-get update` without first removing the Azure CLI / Microsoft prod \
+         source lists:\n{}\n\nThose mirrors periodically break `apt-get update` on \
+         GitHub runners and fail the step. Add this line immediately before it:\n\n    \
+         {CLEANUP}",
+        problems.join("\n")
+    );
+    assert!(
+        checked >= 5,
+        "expected to check at least five `apt-get update` sites, found {checked}; \
+         workflow discovery may be broken"
+    );
+}
+
 #[test]
 fn test_workflow_files_are_valid_yaml() {
     // This test catches basic YAML syntax errors in workflow files
