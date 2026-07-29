@@ -256,14 +256,16 @@ struct QueueState {
     counters: DeliveryCountersByClass,
     wire_counters: DeliveryCountersByClass,
     pending_unsupported: PendingUnsupported,
-    /// A queued report advanced `wire_counters` when it was handed to the writer,
-    /// but that frame has not been confirmed written yet.
+    /// The counter frontier the recipient has actually been shown.
     ///
-    /// While this is set the frontier describes a frame the recipient may never
-    /// receive, so a coalesced unsupported-format report must not be built from
-    /// it: its other counters would carry deltas the recipient was never told
-    /// about. Cleared by [`OutboundReceiver::confirm_report_frontier`].
-    report_frontier_unconfirmed: bool,
+    /// `wire_counters` advances when a queued report is handed to the writer, so
+    /// after a cancelled or failed write it can describe a frame nobody
+    /// received. A coalesced unsupported-format report is therefore built on
+    /// this value instead: its deltas are then exact against the last frame that
+    /// really landed, whatever happened to the one before it. Advanced by
+    /// [`OutboundReceiver::confirm_report_frontier`] and by committing a
+    /// coalesced report.
+    confirmed_wire_counters: DeliveryCountersByClass,
     enqueue_generation: u64,
     receive_generation: u64,
     active_room: Option<RoomId>,
@@ -407,7 +409,7 @@ impl QueueState {
             counters: DeliveryCountersByClass::default(),
             wire_counters: DeliveryCountersByClass::default(),
             pending_unsupported: PendingUnsupported::default(),
-            report_frontier_unconfirmed: false,
+            confirmed_wire_counters: DeliveryCountersByClass::default(),
             enqueue_generation: 0,
             receive_generation: 0,
             active_room: None,
@@ -1790,20 +1792,16 @@ impl OutboundReceiver {
     /// `unsupported_format` counter delta whose exact ranges had not been sent.
     pub fn pending_unsupported_report(&self) -> Option<DeliveryReportPayload> {
         let state = self.shared.state();
-        if state.report_frontier_unconfirmed {
-            // A queued report took the frontier forward and has not been
-            // confirmed written. Building on it would advertise that frame's
-            // counter deltas to a recipient that may never receive it, so this
-            // report waits — the omissions stay recorded either way.
-            return None;
-        }
-        state.pending_unsupported.peek(state.wire_counters)
+        state
+            .pending_unsupported
+            .peek(state.confirmed_wire_counters)
     }
 
-    /// Confirm that the report frame the queue last handed to the writer reached
-    /// the socket, so the wire frontier describes what the recipient has seen.
+    /// Record that the report frame the queue last handed to the writer reached
+    /// the socket, so later reports can build on the counters it carried.
     pub fn confirm_report_frontier(&self) {
-        self.shared.state().report_frontier_unconfirmed = false;
+        let mut state = self.shared.state();
+        state.confirmed_wire_counters = state.wire_counters;
     }
 
     /// Retire the ranges a written report carried and advance the wire frontier
@@ -1812,6 +1810,8 @@ impl OutboundReceiver {
         let mut state = self.shared.state();
         state.pending_unsupported.commit(report);
         state.wire_counters = max_counters(state.wire_counters, report.per_class);
+        state.confirmed_wire_counters =
+            max_counters(state.confirmed_wire_counters, report.per_class);
     }
 
     /// When a coalesced unsupported-format report must reach the recipient even
@@ -2073,8 +2073,6 @@ fn prepare_for_wire(state: &mut QueueState, mut item: QueuedOutbound) -> QueuedO
         report.per_class.volatile.unsupported_format =
             state.wire_counters.volatile.unsupported_format;
         state.wire_counters = report.per_class;
-        // The frontier now describes a frame that has not been written yet.
-        state.report_frontier_unconfirmed = true;
     }
     item
 }
@@ -2670,17 +2668,26 @@ mod tests {
         let reasons: Vec<_> = queued.gaps.iter().map(|gap| gap.reason).collect();
         assert_eq!(reasons, vec![DeliveryGapReason::LatestDroppedFull]);
 
-        // Until that frame is confirmed written, the frontier describes something
-        // the recipient may never see, so no report may be built on it.
-        assert!(
-            rx.pending_unsupported_report().is_none(),
-            "an unconfirmed report frame must not become another report's baseline"
+        // Until that frame is confirmed written it may never reach the
+        // recipient, so a report built now must not inherit its deltas: the
+        // coalesced report is built on the last frame that actually landed.
+        let unconfirmed = rx
+            .pending_unsupported_report()
+            .expect("a teardown must still be able to report the coalesced range");
+        assert_eq!(
+            unconfirmed.per_class.latest.dropped_full, 0,
+            "an unwritten frame's deltas must not ride along on a later report"
         );
-        rx.confirm_report_frontier();
+        assert_eq!(unconfirmed.per_class.reliable.unsupported_format, 1);
 
+        rx.confirm_report_frontier();
         let pending = rx
             .pending_unsupported_report()
             .expect("the coalesced range is still waiting for its own frame");
+        assert_eq!(
+            pending.per_class.latest.dropped_full, 1,
+            "once that frame landed, the report builds on the counters it carried"
+        );
         assert_eq!(pending.per_class.reliable.unsupported_format, 1);
         assert_eq!(pending.gaps.len(), 1);
         assert_eq!(pending.gaps[0].reason, DeliveryGapReason::UnsupportedFormat);
