@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
-use super::sending::send_immediate_server_message;
+use super::sending::{send_immediate_server_message, write_pending_unsupported_report};
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
 use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
 
@@ -351,19 +351,23 @@ async fn flush_pending_unsupported_report(
     rx: &OutboundReceiver,
     player_id: &PlayerId,
 ) {
-    let Some(report) = rx.take_pending_unsupported_report() else {
+    let Some(report) = rx.pending_unsupported_report() else {
         return;
     };
-    let report = ServerMessage::DeliveryReport(Box::new(report));
     // Counted as its own step in `RegisteredConnectionCloseStep`, so the derived
-    // shutdown settle timeout covers this budget too.
+    // shutdown settle timeout covers this budget too. The ranges are retired
+    // only after the frame is written, so a timed-out or failed write leaves the
+    // accounting recorded rather than silently dropped.
     match registered_close_write_timeout(
         RegisteredConnectionCloseStep::FinalDeliveryReport,
-        send_immediate_server_message(sender, &report),
+        send_immediate_server_message(
+            sender,
+            &ServerMessage::DeliveryReport(Box::new(report.clone())),
+        ),
     )
     .await
     {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => rx.commit_pending_unsupported_report(&report),
         Ok(Err(err)) => {
             tracing::debug!(%player_id, error = %err, "Failed to flush final delivery report");
         }
@@ -1135,6 +1139,10 @@ pub(super) async fn handle_socket(
             () = async {
                 let batch_interval = Duration::from_millis(batch_interval_ms.max(1));
                 loop {
+                    // Read outside the `select!`: the arm below only needs the
+                    // deadline value, and borrowing `rx` inside the select would
+                    // conflict with the `&mut` receive arm.
+                    let pending_flush_deadline = rx.pending_unsupported_flush_deadline();
                     let received = tokio::select! {
                         biased;
                         command = ping_command_rx.recv() => {
@@ -1190,6 +1198,31 @@ pub(super) async fn handle_socket(
                                 }
                             }
                             break;
+                        }
+                        // An idle recipient must still learn about coalesced
+                        // omissions within a bounded time: without this the last
+                        // range of a burst would wait for the next omission or
+                        // for the connection to close. `recv`/`recv_batched` are
+                        // cancel-safe, so losing this race costs nothing.
+                        () = async {
+                            match pending_flush_deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            let current_player_id =
+                                *effective_player_id_for_send.read().await;
+                            if write_pending_unsupported_report(
+                                &mut sender,
+                                &rx,
+                                &current_player_id,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
                         }
                         received = async {
                             if batching_enabled {

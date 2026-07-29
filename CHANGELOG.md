@@ -64,10 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slow consumer: the weaker peer was evicted after 703 of 5,000 messages while
   the compatible peer was unaffected. Consecutive omissions from one sender and
   delivery class now coalesce into one exact range under the same merge rule the
-  queue already applied to its own gap reports, flushed before the next
-  delivered frame, with the rate-limited advisory, inside an already-queued
+  queue already applied to its own gap reports, written before the next
+  delivered frame, with the rate-limited advisory, immediately after a queued
   report, at most one second after the first omission when the recipient is
-  otherwise idle, or at close. The same burst now costs 2,218 bytes in four
+  otherwise idle, or after the teardown drain. The ranges are retired only once
+  the frame is on the wire, so a write cancelled by the connection's close signal
+  re-reports them instead of losing a whole coalesced burst.
+  The same burst now costs 2,218 bytes in four
   reports (0.01x) with all 5,000 sequences still accounted for exactly, and the
   experiment passes under the single-core contention that reproduced the CI
   failure. Wire-visible for protocol v3 only: reports may now carry several
