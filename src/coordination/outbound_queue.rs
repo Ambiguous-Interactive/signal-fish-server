@@ -3277,6 +3277,25 @@ mod tests {
         );
     }
 
+    /// The connection's teardown flushes whatever is still coalesced, so closing
+    /// the queue must not strand it: `finalize_closed_connection` takes the
+    /// pending report *after* `rx.close()`, and a cleared or refused buffer there
+    /// would silently drop the last omissions instead of reporting them.
+    #[test]
+    fn closing_the_queue_preserves_pending_unsupported_accountability() {
+        let (tx, mut rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        assert!(rx
+            .record_unsupported_format(unsupported_metadata(DeliveryClass::Reliable, 4, 1))
+            .is_none());
+        rx.close();
+        let report = rx
+            .take_pending_unsupported_report()
+            .expect("a closing connection must still be able to report its last omissions");
+        assert_eq!(report.per_class.reliable.unsupported_format, 1);
+        assert_eq!(report.gaps.len(), 1);
+    }
+
     /// The pending report is bounded by the canonical per-report gap maximum,
     /// and hitting that bound flushes rather than dropping accountability.
     #[test]
