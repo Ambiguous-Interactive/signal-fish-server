@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix a pre-existing nightly flake in which the chaos proxy's bandwidth fault
+  ran slower than its nominal rate. Pacing slept a fixed interval per chunk, so
+  the pump's own read/write/scheduling latency was added to every period and the
+  achieved rate drifted below nominal under load. A throttled recipient in the
+  mixed-encoding experiment was then evicted as a slow consumer — the outcome
+  that experiment exists to disprove. Chunks are now released against a virtual
+  clock with catch-up credit capped at one period, so a late iteration is
+  absorbed rather than compounding and a long stall cannot burst.
 - Repair the load-test suite, which was measuring nothing. Every cell built a
   room code of the wrong length (10, 8, or 7 characters against the server's
   required 6), and `handle_join_room` reports a rejected join only by leaving

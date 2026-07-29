@@ -45,7 +45,6 @@
 mod test_helpers;
 
 use signal_fish_server::config::ProtocolConfig;
-use signal_fish_server::protocol::DEFAULT_ROOM_CODE_LENGTH;
 use signal_fish_server::server::ServerConfig;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -66,12 +65,16 @@ use tokio::time::timeout;
 /// rooms. Codes are built here so their length is one checked decision rather
 /// than six independent `format!` strings.
 fn load_room_code(prefix: char, index: u32) -> String {
+    // Checked against the same `ProtocolConfig` the load servers below are
+    // built with, rather than a second copy of the constant, so a change to the
+    // configured length cannot leave this helper silently disagreeing.
+    let required = ProtocolConfig::default().room_code_length;
     let code = format!("{prefix}{index:05}");
     assert_eq!(
         code.len(),
-        DEFAULT_ROOM_CODE_LENGTH,
-        "load-test room code `{code}` is not the {DEFAULT_ROOM_CODE_LENGTH} characters \
-         the server requires; widen the index format or shorten the prefix"
+        required,
+        "load-test room code `{code}` is not the {required} characters the server \
+         requires; widen the index format or shorten the prefix"
     );
     code
 }
@@ -496,7 +499,10 @@ async fn test_load_sustained_concurrent_connections() {
 #[tokio::test]
 #[ignore]
 async fn test_load_message_latency_distribution() {
-    let server = Arc::new(create_test_server().await);
+    // Uses the load server for headroom: this cell creates exactly as many rooms
+    // as the shared config's `max_rooms_per_game` allows, so any shift in room
+    // cleanup timing would push the last creation over a zero-margin limit.
+    let server = Arc::new(create_load_test_server().await);
 
     let num_rooms = 100;
     let players_per_room = 4;
