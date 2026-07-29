@@ -216,18 +216,18 @@ jobs:
         uses: taiki-e/install-action@v2.83.4
         with:
           tool: cargo-nextest
-      # Only the latency-distribution smoke test is activated by name. The
-      # other two candidates (test_load_room_creation_throughput,
-      # test_load_sustained_concurrent_connections) currently fail
-      # deterministically under the shared test-server defaults — they
-      # request 250-500 rooms in one game against max_rooms_per_game=100 and
-      # trip the room-creation rate limits, so their ">=95% success" asserts
-      # can never hold — and are excluded until they are repaired rather than
-      # shipped as a permanently red lane. The remaining #[ignore]d load
-      # tests (stress to failure, memory projection, connection-rate) are
-      # exploratory and stay manual. These tests cannot observe delivery —
-      # see the load_tests.rs module docs — so this job reports numbers and
-      # fails only on genuine test failure.
+      # All three room-based smoke cells are activated by name. The two
+      # throughput cells were previously excluded as "known-broken": every cell
+      # in load_tests.rs built a room code of the wrong length (the server
+      # requires exactly 6 characters), so no player ever entered a room. That
+      # zeroed the throughput cells' success rate and silently made the latency
+      # cell measure broadcasts into empty rooms. Issue #207 repaired the codes,
+      # raised the room ceiling for the 250-500 room cells, and added assertions
+      # that players actually joined, so all three now measure real work. The
+      # remaining #[ignore]d load tests (stress to failure, memory projection,
+      # connection-rate) are exploratory and stay manual. These tests cannot
+      # observe delivery — see the load_tests.rs module docs — so this job
+      # reports numbers and fails only on genuine test failure.
       - name: Run load smoke tests
         shell: bash
         run: |
@@ -235,6 +235,8 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test load_tests --run-ignored all --success-output final -- \
             test_load_message_latency_distribution \
+            test_load_room_creation_throughput \
+            test_load_sustained_concurrent_connections \
             2>&1 | tee load-output.txt
       - name: Report load numbers to job summary
         if: always()

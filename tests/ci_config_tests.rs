@@ -1418,6 +1418,149 @@ const REQUIRED_RELEASE_TARGETS: &[(&str, &str)] = &[
     ("aarch64-pc-windows-msvc", "Windows ARM64"),
 ];
 
+/// Every git-tracked package manifest must declare an explicit `unsafe_code`
+/// lint policy under `[lints.rust]` (issue #205).
+///
+/// The signaling server and its reference clients contain no `unsafe` block.
+/// That was true by habit, not by construction — nothing stopped a future
+/// change from introducing one silently. Discovery is dynamic (`git ls-files`)
+/// so a package added later cannot opt out by omission, which is the failure
+/// mode this guards: a manifest that simply never mentions the policy.
+///
+/// `forbid` is required everywhere except packages listed in
+/// `DENY_UNSAFE_PACKAGES`, which need a small, reviewed number of unsafe sites
+/// (godot-rust's `unsafe impl ExtensionLibrary` marker) and therefore use
+/// `deny` plus a local `#[allow(unsafe_code)]` at each site.
+#[test]
+fn test_every_package_manifest_declares_an_unsafe_code_policy() {
+    /// Packages permitted to use `deny` instead of `forbid`, with the reason.
+    const DENY_UNSAFE_PACKAGES: &[(&str, &str)] = &[(
+        "clients/fortress-wasm/Cargo.toml",
+        "godot-rust requires one `unsafe impl ExtensionLibrary` marker",
+    )];
+    /// Asserted present so a broken discovery cannot pass vacuously.
+    const REQUIRED_MANIFESTS: &[&str] = &[
+        "Cargo.toml",
+        "clients/fortress/Cargo.toml",
+        "clients/fortress-wasm/Cargo.toml",
+        "clients/native/Cargo.toml",
+        "fuzz/Cargo.toml",
+    ];
+
+    let root = repo_root();
+    let manifests = tracked_package_manifests(&root);
+    let mut checked: Vec<String> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+
+    for relative in &manifests {
+        let manifest = read_file(&root.join(relative));
+        // Only packages carry lints; a pure `[workspace]` manifest has none.
+        if !manifest.lines().any(|line| line.trim() == "[package]") {
+            continue;
+        }
+        checked.push(relative.clone());
+        let expected = if DENY_UNSAFE_PACKAGES
+            .iter()
+            .any(|(path, _)| path == relative)
+        {
+            "deny"
+        } else {
+            "forbid"
+        };
+        match unsafe_code_lint_level(&manifest) {
+            Some(level) if level == expected => {}
+            Some(level) => problems.push(format!(
+                "  - {relative}  declares `unsafe_code = \"{level}\"`, expected \"{expected}\""
+            )),
+            None => problems.push(format!(
+                "  - {relative}  has no `unsafe_code` entry under [lints.rust]"
+            )),
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "Package manifest(s) missing the no-unsafe policy (issue #205):\n{}\n\n\
+         Add `unsafe_code = \"forbid\"` under a `[lints.rust]` table. If the package \
+         genuinely requires an unsafe site, use \"deny\" instead, add a local \
+         `#[allow(unsafe_code)]` with a SAFETY comment at that site, and record the \
+         package in DENY_UNSAFE_PACKAGES in this test.",
+        problems.join("\n")
+    );
+    for required in REQUIRED_MANIFESTS {
+        assert!(
+            checked.iter().any(|relative| relative == required),
+            "expected to check `{required}`, but only checked {checked:?}; manifest \
+             discovery may be broken or the package moved"
+        );
+    }
+}
+
+/// Read the `unsafe_code` level from a manifest's `[lints.rust]` table.
+///
+/// A small section scan rather than a toml dependency, matching the style of
+/// the MSRV and lockfile guards in this repository.
+fn unsafe_code_lint_level(manifest: &str) -> Option<String> {
+    let mut in_lints_rust = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_lints_rust = trimmed == "[lints.rust]";
+            continue;
+        }
+        if !in_lints_rust {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("unsafe_code") else {
+            continue;
+        };
+        let rest = rest.trim_start().strip_prefix('=')?.trim();
+        // Accept both `unsafe_code = "forbid"` and the table form
+        // `unsafe_code = { level = "forbid", .. }`.
+        let value = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"'));
+        return match value {
+            Some(level) => Some(level.to_string()),
+            None => rest
+                .split("level")
+                .nth(1)
+                .and_then(|s| s.split('"').nth(1))
+                .map(str::to_string),
+        };
+    }
+    None
+}
+
+/// Repository-relative paths of every git-tracked `Cargo.toml`.
+///
+/// Uses git rather than a filesystem walk so vendored/ignored manifests under
+/// `target/` are excluded and any newly committed package is picked up with no
+/// list to maintain.
+fn tracked_package_manifests(root: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--", "Cargo.toml", "*/Cargo.toml"])
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("`git ls-files` failed ({error}); this guard requires a git checkout")
+        });
+    assert!(
+        output.status.success(),
+        "`git ls-files` exited with {}; this guard requires a git checkout",
+        output.status
+    );
+    let manifests: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.replace('\\', "/"))
+        .collect();
+    assert!(
+        !manifests.is_empty(),
+        "`git ls-files` returned no Cargo.toml paths; this guard requires a git checkout"
+    );
+    manifests
+}
+
 #[test]
 fn test_msrv_consistency_across_config_files() {
     // This test prevents the MSRV inconsistency issue that was fixed in commit d9eac0f

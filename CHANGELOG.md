@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Enforce the no-unsafe property that the server and its reference clients
+  already held by habit: every package manifest now declares an explicit
+  `unsafe_code` lint policy (`forbid`, or `deny` for the Godot fixture that
+  needs one `unsafe impl ExtensionLibrary` marker), and a git-discovery policy
+  test fails when a package omits it (issue #205).
+
+### Changed
+
+- Refresh the compatible dependency set (Tokio 1.53.1, serde 1.0.229, futures
+  0.3.33, clap 4.6.4, hdrhistogram 7.6.0 and others). The `tokio-tungstenite`
+  0.30, `serial_test` 4.0, `base64` 0.23, and `syn` 3.0 declarations proposed
+  alongside them are deliberately not taken: the first duplicates the
+  Tungstenite stack Axum still pins to 0.29, the second requires rustc 1.93.1
+  against a 1.89.0 MSRV, the third adds a second `base64` used by nothing but
+  this crate, and the fourth removes `syn::Arm::guard` without deduplicating
+  anything. The locked graph keeps exactly one WebSocket and one base64
+  implementation.
+
 ### Fixed
+
+- Repair the load-test suite, which was measuring nothing. Every cell built a
+  room code of the wrong length (10, 8, or 7 characters against the server's
+  required 6), and `handle_join_room` reports a rejected join only by leaving
+  the player roomless. The two throughput cells therefore recorded 0% success
+  and had been excluded from CI as "known-broken" against an incorrect
+  diagnosis, while the nightly latency cell passed while broadcasting into
+  empty rooms. Codes now come from one checked helper, the room ceiling is
+  sized for the cells that need it, and the cells assert that players actually
+  entered a room. All three run in the nightly load lane (issue #207).
 
 - Restore the weekly Firefox cell of the Fortress/Godot no-thread WASM
   interoperability gate. Headless Firefox has no GPU-backed WebGL, so its

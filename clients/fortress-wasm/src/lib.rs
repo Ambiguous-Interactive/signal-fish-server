@@ -898,6 +898,9 @@ struct FortressWasmExtension;
 
 // SAFETY: godot-rust requires this marker to register generated GDExtension
 // callbacks. The implementation supplies no raw pointers or custom lifecycle code.
+// This is the only permitted unsafe site in the fixture; `unsafe_code = "deny"`
+// in Cargo.toml rejects any other.
+#[allow(unsafe_code)]
 #[gdextension]
 unsafe impl ExtensionLibrary for FortressWasmExtension {}
 

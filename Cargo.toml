@@ -27,6 +27,13 @@ tls = ["axum-server", "rustls", "rustls-pki-types"]
 # hooks; a caller must explicitly attach a recorder to a connection.
 trace-validation = []
 
+# The signaling server carries no `unsafe` block and must not acquire one by
+# accident. `forbid` (not `deny`) is deliberate: it cannot be re-enabled by a
+# local `#[allow(unsafe_code)]`, so adding unsafe here requires editing this
+# manifest and defending the change in review.
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 # Async runtime. `sync` (mpsc/watch delivery channels) and `time` (backpressure
 # timeouts) are load-bearing for the no-silent-drop delivery path — keep them
