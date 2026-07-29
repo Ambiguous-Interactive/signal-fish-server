@@ -58,17 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Restore the weekly Firefox cell of the Fortress/Godot no-thread WASM
   interoperability gate, which had failed on every run since it was added. Two
-  independent causes: Firefox's blocklist refuses a WebGL context without an
-  accelerated adapter (fixed with `webgl.force-enabled`), and Playwright's
-  Firefox dependency list installs no GL driver at all — unlike its Chromium and
-  WebKit lists — so there was nothing for the loader to resolve even once the
-  blocklist was bypassed, and headless Firefox still needs an X display to
-  resolve that driver at all. The workflow now installs Mesa's software
-  rasterizer plus Xvfb, the runner script gives the Firefox harness a virtual
-  display, and the harness pins `LIBGL_ALWAYS_SOFTWARE`. Both browsers are
-  probed for a WebGL2 context before the export loads, so the failure is
-  reported with the browser's own reason, and a bounded wait for a page global
-  now reports the page's captured errors instead of a bare timeout.
+  causes: Firefox's blocklist refuses a WebGL context without an accelerated
+  adapter (`webgl.force-enabled`), and — unlike Chromium, which carries
+  SwiftShader — Firefox has no software fallback of its own, so even headless it
+  needs an X display to resolve a Mesa GL driver. The runner script now runs the
+  Firefox harness under `xvfb-run`; the workflow additionally pins the Mesa/EGL
+  packages as defensive hardening. Both browsers are probed for a WebGL2 context
+  before the export loads, so the failure is reported with the browser's own
+  reason, and a bounded wait for a page global now reports the page's captured
+  errors instead of a bare timeout.
 
 ## [0.5.1] - 2026-07-24
 

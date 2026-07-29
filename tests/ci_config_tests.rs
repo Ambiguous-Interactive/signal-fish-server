@@ -22408,10 +22408,12 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
             "P13 headless Firefox must force a software WebGL2 context: `{required}`"
         );
     }
-    // Firefox resolves Mesa's llvmpipe through an X display even when headless,
-    // and has no software WebGL fallback of its own. Without both the driver and
-    // a display it reports FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS and the Godot
-    // export aborts at boot. Reproduced locally with `env -u DISPLAY`.
+    // Firefox has no software WebGL fallback of its own and resolves Mesa's
+    // llvmpipe through an X display even when headless; without one it reports
+    // FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS and the Godot export aborts at
+    // boot. Reproduced locally with `env -u DISPLAY`. The display is the
+    // operative fix — a CI bisection showed the GL packages alone did not help —
+    // but both are pinned so the cell cannot regress on either axis.
     for required in ["libgl1-mesa-dri", "xvfb"] {
         assert!(
             workflow.contains(required),

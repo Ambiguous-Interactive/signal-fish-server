@@ -142,14 +142,19 @@ jobs:
             --target wasm32-unknown-emscripten \
             --release \
             -- -D warnings
-      # `playwright install --with-deps firefox` installs NO GL stack: unlike the
-      # Chromium (libgbm1) and WebKit (libgl1/libegl1) dependency lists,
-      # Playwright's Firefox list contains no Mesa driver at all. The Godot web
-      # export needs WebGL2, and `webgl.force-enabled` only bypasses the
-      # blocklist — with no driver for the loader to resolve, the export still
-      # aborts at boot reporting WebGL2 as missing. Install the software
-      # rasterizer explicitly so this cell does not depend on whatever GL
-      # packages a runner image happens to carry.
+      # The Godot web export needs WebGL2, and Firefox — unlike Chromium, which
+      # carries SwiftShader — has no software fallback of its own: it needs a
+      # real Mesa GL stack AND an X display to resolve it through, even headless.
+      #
+      # The operative fix is the display (see the xvfb-run wrapper in
+      # scripts/run-fortress-wasm-interop.sh). This install is defensive: on the
+      # current ubuntu-24.04 image libgl1, libglx-mesa0, libgl1-mesa-dri, xvfb,
+      # and xauth are all already present and only the libegl1/libegl-mesa0
+      # loader packages are new. Pinning the whole set keeps the cell from
+      # depending on whatever a future runner image happens to ship, since
+      # `playwright install --with-deps firefox` contributes no GL packages of
+      # its own (its Chromium list carries libgbm1 and its WebKit list carries
+      # libgl1/libegl1, but the Firefox list has none).
       - name: Install Mesa software GL and Xvfb for headless Firefox
         if: matrix.browser == 'firefox'
         shell: bash
