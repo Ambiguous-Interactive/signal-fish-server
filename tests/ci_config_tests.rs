@@ -1535,6 +1535,13 @@ fn unsafe_code_lint_level(manifest: &str) -> Option<String> {
 /// Uses git rather than a filesystem walk so vendored/ignored manifests under
 /// `target/` are excluded and any newly committed package is picked up with no
 /// list to maintain.
+///
+/// `*/Cargo.toml` reaches **any** depth, not just one level: git pathspec globs
+/// do not set `FNM_PATHNAME`, so `*` matches `/`. It therefore covers
+/// `clients/fortress/Cargo.toml` as well as `fuzz/Cargo.toml`. This reads like
+/// a shell glob, where it would mean one level only — `REQUIRED_MANIFESTS`
+/// names a two-level path precisely so a wrong assumption here fails loudly
+/// instead of silently shrinking the guard's coverage.
 fn tracked_package_manifests(root: &Path) -> Vec<String> {
     let output = Command::new("git")
         .arg("-C")
