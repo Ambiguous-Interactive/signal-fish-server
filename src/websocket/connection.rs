@@ -2306,12 +2306,18 @@ mod tests {
         let _drain = server_for_shutdown.begin_shutdown_drain();
         let _ = shutdown_tx.send(());
         server_for_shutdown.close_connections_for_shutdown();
+        // Hard failure, not a warning. Upgraded WebSocket handlers are tracked
+        // separately from `axum::serve`, so the serve join below can succeed
+        // while handlers are still live — and a warning here would let the test
+        // pass in exactly the leaky state this teardown exists to prevent.
+        // `RunningTestServer::shutdown` asserts on this for the same reason.
         let remaining = server_for_shutdown
             .wait_for_shutdown_connections(settle)
             .await;
-        if remaining != 0 {
-            tracing::warn!(remaining, "test server retained WebSocket handlers");
-        }
+        anyhow::ensure!(
+            remaining == 0,
+            "test server retained {remaining} WebSocket handler(s) after shutdown"
+        );
         // `&mut` matters: passing the handle by value would drop it on timeout,
         // and dropping a `JoinHandle` detaches the task rather than cancelling
         // it — leaving the serve task and any still-registered handlers alive,
