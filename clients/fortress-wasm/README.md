@@ -57,8 +57,15 @@ than restored from a browser cache. A manual workflow dispatch also selects
 Firefox, allowing exact-head verification before merge.
 
 The Godot web export requires a WebGL2 context, and CI runners have no GPU.
-Chromium reaches its software rasterizer through `--enable-webgl
---ignore-gpu-blocklist`; Firefox refuses a software context until
-`webgl.force-enabled` is set, and otherwise aborts at boot reporting WebGL2 as
-missing. The harness sets the equivalent option for whichever browser it
-launches, so neither cell depends on runner graphics hardware.
+Chromium reaches its own software rasterizer (SwiftShader) through
+`--enable-webgl --ignore-gpu-blocklist`. Firefox needs two separate things:
+`webgl.force-enabled` to bypass the blocklist that refuses WebGL without an
+accelerated adapter, **and** an actual software GL driver — Playwright's Firefox
+dependency list installs no GL packages at all, unlike its Chromium and WebKit
+lists, so the workflow installs Mesa's rasterizer (`libgl1-mesa-dri` and
+friends) for that cell and the harness pins `LIBGL_ALWAYS_SOFTWARE`. Missing
+either half leaves the export aborting at boot with WebGL2 reported as missing.
+
+Both browsers are probed for a WebGL2 context before the export is loaded, so
+that failure is reported with the browser's own
+`webglcontextcreationerror` reason instead of a bare wait for a page global.

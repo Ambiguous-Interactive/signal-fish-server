@@ -22397,12 +22397,24 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     // WebGL context and the Godot web export aborts at boot on missing WebGL2.
     // Chromium gets `--enable-webgl --ignore-gpu-blocklist`; Firefox needs the
     // pref below or the scheduled cell fails before the game ever starts.
-    for required in ["firefoxUserPrefs", "\"webgl.force-enabled\": true"] {
+    for required in [
+        "firefoxUserPrefs",
+        "\"webgl.force-enabled\": true",
+        "LIBGL_ALWAYS_SOFTWARE",
+        "assertWebGl2Available",
+    ] {
         assert!(
             harness.contains(required),
             "P13 headless Firefox must force a software WebGL2 context: `{required}`"
         );
     }
+    // Playwright's Firefox dependency list carries no GL packages, so bypassing
+    // the blocklist is useless without a driver for the loader to resolve.
+    assert!(
+        workflow.contains("libgl1-mesa-dri"),
+        "P13 must install Mesa's software rasterizer for the Firefox cell; without it \
+         the Godot export aborts at boot on missing WebGL2 even with the prefs set"
+    );
     for required in [
         "browser_name=\"${FORTRESS_WASM_BROWSER:-chromium}\"",
         "install --with-deps \"${browser_name}\"",

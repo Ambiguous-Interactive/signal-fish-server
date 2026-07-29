@@ -57,12 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entered a room. All three run in the nightly load lane (issue #207).
 
 - Restore the weekly Firefox cell of the Fortress/Godot no-thread WASM
-  interoperability gate. Headless Firefox has no GPU-backed WebGL, so its
-  blocklist refused a software context and the Godot web export aborted at boot
-  reporting WebGL2 as missing; the harness now forces the software context for
-  Firefox exactly as it already did for Chromium. A bounded wait for a page
-  global also reports the page's captured errors instead of a bare timeout, so
-  a boot failure is legible from the workflow log without downloading artifacts.
+  interoperability gate, which had failed on every run since it was added. Two
+  independent causes: Firefox's blocklist refuses a WebGL context without an
+  accelerated adapter (fixed with `webgl.force-enabled`), and Playwright's
+  Firefox dependency list installs no GL driver at all — unlike its Chromium and
+  WebKit lists — so there was nothing for the loader to resolve even once the
+  blocklist was bypassed. The workflow now installs Mesa's software rasterizer
+  for that cell and the harness pins `LIBGL_ALWAYS_SOFTWARE`. Both browsers are
+  probed for a WebGL2 context before the export loads, so the failure is
+  reported with the browser's own reason, and a bounded wait for a page global
+  now reports the page's captured errors instead of a bare timeout.
 
 ## [0.5.1] - 2026-07-24
 

@@ -142,6 +142,22 @@ jobs:
             --target wasm32-unknown-emscripten \
             --release \
             -- -D warnings
+      # `playwright install --with-deps firefox` installs NO GL stack: unlike the
+      # Chromium (libgbm1) and WebKit (libgl1/libegl1) dependency lists,
+      # Playwright's Firefox list contains no Mesa driver at all. The Godot web
+      # export needs WebGL2, and `webgl.force-enabled` only bypasses the
+      # blocklist — with no driver for the loader to resolve, the export still
+      # aborts at boot reporting WebGL2 as missing. Install the software
+      # rasterizer explicitly so this cell does not depend on whatever GL
+      # packages a runner image happens to carry.
+      - name: Install Mesa software GL for headless Firefox
+        if: matrix.browser == 'firefox'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 libegl-mesa0
       - name: Verify released graph plus expected-busted control
         env:
           INSTALL_PLAYWRIGHT_DEPS: "1"
