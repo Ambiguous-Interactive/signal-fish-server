@@ -2696,6 +2696,49 @@ mod tests {
         );
     }
 
+    /// When the pending ranges cannot fit in the report being handed out, the
+    /// report must not advertise an `unsupported_format` delta it carries no
+    /// ranges for — otherwise the following flush would report the same
+    /// omissions again and the counters would regress on the wire.
+    #[tokio::test]
+    async fn a_full_report_leaves_the_pending_ranges_and_the_frontier_alone() {
+        let (tx, mut rx) = channel(1, 2);
+        tx.set_protocol_version(3);
+        // Fill the pending report to its bound with non-mergeable ranges.
+        for index in 0..DELIVERY_REPORT_MAX_GAPS {
+            assert!(rx
+                .record_unsupported_format(unsupported_metadata(
+                    DeliveryClass::Reliable,
+                    4,
+                    (index as u64) * 2
+                ))
+                .is_none());
+        }
+
+        // A queued gap report of its own: one `latest` key superseded.
+        tx.try_enqueue_data(data(2, DeliveryClass::Latest, Some(3), 2))
+            .unwrap();
+        tx.try_enqueue_data(data(3, DeliveryClass::Latest, Some(3), 3))
+            .unwrap();
+
+        let queued = report(rx.recv().await.unwrap().unwrap());
+        assert_eq!(queued.gaps.len(), 1, "no pending range could fit");
+        assert_eq!(queued.gaps[0].reason, DeliveryGapReason::LatestSuperseded);
+        assert_eq!(
+            queued.per_class.reliable.unsupported_format, 0,
+            "the frontier may not advance without the ranges that explain it"
+        );
+
+        let flushed = rx
+            .take_pending_unsupported_report()
+            .expect("the pending ranges survive a report that could not absorb them");
+        assert_eq!(flushed.gaps.len(), DELIVERY_REPORT_MAX_GAPS);
+        assert_eq!(
+            flushed.per_class.reliable.unsupported_format,
+            DELIVERY_REPORT_MAX_GAPS as u64
+        );
+    }
+
     #[tokio::test]
     async fn per_class_metrics_conserve_every_terminal_outcome() {
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
