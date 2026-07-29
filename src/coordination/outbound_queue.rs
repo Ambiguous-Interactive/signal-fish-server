@@ -255,9 +255,115 @@ struct QueueState {
     permit_count: usize,
     counters: DeliveryCountersByClass,
     wire_counters: DeliveryCountersByClass,
+    pending_unsupported: PendingUnsupported,
     enqueue_generation: u64,
     receive_generation: u64,
     active_room: Option<RoomId>,
+}
+
+/// Exact omissions discovered by the socket writer that have not reached the
+/// wire yet, coalesced under the same merge rule the queue applies to its own
+/// gap reports ([`try_append_gap`]).
+///
+/// `QueueState::wire_counters` deliberately does **not** advance while these are
+/// pending: a recipient must never see an `unsupported_format` counter move
+/// without the exact ranges that explain it, so the increments and their gaps
+/// always reach the socket in the same frame. The per-class counts are carried
+/// alongside the ranges because [`DeliveryGap`] does not name a delivery class,
+/// and the flushed report must advance exactly the counters its ranges explain.
+///
+/// Ranges are bucketed by delivery class for that reason: `UnsupportedFormat`
+/// is the one gap reason every class shares, so a single list could merge two
+/// adjacent omissions of different classes into one range and lose the
+/// attribution the counters need. Merging within a bucket keeps the per-class
+/// totals derivable from the ranges themselves.
+#[derive(Debug, Default)]
+struct PendingUnsupported {
+    reliable: Vec<DeliveryGap>,
+    latest: Vec<DeliveryGap>,
+    volatile: Vec<DeliveryGap>,
+    /// When the oldest unsent range was recorded, so an idle writer still tells
+    /// the recipient about it within a bounded time instead of holding it until
+    /// the next omission or the connection's close.
+    since: Option<Instant>,
+}
+
+impl PendingUnsupported {
+    fn bucket(&mut self, class: DeliveryClass) -> &mut Vec<DeliveryGap> {
+        match class {
+            DeliveryClass::Reliable => &mut self.reliable,
+            DeliveryClass::Latest => &mut self.latest,
+            DeliveryClass::Volatile => &mut self.volatile,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.reliable.len() + self.latest.len() + self.volatile.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Merge one omission into the pending report. `false` means the report
+    /// cannot absorb it and must be flushed first.
+    fn append(&mut self, gap: &DeliveryGap, class: DeliveryClass) -> bool {
+        // One report carries at most `DELIVERY_REPORT_MAX_GAPS` ranges however
+        // they are distributed across classes, so the bound is checked against
+        // the combined length before a bucket is allowed to grow.
+        let would_grow = self
+            .bucket(class)
+            .last()
+            .is_none_or(|previous| !gaps_merge(previous, gap));
+        if would_grow && self.len() >= DELIVERY_REPORT_MAX_GAPS {
+            return false;
+        }
+        if self.is_empty() {
+            self.since = Some(Instant::now());
+        }
+        append_gap(self.bucket(class), gap)
+    }
+
+    /// When this report must reach the recipient even if nothing else is
+    /// written.
+    fn flush_deadline(&self) -> Option<Instant> {
+        self.since
+            .map(|since| since + PENDING_UNSUPPORTED_FLUSH_INTERVAL)
+    }
+
+    /// Take the pending ranges, advancing `wire` by exactly the omissions they
+    /// account for.
+    fn take(&mut self, wire: &mut DeliveryCountersByClass) -> Option<DeliveryReportPayload> {
+        if self.is_empty() {
+            return None;
+        }
+        self.since = None;
+        let mut gaps = Vec::with_capacity(self.len());
+        for (bucket, counter) in [
+            (
+                std::mem::take(&mut self.reliable),
+                &mut wire.reliable.unsupported_format,
+            ),
+            (
+                std::mem::take(&mut self.latest),
+                &mut wire.latest.unsupported_format,
+            ),
+            (
+                std::mem::take(&mut self.volatile),
+                &mut wire.volatile.unsupported_format,
+            ),
+        ] {
+            for gap in bucket {
+                *counter = counter
+                    .saturating_add(gap.to_seq.saturating_sub(gap.from_seq).saturating_add(1));
+                gaps.push(gap);
+            }
+        }
+        Some(DeliveryReportPayload {
+            per_class: *wire,
+            gaps,
+        })
+    }
 }
 
 impl QueueState {
@@ -276,6 +382,7 @@ impl QueueState {
             permit_count: 0,
             counters: DeliveryCountersByClass::default(),
             wire_counters: DeliveryCountersByClass::default(),
+            pending_unsupported: PendingUnsupported::default(),
             enqueue_generation: 0,
             receive_generation: 0,
             active_room: None,
@@ -335,6 +442,13 @@ struct SharedQueue {
 }
 
 const UNSUPPORTED_NOTICE_INTERVAL: Duration = Duration::from_secs(1);
+/// How long the writer may keep coalescing undeliverable omissions before the
+/// recipient is told, when nothing else is being written to it.
+///
+/// Matched to [`UNSUPPORTED_NOTICE_INTERVAL`] so the exact report and its prose
+/// advisory share one cadence: at most one of each per second, instead of one of
+/// each per omitted message.
+const PENDING_UNSUPPORTED_FLUSH_INTERVAL: Duration = UNSUPPORTED_NOTICE_INTERVAL;
 const MAX_UNSUPPORTED_NOTICE_SENDERS: usize = 256;
 
 #[derive(Debug, Default)]
@@ -1295,7 +1409,19 @@ impl OutboundReceiver {
                 Ok(item) => return Ok(Some(item)),
                 Err(PopState::Disconnected) => return Ok(None),
                 Err(PopState::Terminal) => return Err(TryReceiveError::AccountabilityFailed),
-                Err(PopState::Empty) => notified.as_mut().await,
+                Err(PopState::Empty) => match self.pending_unsupported_flush_deadline() {
+                    Some(deadline) => {
+                        tokio::select! {
+                            () = notified.as_mut() => {}
+                            () = tokio::time::sleep_until(deadline) => {
+                                if let Some(item) = self.take_pending_unsupported_item() {
+                                    return Ok(Some(item));
+                                }
+                            }
+                        }
+                    }
+                    None => notified.as_mut().await,
+                },
             }
         }
     }
@@ -1320,11 +1446,37 @@ impl OutboundReceiver {
                 Err(BatchedPopState::Terminal) => {
                     return Err(TryReceiveError::AccountabilityFailed)
                 }
-                Err(BatchedPopState::Empty) => notified.as_mut().await,
+                Err(BatchedPopState::Empty) => match self.pending_unsupported_flush_deadline() {
+                    Some(deadline) => {
+                        tokio::select! {
+                            () = notified.as_mut() => {}
+                            () = tokio::time::sleep_until(deadline) => {
+                                if let Some(item) = self.take_pending_unsupported_item() {
+                                    return Ok(Some(item));
+                                }
+                            }
+                        }
+                    }
+                    None => notified.as_mut().await,
+                },
                 Err(BatchedPopState::WaitUntil(deadline)) => {
+                    // The pending exact report is control traffic and outranks a
+                    // data batch still waiting to coalesce, so whichever
+                    // deadline comes first wins.
+                    let pending_deadline = self.pending_unsupported_flush_deadline();
                     tokio::select! {
-                        _ = notified.as_mut() => {}
-                        _ = tokio::time::sleep_until(deadline) => {}
+                        () = notified.as_mut() => {}
+                        () = tokio::time::sleep_until(deadline) => {}
+                        () = async {
+                            match pending_deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            if let Some(item) = self.take_pending_unsupported_item() {
+                                return Ok(Some(item));
+                            }
+                        }
                     }
                 }
             }
@@ -1590,22 +1742,91 @@ impl OutboundReceiver {
         self.shared.record_abandoned(class, count);
     }
 
-    /// Account an encoding failure discovered only by the socket writer. The
-    /// returned report must be written immediately before the replacement Error.
+    /// Account an encoding failure discovered only by the socket writer,
+    /// coalescing contiguous omissions into one pending exact report.
+    ///
+    /// One frame per omitted message made accountability cost the recipient
+    /// least able to afford it several times the bytes of the payload it
+    /// replaced — measured at 5.4x for a MessagePack burst relayed to a JSON
+    /// peer — which is what evicted that peer as a slow consumer under a
+    /// bandwidth fault (issue #212). Contiguous ranges from one sender now
+    /// merge under exactly the rules the queue applies to its own gap reports
+    /// ([`try_append_gap`]), so the accounting stays exact while the wire cost
+    /// collapses to one report per burst.
+    ///
+    /// Returns `Some(report)` when the accumulated accountability must be
+    /// written before this omission can be recorded (the pending report is full
+    /// or the new range cannot merge into it). `None` means the omission merged
+    /// into the pending report, which
+    /// [`take_pending_unsupported_report`](Self::take_pending_unsupported_report)
+    /// emits before the next frame of any other kind, alongside the rate-limited
+    /// advisory, or at close.
     pub fn record_unsupported_format(
         &self,
         metadata: DataDeliveryMetadata,
-    ) -> DeliveryReportPayload {
+    ) -> Option<DeliveryReportPayload> {
         let mut state = self.shared.state();
         increment_unsupported(&mut state.counters, metadata.class);
         self.shared.record_unsupported(metadata.class);
-        let mut wire_counters = state.wire_counters;
-        increment_unsupported(&mut wire_counters, metadata.class);
-        state.wire_counters = wire_counters;
-        DeliveryReportPayload {
-            per_class: wire_counters,
-            gaps: vec![metadata.gap(DeliveryGapReason::UnsupportedFormat)],
+        let gap = metadata.gap(DeliveryGapReason::UnsupportedFormat);
+        // A recipient that never negotiated v3 receives no `DeliveryReport` at
+        // all, so nothing may accumulate for it: the pending buffer must stay
+        // empty or a later flush would emit a v3-only frame on a v2 wire.
+        if !self.shared.v3() {
+            return None;
         }
+        if state.pending_unsupported.append(&gap, metadata.class) {
+            return None;
+        }
+        // The pending report cannot absorb this omission. Flush it and start a
+        // new one from this gap, so the returned report is complete and this
+        // omission is still accounted for exactly once.
+        let mut wire_counters = state.wire_counters;
+        let flushed = state.pending_unsupported.take(&mut wire_counters);
+        state.wire_counters = wire_counters;
+        let appended = state.pending_unsupported.append(&gap, metadata.class);
+        debug_assert!(appended, "an emptied pending report must accept any gap");
+        flushed
+    }
+
+    /// Take the coalesced unsupported-format report so it reaches the wire
+    /// before any other frame, with the advisory that explains it, or at close.
+    ///
+    /// This ordering is required rather than cosmetic: `wire_counters` only
+    /// advances here, so emitting any other report first would advertise an
+    /// `unsupported_format` counter delta whose exact ranges had not been sent.
+    pub fn take_pending_unsupported_report(&self) -> Option<DeliveryReportPayload> {
+        let mut state = self.shared.state();
+        if state.pending_unsupported.is_empty() {
+            return None;
+        }
+        let mut wire_counters = state.wire_counters;
+        let report = state.pending_unsupported.take(&mut wire_counters);
+        state.wire_counters = wire_counters;
+        report
+    }
+
+    /// When a coalesced unsupported-format report must reach the recipient even
+    /// though nothing else is queued for it.
+    fn pending_unsupported_flush_deadline(&self) -> Option<Instant> {
+        self.shared.state().pending_unsupported.flush_deadline()
+    }
+
+    /// The coalesced report as a writable queue item, for the receive paths that
+    /// reach its flush deadline while the lanes are empty. It is synthesized
+    /// rather than enqueued: the accounting is already owned here, so it must not
+    /// depend on control-lane capacity it could be denied.
+    fn take_pending_unsupported_item(&self) -> Option<QueuedOutbound> {
+        let report = self.take_pending_unsupported_report()?;
+        let generation = self.shared.state().receive_generation;
+        Some(QueuedOutbound {
+            payload: OutboundPayload::DeliveryReport(report),
+            delivery_class: None,
+            metadata: None,
+            enqueued_at: Instant::now(),
+            generation,
+            transition_barrier: false,
+        })
     }
 
     pub(crate) fn record_unsupported_class(&self, class: DeliveryClass) {
@@ -1800,17 +2021,26 @@ fn report_can_append(report: &DeliveryReportPayload, gap: &DeliveryGap) -> bool 
 }
 
 fn try_append_gap(report: &mut DeliveryReportPayload, gap: &DeliveryGap) -> bool {
-    if let Some(previous) = report.gaps.last_mut() {
+    append_gap(&mut report.gaps, gap)
+}
+
+/// The single merge rule for exact gap ranges: extend the trailing range when
+/// it is adjacent or overlapping ([`gaps_merge`]), otherwise start a new range
+/// while the bounded report still has room. Shared by the queue's own gap
+/// reports and by the writer's pending unsupported-format report so both
+/// coalesce identically.
+fn append_gap(gaps: &mut Vec<DeliveryGap>, gap: &DeliveryGap) -> bool {
+    if let Some(previous) = gaps.last_mut() {
         if gaps_merge(previous, gap) {
             previous.from_seq = previous.from_seq.min(gap.from_seq);
             previous.to_seq = previous.to_seq.max(gap.to_seq);
             return true;
         }
     }
-    if report.gaps.len() >= DELIVERY_REPORT_MAX_GAPS {
+    if gaps.len() >= DELIVERY_REPORT_MAX_GAPS {
         return false;
     }
-    report.gaps.push(gap.clone());
+    gaps.push(gap.clone());
     true
 }
 
@@ -1838,7 +2068,30 @@ fn enqueue_delivery_report(state: &mut QueueState, gaps: Vec<DeliveryGap>) {
 
 fn prepare_for_wire(state: &mut QueueState, mut item: QueuedOutbound) -> QueuedOutbound {
     if let OutboundPayload::DeliveryReport(report) = &mut item.payload {
+        // The writer's coalesced omissions ride along in this report whenever
+        // they fit, so one frame carries both. That keeps a single owner of the
+        // `unsupported_format` wire frontier: whatever is not absorbed here is
+        // still pending, and the counters below therefore never advertise a
+        // delta whose exact ranges have not been sent.
+        let absorbed =
+            if report.gaps.len() + state.pending_unsupported.len() <= DELIVERY_REPORT_MAX_GAPS {
+                state.pending_unsupported.take(&mut state.wire_counters)
+            } else {
+                None
+            };
         report.per_class = max_counters(report.per_class, state.wire_counters);
+        // `state.counters` may already count omissions that are still pending
+        // (they are counted when discovered, reported when coalesced), so this
+        // counter is clamped to the frontier rather than raised by a report that
+        // carries no ranges for it.
+        report.per_class.reliable.unsupported_format =
+            state.wire_counters.reliable.unsupported_format;
+        report.per_class.latest.unsupported_format = state.wire_counters.latest.unsupported_format;
+        report.per_class.volatile.unsupported_format =
+            state.wire_counters.volatile.unsupported_format;
+        if let Some(absorbed) = absorbed {
+            report.gaps.extend(absorbed.gaps);
+        }
         state.wire_counters = report.per_class;
     }
     item
@@ -2403,8 +2656,11 @@ mod tests {
         assert!(tx.is_closed());
     }
 
+    /// A queued report popped while the writer still holds coalesced omissions
+    /// carries both, so exactly one frame owns the `unsupported_format` wire
+    /// frontier and no frame advertises a counter delta without its ranges.
     #[tokio::test]
-    async fn inline_unsupported_report_precedes_and_advances_queued_frontier() {
+    async fn queued_report_absorbs_the_writers_pending_unsupported_ranges() {
         let (tx, mut rx) = channel(1, 2);
         tx.set_protocol_version(3);
         tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
@@ -2417,15 +2673,27 @@ mod tests {
         tx.try_enqueue_data(data(3, DeliveryClass::Latest, Some(3), 3))
             .unwrap();
 
-        let inline = rx.record_unsupported_format(active_metadata);
-        assert_eq!(inline.per_class.reliable.unsupported_format, 1);
-        assert_eq!(inline.per_class.latest.dropped_full, 0);
-        assert_eq!(inline.gaps[0].reason, DeliveryGapReason::UnsupportedFormat);
+        assert!(
+            rx.record_unsupported_format(active_metadata).is_none(),
+            "the first omission coalesces instead of costing its own frame"
+        );
 
         let queued = report(rx.recv().await.unwrap().unwrap());
         assert_eq!(queued.per_class.reliable.unsupported_format, 1);
         assert_eq!(queued.per_class.latest.dropped_full, 1);
-        assert_eq!(queued.gaps[0].reason, DeliveryGapReason::LatestDroppedFull);
+        let reasons: Vec<_> = queued.gaps.iter().map(|gap| gap.reason).collect();
+        assert_eq!(
+            reasons,
+            vec![
+                DeliveryGapReason::LatestDroppedFull,
+                DeliveryGapReason::UnsupportedFormat
+            ],
+            "the absorbed range must ride along with the queued report"
+        );
+        assert!(
+            rx.take_pending_unsupported_report().is_none(),
+            "an absorbed range must not be reported a second time"
+        );
     }
 
     #[tokio::test]
@@ -2929,22 +3197,134 @@ mod tests {
         assert!(closed.unwrap().is_none());
     }
 
-    #[test]
-    fn unsupported_format_report_is_exact_and_class_partitioned() {
-        let (_tx, rx) = channel(1, 1);
-        let metadata = DataDeliveryMetadata {
-            class: DeliveryClass::Volatile,
+    fn unsupported_metadata(
+        class: DeliveryClass,
+        from_player: u128,
+        seq: u64,
+    ) -> DataDeliveryMetadata {
+        DataDeliveryMetadata {
+            class,
             key: None,
-            from_player: PlayerId::from_u128(4),
+            from_player: PlayerId::from_u128(from_player),
             room_id: RoomId::from_u128(5),
             epoch: 6,
-            seq: 7,
-        };
-        let report = rx.record_unsupported_format(metadata);
-        assert_eq!(report.per_class.volatile.unsupported_format, 1);
+            seq,
+        }
+    }
+
+    /// One frame per omitted message made accountability cost the weakest
+    /// recipient several times the payload it replaced (issue #212). Contiguous
+    /// omissions must collapse into one range while the counters stay exact.
+    #[test]
+    fn unsupported_format_reports_coalesce_and_stay_exact_per_class() {
+        let (tx, rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        for seq in 7..=9 {
+            assert!(
+                rx.record_unsupported_format(unsupported_metadata(DeliveryClass::Volatile, 4, seq))
+                    .is_none(),
+                "contiguous omissions from one sender must coalesce"
+            );
+        }
+        // A different class cannot share a range: `UnsupportedFormat` is the one
+        // gap reason every class uses, so merging across classes would lose the
+        // attribution the per-class counters need.
+        assert!(rx
+            .record_unsupported_format(unsupported_metadata(DeliveryClass::Reliable, 4, 10))
+            .is_none());
+        // A different sender starts its own range.
+        assert!(rx
+            .record_unsupported_format(unsupported_metadata(DeliveryClass::Volatile, 11, 1))
+            .is_none());
+
+        let report = rx
+            .take_pending_unsupported_report()
+            .expect("pending accountability must flush");
+        assert_eq!(report.per_class.volatile.unsupported_format, 4);
+        assert_eq!(report.per_class.reliable.unsupported_format, 1);
+        let ranges: Vec<_> = report
+            .gaps
+            .iter()
+            .map(|gap| (gap.from_player, gap.from_seq, gap.to_seq, gap.reason))
+            .collect();
         assert_eq!(
-            report.gaps,
-            vec![metadata.gap(DeliveryGapReason::UnsupportedFormat)]
+            ranges,
+            vec![
+                (
+                    PlayerId::from_u128(4),
+                    10,
+                    10,
+                    DeliveryGapReason::UnsupportedFormat
+                ),
+                (
+                    PlayerId::from_u128(4),
+                    7,
+                    9,
+                    DeliveryGapReason::UnsupportedFormat
+                ),
+                (
+                    PlayerId::from_u128(11),
+                    1,
+                    1,
+                    DeliveryGapReason::UnsupportedFormat
+                ),
+            ],
+            "five omissions must be reported as three exact ranges"
+        );
+        assert!(
+            rx.take_pending_unsupported_report().is_none(),
+            "a flushed report leaves nothing pending"
+        );
+    }
+
+    /// The pending report is bounded by the canonical per-report gap maximum,
+    /// and hitting that bound flushes rather than dropping accountability.
+    #[test]
+    fn pending_unsupported_report_is_bounded_and_flushes_when_full() {
+        let (tx, rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        // Every second sequence is a hole, so no two omissions can merge.
+        let mut flushed = None;
+        for index in 0..=DELIVERY_REPORT_MAX_GAPS {
+            let seq = (index as u64) * 2;
+            let report =
+                rx.record_unsupported_format(unsupported_metadata(DeliveryClass::Reliable, 4, seq));
+            if let Some(report) = report {
+                assert!(flushed.is_none(), "only the bounded report may flush");
+                flushed = Some(report);
+            }
+        }
+        let flushed = flushed.expect("the bounded report must flush when it is full");
+        assert_eq!(flushed.gaps.len(), DELIVERY_REPORT_MAX_GAPS);
+        assert_eq!(
+            flushed.per_class.reliable.unsupported_format,
+            DELIVERY_REPORT_MAX_GAPS as u64
+        );
+        let remainder = rx
+            .take_pending_unsupported_report()
+            .expect("the omission that displaced the report is still accounted for");
+        assert_eq!(remainder.gaps.len(), 1);
+        assert_eq!(
+            remainder.per_class.reliable.unsupported_format,
+            DELIVERY_REPORT_MAX_GAPS as u64 + 1,
+            "counters advance monotonically with the ranges that explain them"
+        );
+    }
+
+    /// A recipient that never negotiated v3 receives no `DeliveryReport` at all,
+    /// so nothing may accumulate for it — a later flush would put a v3-only
+    /// frame on a frozen v2 wire.
+    #[test]
+    fn pre_v3_recipients_accumulate_no_delivery_report() {
+        let (_tx, rx) = channel(1, 1);
+        assert!(rx
+            .record_unsupported_format(unsupported_metadata(DeliveryClass::Reliable, 4, 1))
+            .is_none());
+        assert!(rx.take_pending_unsupported_report().is_none());
+        assert_eq!(
+            rx.shared.state().counters.reliable.unsupported_format,
+            1,
+            "the omission is still counted internally"
         );
     }
 

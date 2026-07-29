@@ -1188,11 +1188,13 @@ impl ConformanceAuditor {
                 DeliveryGapReason::LatestSuperseded => 0,
                 DeliveryGapReason::LatestDroppedFull => 1,
                 DeliveryGapReason::VolatileDropped => 2,
+                // Undeliverable payloads are reported as coalesced ranges, so a
+                // report may carry several of them (issue #212): one frame per
+                // omitted message cost the recipient least able to afford it
+                // ~5.4x the bytes of the payload it replaced. Exactness is
+                // enforced by `validate_and_record_gap` (no overlap, no hole)
+                // and by the counter-delta assertions below, not by frame count.
                 DeliveryGapReason::UnsupportedFormat => {
-                    assert!(
-                        unsupported_gap.is_none() && gap.from_seq == gap.to_seq,
-                        "{receiver}: unsupported-format replacement report must name exactly one sequence"
-                    );
                     unsupported_gap = Some(gap.clone());
                     3
                 }

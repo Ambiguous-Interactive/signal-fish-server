@@ -660,9 +660,13 @@ Practical consequences:
   the equality above holds at quiescence.
 
 A binary game-data payload that cannot be converted for a v3 recipient is not
-silently dropped either: the server first writes an exact `DeliveryReport` gap
-with reason `unsupported_format`, then attempts a supplemental `Error` with code
-`UNSUPPORTED_GAME_DATA_FORMAT`, both before any later data. The supplemental
+silently dropped either: the server accounts the omission as an exact
+`DeliveryReport` gap with reason `unsupported_format`, and attempts a
+supplemental `Error` with code `UNSUPPORTED_GAME_DATA_FORMAT` after it. Both
+precede any later data for that recipient. Consecutive omissions from one sender
+coalesce into one range and one report — at most one per second while the
+recipient is otherwise idle — so a recipient that cannot represent the room's
+encoding is not charged one report frame per relayed message. The supplemental
 error is best effort: if its write fails after the report succeeds, the socket
 disconnects and no successor is exposed. The report, not the aggregate counter
 or error alone, authorizes a gap on a continuing stream. Once the writer has
@@ -1726,12 +1730,17 @@ sequence; one report or range need not cover the entire hole alone.
 Gap-bearing reports are event-driven even when
 `websocket.delivery_stats_interval_secs` is zero. Queue-policy reports for
 `latest` / `volatile` travel on the active generation's strict-priority control
-lane and are committed atomically with the omission. An unsupported-format
-report is written inline before later data can reveal the gap. The supplemental
+lane and are committed atomically with the omission. Unsupported-format ranges
+are coalesced by the socket writer and reach the recipient before any later
+data, when the supplemental advisory is emitted, carried by an already-queued
+report, or at most one second after the first omission if nothing else is
+written; a closing connection flushes them too. Consecutive omissions from one
+sender and delivery class therefore arrive as one range rather than one report
+per message. The supplemental
 `UNSUPPORTED_GAME_DATA_FORMAT` prose `Error` is rate-limited to at most one per
 sender per second for each recipient; a later notice reports how many similar
-advisories were suppressed. Clients MUST use the unthrottled exact reports—not
-advisory errors—to account sequence gaps. If either an exact report or a chosen
+advisories were suppressed. Clients MUST use the exact reports—not advisory
+errors—to account sequence gaps. If either an exact report or a chosen
 supplemental error write fails, the stream disconnects.
 Counter-only snapshots may be periodic. If exact reporting cannot be preserved,
 the server closes the connection with `4002 slow_consumer` before exposing

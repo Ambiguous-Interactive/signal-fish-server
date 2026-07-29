@@ -370,6 +370,29 @@ async fn finalize_closed_connection(
     #[cfg(feature = "trace-validation")]
     close_signal.record_trace_queue_closed();
 
+    // Emit whatever exact omission accounting is still coalesced for this
+    // recipient before the terminal frames. It is best-effort — a wedged socket
+    // is exactly why this path runs — but on a healthy teardown it means the
+    // last burst of undeliverable data is still reported rather than lost with
+    // the connection.
+    if let Some(report) = rx.take_pending_unsupported_report() {
+        let report = ServerMessage::DeliveryReport(Box::new(report));
+        match tokio::time::timeout(
+            CLOSE_WRITE_TIMEOUT,
+            send_immediate_server_message(sender, &report),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::debug!(%player_id, error = %err, "Failed to flush final delivery report");
+            }
+            Err(_elapsed) => {
+                tracing::debug!(%player_id, "Timed out flushing final delivery report");
+            }
+        }
+    }
+
     match reason {
         Some(CloseReason::SlowConsumer) => {
             // `send_batch` pops messages one at a time, so a cancelled

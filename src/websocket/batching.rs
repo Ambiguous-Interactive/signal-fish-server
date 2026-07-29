@@ -12,8 +12,8 @@ use tokio::time::Instant;
 use crate::server::EnhancedGameServer;
 
 use super::sending::{
-    preflight_binary_fallback, send_single_message, BinaryFallbackPreflight, SendAccounting,
-    SendDisposition,
+    preflight_binary_fallback, send_single_message, send_text_message, BinaryFallbackPreflight,
+    SendAccounting, SendDisposition,
 };
 
 /// Message batcher for WebSocket connections
@@ -272,25 +272,53 @@ pub(super) async fn send_queued(
         write_started_at,
         fallback_preflight.is_unsupported(),
     );
+    let carries_queued_report = matches!(queued.payload, OutboundPayload::DeliveryReport(_));
     let message = match queued.payload {
         OutboundPayload::Message(message) => message,
         OutboundPayload::DeliveryReport(report) => {
             Arc::new(ServerMessage::DeliveryReport(Box::new(report)))
         }
     };
+    // Exact accounting owns the head of the stream: a coalesced
+    // unsupported-format report must reach this recipient before the next
+    // delivered frame, because a recipient may not observe delivered data that
+    // skips sequences it was never told about. Two items are excluded:
+    //
+    // - another undeliverable payload, which keeps coalescing instead — that is
+    //   what collapses a burst into one report;
+    // - a queued `DeliveryReport`, which already absorbed what fitted and had
+    //   its counters stamped against the wire frontier when it was popped.
+    //   Emitting a flush ahead of it would move a counter that the following
+    //   frame then reports as lower.
+    let pending_report = if fallback_preflight.is_unsupported() || carries_queued_report {
+        None
+    } else {
+        receiver.take_pending_unsupported_report()
+    };
     let mut accounting = SendAccounting::new(receiver, server, *player_id, class);
     let recipient_supports_v3 = receiver.supports_v3();
     let recipient_format = receiver.game_data_format();
-    let write = send_single_message(
-        sender,
-        message,
-        player_id,
-        recipient_supports_v3,
-        recipient_format,
-        fallback_preflight,
-        metadata,
-        &mut accounting,
-    );
+    let write = async {
+        if let Some(report) = pending_report {
+            send_text_message(
+                sender,
+                &ServerMessage::DeliveryReport(Box::new(report)),
+                player_id,
+            )
+            .await?;
+        }
+        send_single_message(
+            sender,
+            message,
+            player_id,
+            recipient_supports_v3,
+            recipient_format,
+            fallback_preflight,
+            metadata,
+            &mut accounting,
+        )
+        .await
+    };
     let result = if max_sojourn.is_zero() {
         write.await.map_err(|()| QueueWriteError::SocketClosed)
     } else {

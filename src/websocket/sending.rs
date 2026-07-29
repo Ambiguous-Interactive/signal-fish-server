@@ -311,11 +311,15 @@ impl<'a> SendAccounting<'a> {
         self.resolved = true;
     }
 
+    /// Account one undeliverable payload. The returned report (if any) is
+    /// accountability that must reach the wire before anything else; `None`
+    /// means it coalesced into the recipient's pending report.
     fn complete_unsupported(
         &mut self,
         metadata: Option<DataDeliveryMetadata>,
     ) -> Option<crate::protocol::DeliveryReportPayload> {
-        let report = metadata.map(|metadata| self.receiver.record_unsupported_format(metadata));
+        let report =
+            metadata.and_then(|metadata| self.receiver.record_unsupported_format(metadata));
         if metadata.is_none() {
             if let Some(class) = self.class {
                 self.receiver.record_unsupported_class(class);
@@ -324,6 +328,11 @@ impl<'a> SendAccounting<'a> {
         self.record_drop_metrics();
         self.resolved = true;
         report
+    }
+
+    /// Flush whatever exact accounting is still coalesced for this recipient.
+    fn take_pending_unsupported(&self) -> Option<crate::protocol::DeliveryReportPayload> {
+        self.receiver.take_pending_unsupported_report()
     }
 
     fn record_drop_metrics(&self) {
@@ -420,20 +429,31 @@ async fn notify_or_close_on_fallback_failure(
                 reason = %reason,
                 "Game data undeliverable to this recipient; sending an error notice instead"
             );
-            let report = accounting.complete_unsupported(metadata);
-            if recipient_supports_v3 {
-                let Some(report) = report else {
-                    tracing::error!(
-                        %player_id,
-                        %from_player,
-                        "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
-                    );
-                    return Err(());
-                };
+            let displaced = accounting.complete_unsupported(metadata);
+            if recipient_supports_v3 && metadata.is_none() {
+                tracing::error!(
+                    %player_id,
+                    %from_player,
+                    "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
+                );
+                return Err(());
+            }
+            // A displaced report is a completed range this omission could not
+            // join; it goes out now so the pending report stays the only
+            // unsent accounting.
+            if let Some(report) = displaced {
                 let report = ServerMessage::DeliveryReport(Box::new(report));
                 send_text_message(sender, &report, player_id).await?;
             }
             if let Some(suppressed) = accounting.unsupported_notice(from_player) {
+                // The advisory must never precede the exact report that
+                // explains it, so the rate-limited notice is also the pending
+                // report's flush cadence: at most one report per sender per
+                // second instead of one per omitted message.
+                if let Some(report) = accounting.take_pending_unsupported() {
+                    let report = ServerMessage::DeliveryReport(Box::new(report));
+                    send_text_message(sender, &report, player_id).await?;
+                }
                 let suppressed = if suppressed == 0 {
                     String::new()
                 } else {

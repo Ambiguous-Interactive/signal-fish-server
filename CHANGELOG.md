@@ -41,6 +41,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop unsupported-format accountability from evicting the recipient it exists
+  to protect (issue #212). A binary payload that a peer's negotiated encoding
+  cannot represent was reported with one `DeliveryReport` frame per omitted
+  message, so a JSON peer in a MessagePack room paid **5.4x** the wire bytes of
+  the compact frames its room-mates received (2,096,502 against 389,618 bytes
+  for a 5,000-message burst). Under an equal 32 KiB/s bandwidth fault that
+  difference is the difference between surviving and being disconnected as a
+  slow consumer: the weaker peer was evicted after 703 of 5,000 messages while
+  the compatible peer was unaffected. Consecutive omissions from one sender and
+  delivery class now coalesce into one exact range under the same merge rule the
+  queue already applied to its own gap reports, flushed before the next
+  delivered frame, with the rate-limited advisory, inside an already-queued
+  report, at most one second after the first omission when the recipient is
+  otherwise idle, or at close. The same burst now costs 2,218 bytes in four
+  reports (0.01x) with all 5,000 sequences still accounted for exactly, and the
+  experiment passes under the single-core contention that reproduced the CI
+  failure. Wire-visible for protocol v3 only: reports may now carry several
+  `unsupported_format` ranges, which the documented "union of ranges covers
+  every missing sequence" contract already required clients to handle.
 - Make the chaos proxy's bandwidth fault rate-accurate. Pacing slept a fixed
   interval per chunk, so the pump's own read/write/scheduling latency was added
   to every period and the achieved rate drifted below nominal under load — a

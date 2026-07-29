@@ -18,7 +18,8 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::{
-    ClientMessage, GameDataEncoding, PlayerId, ServerMessage, V3BinaryGameDataFrame,
+    ClientMessage, DeliveryGapReason, GameDataEncoding, PlayerId, ServerMessage,
+    V3BinaryGameDataFrame,
 };
 use signal_fish_server::websocket::create_router;
 use tokio_tungstenite::tungstenite::Message;
@@ -321,6 +322,21 @@ async fn mixed_json_and_message_pack_relay_without_error_amplification() {
     running_server.shutdown().await;
 }
 
+/// Everything the throttled JSON recipient observed, so the amplification
+/// oracle can be asserted against measured wire bytes rather than frame counts.
+struct FallbackObservation {
+    /// `DeliveryReport` frames received.
+    reports: u64,
+    /// Rate-limited `UnsupportedGameDataFormat` advisories received.
+    advisories: u64,
+    /// Sequences named by `UnsupportedFormat` gap ranges, summed over reports.
+    accounted: u64,
+    /// Total WebSocket payload bytes this recipient had to drain.
+    wire_bytes: u64,
+    close: Option<(u16, String)>,
+    elapsed: Duration,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 #[ignore = "nightly-only (verification-nightly.yml): throttled unsupported-format amplification"]
@@ -398,6 +414,7 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
         let deadline = tokio::time::Instant::now() + EXPERIMENT_DEADLINE;
         let mut delivered = 0u64;
         let mut player_left = 0u64;
+        let mut wire_bytes = 0u64;
         while delivered < BURST {
             let frame = tokio::time::timeout_at(deadline, stream.next())
                 .await
@@ -410,6 +427,7 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
                 .unwrap_or_else(|error| panic!("compatible recipient read failed: {error}"));
             match frame {
                 Message::Binary(bytes) => {
+                    wire_bytes += bytes.len() as u64;
                     let relayed = compatible_auditor.record_binary_frame("P1", &bytes);
                     assert_eq!(relayed.encoding, GameDataEncoding::MessagePack);
                     assert_eq!(relayed.payload.as_slice(), [0xc1]);
@@ -428,7 +446,7 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
                 }
             }
         }
-        (stream, player_left)
+        (stream, player_left, wire_bytes)
     });
 
     let fallback_auditor = Arc::clone(&auditor);
@@ -438,7 +456,9 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
         let deadline = tokio::time::Instant::now() + EXPERIMENT_DEADLINE;
         let mut reports = 0u64;
         let mut errors = 0u64;
-        while reports < BURST {
+        let mut wire_bytes = 0u64;
+        let mut accounted = 0u64;
+        while accounted < BURST {
             let frame = tokio::time::timeout_at(deadline, stream.next())
                 .await
                 .unwrap_or_else(|_| {
@@ -453,44 +473,69 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
                 })
                 .unwrap_or_else(|error| panic!("fallback recipient read failed: {error}"));
             match frame {
-                Message::Text(text) => match fallback_auditor.record_text_frame("P2", &text) {
-                    ServerMessage::DeliveryReport(_) => reports += 1,
-                    ServerMessage::Error {
-                        error_code,
-                        message,
-                    } => {
-                        // `SlowConsumer` here is not a stray advisory: the server
-                        // only ever emits it as a farewell frame immediately
-                        // before eviction, so seeing it means this recipient is
-                        // being dropped. Report the counters and elapsed time
-                        // with it — a bare `assert_eq!` on the code says nothing
-                        // about how far the experiment got, which is the first
-                        // thing needed to tell a genuine amplification eviction
-                        // from a link that simply never kept pace. See issue
-                        // #212.
-                        assert_eq!(
+                Message::Text(text) => {
+                    wire_bytes += text.len() as u64;
+                    match fallback_auditor.record_text_frame("P2", &text) {
+                        ServerMessage::DeliveryReport(report) => {
+                            reports += 1;
+                            // The auditor already proves these ranges never overlap
+                            // and never leave a hole, so summing their lengths is an
+                            // exact count of the sequences accounted for. Counting
+                            // sequences rather than frames is what lets one
+                            // coalesced range stand in for a burst of omissions
+                            // without weakening the accountability oracle.
+                            accounted += report
+                                .gaps
+                                .iter()
+                                .filter(|gap| gap.reason == DeliveryGapReason::UnsupportedFormat)
+                                .map(|gap| gap.to_seq - gap.from_seq + 1)
+                                .sum::<u64>();
+                        }
+                        ServerMessage::Error {
+                            error_code,
+                            message,
+                        } => {
+                            // `SlowConsumer` here is not a stray advisory: the server
+                            // only ever emits it as a farewell frame immediately
+                            // before eviction, so seeing it means this recipient is
+                            // being dropped. Report the counters and elapsed time
+                            // with it — a bare `assert_eq!` on the code says nothing
+                            // about how far the experiment got, which is the first
+                            // thing needed to tell a genuine amplification eviction
+                            // from a link that simply never kept pace. See issue
+                            // #212.
+                            assert_eq!(
                             error_code,
                             Some(
                                 signal_fish_server::protocol::ErrorCode::UnsupportedGameDataFormat
                             ),
-                            "fallback recipient received `{error_code:?}` after {reports}/{BURST} \
-                             reports and {errors} advisories, {:?} into a {EXPERIMENT_DEADLINE:?} \
-                             budget: {message}",
+                            "fallback recipient received `{error_code:?}` after \
+                             {accounted}/{BURST} accounted sequences in {reports} reports and \
+                             {errors} advisories ({wire_bytes} wire bytes), {:?} into a \
+                             {EXPERIMENT_DEADLINE:?} budget: {message}",
                             started.elapsed(),
                         );
-                        errors += 1;
+                            errors += 1;
+                        }
+                        other => {
+                            panic!("fallback recipient observed unexpected message: {other:?}")
+                        }
                     }
-                    other => panic!("fallback recipient observed unexpected message: {other:?}"),
-                },
+                }
                 Message::Close(reason) => {
                     let reason = reason.expect("fallback close must carry code and reason");
                     let code = u16::from(reason.code);
                     fallback_auditor.record_close("P2", code, &reason.reason);
                     return (
                         stream,
-                        reports,
-                        errors,
-                        Some((code, reason.reason.to_string())),
+                        FallbackObservation {
+                            reports,
+                            advisories: errors,
+                            accounted,
+                            wire_bytes,
+                            close: Some((code, reason.reason.to_string())),
+                            elapsed: started.elapsed(),
+                        },
                     );
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
@@ -502,7 +547,17 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
                 }
             }
         }
-        (stream, reports, errors, None)
+        (
+            stream,
+            FallbackObservation {
+                reports,
+                advisories: errors,
+                accounted,
+                wire_bytes,
+                close: None,
+                elapsed: started.elapsed(),
+            },
+        )
     });
 
     for _ in 0..BURST {
@@ -515,35 +570,84 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
             .expect("send unconvertible MessagePack payload");
     }
 
-    let (fallback_stream, reports, errors, close) = fallback_reader
-        .await
-        .expect("fallback recipient task panicked");
+    // Both recipients must complete their streams while the bandwidth fault is
+    // still applied. Lifting the throttle as soon as the fallback recipient
+    // finished would let the compatible recipient drain its remainder on an
+    // unimpaired link, and "the compatible peer survives the same fault" is half
+    // the oracle.
+    let (fallback_result, compatible_result) = tokio::join!(fallback_reader, compatible_reader);
     compatible_proxy.throttle(Direction::ServerToClient, None);
     fallback_proxy.throttle(Direction::ServerToClient, None);
 
-    let (compatible_stream, compatible_player_left) = compatible_reader
-        .await
-        .expect("compatible recipient task panicked");
+    let (fallback_stream, fallback) = fallback_result.expect("fallback recipient task panicked");
+    let (compatible_stream, compatible_player_left, compatible_bytes) =
+        compatible_result.expect("compatible recipient task panicked");
+
+    let backpressure = metrics
+        .websocket_backpressure_events
+        .load(Ordering::Relaxed);
+    // Printed before the oracles so a RED run still reports the numbers that
+    // separate genuine amplification from a link that never kept pace (#212).
+    eprintln!(
+        "mixed-encoding H14: accounted={}/{BURST} reports={} advisories={} \
+         fallback_bytes={} compatible_bytes={compatible_bytes} \
+         amplification={:.2}x elapsed={:?} backpressure_events={backpressure} \
+         slow_consumer_evictions={}",
+        fallback.accounted,
+        fallback.reports,
+        fallback.advisories,
+        fallback.wire_bytes,
+        fallback.wire_bytes as f64 / compatible_bytes.max(1) as f64,
+        fallback.elapsed,
+        metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+    );
 
     // This is the pre-registered falsification oracle. A RED result here means
-    // the per-message advisory doubles the fallback stream enough to evict a
-    // recipient that survives the same throttle on compact binary delivery.
+    // unsupported-format accountability inflates the fallback stream enough to
+    // evict a recipient that survives the same throttle on compact binary
+    // delivery.
     assert!(
-        close.is_none(),
+        fallback.close.is_none(),
         "unsupported-format amplification evicted only the JSON fallback recipient after \
-         {reports} reports/{errors} rate-limited errors ({close:?})"
+         {}/{BURST} accounted sequences and {} advisories ({:?})",
+        fallback.accounted,
+        fallback.advisories,
+        fallback.close
     );
+    // Exactness is a property of the *sequences* named, not of the frame count:
+    // one coalesced range may account for a whole burst of omissions. The
+    // conformance auditor independently proves those ranges never overlap and
+    // never leave a hole.
     assert_eq!(
-        reports, BURST,
-        "every omitted sequence needs an exact report"
+        fallback.accounted, BURST,
+        "every omitted sequence needs exact accounting"
     );
     assert!(
-        errors > 0,
+        fallback.advisories > 0,
         "the first supplemental advisory must be visible"
     );
+    // The advisory limiter admits at most one notice per sender per second;
+    // allow one extra for the immediate first notice and one for rounding.
+    let advisory_ceiling = fallback.elapsed.as_secs() + 2;
     assert!(
-        errors < reports / 100,
-        "advisory rate limiting was ineffective: {errors} errors for {reports} reports"
+        fallback.advisories <= advisory_ceiling,
+        "advisory rate limiting was ineffective: {} advisories in {:?}",
+        fallback.advisories,
+        fallback.elapsed
+    );
+    // The amplification invariant, and the whole point of H14: accounting for
+    // undeliverable game data must not cost the weaker recipient more wire
+    // bytes than delivering the payload costs the compatible one. Before the
+    // reports were coalesced this ratio was ~8x, which is what evicted the
+    // fallback recipient under an equal bandwidth fault.
+    assert!(
+        fallback.wire_bytes <= compatible_bytes,
+        "unsupported-format accountability cost the fallback recipient {} bytes against \
+         {compatible_bytes} bytes of compact binary delivery ({:.2}x amplification)",
+        fallback.wire_bytes,
+        fallback.wire_bytes as f64 / compatible_bytes.max(1) as f64
     );
     assert_eq!(
         compatible_player_left, 0,
@@ -555,11 +659,14 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
             .load(Ordering::Relaxed),
         0
     );
-    auditor.assert_conformance(&metrics, &[]).await;
-    eprintln!(
-        "mixed-encoding H14: exact_reports={reports} advisory_errors={errors} \
-         compatible_deliveries={BURST} slow_consumer_evictions=0"
+    // Non-vacuity: the injected bandwidth fault must actually have reached the
+    // server's outbound queues. A run where kernel buffering absorbed the whole
+    // experiment would prove nothing about amplification.
+    assert!(
+        backpressure > 0,
+        "the throttle never produced server-side backpressure; the experiment was vacuous"
     );
+    auditor.assert_conformance(&metrics, &[]).await;
 
     drop(sender);
     drop(compatible_stream);
