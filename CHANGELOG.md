@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Symbolize AddressSanitizer/LeakSanitizer reports by locating the runner's
+  `llvm-symbolizer` (rustup's `llvm-tools` component does not ship one). The
+  lookup is best-effort and the diagnostic step now states whether
+  symbolization was active, so an unsymbolized report is self-describing rather
+  than an undiagnosable stack of raw addresses.
+- Bump the pinned GitHub Actions group (`actions/checkout` 7.0.1,
+  `taiki-e/install-action` 2.85.2, and `actions/upload-artifact`), carrying
+  Dependabot #202 forward.
 - Refresh the compatible dependency set (Tokio 1.53.1, serde 1.0.229, futures
   0.3.33, clap 4.6.4, hdrhistogram 7.6.0 and others). The `tokio-tungstenite`
   0.30, `serial_test` 4.0, `base64` 0.23, and `syn` 3.0 declarations proposed

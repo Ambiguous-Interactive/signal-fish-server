@@ -12,10 +12,11 @@
 #   - concurrency-stress: tests/delivery_concurrency_stress.rs — the
 #     loom-substitute lane racing deliver_or_disconnect against receiver
 #     drops and explicit closes across thousands of scheduler samples.
-#   - load-smoke: the in-process latency-distribution smoke test from
-#     tests/load_tests.rs (the room-creation-throughput and
-#     sustained-connections candidates are excluded as known-broken — see the
-#     load-smoke job comment). NOTE these are throughput/latency smoke checks
+#   - load-smoke: the in-process latency-distribution, room-creation-throughput,
+#     and sustained-connections smoke tests from tests/load_tests.rs. The latter
+#     two were previously excluded as known-broken; issue #207 traced that to
+#     invalid room-code lengths across the whole suite — see the load-smoke job
+#     comment. NOTE these are throughput/latency smoke checks
 #     only — their clients are mpsc channels that cannot observe delivery
 #     (see the module docs in tests/load_tests.rs); the delivery contract is
 #     verified by the soak/backpressure suites above.
