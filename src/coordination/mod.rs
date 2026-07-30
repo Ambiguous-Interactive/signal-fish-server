@@ -11,6 +11,20 @@ pub mod dedup;
 pub(crate) mod outbound_queue;
 pub mod room_coordinator;
 
+/// Narrow, dev-only exports used by the relay allocation benchmark.
+///
+/// The production queue module remains crate-private; enabling
+/// `allocation-tracking` re-exports the queue types needed to drive and observe
+/// its steady-state heap traffic from a separate benchmark crate.
+#[cfg(feature = "allocation-tracking")]
+#[doc(hidden)]
+pub mod allocation_benchmark {
+    pub use super::outbound_queue::{
+        channel_with_metrics, DataDeliveryMetadata, OutboundData, OutboundPayload,
+        OutboundReceiver, OutboundSender,
+    };
+}
+
 // Re-export public types
 pub use dedup::DedupCacheSettings;
 pub use room_coordinator::{
@@ -885,6 +899,25 @@ impl ClientDeliveryHandle {
     pub(crate) fn classified(sender: OutboundSender, close: ConnectionCloseSignal) -> Self {
         Self {
             sender: DeliverySender::classified(sender),
+            close,
+        }
+    }
+
+    /// Build a generation-scoped classified handle for the allocation benchmark.
+    ///
+    /// Production advances generations through the connection manager. The
+    /// external benchmark is a separate crate, so this feature-gated seam lets
+    /// it reproduce that exact post-transition delivery path without exposing
+    /// the general generation-mutating API.
+    #[cfg(feature = "allocation-tracking")]
+    #[doc(hidden)]
+    pub fn classified_for_allocation_benchmark(
+        sender: OutboundSender,
+        generation: u64,
+        close: ConnectionCloseSignal,
+    ) -> Self {
+        Self {
+            sender: DeliverySender(DeliverySenderKind::Classified { sender, generation }),
             close,
         }
     }

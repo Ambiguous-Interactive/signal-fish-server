@@ -246,6 +246,25 @@ cargo bench
 
 View results in `target/criterion/report/index.html`.
 
+Measure steady-state heap traffic in the protocol-v3 relay fan-out and
+classified outbound queue:
+
+```bash
+
+cargo bench --locked --bench relay_allocations --features allocation-tracking
+
+```
+
+The allocation harness uses a warmed current-thread runtime, prebuilt shared
+payload, and warmed classified queues to isolate coordinator routing, fan-out,
+and enqueue costs. Recipient and `join_all` storage is intentionally rebuilt
+inside each measured call. The harness excludes the inbound handler's stamp and
+message construction and its outer builder allocation. It repeats each sample
+five times and fails if the samples drift or if the attempt, enqueue, and
+receiver-drain ledgers do not prove every expected delivery. Its allocator uses
+sequentially consistent counters, so its output is an allocation baseline, not
+a latency benchmark; use the ordinary Criterion benchmarks for timing.
+
 ## Code Coverage
 
 ```bash

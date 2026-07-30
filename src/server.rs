@@ -1067,6 +1067,36 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    fn collect_routed_recipients(
+        room_players: &HashMap<RoomId, HashSet<PlayerId>>,
+        clients: &HashMap<PlayerId, ClientDeliveryHandle>,
+        room_id: &RoomId,
+        except_player: Option<&PlayerId>,
+    ) -> Vec<(PlayerId, ClientDeliveryHandle)> {
+        let Some(players) = room_players.get(room_id) else {
+            return Vec::new();
+        };
+        // Membership gives an exact upper bound. The old iterator `collect`
+        // started from a filtered size hint of zero, then grew this vector one,
+        // two, or three times for 2-, 8-, and 16-player rooms respectively.
+        // This path runs for every relayed game-data frame, so reserve once.
+        let capacity = players.len().saturating_sub(usize::from(
+            except_player.is_some_and(|player_id| players.contains(player_id)),
+        ));
+        let mut recipients = Vec::with_capacity(capacity);
+        recipients.extend(
+            players
+                .iter()
+                .filter(|player_id| Some(*player_id) != except_player)
+                .filter_map(|player_id| {
+                    clients
+                        .get(player_id)
+                        .map(|handle| (*player_id, handle.clone()))
+                }),
+        );
+        recipients
+    }
+
     /// Snapshot the delivery handles for a room's members (optionally skipping
     /// one player) and release both locks before any await on delivery, so a
     /// backpressured recipient can never stall registration or other
@@ -1080,21 +1110,7 @@ impl InMemoryMessageCoordinator {
         // register/unregister to prevent ABBA deadlocks).
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-
-        room_players
-            .get(room_id)
-            .map(|players| {
-                players
-                    .iter()
-                    .filter(|player_id| Some(*player_id) != except_player)
-                    .filter_map(|player_id| {
-                        clients
-                            .get(player_id)
-                            .map(|handle| (*player_id, handle.clone()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        Self::collect_routed_recipients(&room_players, &clients, room_id, except_player)
     }
 
     fn record_canceled_delivery(&self, player_id: PlayerId) {
@@ -2399,21 +2415,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         // baselines, which take the write side of the same room lock.
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-
-        let recipients = room_players
-            .get(room_id)
-            .map(|players| {
-                players
-                    .iter()
-                    .filter(|player_id| *player_id != except_player)
-                    .filter_map(|player_id| {
-                        clients
-                            .get(player_id)
-                            .map(|handle| (*player_id, handle.clone()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let recipients =
+            Self::collect_routed_recipients(&room_players, &clients, room_id, Some(except_player));
 
         let message = build_message();
         drop(clients);

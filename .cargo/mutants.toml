@@ -45,9 +45,10 @@ additional_cargo_test_args = ["--profile", "mutants"]
 #
 # Standing rules (enforced by tests/ci_config_tests.rs::
 # test_mutation_oracle_does_not_use_all_features): keep `--lib` in
-# `additional_cargo_args`; never re-add `--all-features`; if a scoped module ever
-# gains another feature gate, add only the exact minimal feature here and to the
-# test's allowed set.
+# `additional_cargo_args`; never re-add `--all-features`. If production behavior
+# in a scoped module gains another feature gate, add only that exact minimal
+# feature here and to the test's allowed set. Benchmark/test-only feature gates
+# may instead be excluded narrowly below with an explicit rationale.
 additional_cargo_args = ["--lib", "--features", "trace-validation"]
 
 # High-signal pure-logic modules, plus the delivery contract core.
@@ -81,7 +82,8 @@ exclude_globs = [
     "fuzz/**",
 ]
 
-# Provably-equivalent mutants — excluded with justification (not test gaps).
+# Out-of-scope or provably-equivalent mutants — excluded with justification
+# (not test gaps).
 #
 # `replan_host_session` re-elects the host via `elect_host(electable_authority,
 # &electable)`. The `electable_authority` filter (`session_policy.rs:880`,
@@ -94,6 +96,13 @@ exclude_globs = [
 # (see its doc comment) and `replan_prefers_electable_authority_over_earliest_joiner`
 # pins the authority-preference contract regardless.
 exclude_re = [
+    # This constructor exists only behind `allocation-tracking` so the external
+    # allocation benchmark can build a production-shaped classified handle.
+    # The mutation oracle deliberately enables only `trace-validation`, while
+    # benchmark targets are excluded above. Its behavior is proved by the
+    # benchmark's attempt/enqueue/drain ledgers; mutating it under this oracle
+    # is necessarily invisible, just like mutating a file under `benches/**`.
+    "replace ClientDeliveryHandle::classified_for_allocation_benchmark -> Self with Default::default\\(\\)",
     "replace == with != in EnhancedGameServer::replan_host_session",
     # `MessageCoordinator::handle_membership_update`'s default body IS
     # `let _ = update; Ok(())` — the "replace -> anyhow::Result<()> with
