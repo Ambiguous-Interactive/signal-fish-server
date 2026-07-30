@@ -452,7 +452,7 @@ impl DeliveryAccountability {
         // that overlap another range in this same report.
         let mut report_ranges: BTreeMap<(PlayerId, u32), Vec<(u64, u64)>> = BTreeMap::new();
         let mut causal_counts = [0u64; 4];
-        let mut unsupported_seen = false;
+        let mut unsupported_gap = None;
         for gap in &report.gaps {
             self.validate_gap(gap)?;
             let count = gap
@@ -466,11 +466,16 @@ impl DeliveryAccountability {
                 DeliveryGapReason::LatestSuperseded => 0,
                 DeliveryGapReason::LatestDroppedFull => 1,
                 DeliveryGapReason::VolatileDropped => 2,
+                // A report may carry several coalesced unsupported-format
+                // ranges, and one range may span many sequences: the server
+                // merges consecutive omissions from a sender so accountability
+                // does not cost a recipient one frame per relayed message
+                // (server issue #212). Exactness is still enforced — by
+                // `validate_gap`, by the in-report overlap check below, and by
+                // the counter-delta comparison — so nothing here needs to bound
+                // the shape of the ranges.
                 DeliveryGapReason::UnsupportedFormat => {
-                    if unsupported_seen || gap.from_seq != gap.to_seq || report.gaps.len() != 1 {
-                        return Err("delivery accountability violation: unsupported-format report must name exactly one sequence".to_string());
-                    }
-                    unsupported_seen = true;
+                    unsupported_gap = Some(gap.clone());
                     3
                 }
             };
@@ -534,8 +539,10 @@ impl DeliveryAccountability {
             gaps.push(gap.clone());
             gaps.sort_unstable_by_key(|candidate| candidate.from_seq);
         }
-        if unsupported_seen {
-            self.unadvised_unsupported_gap = report.gaps.first().cloned();
+        if unsupported_gap.is_some() {
+            // The advisory is authorized by an unsupported-format range having
+            // been reported, whichever position it occupied in the report.
+            self.unadvised_unsupported_gap = unsupported_gap;
         }
         self.counters = Some(report.per_class);
         for gap in &report.gaps {
@@ -1592,9 +1599,12 @@ mod tests {
         terminal.record_report(&report).unwrap();
         terminal.observe_terminal();
 
+        // The server coalesces consecutive undeliverable omissions and lets the
+        // resulting range ride along in an already-queued report (issue #212),
+        // so a mixed-reason report is a frame the current server emits.
         let mut mixed = DeliveryAccountability::default();
         mixed.note_player_joined(&player(sender, 1)).unwrap();
-        assert!(mixed
+        mixed
             .record_report(&DeliveryReportPayload {
                 per_class: {
                     let mut value = counters_with_unsupported(1);
@@ -1603,7 +1613,66 @@ mod tests {
                 },
                 gaps: vec![unsupported_gap(sender, 1), gap(sender, 2, 2)],
             })
-            .is_err());
+            .unwrap();
+        mixed.observe_server_message(true).unwrap();
+    }
+
+    /// Coalesced ranges keep accountability exact rather than loosening it: a
+    /// multi-sequence unsupported-format range is accepted only when the
+    /// counters move by exactly the sequences it names (issue #212).
+    #[test]
+    fn coalesced_unsupported_ranges_are_accepted_only_when_counters_match() {
+        let sender = id(9);
+        let coalesced = |count: u64| DeliveryReportPayload {
+            per_class: counters_with_unsupported(count),
+            gaps: vec![DeliveryGap {
+                from_player: sender,
+                epoch: 1,
+                from_seq: 4,
+                to_seq: 6,
+                reason: DeliveryGapReason::UnsupportedFormat,
+            }],
+        };
+
+        let mut exact = DeliveryAccountability::default();
+        exact.note_player_joined(&player(sender, 1)).unwrap();
+        exact.record_report(&coalesced(3)).unwrap();
+        exact.observe_server_message(true).unwrap();
+
+        for understated in [2, 4] {
+            let mut skewed = DeliveryAccountability::default();
+            skewed.note_player_joined(&player(sender, 1)).unwrap();
+            assert!(
+                skewed.record_report(&coalesced(understated)).is_err(),
+                "a {understated}-count report for a 3-sequence range must be rejected"
+            );
+        }
+
+        // Two coalesced ranges from one sender in one report, as the pending
+        // report emits when an omission cannot merge into the previous range.
+        let mut split = DeliveryAccountability::default();
+        split.note_player_joined(&player(sender, 1)).unwrap();
+        split
+            .record_report(&DeliveryReportPayload {
+                per_class: counters_with_unsupported(5),
+                gaps: vec![
+                    DeliveryGap {
+                        from_player: sender,
+                        epoch: 1,
+                        from_seq: 1,
+                        to_seq: 2,
+                        reason: DeliveryGapReason::UnsupportedFormat,
+                    },
+                    DeliveryGap {
+                        from_player: sender,
+                        epoch: 1,
+                        from_seq: 7,
+                        to_seq: 9,
+                        reason: DeliveryGapReason::UnsupportedFormat,
+                    },
+                ],
+            })
+            .unwrap();
     }
 
     #[test]

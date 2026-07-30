@@ -444,7 +444,7 @@ jobs:
 
       - name: Configure sccache
         id: sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
         continue-on-error: true
 
       - name: Verify sccache is working
@@ -491,7 +491,7 @@ jobs:
         run: cargo publish --locked
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.85.2
+        uses: taiki-e/install-action@v2.85.4
         with:
           tool: cargo-sbom
 

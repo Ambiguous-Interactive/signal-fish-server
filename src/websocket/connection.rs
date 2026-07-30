@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
-use super::sending::send_immediate_server_message;
+use super::sending::{send_immediate_server_message, write_pending_unsupported_report};
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
 use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
 
@@ -41,6 +41,9 @@ fn random_ping_nonce() -> u64 {
 #[repr(u32)]
 enum RegisteredConnectionCloseStep {
     FlushQueuedMessages,
+    /// The coalesced unsupported-format report, written after the drain because
+    /// the drain itself can discover further undeliverable payloads.
+    FinalDeliveryReport,
     SemanticCloseFrame,
     SinkClose,
     Count,
@@ -334,6 +337,46 @@ where
     tokio::time::timeout(CLOSE_WRITE_TIMEOUT, operation).await
 }
 
+/// Write whatever exact omission accounting is still coalesced for this
+/// recipient, once no further frame will carry it.
+///
+/// Best-effort by nature — a wedged socket is one reason this path runs — but on
+/// a healthy teardown it means the last burst of undeliverable data is still
+/// reported rather than dying with the connection. Callers must invoke this
+/// after the last queued write on their path, because each write can discover
+/// further undeliverable payloads whose advisory (and therefore whose report
+/// flush) the rate limiter may suppress.
+async fn flush_pending_unsupported_report(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    rx: &OutboundReceiver,
+    player_id: &PlayerId,
+) {
+    let Some(report) = rx.pending_unsupported_report() else {
+        return;
+    };
+    // Counted as its own step in `RegisteredConnectionCloseStep`, so the derived
+    // shutdown settle timeout covers this budget too. The ranges are retired
+    // only after the frame is written, so a timed-out or failed write leaves the
+    // accounting recorded rather than silently dropped.
+    match registered_close_write_timeout(
+        RegisteredConnectionCloseStep::FinalDeliveryReport,
+        send_immediate_server_message(
+            sender,
+            &ServerMessage::DeliveryReport(Box::new(report.clone())),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(())) => rx.commit_pending_unsupported_report(&report),
+        Ok(Err(err)) => {
+            tracing::debug!(%player_id, error = %err, "Failed to flush final delivery report");
+        }
+        Err(_elapsed) => {
+            tracing::debug!(%player_id, "Timed out flushing final delivery report");
+        }
+    }
+}
+
 /// Final actions of the send task once a server-side close was requested.
 ///
 /// - Slow consumer: the queue contents are abandoned **by design** (the
@@ -372,6 +415,10 @@ async fn finalize_closed_connection(
 
     match reason {
         Some(CloseReason::SlowConsumer) => {
+            // Nothing more will be written from the queue on this path — it is
+            // abandoned below — so the coalesced omissions are flushed here,
+            // before the counters that make the farewell terminal.
+            flush_pending_unsupported_report(sender, rx, player_id).await;
             // `send_batch` pops messages one at a time, so a cancelled
             // in-flight write leaves everything unsent inside the batcher;
             // the count below misses at most the single message that was
@@ -493,6 +540,11 @@ async fn finalize_closed_connection(
                     );
                 }
             }
+            // After the drain, not before it: the drain itself writes queued
+            // items and can discover further undeliverable payloads, and a
+            // suppressed advisory leaves those coalesced. Flushing first would
+            // leave exactly the tail this change exists to preserve unreported.
+            flush_pending_unsupported_report(sender, rx, player_id).await;
         }
     }
 
@@ -1087,6 +1139,10 @@ pub(super) async fn handle_socket(
             () = async {
                 let batch_interval = Duration::from_millis(batch_interval_ms.max(1));
                 loop {
+                    // Read outside the `select!`: the arm below only needs the
+                    // deadline value, and borrowing `rx` inside the select would
+                    // conflict with the `&mut` receive arm.
+                    let pending_flush_deadline = rx.pending_unsupported_flush_deadline();
                     let received = tokio::select! {
                         biased;
                         command = ping_command_rx.recv() => {
@@ -1142,6 +1198,31 @@ pub(super) async fn handle_socket(
                                 }
                             }
                             break;
+                        }
+                        // An idle recipient must still learn about coalesced
+                        // omissions within a bounded time: without this the last
+                        // range of a burst would wait for the next omission or
+                        // for the connection to close. `recv`/`recv_batched` are
+                        // cancel-safe, so losing this race costs nothing.
+                        () = async {
+                            match pending_flush_deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            let current_player_id =
+                                *effective_player_id_for_send.read().await;
+                            if write_pending_unsupported_report(
+                                &mut sender,
+                                &rx,
+                                &current_player_id,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
                         }
                         received = async {
                             if batching_enabled {

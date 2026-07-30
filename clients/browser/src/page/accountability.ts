@@ -345,7 +345,7 @@ export class DeliveryAccountability {
     }
     const reportRanges = new Map<string, ParsedGap[]>();
     const causalCounts = [0, 0, 0, 0];
-    let unsupportedSeen = false;
+    let unsupportedGap: ParsedGap | null = null;
     for (const gap of gaps) {
       this.validateGap(gap);
       const count = gap.toSeq - gap.fromSeq + 1;
@@ -361,10 +361,13 @@ export class DeliveryAccountability {
               ? 2
               : 3;
       if (index === 3) {
-        if (unsupportedSeen || gap.fromSeq !== gap.toSeq || gaps.length !== 1) {
-          violation('unsupported-format report must name exactly one sequence');
-        }
-        unsupportedSeen = true;
+        // A report may carry several coalesced unsupported-format ranges, and
+        // one range may span many sequences: the server merges consecutive
+        // omissions from a sender so accountability does not cost a recipient
+        // one frame per relayed message (server issue #212). Exactness is still
+        // enforced by validateGap, the in-report overlap check below, and the
+        // counter-delta comparison.
+        unsupportedGap = gap;
       }
       causalCounts[index] = (causalCounts[index] ?? 0) + count;
       if (!Number.isSafeInteger(causalCounts[index])) {
@@ -409,8 +412,10 @@ export class DeliveryAccountability {
       pending.sort((left, right) => left.fromSeq - right.fromSeq);
       this.pendingGaps.set(key, pending);
     }
-    if (unsupportedSeen) {
-      this.unadvisedUnsupportedGap = gaps[0] ?? null;
+    if (unsupportedGap !== null) {
+      // The advisory is authorized by an unsupported-format range having been
+      // reported, whichever position it occupied in the report.
+      this.unadvisedUnsupportedGap = unsupportedGap;
     }
     this.counters = nextCounters;
     for (const gap of gaps) {

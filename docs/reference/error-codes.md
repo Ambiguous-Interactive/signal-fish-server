@@ -80,7 +80,7 @@ establishment.
 | `SLOW_CONSUMER` | The delivery contract failed closed: reliable queue/sojourn timed out, a selected socket write stopped progressing within `websocket.max_sojourn_ms`, or the server could not preserve exact report/control ordering. The best-effort error is followed by authoritative close code `4002 slow_consumer`. |
 | `ACTIVITY_TIMEOUT` | The server could not write its WebSocket Ping within the bounded write timeout, the connection missed the matching Pong deadline, or the activity reaper (`server.ping_timeout`) observed no inbound traffic within its window. Distinct from `CONNECTION_IDLE_TIMEOUT` (the socket-level `websocket.idle_timeout_secs` close). Compliant WebSocket stacks answer protocol Pings automatically; clients should still send application `Ping` messages when server probes are disabled. |
 | `SDK_VERSION_UNSUPPORTED` | The SDK version is no longer supported. Upgrade to the latest version. |
-| `UNSUPPORTED_GAME_DATA_FORMAT` | A payload could not be represented in the recipient's negotiated format. For v3, an exact `DeliveryReport` gap with reason `unsupported_format` is written first; this supplemental error is best effort, and a failed error write disconnects without exposing a successor. |
+| `UNSUPPORTED_GAME_DATA_FORMAT` | A payload could not be represented in the recipient's negotiated format. For v3, an exact `DeliveryReport` gap with reason `unsupported_format` covers the omission and is written before this supplemental error; consecutive omissions from one sender coalesce into one range, so the report count does not scale with the relayed message count. This supplemental error is best effort, and a failed error write disconnects without exposing a successor. |
 
 ### Validation Errors (2xxx)
 

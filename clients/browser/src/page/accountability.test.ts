@@ -1078,16 +1078,43 @@ test('unsupported advisory requires a prior report but not adjacency', () => {
   terminal.recordReport(report);
   terminal.observeTerminal();
 
+  // The server coalesces consecutive undeliverable omissions and lets the
+  // resulting range ride along in an already-queued report (server issue #212),
+  // so a mixed-reason report is a frame the current server emits.
   const mixedCounters = countersWithUnsupported(1);
   (mixedCounters['latest'] as Record<string, unknown>)['superseded'] = 1;
-  expectViolation(
-    () =>
-      joinedState().recordReport({
-        per_class: mixedCounters,
-        gaps: [unsupportedGap(1), gap(2, 2)],
-      }),
-    'unsupported-format report must name exactly one sequence',
-  );
+  const mixed = joinedState();
+  mixed.recordReport({
+    per_class: mixedCounters,
+    gaps: [unsupportedGap(1), gap(2, 2)],
+  });
+  mixed.observeServerMessage(true);
+});
+
+test('coalesced unsupported-format ranges are accepted only when counters match', () => {
+  const coalesced = (count: number): Record<string, unknown> => ({
+    per_class: countersWithUnsupported(count),
+    gaps: [
+      {
+        from_player: SENDER,
+        epoch: 1,
+        from_seq: 4,
+        to_seq: 6,
+        reason: 'unsupported_format',
+      },
+    ],
+  });
+
+  const exact = joinedState();
+  exact.recordReport(coalesced(3));
+  exact.observeServerMessage(true);
+
+  for (const understated of [2, 4]) {
+    expectViolation(
+      () => joinedState().recordReport(coalesced(understated)),
+      'do not match exact gap units',
+    );
+  }
 });
 
 test('browser GameData send API validates before invoking the wire callback', () => {

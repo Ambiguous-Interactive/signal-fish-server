@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Count the teardown's final delivery report as its own registered close-write
+  step, so `REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS` is 4 and the derived
+  `registered_connection_shutdown_settle_timeout()` (and the binary's graceful
+  shutdown budget) still covers the whole sequence. A wedged socket can therefore
+  take one more `CONNECTION_CLOSE_WRITE_TIMEOUT` (1 s) to reclaim; a healthy one
+  is unaffected.
 - Require every workflow `apt-get update` to first drop the Azure CLI and
   Microsoft prod source lists, enforced by a sweep test over all workflows.
   Those mirrors periodically break `apt-get update` on GitHub runners; five call
@@ -27,8 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symbolization was active, so an unsymbolized report is self-describing rather
   than an undiagnosable stack of raw addresses.
 - Bump the pinned GitHub Actions group (`actions/checkout` 7.0.1,
-  `taiki-e/install-action` 2.85.2, and `actions/upload-artifact`), carrying
-  Dependabot #202 forward.
+  `taiki-e/install-action` 2.85.4, `docker/login-action` 4.6.0,
+  `mozilla-actions/sccache-action` 0.0.11, and `actions/upload-artifact`),
+  carrying Dependabot #202 and #215 forward.
 - Refresh the compatible dependency set (Tokio 1.53.1, serde 1.0.229, futures
   0.3.33, clap 4.6.4, hdrhistogram 7.6.0 and others). The `tokio-tungstenite`
   0.30, `serial_test` 4.0, `base64` 0.23, and `syn` 3.0 declarations proposed
@@ -37,10 +44,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a 1.89.0 MSRV, the third adds a second `base64` used by nothing but
   this crate, and the fourth removes `syn::Arm::guard` without deduplicating
   anything. The locked graph keeps exactly one WebSocket and one base64
-  implementation.
+  implementation. Dependabot #214 re-proposes all four; each rejection was
+  re-measured against the current graph rather than carried forward on the
+  earlier note — the PR's own lockfile adds `tokio-tungstenite`/`tungstenite`
+  0.30 beside the 0.29 pair axum still requires and a second `base64`,
+  `serial_test` 4.0.1 declares `rust-version = 1.93.1`, and compiling against
+  `syn` 3.0 fails with `no field 'guard' on type '&Arm'` while syn 2 stays in
+  the graph for `bytecheck_derive`, `derive_more-impl`, and `educe` regardless.
 
 ### Fixed
 
+- Stop unsupported-format accountability from evicting the recipient it exists
+  to protect (issue #212). A binary payload that a peer's negotiated encoding
+  cannot represent was reported with one `DeliveryReport` frame per omitted
+  message, so a JSON peer in a MessagePack room paid **5.4x** the wire bytes of
+  the compact frames its room-mates received (2,096,502 against 389,618 bytes
+  for a 5,000-message burst). Under an equal 32 KiB/s bandwidth fault that
+  difference is the difference between surviving and being disconnected as a
+  slow consumer: the weaker peer was evicted after 703 of 5,000 messages while
+  the compatible peer was unaffected. Consecutive omissions from one sender and
+  delivery class now coalesce into one exact range under the same merge rule the
+  queue already applied to its own gap reports, written before the next
+  delivered frame, with the rate-limited advisory, immediately after a queued
+  report, at most one second after the first omission when the recipient is
+  otherwise idle, or after the teardown drain. The ranges are retired only once
+  the frame is on the wire, so a write cancelled by the connection's close signal
+  re-reports them instead of losing a whole coalesced burst.
+  The same burst now costs 2,218 bytes in four
+  reports (0.01x) with all 5,000 sequences still accounted for exactly, and the
+  experiment passes under the single-core contention that reproduced the CI
+  failure. Wire-visible for protocol v3 only: reports may now carry several
+  `unsupported_format` ranges, which the documented "union of ranges covers
+  every missing sequence" contract already required clients to handle. Both
+  in-repo reference clients validated the old shape (`from_seq == to_seq` and a
+  single gap per report) and would have rejected the server's own frames as
+  accountability violations; they now validate the ranges, with tests proving a
+  coalesced range is accepted only when the counters move by exactly the
+  sequences it names. The **published** `signal-fish-client` 0.9.0 carries the
+  same over-strict check and needs the same change
+  (`signal-fish-client-rust` issue #81): `docs/protocol.md` has never promised a
+  shape for these reports — it requires clients to authorize a hole from the
+  union of ranges, and `DeliveryGap` is defined as an inclusive range — so the
+  server now emits what the documented contract always allowed. Until a client
+  release ships, a 0.9.0 client reports an accountability violation instead of
+  recording the gap, and only on the error path that produces these reports at
+  all: a convertible payload is still delivered as a JSON fallback with no
+  report, so this needs an unrepresentable (reserved/`rkyv`) or malformed
+  payload to trigger.
 - Make the chaos proxy's bandwidth fault rate-accurate. Pacing slept a fixed
   interval per chunk, so the pump's own read/write/scheduling latency was added
   to every period and the achieved rate drifted below nominal under load — a

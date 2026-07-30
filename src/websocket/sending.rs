@@ -311,11 +311,13 @@ impl<'a> SendAccounting<'a> {
         self.resolved = true;
     }
 
-    fn complete_unsupported(
-        &mut self,
-        metadata: Option<DataDeliveryMetadata>,
-    ) -> Option<crate::protocol::DeliveryReportPayload> {
-        let report = metadata.map(|metadata| self.receiver.record_unsupported_format(metadata));
+    /// Account one undeliverable payload, coalescing its exact range. `false`
+    /// means the pending report has to be written before this range can be held
+    /// (see [`Self::hold_unsupported`]); the omission itself is counted either
+    /// way.
+    fn complete_unsupported(&mut self, metadata: Option<DataDeliveryMetadata>) -> bool {
+        let coalesced =
+            metadata.is_none_or(|metadata| self.receiver.record_unsupported_format(metadata));
         if metadata.is_none() {
             if let Some(class) = self.class {
                 self.receiver.record_unsupported_class(class);
@@ -323,7 +325,14 @@ impl<'a> SendAccounting<'a> {
         }
         self.record_drop_metrics();
         self.resolved = true;
-        report
+        coalesced
+    }
+
+    /// Hold an omission whose range only fits once the pending report is written.
+    fn hold_unsupported(&self, metadata: Option<DataDeliveryMetadata>) {
+        if let Some(metadata) = metadata {
+            self.receiver.hold_unsupported_format(metadata);
+        }
     }
 
     fn record_drop_metrics(&self) {
@@ -420,20 +429,29 @@ async fn notify_or_close_on_fallback_failure(
                 reason = %reason,
                 "Game data undeliverable to this recipient; sending an error notice instead"
             );
-            let report = accounting.complete_unsupported(metadata);
-            if recipient_supports_v3 {
-                let Some(report) = report else {
-                    tracing::error!(
-                        %player_id,
-                        %from_player,
-                        "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
-                    );
-                    return Err(());
-                };
-                let report = ServerMessage::DeliveryReport(Box::new(report));
-                send_text_message(sender, &report, player_id).await?;
+            let coalesced = accounting.complete_unsupported(metadata);
+            if recipient_supports_v3 && metadata.is_none() {
+                tracing::error!(
+                    %player_id,
+                    %from_player,
+                    "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
+                );
+                return Err(());
+            }
+            if !coalesced {
+                // The pending report is full, or this range cannot join it:
+                // write what is pending, then hold this range in the emptied
+                // report. Holding only after the write keeps the two sets
+                // disjoint if the write is cancelled.
+                write_pending_unsupported_report(sender, accounting.receiver, player_id).await?;
+                accounting.hold_unsupported(metadata);
             }
             if let Some(suppressed) = accounting.unsupported_notice(from_player) {
+                // The advisory must never precede the exact report that
+                // explains it, so the rate-limited notice is also the pending
+                // report's flush cadence: at most one report per sender per
+                // second instead of one per omitted message.
+                write_pending_unsupported_report(sender, accounting.receiver, player_id).await?;
                 let suppressed = if suppressed == 0 {
                     String::new()
                 } else {
@@ -452,6 +470,32 @@ async fn notify_or_close_on_fallback_failure(
             Ok(SendDisposition::AccountedDrop)
         }
     }
+}
+
+/// Write the recipient's coalesced unsupported-format report, if any, and retire
+/// its ranges only once the frame is on the wire.
+///
+/// Peek-write-commit rather than take-then-write: the send task's close
+/// `select!` can cancel this at its await, and losing the only copy of a
+/// coalesced burst would silently drop accountability for every omission in it.
+/// A cancelled write leaves the ranges pending for the next flush or for the
+/// connection's teardown.
+pub(super) async fn write_pending_unsupported_report(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    receiver: &OutboundReceiver,
+    player_id: &PlayerId,
+) -> Result<(), ()> {
+    let Some(report) = receiver.pending_unsupported_report() else {
+        return Ok(());
+    };
+    send_text_message(
+        sender,
+        &ServerMessage::DeliveryReport(Box::new(report.clone())),
+        player_id,
+    )
+    .await?;
+    receiver.commit_pending_unsupported_report(&report);
+    Ok(())
 }
 
 pub(super) async fn send_text_message(
