@@ -49,14 +49,132 @@ pub(super) fn preflight_binary_fallback(
     }
 }
 
-/// Why a binary game-data fallback could not be delivered.
-enum BinaryFallbackError {
-    /// The payload cannot be represented for this recipient (e.g. an rkyv
-    /// payload relayed to a JSON-only client). The connection is healthy; the
-    /// recipient must be told loudly instead of silently receiving nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SerializationWork {
+    pub(super) json_encodes: u64,
+    pub(super) message_pack_encodes: u64,
+    pub(super) message_pack_decodes: u64,
+}
+
+pub(super) struct MaterializedFrame {
+    pub(super) frame: Message,
+    pub(super) work: SerializationWork,
+    binary_encode_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) enum GameDataMaterializationError {
+    InvalidV3Stamp,
+    Serialization(String),
     Undeliverable(String),
-    /// The socket write failed; the connection is closing.
-    ConnectionClosed,
+}
+
+/// Apply the exact per-recipient game-data wire projection synchronously.
+///
+/// Production calls this immediately before the socket write. The allocation
+/// benchmark sends the same returned Axum frame to an in-memory ledger, so the
+/// measurement cannot drift from v2 field stripping, the v3 binary envelope,
+/// or MessagePack-to-JSON fallback.
+pub(super) fn materialize_game_data_frame(
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+    recipient_format: GameDataEncoding,
+    fallback_preflight: BinaryFallbackPreflight,
+) -> Result<MaterializedFrame, GameDataMaterializationError> {
+    match message {
+        ServerMessage::GameData {
+            from_player,
+            data,
+            seq,
+            epoch,
+            class,
+            key,
+        } => {
+            let frame = if !recipient_supports_v3
+                && (seq.is_some() || epoch.is_some() || class.is_some() || key.is_some())
+            {
+                serialize_json_frame(&LegacyGameDataEnvelope::new(*from_player, data))
+            } else {
+                serialize_json_frame(message)
+            }
+            .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
+            Ok(MaterializedFrame {
+                frame,
+                work: SerializationWork {
+                    json_encodes: 1,
+                    ..SerializationWork::default()
+                },
+                binary_encode_error: None,
+            })
+        }
+        ServerMessage::GameDataBinary {
+            from_player,
+            encoding,
+            payload,
+            seq,
+            epoch,
+        } => {
+            let (seq, epoch) = if recipient_supports_v3 {
+                match (*seq, *epoch) {
+                    (Some(seq), Some(epoch)) => (Some(seq), Some(epoch)),
+                    _ => return Err(GameDataMaterializationError::InvalidV3Stamp),
+                }
+            } else {
+                (None, None)
+            };
+
+            let binary_encode_error = if recipient_format == *encoding {
+                match encode_binary_game_data(*from_player, *encoding, payload, seq, epoch) {
+                    Ok(frame_bytes) => {
+                        return Ok(MaterializedFrame {
+                            frame: Message::Binary(frame_bytes.into()),
+                            work: SerializationWork {
+                                message_pack_encodes: u64::from(
+                                    seq.is_some() || *encoding == GameDataEncoding::MessagePack,
+                                ),
+                                ..SerializationWork::default()
+                            },
+                            binary_encode_error: None,
+                        });
+                    }
+                    Err(error) => Some(error),
+                }
+            } else {
+                None
+            };
+
+            let data = match fallback_preflight {
+                BinaryFallbackPreflight::NotNeeded => decode_binary_to_json(*encoding, payload)
+                    .map_err(GameDataMaterializationError::Undeliverable)?,
+                BinaryFallbackPreflight::Decoded(data) => data,
+                BinaryFallbackPreflight::Undeliverable(reason) => {
+                    return Err(GameDataMaterializationError::Undeliverable(reason));
+                }
+            };
+            let fallback = ServerMessage::GameData {
+                from_player: *from_player,
+                data,
+                seq,
+                epoch,
+                class: None,
+                key: None,
+            };
+            let frame = serialize_json_frame(&fallback)
+                .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
+            Ok(MaterializedFrame {
+                frame,
+                work: SerializationWork {
+                    json_encodes: 1,
+                    message_pack_decodes: u64::from(*encoding == GameDataEncoding::MessagePack),
+                    ..SerializationWork::default()
+                },
+                binary_encode_error,
+            })
+        }
+        _ => Err(GameDataMaterializationError::Serialization(
+            "game-data materializer received a non-game-data message".to_string(),
+        )),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -97,122 +215,83 @@ pub(super) async fn send_single_message(
         ServerMessage::GameDataBinary {
             from_player,
             encoding,
-            payload,
             seq,
             epoch,
+            ..
         } => {
-            // Per-recipient v3 gate: the relay stamp (seq + incarnation epoch)
-            // reaches only recipients that negotiated protocol v3+ — a pre-v3
-            // (v2) recipient's bytes stay byte-identical to the frozen v2 wire.
-            let (seq, epoch) = if recipient_supports_v3 {
-                match (*seq, *epoch) {
-                    (Some(seq), Some(epoch)) => (Some(seq), Some(epoch)),
-                    _ => {
-                        tracing::error!(
-                            %player_id,
-                            %from_player,
-                            seq = ?seq,
-                            epoch = ?epoch,
-                            "Protocol-v3 binary game data lacked a complete delivery stamp; closing fail-closed"
-                        );
-                        return Err(());
-                    }
-                }
-            } else {
-                (None, None)
-            };
-            if recipient_format == *encoding {
-                match encode_binary_game_data(*from_player, *encoding, payload, seq, epoch) {
-                    Ok(frame_bytes) => {
-                        if sender
-                            .send(Message::Binary(frame_bytes.into()))
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!(
-                                %player_id,
-                                "Failed to send binary game data, connection closed"
-                            );
-                            return Err(());
-                        }
-                    }
-                    Err(err) => {
+            match materialize_game_data_frame(
+                message.as_ref(),
+                recipient_supports_v3,
+                recipient_format,
+                fallback_preflight,
+            ) {
+                Ok(materialized) => {
+                    if let Some(error) = materialized.binary_encode_error {
                         tracing::error!(
                             %player_id,
                             %from_player,
                             encoding = ?encoding,
-                            error = %err,
+                            %error,
                             "Failed to encode binary game data; attempting JSON fallback"
                         );
-                        let fallback = send_binary_fallback(
-                            sender,
-                            *from_player,
-                            *encoding,
-                            payload,
-                            seq,
-                            epoch,
-                            player_id,
-                            fallback_preflight,
-                        )
-                        .await;
-                        disposition = notify_or_close_on_fallback_failure(
-                            sender,
-                            fallback,
-                            *from_player,
-                            *encoding,
-                            player_id,
-                            recipient_supports_v3,
-                            metadata,
-                            accounting,
-                        )
-                        .await?;
+                    }
+                    if sender.send(materialized.frame).await.is_err() {
+                        tracing::warn!(
+                            %player_id,
+                            "Failed to send binary game data, connection closed"
+                        );
+                        return Err(());
                     }
                 }
-            } else {
-                let fallback = send_binary_fallback(
-                    sender,
-                    *from_player,
-                    *encoding,
-                    payload,
-                    seq,
-                    epoch,
-                    player_id,
-                    fallback_preflight,
-                )
-                .await;
-                disposition = notify_or_close_on_fallback_failure(
-                    sender,
-                    fallback,
-                    *from_player,
-                    *encoding,
-                    player_id,
-                    recipient_supports_v3,
-                    metadata,
-                    accounting,
-                )
-                .await?;
+                Err(GameDataMaterializationError::InvalidV3Stamp) => {
+                    tracing::error!(
+                        %player_id,
+                        %from_player,
+                        seq = ?seq,
+                        epoch = ?epoch,
+                        "Protocol-v3 binary game data lacked a complete delivery stamp; closing fail-closed"
+                    );
+                    return Err(());
+                }
+                Err(GameDataMaterializationError::Serialization(error)) => {
+                    tracing::error!(
+                        %player_id,
+                        %from_player,
+                        encoding = ?encoding,
+                        %error,
+                        "Failed to serialize binary game data fallback"
+                    );
+                    return Err(());
+                }
+                Err(GameDataMaterializationError::Undeliverable(reason)) => {
+                    disposition = notify_on_undeliverable(
+                        sender,
+                        *from_player,
+                        *encoding,
+                        reason,
+                        player_id,
+                        recipient_supports_v3,
+                        metadata,
+                        accounting,
+                    )
+                    .await?;
+                }
             }
         }
-        // A stamped text relay bound for a pre-v3 (v2) recipient: serialize the
-        // borrowed legacy shadow (seq + epoch stripped) instead of cloning the
-        // payload, keeping pre-v3 bytes identical at ~the same cost as the
-        // pre-v3 serialization itself. v3 recipients (and unstamped messages)
-        // fall through to the shared-Arc path below untouched. The guard fires
-        // when EITHER stamp is present (they are stamped together today, but
-        // keying on both — not just `seq` — keeps the strip robust if the fields
-        // ever diverge; `seq`/`epoch` are referenced only by the guard).
-        ServerMessage::GameData {
-            from_player,
-            data,
-            seq,
-            epoch,
-            class,
-            key,
-        } if (seq.is_some() || epoch.is_some() || class.is_some() || key.is_some())
-            && !recipient_supports_v3 =>
-        {
-            let legacy = LegacyGameDataEnvelope::new(*from_player, data);
-            send_serialized_text(sender, &legacy, player_id).await?;
+        ServerMessage::GameData { .. } => {
+            let materialized = materialize_game_data_frame(
+                message.as_ref(),
+                recipient_supports_v3,
+                recipient_format,
+                fallback_preflight,
+            )
+            .map_err(|error| {
+                tracing::error!(%player_id, ?error, "Failed to serialize game data");
+            })?;
+            if sender.send(materialized.frame).await.is_err() {
+                tracing::warn!(%player_id, "Failed to send message, connection closed");
+                return Err(());
+            }
         }
         // Broadcast room-snapshot frames carry a v3 incarnation `epoch` that
         // must never reach a pre-v3 (v2) recipient (their bytes stay
@@ -373,119 +452,72 @@ impl Drop for SendAccounting<'_> {
     }
 }
 
-async fn send_binary_fallback(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    from_player: PlayerId,
-    encoding: GameDataEncoding,
-    payload: &[u8],
-    seq: Option<u64>,
-    epoch: Option<u32>,
-    player_id: &PlayerId,
-    preflight: BinaryFallbackPreflight,
-) -> Result<(), BinaryFallbackError> {
-    let data = match preflight {
-        BinaryFallbackPreflight::NotNeeded => {
-            decode_binary_to_json(encoding, payload).map_err(BinaryFallbackError::Undeliverable)?
-        }
-        BinaryFallbackPreflight::Decoded(data) => data,
-        BinaryFallbackPreflight::Undeliverable(reason) => {
-            return Err(BinaryFallbackError::Undeliverable(reason));
-        }
-    };
-    // `seq`/`epoch` were already gated per recipient by the caller, so the enum
-    // form serializes correctly for v3 (present) and pre-v3 (absent) alike.
-    let fallback = ServerMessage::GameData {
-        from_player,
-        data,
-        seq,
-        epoch,
-        class: None,
-        key: None,
-    };
-    send_text_message(sender, &fallback, player_id)
-        .await
-        .map_err(|()| BinaryFallbackError::ConnectionClosed)
-}
-
 /// Handle a failed binary fallback without ever silently dropping game data:
-/// a dead socket closes the connection (propagated as `Err`), while a payload
-/// that genuinely cannot be represented for this recipient is counted as
-/// dropped and replaced by an explicit error frame so the recipient knows it
-/// is missing data (e.g. an rkyv-encoded room relayed to a JSON-only client).
-async fn notify_or_close_on_fallback_failure(
+/// a payload that genuinely cannot be represented for this recipient is
+/// counted as dropped and replaced by an explicit error frame so the recipient
+/// knows it is missing data (e.g. an rkyv-encoded room relayed to a JSON-only
+/// client).
+async fn notify_on_undeliverable(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    fallback: Result<(), BinaryFallbackError>,
     from_player: PlayerId,
     encoding: GameDataEncoding,
+    reason: String,
     player_id: &PlayerId,
     recipient_supports_v3: bool,
     metadata: Option<DataDeliveryMetadata>,
     accounting: &mut SendAccounting<'_>,
 ) -> Result<SendDisposition, ()> {
-    match fallback {
-        Ok(()) => Ok(SendDisposition::Written),
-        Err(BinaryFallbackError::ConnectionClosed) => {
-            tracing::warn!(
-                %player_id,
-                %from_player,
-                "Failed to write binary game data fallback, connection closed"
-            );
-            Err(())
-        }
-        Err(BinaryFallbackError::Undeliverable(reason)) => {
-            tracing::warn!(
-                %player_id,
-                %from_player,
-                encoding = ?encoding,
-                reason = %reason,
-                "Game data undeliverable to this recipient; sending an error notice instead"
-            );
-            let coalesced = accounting.complete_unsupported(metadata);
-            if recipient_supports_v3 && metadata.is_none() {
-                tracing::error!(
-                    %player_id,
-                    %from_player,
-                    "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
-                );
-                return Err(());
-            }
-            if !coalesced {
-                // The pending report is full, or this range cannot join it:
-                // write what is pending, then hold this range in the emptied
-                // report. Holding only after the write keeps the two sets
-                // disjoint if the write is cancelled.
-                if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
-                    accounting.record_outbound_progress();
-                }
-                accounting.hold_unsupported(metadata);
-            }
-            if let Some(suppressed) = accounting.unsupported_notice(from_player) {
-                // The advisory must never precede the exact report that
-                // explains it, so the rate-limited notice is also the pending
-                // report's flush cadence: at most one report per sender per
-                // second instead of one per omitted message.
-                if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
-                    accounting.record_outbound_progress();
-                }
-                let suppressed = if suppressed == 0 {
-                    String::new()
-                } else {
-                    format!("; {suppressed} similar advisories suppressed since the last notice")
-                };
-                let notice = ServerMessage::Error {
-                    message: format!(
-                        "Undeliverable game data from player {from_player} \
-                         ({} payload cannot be converted for this connection): {reason}{suppressed}",
-                        encoding.as_wire_str()
-                    ),
-                    error_code: Some(ErrorCode::UnsupportedGameDataFormat),
-                };
-                send_text_message(sender, &notice, player_id).await?;
-                accounting.record_outbound_progress();
-            }
-            Ok(SendDisposition::AccountedDrop)
-        }
+    tracing::warn!(
+        %player_id,
+        %from_player,
+        encoding = ?encoding,
+        reason = %reason,
+        "Game data undeliverable to this recipient; sending an error notice instead"
+    );
+    let coalesced = accounting.complete_unsupported(metadata);
+    if recipient_supports_v3 && metadata.is_none() {
+        tracing::error!(
+            %player_id,
+            %from_player,
+            "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
+        );
+        return Err(());
     }
+    if !coalesced {
+        // The pending report is full, or this range cannot join it:
+        // write what is pending, then hold this range in the emptied
+        // report. Holding only after the write keeps the two sets
+        // disjoint if the write is cancelled.
+        if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
+            accounting.record_outbound_progress();
+        }
+        accounting.hold_unsupported(metadata);
+    }
+    if let Some(suppressed) = accounting.unsupported_notice(from_player) {
+        // The advisory must never precede the exact report that
+        // explains it, so the rate-limited notice is also the pending
+        // report's flush cadence: at most one report per sender per
+        // second instead of one per omitted message.
+        if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
+            accounting.record_outbound_progress();
+        }
+        let suppressed = if suppressed == 0 {
+            String::new()
+        } else {
+            format!("; {suppressed} similar advisories suppressed since the last notice")
+        };
+        let notice = ServerMessage::Error {
+            message: format!(
+                "Undeliverable game data from player {from_player} \
+                         ({} payload cannot be converted for this connection): {reason}{suppressed}",
+                encoding.as_wire_str()
+            ),
+            error_code: Some(ErrorCode::UnsupportedGameDataFormat),
+        };
+        send_text_message(sender, &notice, player_id).await?;
+        accounting.record_outbound_progress();
+    }
+    Ok(SendDisposition::AccountedDrop)
 }
 
 /// Write the recipient's coalesced unsupported-format report, if any, and retire
@@ -553,6 +585,10 @@ async fn send_serialized_text<T: Serialize>(
 
 fn serialize_json_text<T: Serialize>(message: &T) -> Result<String, serde_json::Error> {
     serde_json::to_string(message)
+}
+
+fn serialize_json_frame<T: Serialize>(message: &T) -> Result<Message, serde_json::Error> {
+    serialize_json_text(message).map(|json| Message::Text(json.into()))
 }
 
 /// Borrowed wire shadow of a `ServerMessage::GameData` frame WITHOUT the v3
@@ -723,6 +759,149 @@ mod tests {
             GameDataEncoding::Json,
         )
         .is_unsupported());
+    }
+
+    #[test]
+    fn materializer_projects_exact_recipient_cohorts_and_codec_work() {
+        let data = serde_json::json!({"move": "up", "n": 3});
+        let text = ServerMessage::GameData {
+            from_player: player_a(),
+            data: data.clone(),
+            seq: Some(42),
+            epoch: Some(3),
+            class: Some(crate::protocol::DeliveryClass::Reliable),
+            key: None,
+        };
+
+        let v2_text = materialize_game_data_frame(
+            &text,
+            false,
+            GameDataEncoding::Json,
+            BinaryFallbackPreflight::NotNeeded,
+        )
+        .expect("v2 text projection");
+        assert_eq!(
+            v2_text.frame,
+            serialize_json_frame(&ServerMessage::GameData {
+                from_player: player_a(),
+                data: data.clone(),
+                seq: None,
+                epoch: None,
+                class: None,
+                key: None,
+            })
+            .expect("expected v2 text")
+        );
+        assert_eq!(
+            v2_text.work,
+            SerializationWork {
+                json_encodes: 1,
+                ..SerializationWork::default()
+            }
+        );
+
+        let v3_text = materialize_game_data_frame(
+            &text,
+            true,
+            GameDataEncoding::Json,
+            BinaryFallbackPreflight::NotNeeded,
+        )
+        .expect("v3 text projection");
+        assert_eq!(
+            v3_text.frame,
+            serialize_json_frame(&text).expect("expected v3 text")
+        );
+        assert_eq!(
+            v3_text.work,
+            SerializationWork {
+                json_encodes: 1,
+                ..SerializationWork::default()
+            }
+        );
+
+        let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+        let binary = ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: payload.clone().into(),
+            seq: Some(42),
+            epoch: Some(3),
+        };
+        for supports_v3 in [false, true] {
+            let direct = materialize_game_data_frame(
+                &binary,
+                supports_v3,
+                GameDataEncoding::MessagePack,
+                BinaryFallbackPreflight::NotNeeded,
+            )
+            .expect("direct MessagePack projection");
+            let stamp = supports_v3.then_some((42, 3));
+            assert_eq!(
+                direct.frame,
+                Message::Binary(
+                    encode_binary_game_data(
+                        player_a(),
+                        GameDataEncoding::MessagePack,
+                        &payload,
+                        stamp.map(|value| value.0),
+                        stamp.map(|value| value.1),
+                    )
+                    .expect("expected direct binary")
+                    .into()
+                )
+            );
+            assert_eq!(
+                direct.work,
+                SerializationWork {
+                    message_pack_encodes: 1,
+                    ..SerializationWork::default()
+                }
+            );
+
+            let fallback = materialize_game_data_frame(
+                &binary,
+                supports_v3,
+                GameDataEncoding::Json,
+                preflight_binary_fallback(&binary, GameDataEncoding::Json),
+            )
+            .expect("MessagePack-to-JSON fallback");
+            let expected = ServerMessage::GameData {
+                from_player: player_a(),
+                data: data.clone(),
+                seq: stamp.map(|value| value.0),
+                epoch: stamp.map(|value| value.1),
+                class: None,
+                key: None,
+            };
+            assert_eq!(
+                fallback.frame,
+                serialize_json_frame(&expected).expect("expected fallback text")
+            );
+            assert_eq!(
+                fallback.work,
+                SerializationWork {
+                    json_encodes: 1,
+                    message_pack_decodes: 1,
+                    ..SerializationWork::default()
+                }
+            );
+        }
+
+        assert!(matches!(
+            materialize_game_data_frame(
+                &ServerMessage::GameDataBinary {
+                    from_player: player_a(),
+                    encoding: GameDataEncoding::MessagePack,
+                    payload: payload.into(),
+                    seq: Some(42),
+                    epoch: None,
+                },
+                true,
+                GameDataEncoding::MessagePack,
+                BinaryFallbackPreflight::NotNeeded,
+            ),
+            Err(GameDataMaterializationError::InvalidV3Stamp)
+        ));
     }
 
     fn hex(bytes: &[u8]) -> String {

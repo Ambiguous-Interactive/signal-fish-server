@@ -23,6 +23,55 @@ mod routes;
 mod sending;
 mod token_binding;
 
+/// Narrow, dev-only exports used by the relay serialization benchmarks.
+///
+/// The benchmark drives the production projector immediately upstream of the
+/// socket write. It receives the exact Axum frame plus explicit codec work
+/// counters, avoiding a benchmark-only serialization implementation.
+#[cfg(feature = "allocation-tracking")]
+#[doc(hidden)]
+pub mod allocation_benchmark {
+    use super::sending::{
+        materialize_game_data_frame, preflight_binary_fallback, GameDataMaterializationError,
+    };
+    use crate::protocol::{GameDataEncoding, ServerMessage};
+    use axum::extract::ws::Message;
+
+    pub struct MaterializedFrame {
+        pub frame: Message,
+        pub json_encodes: u64,
+        pub message_pack_encodes: u64,
+        pub message_pack_decodes: u64,
+    }
+
+    pub fn materialize_game_data(
+        message: &ServerMessage,
+        recipient_supports_v3: bool,
+        recipient_format: GameDataEncoding,
+    ) -> Result<MaterializedFrame, String> {
+        let preflight = preflight_binary_fallback(message, recipient_format);
+        let materialized = materialize_game_data_frame(
+            message,
+            recipient_supports_v3,
+            recipient_format,
+            preflight,
+        )
+        .map_err(|error| match error {
+            GameDataMaterializationError::InvalidV3Stamp => {
+                "protocol-v3 binary game data lacked a complete stamp".to_string()
+            }
+            GameDataMaterializationError::Serialization(error)
+            | GameDataMaterializationError::Undeliverable(error) => error,
+        })?;
+        Ok(MaterializedFrame {
+            frame: materialized.frame,
+            json_encodes: materialized.work.json_encodes,
+            message_pack_encodes: materialized.work.message_pack_encodes,
+            message_pack_decodes: materialized.work.message_pack_decodes,
+        })
+    }
+}
+
 // Re-export public API to maintain backward compatibility
 pub use handler::{websocket_handler, websocket_handler_v3};
 pub use metrics::{metrics_handler, prometheus_metrics_handler, MetricsQuery};

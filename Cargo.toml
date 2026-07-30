@@ -173,6 +173,16 @@ name = "relay_allocations"
 harness = false
 required-features = ["allocation-tracking"]
 
+[[bench]]
+name = "relay_serialization_allocations"
+harness = false
+required-features = ["allocation-tracking"]
+
+[[bench]]
+name = "relay_serialization_runtime"
+harness = false
+required-features = ["allocation-tracking"]
+
 [profile.dev]
 debug = 1
 
