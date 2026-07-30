@@ -23,6 +23,8 @@ mod routes;
 mod sending;
 mod token_binding;
 
+pub(crate) use sending::RelayFrameCache;
+
 /// Narrow, dev-only exports used by the relay serialization benchmarks.
 ///
 /// The benchmark drives the production projector immediately upstream of the
@@ -34,7 +36,8 @@ pub mod allocation_benchmark {
     use super::sending::{
         materialize_game_data_frame, preflight_binary_fallback, GameDataMaterializationError,
     };
-    use crate::protocol::{GameDataEncoding, ServerMessage};
+    use crate::coordination::allocation_benchmark::DeliveryMessage;
+    use crate::protocol::GameDataEncoding;
     use axum::extract::ws::Message;
 
     pub struct MaterializedFrame {
@@ -45,16 +48,19 @@ pub mod allocation_benchmark {
     }
 
     pub fn materialize_game_data(
-        message: &ServerMessage,
+        delivery: &DeliveryMessage,
         recipient_supports_v3: bool,
         recipient_format: GameDataEncoding,
     ) -> Result<MaterializedFrame, String> {
-        let preflight = preflight_binary_fallback(message, recipient_format);
+        let message = delivery.message();
+        let relay_cache = delivery.relay_frame_cache();
+        let preflight = preflight_binary_fallback(message, recipient_format, relay_cache);
         let materialized = materialize_game_data_frame(
             message,
             recipient_supports_v3,
             recipient_format,
             preflight,
+            relay_cache,
         )
         .map_err(|error| match error {
             GameDataMaterializationError::InvalidV3Stamp => {

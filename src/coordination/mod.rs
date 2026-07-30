@@ -20,7 +20,7 @@ pub mod room_coordinator;
 #[doc(hidden)]
 pub mod allocation_benchmark {
     pub use super::outbound_queue::{
-        channel_with_metrics, DataDeliveryMetadata, OutboundData, OutboundPayload,
+        channel_with_metrics, DataDeliveryMetadata, DeliveryMessage, OutboundData, OutboundPayload,
         OutboundReceiver, OutboundSender,
     };
 }
@@ -41,8 +41,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 
 use outbound_queue::{
-    DataDeliveryMetadata, EnqueueOutcome as QueueEnqueueOutcome, OutboundData, OutboundPermit,
-    OutboundSender, TryEnqueueError,
+    DataDeliveryMetadata, DeliveryMessage, EnqueueOutcome as QueueEnqueueOutcome, OutboundData,
+    OutboundPermit, OutboundSender, TryEnqueueError,
 };
 
 /// An owned room-event job. The closure is enqueued synchronously, and its
@@ -696,36 +696,52 @@ impl DeliverySender {
         message: Arc<ServerMessage>,
         room_id: Option<RoomId>,
     ) -> Result<QueueEnqueueOutcome, DeliveryTrySendError> {
+        self.try_send_delivery(DeliveryMessage::new(message), room_id)
+    }
+
+    pub(crate) fn try_send_delivery(
+        &self,
+        delivery: DeliveryMessage,
+        room_id: Option<RoomId>,
+    ) -> Result<QueueEnqueueOutcome, DeliveryTrySendError> {
         match &self.0 {
-            DeliverySenderKind::Legacy(sender) => sender
-                .try_send(message)
-                .map(|()| QueueEnqueueOutcome {
-                    enqueued: true,
-                    losses: 0,
-                })
-                .map_err(|error| match error {
-                    tokio::sync::mpsc::error::TrySendError::Full(message) => {
-                        DeliveryTrySendError::Full(message)
-                    }
-                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                        DeliveryTrySendError::Closed
-                    }
-                }),
+            DeliverySenderKind::Legacy(sender) => {
+                let (message, relay_frame_cache) = delivery.into_parts();
+                sender
+                    .try_send(message)
+                    .map(|()| QueueEnqueueOutcome {
+                        enqueued: true,
+                        losses: 0,
+                    })
+                    .map_err(|error| match error {
+                        tokio::sync::mpsc::error::TrySendError::Full(message) => {
+                            DeliveryTrySendError::Full(DeliveryMessage::from_parts(
+                                message,
+                                relay_frame_cache,
+                            ))
+                        }
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            DeliveryTrySendError::Closed
+                        }
+                    })
+            }
             DeliverySenderKind::Classified { sender, generation } => {
-                if is_delivery_transition(message.as_ref()) {
+                if is_delivery_transition(delivery.message()) {
+                    let (message, _) = delivery.into_parts();
                     sender
                         .try_enqueue_transition(message, *generation)
                         .map_err(map_control_queue_error)
                 } else if matches!(
-                    message.as_ref(),
+                    delivery.message(),
                     ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
                 ) {
-                    let data = classify_outbound_data(message, room_id)
+                    let data = classify_outbound_data(delivery, room_id)
                         .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
                     sender
                         .try_enqueue_data_scoped(data, *generation)
                         .map_err(map_data_queue_error)
                 } else {
+                    let (message, _) = delivery.into_parts();
                     sender
                         .try_enqueue_control_scoped(message, room_id, *generation)
                         .map_err(map_control_queue_error)
@@ -734,37 +750,42 @@ impl DeliverySender {
         }
     }
 
-    pub(crate) async fn send(
+    pub(crate) async fn send_delivery(
         &self,
-        message: Arc<ServerMessage>,
+        delivery: DeliveryMessage,
         room_id: Option<RoomId>,
     ) -> Result<QueueEnqueueOutcome, DeliveryTrySendError> {
         match &self.0 {
-            DeliverySenderKind::Legacy(sender) => sender
-                .send(message)
-                .await
-                .map(|()| QueueEnqueueOutcome {
-                    enqueued: true,
-                    losses: 0,
-                })
-                .map_err(|_| DeliveryTrySendError::Closed),
+            DeliverySenderKind::Legacy(sender) => {
+                let (message, _) = delivery.into_parts();
+                sender
+                    .send(message)
+                    .await
+                    .map(|()| QueueEnqueueOutcome {
+                        enqueued: true,
+                        losses: 0,
+                    })
+                    .map_err(|_| DeliveryTrySendError::Closed)
+            }
             DeliverySenderKind::Classified { sender, generation } => {
-                if is_delivery_transition(message.as_ref()) {
+                if is_delivery_transition(delivery.message()) {
+                    let (message, _) = delivery.into_parts();
                     sender
                         .enqueue_transition(message, *generation)
                         .await
                         .map_err(map_control_queue_error)
                 } else if matches!(
-                    message.as_ref(),
+                    delivery.message(),
                     ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
                 ) {
-                    let data = classify_outbound_data(message, room_id)
+                    let data = classify_outbound_data(delivery, room_id)
                         .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
                     sender
                         .enqueue_data_scoped(data, *generation)
                         .await
                         .map_err(map_data_queue_error)
                 } else {
+                    let (message, _) = delivery.into_parts();
                     sender
                         .enqueue_control_scoped(message, room_id, *generation)
                         .await
@@ -866,7 +887,7 @@ impl DeliveryPermit {
 
 #[derive(Debug)]
 pub(crate) enum DeliveryTrySendError {
-    Full(Arc<ServerMessage>),
+    Full(DeliveryMessage),
     Closed,
     AccountabilityUnavailable,
     InvalidMetadata,
@@ -924,10 +945,10 @@ impl ClientDeliveryHandle {
 }
 
 fn classify_outbound_data(
-    message: Arc<ServerMessage>,
+    delivery: DeliveryMessage,
     room_id: Option<RoomId>,
-) -> Result<OutboundData, Arc<ServerMessage>> {
-    let fields = match message.as_ref() {
+) -> Result<OutboundData, DeliveryMessage> {
+    let fields = match delivery.message() {
         ServerMessage::GameData {
             from_player,
             seq,
@@ -942,28 +963,28 @@ fn classify_outbound_data(
             epoch,
             ..
         } => (*from_player, *seq, *epoch, None, None),
-        _ => return Err(message),
+        _ => return Err(delivery),
     };
     let (from_player, seq, epoch, class, key) = fields;
     match (room_id, seq, epoch) {
-        (Some(room_id), Some(seq), Some(epoch)) => Ok(OutboundData::new(
-            message,
-            DataDeliveryMetadata {
+        (Some(room_id), Some(seq), Some(epoch)) => Ok(OutboundData::from_delivery(
+            delivery,
+            Some(DataDeliveryMetadata {
                 class: class.unwrap_or_default(),
                 key,
                 from_player,
                 room_id,
                 epoch,
                 seq,
-            },
+            }),
         )),
         (_, None, None)
             if class.unwrap_or_default() == crate::protocol::DeliveryClass::Reliable
                 && key.is_none() =>
         {
-            Ok(OutboundData::reliable_unstamped(message))
+            Ok(OutboundData::from_delivery(delivery, None))
         }
-        _ => Err(message),
+        _ => Err(delivery),
     }
 }
 
@@ -980,7 +1001,7 @@ fn is_delivery_transition(message: &ServerMessage) -> bool {
 
 fn map_data_queue_error(error: TryEnqueueError<OutboundData>) -> DeliveryTrySendError {
     match error {
-        TryEnqueueError::Full(data) => DeliveryTrySendError::Full(data.message),
+        TryEnqueueError::Full(data) => DeliveryTrySendError::Full(data.delivery),
         TryEnqueueError::Closed(_) => DeliveryTrySendError::Closed,
         TryEnqueueError::AccountabilityUnavailable(_) => {
             DeliveryTrySendError::AccountabilityUnavailable
@@ -991,7 +1012,7 @@ fn map_data_queue_error(error: TryEnqueueError<OutboundData>) -> DeliveryTrySend
 
 fn map_control_queue_error(error: TryEnqueueError<Arc<ServerMessage>>) -> DeliveryTrySendError {
     match error {
-        TryEnqueueError::Full(message) => DeliveryTrySendError::Full(message),
+        TryEnqueueError::Full(message) => DeliveryTrySendError::Full(DeliveryMessage::new(message)),
         TryEnqueueError::Closed(_) => DeliveryTrySendError::Closed,
         TryEnqueueError::AccountabilityUnavailable(_) => {
             DeliveryTrySendError::AccountabilityUnavailable
@@ -1059,8 +1080,27 @@ pub(crate) async fn deliver_or_disconnect_in_room(
     message: Arc<ServerMessage>,
     room_id: Option<RoomId>,
 ) -> DeliveryOutcome {
+    deliver_message_or_disconnect_in_room(
+        metrics,
+        slow_consumer_timeout,
+        player_id,
+        handle,
+        DeliveryMessage::new(message),
+        room_id,
+    )
+    .await
+}
+
+pub(crate) async fn deliver_message_or_disconnect_in_room(
+    metrics: &crate::metrics::ServerMetrics,
+    slow_consumer_timeout: std::time::Duration,
+    player_id: &PlayerId,
+    handle: &ClientDeliveryHandle,
+    delivery: DeliveryMessage,
+    room_id: Option<RoomId>,
+) -> DeliveryOutcome {
     #[cfg(feature = "trace-validation")]
-    let trace_delivery_id = handle.close.begin_trace_delivery(&message);
+    let trace_delivery_id = handle.close.begin_trace_delivery(delivery.message_arc());
     #[cfg(feature = "trace-validation")]
     if !handle.sender.trace_projection_supported() {
         handle.close.record_trace(
@@ -1078,8 +1118,8 @@ pub(crate) async fn deliver_or_disconnect_in_room(
     // so the default deployment pays one cheap map miss here. Relaxed: these
     // are monotonic diagnostics, never synchronization.
     let connection_stats = metrics.connection_delivery_stats(player_id);
-    let offered_class = handle.sender.effective_data_class(message.as_ref());
-    let message = match handle.sender.try_send(message, room_id) {
+    let offered_class = handle.sender.effective_data_class(delivery.message());
+    let delivery = match handle.sender.try_send_delivery(delivery, room_id) {
         Ok(outcome) => {
             #[cfg(feature = "trace-validation")]
             if trace_queue_outcome_supported(outcome) {
@@ -1114,14 +1154,14 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             );
             return DeliveryOutcome::ChannelClosed;
         }
-        Err(DeliveryTrySendError::Full(message)) => {
+        Err(DeliveryTrySendError::Full(delivery)) => {
             #[cfg(feature = "trace-validation")]
             handle.close.record_trace(
                 crate::trace_validation::DeliveryTraceAction::SendFull,
                 trace_delivery_id,
                 None,
             );
-            message
+            delivery
         }
         Err(DeliveryTrySendError::AccountabilityUnavailable) => {
             #[cfg(feature = "trace-validation")]
@@ -1166,7 +1206,12 @@ pub(crate) async fn deliver_or_disconnect_in_room(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     let pending_class = offered_class;
-    match tokio::time::timeout(slow_consumer_timeout, handle.sender.send(message, room_id)).await {
+    match tokio::time::timeout(
+        slow_consumer_timeout,
+        handle.sender.send_delivery(delivery, room_id),
+    )
+    .await
+    {
         Ok(Ok(outcome)) => {
             #[cfg(feature = "trace-validation")]
             if trace_queue_outcome_supported(outcome) {
@@ -2497,17 +2542,26 @@ mod tests {
 
         for (context, message, room_id, expected) in cases {
             let original = Arc::clone(&message);
-            match (classify_outbound_data(message, room_id), expected) {
+            match (
+                classify_outbound_data(DeliveryMessage::new(message), room_id),
+                expected,
+            ) {
                 (Ok(data), ExpectedClassification::Stamped(metadata)) => {
-                    assert!(Arc::ptr_eq(&data.message, &original), "{context}");
+                    assert!(
+                        Arc::ptr_eq(data.delivery.message_arc(), &original),
+                        "{context}"
+                    );
                     assert_eq!(data.metadata, Some(metadata), "{context}");
                 }
                 (Ok(data), ExpectedClassification::Unstamped) => {
-                    assert!(Arc::ptr_eq(&data.message, &original), "{context}");
+                    assert!(
+                        Arc::ptr_eq(data.delivery.message_arc(), &original),
+                        "{context}"
+                    );
                     assert_eq!(data.metadata, None, "{context}");
                 }
                 (Err(returned), ExpectedClassification::Rejected) => {
-                    assert!(Arc::ptr_eq(&returned, &original), "{context}");
+                    assert!(Arc::ptr_eq(returned.message_arc(), &original), "{context}");
                 }
                 (actual, expected) => {
                     panic!("{context}: got {actual:?}, expected {expected:?}")
@@ -3133,6 +3187,80 @@ mod tests {
         assert_eq!(
             metrics.websocket_messages_dropped.load(Ordering::Relaxed),
             0
+        );
+        assert_conservation(&metrics);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classified_full_retry_preserves_the_logical_relay_cache() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let (sender, mut receiver) =
+            outbound_queue::channel_with_metrics(1, 1, Arc::clone(&metrics));
+        sender.set_protocol_version(3);
+        let (close, _listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        handle
+            .sender
+            .try_send(game_data_message(None, None, None, None), None)
+            .expect("prefill the classified reliable lane");
+
+        let delivery = DeliveryMessage::shared_relay(game_data_message(None, None, None, None));
+        let expected_cache = delivery
+            .relay_frame_cache()
+            .expect("shared relay must carry a cache")
+            as *const crate::websocket::RelayFrameCache as usize;
+        let task = {
+            let metrics = Arc::clone(&metrics);
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                deliver_message_or_disconnect_in_room(
+                    &metrics,
+                    TEST_TIMEOUT,
+                    &test_player(),
+                    &handle,
+                    delivery,
+                    None,
+                )
+                .await
+            })
+        };
+
+        let metrics_for_wait = Arc::clone(&metrics);
+        yield_until(
+            "classified delivery must hit the full/retry path",
+            move || {
+                metrics_for_wait
+                    .websocket_backpressure_events
+                    .load(Ordering::Relaxed)
+                    > 0
+            },
+        )
+        .await;
+        receiver
+            .recv()
+            .await
+            .expect("classified receiver must remain healthy")
+            .expect("prefilled classified message must be readable");
+
+        assert_eq!(
+            task.await.expect("delivery task must not panic"),
+            DeliveryOutcome::Delivered
+        );
+        let queued = receiver
+            .recv()
+            .await
+            .expect("classified receiver must remain healthy")
+            .expect("retried relay must be enqueued");
+        let outbound_queue::OutboundPayload::Data(delivery) = queued.payload else {
+            panic!("retried classified relay must remain a data carrier");
+        };
+        let observed_cache = delivery
+            .relay_frame_cache()
+            .expect("retried relay must retain its cache")
+            as *const crate::websocket::RelayFrameCache as usize;
+        assert_eq!(
+            observed_cache, expected_cache,
+            "the reliable Full -> awaited retry path must preserve cache identity"
         );
         assert_conservation(&metrics);
     }

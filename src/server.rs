@@ -1026,16 +1026,28 @@ impl InMemoryMessageCoordinator {
             return;
         }
 
+        let shared_relay = (recipients.len() > 1
+            && matches!(
+                message.as_ref(),
+                ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+            ))
+        .then(|| {
+            crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(&message))
+        });
         let outcomes =
             futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
-                let message = room_message_for_recipient(&message, player_id);
+                let delivery = shared_relay.clone().unwrap_or_else(|| {
+                    crate::coordination::outbound_queue::DeliveryMessage::new(
+                        room_message_for_recipient(&message, player_id),
+                    )
+                });
                 async move {
-                    let outcome = crate::coordination::deliver_or_disconnect_in_room(
+                    let outcome = crate::coordination::deliver_message_or_disconnect_in_room(
                         &self.metrics,
                         self.slow_consumer_timeout,
                         player_id,
                         handle,
-                        message,
+                        delivery,
                         room_id,
                     )
                     .await;
@@ -1251,6 +1263,7 @@ impl InMemoryMessageCoordinator {
                 ));
             }
         };
+        let (message, _) = message.into_parts();
 
         self.metrics.increment_websocket_backpressure_events();
         if let Some(stats) = &connection_stats {

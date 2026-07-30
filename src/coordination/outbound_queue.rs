@@ -17,6 +17,7 @@ use crate::protocol::{
     DeliveryClass, DeliveryCountersByClass, DeliveryGap, DeliveryGapReason, DeliveryReportPayload,
     GameDataEncoding, PlayerId, RoomId, ServerMessage, DELIVERY_REPORT_MAX_GAPS,
 };
+use crate::websocket::RelayFrameCache;
 
 /// Delivery metadata carried beside a stamped game-data message in memory.
 ///
@@ -64,10 +65,64 @@ struct LatestKey {
     key: u32,
 }
 
+/// One logical server message together with its optional relay-wide wire cache.
+///
+/// Keeping these in one carrier guarantees a reliable queue's full/retry path
+/// cannot accidentally detach a message from frames materialized for a
+/// different relay.
+#[derive(Debug, Clone)]
+pub struct DeliveryMessage {
+    message: Arc<ServerMessage>,
+    relay_frame_cache: Option<Arc<RelayFrameCache>>,
+}
+
+impl DeliveryMessage {
+    pub fn new(message: Arc<ServerMessage>) -> Self {
+        Self {
+            message,
+            relay_frame_cache: None,
+        }
+    }
+
+    pub(crate) fn shared_relay(message: Arc<ServerMessage>) -> Self {
+        Self {
+            message,
+            relay_frame_cache: Some(Arc::new(RelayFrameCache::default())),
+        }
+    }
+
+    pub(crate) fn from_parts(
+        message: Arc<ServerMessage>,
+        relay_frame_cache: Option<Arc<RelayFrameCache>>,
+    ) -> Self {
+        Self {
+            message,
+            relay_frame_cache,
+        }
+    }
+
+    pub fn message(&self) -> &ServerMessage {
+        self.message.as_ref()
+    }
+
+    #[cfg(any(test, feature = "trace-validation"))]
+    pub(crate) fn message_arc(&self) -> &Arc<ServerMessage> {
+        &self.message
+    }
+
+    pub(crate) fn relay_frame_cache(&self) -> Option<&RelayFrameCache> {
+        self.relay_frame_cache.as_deref()
+    }
+
+    pub(crate) fn into_parts(self) -> (Arc<ServerMessage>, Option<Arc<RelayFrameCache>>) {
+        (self.message, self.relay_frame_cache)
+    }
+}
+
 /// One game-data item submitted to the outbound queue.
 #[derive(Debug)]
 pub struct OutboundData {
-    pub message: Arc<ServerMessage>,
+    pub delivery: DeliveryMessage,
     /// Stamped metadata is present for normal routed game data. A reliable
     /// unstamped item remains supported for disconnect races and test doubles;
     /// lossy classes require metadata so a gap can be reported exactly.
@@ -75,18 +130,27 @@ pub struct OutboundData {
 }
 
 impl OutboundData {
+    #[cfg(any(test, feature = "allocation-tracking"))]
     pub fn new(message: Arc<ServerMessage>, metadata: DataDeliveryMetadata) -> Self {
         Self {
-            message,
+            delivery: DeliveryMessage::new(message),
             metadata: Some(metadata),
         }
     }
 
+    #[cfg(any(test, feature = "allocation-tracking"))]
     pub fn reliable_unstamped(message: Arc<ServerMessage>) -> Self {
         Self {
-            message,
+            delivery: DeliveryMessage::new(message),
             metadata: None,
         }
+    }
+
+    pub(crate) fn from_delivery(
+        delivery: DeliveryMessage,
+        metadata: Option<DataDeliveryMetadata>,
+    ) -> Self {
+        Self { delivery, metadata }
     }
 
     fn class(&self) -> DeliveryClass {
@@ -96,7 +160,7 @@ impl OutboundData {
 
     fn metadata_matches_message(&self) -> bool {
         let Some(metadata) = self.metadata else {
-            return match self.message.as_ref() {
+            return match self.delivery.message() {
                 ServerMessage::GameData {
                     seq,
                     epoch,
@@ -119,7 +183,7 @@ impl OutboundData {
         if !valid_class_key(Some(metadata.class), metadata.key) {
             return false;
         }
-        match self.message.as_ref() {
+        match self.delivery.message() {
             ServerMessage::GameData {
                 from_player,
                 seq,
@@ -157,6 +221,7 @@ impl OutboundData {
 #[derive(Debug, Clone)]
 pub enum OutboundPayload {
     Message(Arc<ServerMessage>),
+    Data(DeliveryMessage),
     DeliveryReport(DeliveryReportPayload),
 }
 
@@ -1970,13 +2035,30 @@ fn push_data(
     data: OutboundData,
     effective_class: DeliveryClass,
 ) {
-    push_message(
-        state,
+    let payload = if data.delivery.relay_frame_cache().is_some() {
+        OutboundPayload::Data(data.delivery)
+    } else {
+        let (message, relay_frame_cache) = data.delivery.into_parts();
+        debug_assert!(relay_frame_cache.is_none());
+        OutboundPayload::Message(message)
+    };
+    let queued = QueuedOutbound {
+        payload,
+        delivery_class: Some(effective_class),
+        metadata: data.metadata,
+        enqueued_at: Instant::now(),
+        generation: state.enqueue_generation,
+        transition_barrier: false,
+    };
+    debug_assert_ne!(
         lane,
-        data.message,
-        Some(effective_class),
-        data.metadata,
+        Lane::Control,
+        "game data cannot enter the control lane"
     );
+    match lane {
+        Lane::Legacy => state.legacy.push_back(queued),
+        Lane::Control | Lane::Data => state.data.push_back(queued),
+    }
 }
 
 fn oldest_volatile_position(data: &VecDeque<QueuedOutbound>, generation: u64) -> Option<usize> {
@@ -2194,6 +2276,10 @@ mod tests {
                 ServerMessage::Error { message, .. } => message.parse().unwrap(),
                 ServerMessage::GameData { data, .. } => data["id"].as_u64().unwrap(),
                 other => panic!("unexpected message: {other:?}"),
+            },
+            OutboundPayload::Data(delivery) => match delivery.message() {
+                ServerMessage::GameData { data, .. } => data["id"].as_u64().unwrap(),
+                other => panic!("unexpected data message: {other:?}"),
             },
             OutboundPayload::DeliveryReport(_) => panic!("expected message"),
         }
@@ -2908,7 +2994,7 @@ mod tests {
                 .iter()
                 .filter_map(|queued| match &queued.payload {
                     OutboundPayload::DeliveryReport(report) => Some((queued.generation, report)),
-                    OutboundPayload::Message(_) => None,
+                    OutboundPayload::Message(_) | OutboundPayload::Data(_) => None,
                 })
                 .collect();
             assert_eq!(reports.len(), 1);
@@ -2950,7 +3036,7 @@ mod tests {
                 .iter()
                 .filter_map(|queued| match &queued.payload {
                     OutboundPayload::DeliveryReport(report) => Some(report.gaps.len()),
-                    OutboundPayload::Message(_) => None,
+                    OutboundPayload::Message(_) | OutboundPayload::Data(_) => None,
                 })
                 .collect();
             assert_eq!(report_lengths.len(), expected_reports);
@@ -3132,14 +3218,16 @@ mod tests {
         tx.set_protocol_version(3);
         let game_data = data(1, DeliveryClass::Reliable, None, 1);
         assert!(matches!(
-            tx.try_enqueue_control(Arc::clone(&game_data.message)),
+            tx.try_enqueue_control(Arc::clone(game_data.delivery.message_arc())),
             Err(TryEnqueueError::InvalidMetadata(_))
         ));
         let permit = tx.try_reserve_control().unwrap();
-        assert!(permit.send_control(Arc::clone(&game_data.message)).is_err());
+        assert!(permit
+            .send_control(Arc::clone(game_data.delivery.message_arc()))
+            .is_err());
 
         let stamped_without_metadata =
-            OutboundData::reliable_unstamped(Arc::clone(&game_data.message));
+            OutboundData::reliable_unstamped(Arc::clone(game_data.delivery.message_arc()));
         assert!(matches!(
             tx.try_enqueue_data(stamped_without_metadata),
             Err(TryEnqueueError::InvalidMetadata(_))

@@ -47,6 +47,25 @@ updates:
       - "dependencies"
       - "rust"
       - "automated"
+    # Keep version-update PRs aligned with the graph and Rust 1.89 MSRV.
+    # Vulnerability alerts and the independent cargo-audit/cargo-deny gates
+    # remain active for ignored version lines.
+    ignore:
+      # Axum 0.8.9 and the broader graph still use base64 0.22. Accepting 0.23
+      # only for this crate duplicates a security-sensitive codec.
+      - dependency-name: "base64"
+        versions: ["0.23.x"]
+      # Axum 0.8.9 owns tokio-tungstenite/tungstenite 0.29. A test-only 0.30
+      # declaration duplicates the complete WebSocket stack.
+      - dependency-name: "tokio-tungstenite"
+        versions: ["0.30.x"]
+      # serial_test 4.x requires rustc 1.93.1, above the declared 1.89 MSRV.
+      - dependency-name: "serial_test"
+        versions: ["4.x"]
+      # syn 3 removes APIs used by the policy suite while syn 2 remains in the
+      # transitive graph. Remove this hold only with a measured migration.
+      - dependency-name: "syn"
+        versions: ["3.x"]
     # Group all update types to favor large, area-grouped PRs
     groups:
       cargo-root-updates:
@@ -283,6 +302,8 @@ updates:
 # - GitHub Actions and Docker updates are consolidated by area
 #
 # Ignore Rules:
+# - Root Cargo: Hold four measured-incompatible release lines until the
+#   WebSocket/base64 graph, MSRV, or syn policy code can move coherently
 # - Rust production image (Dockerfile): Aligned with MSRV policy, manual updates only
 # - Devcontainer Rust: No ignores, tracks latest stable for developer experience
 # - rmp ecosystem patches: Ignored to prevent version drift, security overrides policy

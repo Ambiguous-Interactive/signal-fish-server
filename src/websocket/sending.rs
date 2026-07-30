@@ -5,7 +5,9 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::SinkExt;
 use rmp_serde::{from_slice, to_vec_named};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -20,7 +22,10 @@ use super::connection::{record_outbound_probe_activity, PingProbeState};
 /// exact report before any successor.
 pub(super) enum BinaryFallbackPreflight {
     NotNeeded,
-    Decoded(serde_json::Value),
+    Decoded {
+        data: Arc<serde_json::Value>,
+        message_pack_decodes: u64,
+    },
     Undeliverable(String),
 }
 
@@ -33,6 +38,7 @@ impl BinaryFallbackPreflight {
 pub(super) fn preflight_binary_fallback(
     message: &ServerMessage,
     recipient_format: GameDataEncoding,
+    relay_cache: Option<&RelayFrameCache>,
 ) -> BinaryFallbackPreflight {
     let ServerMessage::GameDataBinary {
         encoding, payload, ..
@@ -43,8 +49,28 @@ pub(super) fn preflight_binary_fallback(
     if *encoding == recipient_format {
         return BinaryFallbackPreflight::NotNeeded;
     }
+    if let Some(cache) = relay_cache {
+        return match cache.decoded_fallback.get_or_init(|| {
+            let decoded = decode_binary_to_json(*encoding, payload).map(Arc::new);
+            if decoded.is_ok() && *encoding == GameDataEncoding::MessagePack {
+                cache
+                    .message_pack_decode_unreported
+                    .store(true, Ordering::Release);
+            }
+            decoded
+        }) {
+            Ok(data) => BinaryFallbackPreflight::Decoded {
+                data: Arc::clone(data),
+                message_pack_decodes: 0,
+            },
+            Err(reason) => BinaryFallbackPreflight::Undeliverable(reason.clone()),
+        };
+    }
     match decode_binary_to_json(*encoding, payload) {
-        Ok(data) => BinaryFallbackPreflight::Decoded(data),
+        Ok(data) => BinaryFallbackPreflight::Decoded {
+            data: Arc::new(data),
+            message_pack_decodes: u64::from(*encoding == GameDataEncoding::MessagePack),
+        },
         Err(reason) => BinaryFallbackPreflight::Undeliverable(reason),
     }
 }
@@ -56,17 +82,85 @@ pub(super) struct SerializationWork {
     pub(super) message_pack_decodes: u64,
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct MaterializedFrame {
     pub(super) frame: Message,
     pub(super) work: SerializationWork,
     binary_encode_error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum GameDataMaterializationError {
     InvalidV3Stamp,
     Serialization(String),
     Undeliverable(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RelayFrameCohort {
+    TextV2,
+    TextV3,
+    BinaryDirectV2,
+    BinaryDirectV3,
+    BinaryFallbackV2,
+    BinaryFallbackV3,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RelayFrameCache {
+    text_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    text_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    binary_direct_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    binary_direct_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    binary_fallback_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    binary_fallback_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    decoded_fallback: OnceLock<Result<Arc<serde_json::Value>, String>>,
+    message_pack_decode_unreported: AtomicBool,
+}
+
+impl RelayFrameCache {
+    fn slot(
+        &self,
+        cohort: RelayFrameCohort,
+    ) -> &OnceLock<Result<MaterializedFrame, GameDataMaterializationError>> {
+        match cohort {
+            RelayFrameCohort::TextV2 => &self.text_v2,
+            RelayFrameCohort::TextV3 => &self.text_v3,
+            RelayFrameCohort::BinaryDirectV2 => &self.binary_direct_v2,
+            RelayFrameCohort::BinaryDirectV3 => &self.binary_direct_v3,
+            RelayFrameCohort::BinaryFallbackV2 => &self.binary_fallback_v2,
+            RelayFrameCohort::BinaryFallbackV3 => &self.binary_fallback_v3,
+        }
+    }
+
+    fn materialize(
+        &self,
+        cohort: RelayFrameCohort,
+        initialize: impl FnOnce() -> Result<MaterializedFrame, GameDataMaterializationError>,
+    ) -> Result<MaterializedFrame, GameDataMaterializationError> {
+        let mut initialized = false;
+        let cached = self.slot(cohort).get_or_init(|| {
+            initialized = true;
+            initialize()
+        });
+        let mut materialized = cached.clone()?;
+        if initialized {
+            if matches!(
+                cohort,
+                RelayFrameCohort::BinaryFallbackV2 | RelayFrameCohort::BinaryFallbackV3
+            ) && self
+                .message_pack_decode_unreported
+                .swap(false, Ordering::AcqRel)
+            {
+                materialized.work.message_pack_decodes =
+                    materialized.work.message_pack_decodes.saturating_add(1);
+            }
+        } else {
+            materialized.work = SerializationWork::default();
+            materialized.binary_encode_error = None;
+        }
+        Ok(materialized)
+    }
 }
 
 /// Apply the exact per-recipient game-data wire projection synchronously.
@@ -76,6 +170,52 @@ pub(super) enum GameDataMaterializationError {
 /// measurement cannot drift from v2 field stripping, the v3 binary envelope,
 /// or MessagePack-to-JSON fallback.
 pub(super) fn materialize_game_data_frame(
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+    recipient_format: GameDataEncoding,
+    fallback_preflight: BinaryFallbackPreflight,
+    relay_cache: Option<&RelayFrameCache>,
+) -> Result<MaterializedFrame, GameDataMaterializationError> {
+    let cohort = match message {
+        ServerMessage::GameData { .. } if recipient_supports_v3 => RelayFrameCohort::TextV3,
+        ServerMessage::GameData { .. } => RelayFrameCohort::TextV2,
+        ServerMessage::GameDataBinary { encoding, .. }
+            if *encoding == recipient_format && recipient_supports_v3 =>
+        {
+            RelayFrameCohort::BinaryDirectV3
+        }
+        ServerMessage::GameDataBinary { encoding, .. } if *encoding == recipient_format => {
+            RelayFrameCohort::BinaryDirectV2
+        }
+        ServerMessage::GameDataBinary { .. } if recipient_supports_v3 => {
+            RelayFrameCohort::BinaryFallbackV3
+        }
+        ServerMessage::GameDataBinary { .. } => RelayFrameCohort::BinaryFallbackV2,
+        _ => {
+            return Err(GameDataMaterializationError::Serialization(
+                "game-data materializer received a non-game-data message".to_string(),
+            ));
+        }
+    };
+    if let Some(cache) = relay_cache {
+        return cache.materialize(cohort, || {
+            materialize_game_data_frame_uncached(
+                message,
+                recipient_supports_v3,
+                recipient_format,
+                fallback_preflight,
+            )
+        });
+    }
+    materialize_game_data_frame_uncached(
+        message,
+        recipient_supports_v3,
+        recipient_format,
+        fallback_preflight,
+    )
+}
+
+fn materialize_game_data_frame_uncached(
     message: &ServerMessage,
     recipient_supports_v3: bool,
     recipient_format: GameDataEncoding,
@@ -143,29 +283,29 @@ pub(super) fn materialize_game_data_frame(
                 None
             };
 
-            let data = match fallback_preflight {
-                BinaryFallbackPreflight::NotNeeded => decode_binary_to_json(*encoding, payload)
-                    .map_err(GameDataMaterializationError::Undeliverable)?,
-                BinaryFallbackPreflight::Decoded(data) => data,
+            let (data, message_pack_decodes) = match fallback_preflight {
+                BinaryFallbackPreflight::NotNeeded => (
+                    decode_binary_to_json(*encoding, payload)
+                        .map(Arc::new)
+                        .map_err(GameDataMaterializationError::Undeliverable)?,
+                    u64::from(*encoding == GameDataEncoding::MessagePack),
+                ),
+                BinaryFallbackPreflight::Decoded {
+                    data,
+                    message_pack_decodes,
+                } => (data, message_pack_decodes),
                 BinaryFallbackPreflight::Undeliverable(reason) => {
                     return Err(GameDataMaterializationError::Undeliverable(reason));
                 }
             };
-            let fallback = ServerMessage::GameData {
-                from_player: *from_player,
-                data,
-                seq,
-                epoch,
-                class: None,
-                key: None,
-            };
+            let fallback = BorrowedGameDataEnvelope::new(*from_player, data.as_ref(), seq, epoch);
             let frame = serialize_json_frame(&fallback)
                 .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
             Ok(MaterializedFrame {
                 frame,
                 work: SerializationWork {
                     json_encodes: 1,
-                    message_pack_decodes: u64::from(*encoding == GameDataEncoding::MessagePack),
+                    message_pack_decodes,
                     ..SerializationWork::default()
                 },
                 binary_encode_error,
@@ -203,6 +343,7 @@ pub(super) async fn send_immediate_server_message(
 pub(super) async fn send_single_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: Arc<ServerMessage>,
+    relay_cache: Option<&RelayFrameCache>,
     player_id: &PlayerId,
     recipient_supports_v3: bool,
     recipient_format: GameDataEncoding,
@@ -224,6 +365,7 @@ pub(super) async fn send_single_message(
                 recipient_supports_v3,
                 recipient_format,
                 fallback_preflight,
+                relay_cache,
             ) {
                 Ok(materialized) => {
                     if let Some(error) = materialized.binary_encode_error {
@@ -284,6 +426,7 @@ pub(super) async fn send_single_message(
                 recipient_supports_v3,
                 recipient_format,
                 fallback_preflight,
+                relay_cache,
             )
             .map_err(|error| {
                 tracing::error!(%player_id, ?error, "Failed to serialize game data");
@@ -622,6 +765,44 @@ impl<'a> LegacyGameDataEnvelope<'a> {
     }
 }
 
+/// Borrowed JSON fallback envelope for a binary source. Borrowing the decoded
+/// value lets one relay cache share both the MessagePack decode and the
+/// serialized text frame without cloning the ~payload-sized JSON tree.
+#[derive(Serialize)]
+struct BorrowedGameDataEnvelope<'a> {
+    r#type: &'static str,
+    data: BorrowedGameDataBody<'a>,
+}
+
+#[derive(Serialize)]
+struct BorrowedGameDataBody<'a> {
+    from_player: PlayerId,
+    data: &'a serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<u32>,
+}
+
+impl<'a> BorrowedGameDataEnvelope<'a> {
+    fn new(
+        from_player: PlayerId,
+        data: &'a serde_json::Value,
+        seq: Option<u64>,
+        epoch: Option<u32>,
+    ) -> Self {
+        Self {
+            r#type: "GameData",
+            data: BorrowedGameDataBody {
+                from_player,
+                data,
+                seq,
+                epoch,
+            },
+        }
+    }
+}
+
 /// The exact legacy struct serialized onto the wire for v2 MessagePack
 /// game-data frames.
 ///
@@ -742,21 +923,25 @@ mod tests {
         assert!(preflight_binary_fallback(
             &message(GameDataEncoding::MessagePack, &[0xc1]),
             GameDataEncoding::Json,
+            None,
         )
         .is_unsupported());
         assert!(preflight_binary_fallback(
             &message(GameDataEncoding::Rkyv, &[0x01]),
             GameDataEncoding::Json,
+            None,
         )
         .is_unsupported());
         assert!(!preflight_binary_fallback(
             &message(GameDataEncoding::MessagePack, &[0xc1]),
             GameDataEncoding::MessagePack,
+            None,
         )
         .is_unsupported());
         assert!(!preflight_binary_fallback(
             &message(GameDataEncoding::MessagePack, &[0x01]),
             GameDataEncoding::Json,
+            None,
         )
         .is_unsupported());
     }
@@ -778,6 +963,7 @@ mod tests {
             false,
             GameDataEncoding::Json,
             BinaryFallbackPreflight::NotNeeded,
+            None,
         )
         .expect("v2 text projection");
         assert_eq!(
@@ -805,6 +991,7 @@ mod tests {
             true,
             GameDataEncoding::Json,
             BinaryFallbackPreflight::NotNeeded,
+            None,
         )
         .expect("v3 text projection");
         assert_eq!(
@@ -833,6 +1020,7 @@ mod tests {
                 supports_v3,
                 GameDataEncoding::MessagePack,
                 BinaryFallbackPreflight::NotNeeded,
+                None,
             )
             .expect("direct MessagePack projection");
             let stamp = supports_v3.then_some((42, 3));
@@ -862,7 +1050,8 @@ mod tests {
                 &binary,
                 supports_v3,
                 GameDataEncoding::Json,
-                preflight_binary_fallback(&binary, GameDataEncoding::Json),
+                preflight_binary_fallback(&binary, GameDataEncoding::Json, None),
+                None,
             )
             .expect("MessagePack-to-JSON fallback");
             let expected = ServerMessage::GameData {
@@ -899,9 +1088,175 @@ mod tests {
                 true,
                 GameDataEncoding::MessagePack,
                 BinaryFallbackPreflight::NotNeeded,
+                None,
             ),
             Err(GameDataMaterializationError::InvalidV3Stamp)
         ));
+    }
+
+    #[test]
+    fn relay_cache_reuses_wire_cohorts_and_decodes_message_pack_once() {
+        let data = serde_json::json!({"move": "up", "n": 3});
+        let text = ServerMessage::GameData {
+            from_player: player_a(),
+            data: data.clone(),
+            seq: Some(42),
+            epoch: Some(3),
+            class: Some(crate::protocol::DeliveryClass::Reliable),
+            key: None,
+        };
+        let text_cache = RelayFrameCache::default();
+        for supports_v3 in [false, true] {
+            let first = materialize_game_data_frame(
+                &text,
+                supports_v3,
+                GameDataEncoding::Json,
+                BinaryFallbackPreflight::NotNeeded,
+                Some(&text_cache),
+            )
+            .expect("first text cohort projection");
+            let reused = materialize_game_data_frame(
+                &text,
+                supports_v3,
+                GameDataEncoding::Json,
+                BinaryFallbackPreflight::NotNeeded,
+                Some(&text_cache),
+            )
+            .expect("reused text cohort projection");
+            assert_eq!(reused.frame, first.frame);
+            assert_eq!(first.work.json_encodes, 1);
+            assert_eq!(reused.work, SerializationWork::default());
+        }
+
+        let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+        let binary = ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: payload.into(),
+            seq: Some(42),
+            epoch: Some(3),
+        };
+        let binary_cache = RelayFrameCache::default();
+        for (index, supports_v3) in [false, true].into_iter().enumerate() {
+            let preflight =
+                preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&binary_cache));
+            let first = materialize_game_data_frame(
+                &binary,
+                supports_v3,
+                GameDataEncoding::Json,
+                preflight,
+                Some(&binary_cache),
+            )
+            .expect("first fallback cohort projection");
+            assert_eq!(first.work.json_encodes, 1);
+            assert_eq!(first.work.message_pack_decodes, u64::from(index == 0));
+
+            let preflight =
+                preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&binary_cache));
+            let reused = materialize_game_data_frame(
+                &binary,
+                supports_v3,
+                GameDataEncoding::Json,
+                preflight,
+                Some(&binary_cache),
+            )
+            .expect("reused fallback cohort projection");
+            assert_eq!(reused.frame, first.frame);
+            assert_eq!(reused.work, SerializationWork::default());
+        }
+
+        for supports_v3 in [false, true] {
+            let first = materialize_game_data_frame(
+                &binary,
+                supports_v3,
+                GameDataEncoding::MessagePack,
+                BinaryFallbackPreflight::NotNeeded,
+                Some(&binary_cache),
+            )
+            .expect("first direct binary cohort projection");
+            let reused = materialize_game_data_frame(
+                &binary,
+                supports_v3,
+                GameDataEncoding::MessagePack,
+                BinaryFallbackPreflight::NotNeeded,
+                Some(&binary_cache),
+            )
+            .expect("reused direct binary cohort projection");
+            assert_eq!(reused.frame, first.frame);
+            assert_eq!(first.work.message_pack_encodes, 1);
+            assert_eq!(reused.work, SerializationWork::default());
+        }
+    }
+
+    #[test]
+    fn relay_cache_attributes_shared_decode_to_the_winning_concurrent_cohort() {
+        let data = serde_json::json!({"move": "up", "n": 3});
+        let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+        let binary = Arc::new(ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: payload.into(),
+            seq: Some(42),
+            epoch: Some(3),
+        });
+        let cache = Arc::new(RelayFrameCache::default());
+        let (preflight_ready_tx, preflight_ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let delayed_binary = Arc::clone(&binary);
+        let delayed_cache = Arc::clone(&cache);
+        let delayed = std::thread::spawn(move || {
+            let preflight = preflight_binary_fallback(
+                delayed_binary.as_ref(),
+                GameDataEncoding::Json,
+                Some(&delayed_cache),
+            );
+            preflight_ready_tx
+                .send(())
+                .expect("test coordinator must observe decoded preflight");
+            release_rx
+                .recv()
+                .expect("test coordinator must release delayed cohort");
+            materialize_game_data_frame(
+                delayed_binary.as_ref(),
+                false,
+                GameDataEncoding::Json,
+                preflight,
+                Some(&delayed_cache),
+            )
+            .expect("delayed fallback projection")
+        });
+
+        preflight_ready_rx
+            .recv()
+            .expect("first thread must initialize the shared decode");
+        let winning_preflight =
+            preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&cache));
+        let winning = materialize_game_data_frame(
+            &binary,
+            false,
+            GameDataEncoding::Json,
+            winning_preflight,
+            Some(&cache),
+        )
+        .expect("winning fallback projection");
+        release_tx
+            .send(())
+            .expect("delayed thread must still be waiting");
+        let delayed = delayed.join().expect("delayed projection must not panic");
+
+        assert_eq!(winning.frame, delayed.frame);
+        assert_eq!(
+            winning.work.message_pack_decodes + delayed.work.message_pack_decodes,
+            1,
+            "the shared MessagePack decode must be attributed exactly once even when \
+             a different thread wins cohort initialization"
+        );
+        assert_eq!(
+            winning.work.json_encodes + delayed.work.json_encodes,
+            1,
+            "one exact fallback cohort must serialize exactly once"
+        );
     }
 
     fn hex(bytes: &[u8]) -> String {

@@ -67,7 +67,6 @@ pub struct Ledger {
     pub enqueued: u64,
     pub dequeued: u64,
     pub materialized: u64,
-    pub written: u64,
     pub text_frames: u64,
     pub binary_frames: u64,
     pub wire_bytes: u64,
@@ -169,7 +168,6 @@ impl Fixture {
                 enqueued: 0,
                 dequeued: 0,
                 materialized: 0,
-                written: 0,
                 text_frames: 0,
                 binary_frames: 0,
                 wire_bytes: 0,
@@ -202,14 +200,17 @@ impl Fixture {
                     let class = queued
                         .class()
                         .expect("relay serialization queue item must be classified");
-                    let message = match queued.payload {
-                        OutboundPayload::Message(message) => message,
+                    let delivery = match queued.payload {
+                        OutboundPayload::Data(delivery) => delivery,
+                        OutboundPayload::Message(message) => {
+                            signal_fish_server::coordination::allocation_benchmark::DeliveryMessage::new(message)
+                        }
                         OutboundPayload::DeliveryReport(_) => {
                             panic!("relay serialization fixture received a delivery report")
                         }
                     };
                     let projected =
-                        materialize_game_data(&message, profile.supports_v3(), profile.format)
+                        materialize_game_data(&delivery, profile.supports_v3(), profile.format)
                             .expect("production game-data projection must succeed");
                     ledger.materialized += 1;
                     ledger.json_encodes += projected.json_encodes;
@@ -233,7 +234,6 @@ impl Fixture {
                         other => panic!("game-data projector emitted non-data frame: {other:?}"),
                     }
                     receiver.record_written(class);
-                    ledger.written += 1;
                 }
             }
 
@@ -269,7 +269,6 @@ impl Fixture {
             ledger.materialized, expected,
             "materialized frames disagree"
         );
-        assert_eq!(ledger.written, expected, "written frames disagree");
         assert_eq!(
             ledger.text_frames + ledger.binary_frames,
             expected,
@@ -281,7 +280,7 @@ impl Fixture {
             Scenario::V3JsonText => {
                 assert_eq!(ledger.text_frames, expected);
                 assert_eq!(ledger.binary_frames, 0);
-                assert_eq!(ledger.json_encodes, expected);
+                assert_eq!(ledger.json_encodes, relays as u64);
                 assert_eq!(ledger.message_pack_encodes, 0);
                 assert_eq!(ledger.message_pack_decodes, 0);
             }
@@ -289,7 +288,7 @@ impl Fixture {
                 assert_eq!(ledger.text_frames, 0);
                 assert_eq!(ledger.binary_frames, expected);
                 assert_eq!(ledger.json_encodes, 0);
-                assert_eq!(ledger.message_pack_encodes, expected);
+                assert_eq!(ledger.message_pack_encodes, relays as u64);
                 assert_eq!(ledger.message_pack_decodes, 0);
             }
             Scenario::MixedMessagePackSource => {
@@ -297,9 +296,33 @@ impl Fixture {
                 let binary_recipients = recipients as u64 - json_recipients;
                 assert_eq!(ledger.text_frames, relays as u64 * json_recipients);
                 assert_eq!(ledger.binary_frames, relays as u64 * binary_recipients);
-                assert_eq!(ledger.json_encodes, ledger.text_frames);
-                assert_eq!(ledger.message_pack_decodes, ledger.text_frames);
-                assert_eq!(ledger.message_pack_encodes, ledger.binary_frames);
+                let profiles =
+                    || (0..recipients).map(|index| recipient_profile(self.scenario, index));
+                let json_cohorts = [
+                    profiles().any(|profile| {
+                        !profile.supports_v3() && profile.format == GameDataEncoding::Json
+                    }),
+                    profiles().any(|profile| {
+                        profile.supports_v3() && profile.format == GameDataEncoding::Json
+                    }),
+                ]
+                .into_iter()
+                .filter(|present| *present)
+                .count() as u64;
+                let binary_cohorts = [
+                    profiles().any(|profile| {
+                        !profile.supports_v3() && profile.format == GameDataEncoding::MessagePack
+                    }),
+                    profiles().any(|profile| {
+                        profile.supports_v3() && profile.format == GameDataEncoding::MessagePack
+                    }),
+                ]
+                .into_iter()
+                .filter(|present| *present)
+                .count() as u64;
+                assert_eq!(ledger.json_encodes, relays as u64 * json_cohorts);
+                assert_eq!(ledger.message_pack_decodes, relays as u64);
+                assert_eq!(ledger.message_pack_encodes, relays as u64 * binary_cohorts);
             }
         }
     }
