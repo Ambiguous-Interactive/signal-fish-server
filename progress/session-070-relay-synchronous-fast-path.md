@@ -193,5 +193,33 @@ findings.
   link-text checks, cargo-deny, MSRV/tooling parity, hook readiness,
   worktree pre-commit/pre-push, and the focused doc/CI policy suites pass.
 
-Hosted-CI, publication, and final reviewer evidence is added after the branch
-is pushed.
+## Publication and hosted evidence
+
+- Pull request
+  [#232](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/232)
+  is open, ready for review, and mergeable against exact audited `main`
+  `875057df9748184a824961c6265d26fad010298a`.
+- The implementation head
+  `3e4b149663da90a62b83514cadd0471f6ace2c16` completed all 14 applicable
+  pull-request workflows successfully: Advanced Safety, Browser Interop, CI,
+  Documentation Validation, Formal Verification, Fortress Interop, Fortress
+  WASM Interop, Link Check, Markdownlint, Mutation Testing, Spellcheck, Unused
+  Dependencies, Verification Nightly, and WebRTC Interop. The two Dependabot
+  auto-merge runs skipped as intended for the draft and human-authored ready
+  states.
+- The first Advanced Safety attempt had no sanitizer finding: the production
+  mixed-encoding relay test passed, while one reused chaos-proxy pause timing
+  oracle raced in one integration binary after passing elsewhere in the same
+  run. A failed-job retry passed the complete AddressSanitizer job and Miri
+  again, so no unrelated production change was made.
+- Cursor Bugbot reviewed that exact implementation head and reported no new
+  issues. Copilot was explicitly retriggered but could not review because the
+  requester quota was exhausted. The PR has no inline review threads.
+- The repository exposes no CODEOWNERS, review team, or independent human
+  reviewer candidate; the only discoverable recent human is the branch author.
+  Marking the PR ready for review is therefore the available human
+  notification path without inventing an assignee.
+
+This publication-only follow-up records the immutable implementation-head
+evidence. Its own exact head must independently complete hosted workflows and
+reviewer retriggers before the session is closed.
