@@ -186,8 +186,9 @@ incremental = false
 lto = false
 
 # Build profile for cargo-mutants (see .cargo/mutants.toml + scripts/run-mutants.sh).
-# Mutation testing rebuilds the crate once per mutant (~199 mutants), so per-mutant
-# build/relink cost dominates wall-clock. This profile trims that cost:
+# Mutation testing rebuilds the crate once per mutant, so per-mutant build/relink
+# cost dominates wall-clock. The exact inventory is enforced by
+# `test_mutation_total_mutants_constant_matches_list`. This profile trims that cost:
 #   - inherits "dev" (NOT "ci"): cargo-mutants reuses the per-job target dir
 #     incrementally across mutants; profile.ci sets `incremental = false`, which
 #     would force a near-clean rebuild every mutant. Keep incremental ON.

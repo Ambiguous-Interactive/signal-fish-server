@@ -2,7 +2,7 @@
 # run-mutants.sh - Single source of truth for running cargo-mutants fast.
 #
 # WHY THIS SCRIPT EXISTS
-#   Mutation testing rebuilds the crate once per mutant (344 mutants). Naively,
+#   Mutation testing rebuilds the crate once per mutant (343 mutants). Naively,
 #   cargo-mutants also recompiles every dependency from scratch in a /tmp scratch
 #   dir (it excludes ./target from its copy), so each CI shard paid a full cold
 #   dependency build -> every shard blew the 20-min timeout and was cancelled.

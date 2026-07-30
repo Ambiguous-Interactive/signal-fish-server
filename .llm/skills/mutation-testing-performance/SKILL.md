@@ -60,7 +60,7 @@ cancelled**. Three compounding causes:
    previous one — incremental compilation never gets locality and per-mutant cost
    grew (measured ~55s and climbing).
 3. **Per-mutant relink.** Every mutant relinks the crate; a slow linker multiplies
-   that across 344 mutants × N shards.
+   that across 343 mutants × N shards.
 
 Net effect: each shard paid a full cold build before testing a single mutant, so
 the 20-min timeout fired before any shard finished.
@@ -116,7 +116,7 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
 7. **Shard count sized for serial execution.** `--in-place` runs each shard's
    mutants SERIALLY (one source tree, no `-j`). Measured CI shard 22, the worst
    12-mutant shard, took 310.12s (25.843s/mutant). Adding ~10% headroom and
-   rounding up gives a 29s/mutant budget. Resharded to **36**: 344 mutants ÷ 36
+   rounding up gives a 29s/mutant budget. Resharded to **36**: 343 mutants ÷ 36
    rounds up to 10/shard × 29s = 290s/shard; `timeout-minutes: 10`. **Rule:**
    when the mutant count or per-mutant cost changes, re-size N so each serial
    shard still finishes under the 5-minute target with measured headroom.
@@ -129,7 +129,7 @@ Treat these four quantities as one interlocked budget — changing any one witho
 re-checking the others can silently reintroduce the cancellation:
 
 ```text
-{ mutant-count (344), shard-count N, per-shard timeout, per-mutant budget }
+{ mutant-count (343), shard-count N, per-shard timeout, per-mutant budget }
 ```
 
 - **Per-shard target: < 5 min.** `ceil(mutant-count / N) × per-mutant-budget`
@@ -145,7 +145,7 @@ re-checking the others can silently reintroduce the cancellation:
 Measured in CI: shard 22, the worst 12-mutant shard, took 310.12s, or
 25.843s/mutant. Adding ~10% headroom and rounding up gives a conservative
 29s/mutant budget. Using 36 shards caps the modeled largest shard at
-`ceil(344/36) × 29s = 10 × 29s = 290s`, below the 5-minute target. The
+`ceil(343/36) × 29s = 10 × 29s = 290s`, below the 5-minute target. The
 10-minute `timeout-minutes` retains headroom for runner variance or an
 occasional cache miss.
 

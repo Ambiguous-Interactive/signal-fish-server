@@ -137,7 +137,10 @@ while `cargo deny` and the locked dependency audit remain enforcement points.
 - `cargo clippy --locked --all-targets --all-features -- -D warnings`
 - `cargo test --locked --all-features`
 - Rust 1.89 MSRV benchmark compile
-- Exact 344-mutant inventory and mutation-shard feasibility guards
+- Exact 343-mutant inventory and mutation-shard feasibility guards; the
+  feature-gated benchmark-only constructor is explicitly outside the
+  production mutation oracle. The exact previously failing shard 6/36 then
+  passes locally with three caught and seven unviable mutants.
 - Full advisory and `cargo deny --all-features check` dependency policy
 - Doc consistency, direct ignored-file markdown lint, workflow hygiene, and
   `.llm` size/example policy
