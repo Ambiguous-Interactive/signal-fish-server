@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce steady-state relay fan-out allocation operations by pre-sizing the
+  recipient snapshot from room membership (issue #211). The measured cost is
+  now flat at six allocation operations per coordinator fan-out for 2-, 8-,
+  and 16-player rooms, down from six, seven, and eight respectively; the
+  classified per-recipient queue itself remains allocation-free. Add an
+  opt-in, non-vacuous allocation benchmark so future hot-path changes can be
+  compared against the same workload without imposing runner-dependent CI
+  thresholds.
 - Count the teardown's final delivery report as its own registered close-write
   step, so `REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS` is 4 and the derived
   `registered_connection_shutdown_settle_timeout()` (and the binary's graceful

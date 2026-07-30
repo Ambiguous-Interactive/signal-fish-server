@@ -1661,6 +1661,11 @@ impl OutboundReceiver {
         self.shared.state().len()
     }
 
+    #[cfg(feature = "allocation-tracking")]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Oldest timestamp still resident in any queue lane. The control lane is
     /// not timestamp-FIFO because fresh control is inserted ahead of a trailing
     /// causal delivery report, so inspect every resident item rather than only

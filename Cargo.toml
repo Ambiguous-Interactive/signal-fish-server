@@ -26,6 +26,10 @@ tls = ["axum-server", "rustls", "rustls-pki-types"]
 # Internal verification seam for P10.D7. The feature only exposes inert trace
 # hooks; a caller must explicitly attach a recorder to a connection.
 trace-validation = []
+# Dev-only benchmark seam for measuring relay-path heap traffic. The
+# instrumented allocator is installed only by the dedicated benchmark binary;
+# production binaries never link or select it.
+allocation-tracking = []
 
 # The signaling server carries no `unsafe` block and must not acquire one by
 # accident. `forbid` (not `deny`) is deliberate: it cannot be re-enabled by a
@@ -143,6 +147,7 @@ axum-test = "21.0"
 proptest = "1.11"
 once_cell = "1.21"
 criterion = "0.8"
+stats_alloc = "0.1.10"
 syn = { version = "2.0", features = ["full", "visit"] }
 trybuild = "1.0"
 # YAML 1.2 parser used by tests/ci_config_tests.rs to validate workflow files by
@@ -162,6 +167,11 @@ path = "src/lib.rs"
 [[bench]]
 name = "response_time_tracker"
 harness = false
+
+[[bench]]
+name = "relay_allocations"
+harness = false
+required-features = ["allocation-tracking"]
 
 [profile.dev]
 debug = 1
