@@ -2,9 +2,10 @@ use crate::coordination::outbound_queue::{
     OutboundPayload, OutboundReceiver, QueuedOutbound, TryReceiveError,
 };
 use crate::coordination::{CloseReason, ConnectionCloseSignal};
-use crate::protocol::{PlayerId, ServerMessage};
+use crate::protocol::{DeliveryReportPayload, PlayerId, ServerMessage};
 use axum::extract::ws::{Message, WebSocket};
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -235,6 +236,30 @@ fn queued_write_deadline(
     }
 }
 
+/// Materialize and write one queued delivery report, advancing its counter
+/// frontier only after the sink's send/flush future succeeds.
+///
+/// Keeping prepare/write/confirm in one production seam makes cancellation
+/// safe by construction: dropping this future while `write` is pending leaves
+/// the frontier unchanged.
+async fn write_queued_report<F, Fut>(
+    receiver: &OutboundReceiver,
+    mut report: DeliveryReportPayload,
+    write: F,
+) -> Result<SendDisposition, ()>
+where
+    F: FnOnce(Arc<ServerMessage>) -> Fut,
+    Fut: Future<Output = Result<SendDisposition, ()>>,
+{
+    receiver.prepare_report_for_wire(&mut report);
+    let per_class = report.per_class;
+    let disposition = write(Arc::new(ServerMessage::DeliveryReport(Box::new(report)))).await?;
+    if disposition == SendDisposition::Written {
+        receiver.confirm_report_written(per_class);
+    }
+    Ok(disposition)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_queued(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -273,12 +298,6 @@ pub(super) async fn send_queued(
         fallback_preflight.is_unsupported(),
     );
     let carries_queued_report = matches!(queued.payload, OutboundPayload::DeliveryReport(_));
-    let message = match queued.payload {
-        OutboundPayload::Message(message) => message,
-        OutboundPayload::DeliveryReport(report) => {
-            Arc::new(ServerMessage::DeliveryReport(Box::new(report)))
-        }
-    };
     // Exact accounting owns the head of the stream: a coalesced
     // unsupported-format report must reach this recipient before the next
     // delivered frame, because a recipient may not observe delivered data that
@@ -287,8 +306,8 @@ pub(super) async fn send_queued(
     //
     // - another undeliverable payload keeps coalescing instead, which is what
     //   collapses a burst into one report;
-    // - a queued `DeliveryReport` had its counters stamped against the wire
-    //   frontier when it was popped, so the flush follows it rather than
+    // - a queued `DeliveryReport` is stamped against the wire frontier
+    //   immediately before this write, so the flush follows it rather than
     //   preceding it: a flush in front would move a counter that the very next
     //   frame then reports as lower.
     let flush_before = !fallback_preflight.is_unsupported() && !carries_queued_report;
@@ -299,24 +318,38 @@ pub(super) async fn send_queued(
         if flush_before {
             write_pending_unsupported_report(sender, receiver, player_id).await?;
         }
-        let disposition = send_single_message(
-            sender,
-            message,
-            player_id,
-            recipient_supports_v3,
-            recipient_format,
-            fallback_preflight,
-            metadata,
-            &mut accounting,
-        )
-        .await?;
-        if carries_queued_report {
-            // This report frame is on the wire, so the frontier it advanced at
-            // pop time now describes what the recipient has seen and a coalesced
-            // report may be built on it.
-            receiver.confirm_report_frontier();
-            write_pending_unsupported_report(sender, receiver, player_id).await?;
-        }
+        let disposition = match queued.payload {
+            OutboundPayload::Message(message) => {
+                send_single_message(
+                    sender,
+                    message,
+                    player_id,
+                    recipient_supports_v3,
+                    recipient_format,
+                    fallback_preflight,
+                    metadata,
+                    &mut accounting,
+                )
+                .await?
+            }
+            OutboundPayload::DeliveryReport(report) => {
+                let disposition = write_queued_report(receiver, report, |message| {
+                    send_single_message(
+                        sender,
+                        message,
+                        player_id,
+                        recipient_supports_v3,
+                        recipient_format,
+                        fallback_preflight,
+                        metadata,
+                        &mut accounting,
+                    )
+                })
+                .await?;
+                write_pending_unsupported_report(sender, receiver, player_id).await?;
+                disposition
+            }
+        };
         Ok(disposition)
     };
     let result = if max_sojourn.is_zero() {
@@ -370,8 +403,9 @@ mod tests {
     use super::*;
 
     use crate::coordination::outbound_queue::{channel, DataDeliveryMetadata, OutboundData};
-    use crate::protocol::{DeliveryClass, GameDataEncoding, RoomId};
+    use crate::protocol::{DeliveryClass, DeliveryCountersByClass, GameDataEncoding, RoomId};
     use serde_json::json;
+    use std::sync::Mutex;
 
     fn data(class: DeliveryClass, seq: u64) -> OutboundData {
         let from_player = PlayerId::from_u128(1);
@@ -416,6 +450,123 @@ mod tests {
                 seq,
             },
         )
+    }
+
+    fn report_frontier(receiver: &OutboundReceiver) -> DeliveryCountersByClass {
+        let mut probe = DeliveryReportPayload::default();
+        receiver.prepare_report_for_wire(&mut probe);
+        probe.per_class
+    }
+
+    /// Issue #218: exercise the production seam used by `send_queued` with a
+    /// deterministically controlled socket-send future. The first poll proves
+    /// preparation has happened while confirmation has not; success confirms,
+    /// while both an explicit send error and cancellation leave the frontier
+    /// untouched.
+    #[tokio::test]
+    async fn queued_report_frontier_confirms_only_after_send_flush_success() {
+        let (_tx, receiver) = channel(1, 1);
+        let mut baseline = DeliveryCountersByClass::default();
+        baseline.latest.superseded = 7;
+        receiver.confirm_report_written(baseline);
+
+        let mut successful_report = DeliveryReportPayload::default();
+        successful_report.per_class.latest.dropped_full = 3;
+        let expected_success = DeliveryCountersByClass {
+            latest: crate::protocol::LatestDeliveryCounters {
+                superseded: 7,
+                dropped_full: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let observed = Arc::new(Mutex::new(None));
+        let observed_by_write = Arc::clone(&observed);
+        let (release_send, await_send) = tokio::sync::oneshot::channel();
+        let mut write = Box::pin(write_queued_report(
+            &receiver,
+            successful_report,
+            move |message| {
+                let observed = Arc::clone(&observed_by_write);
+                async move {
+                    let ServerMessage::DeliveryReport(report) = message.as_ref() else {
+                        panic!("queued-report seam wrote a non-report message");
+                    };
+                    *observed.lock().expect("observed-report mutex poisoned") =
+                        Some(report.per_class);
+                    await_send.await.expect("test send gate released");
+                    Ok(SendDisposition::Written)
+                }
+            },
+        ));
+
+        assert!(
+            futures_util::poll!(&mut write).is_pending(),
+            "the controlled socket send must remain in flight"
+        );
+        assert_eq!(
+            *observed.lock().expect("observed-report mutex poisoned"),
+            Some(expected_success),
+            "the report must be prepared before its socket write starts"
+        );
+        assert_eq!(
+            report_frontier(&receiver),
+            baseline,
+            "the frontier must not move while send/flush is pending"
+        );
+
+        release_send.send(()).expect("release controlled send");
+        assert_eq!(write.await, Ok(SendDisposition::Written));
+        assert_eq!(
+            report_frontier(&receiver),
+            expected_success,
+            "a successful send/flush must confirm the prepared frontier"
+        );
+
+        let before_failure = report_frontier(&receiver);
+        let mut failed_report = DeliveryReportPayload::default();
+        failed_report.per_class.volatile.dropped = 2;
+        assert_eq!(
+            write_queued_report(&receiver, failed_report, |_| async { Err(()) }).await,
+            Err(())
+        );
+        assert_eq!(
+            report_frontier(&receiver),
+            before_failure,
+            "a failed socket send must not confirm its report"
+        );
+
+        let mut accounted_drop = DeliveryReportPayload::default();
+        accounted_drop.per_class.volatile.dropped = 4;
+        assert_eq!(
+            write_queued_report(&receiver, accounted_drop, |_| async {
+                Ok(SendDisposition::AccountedDrop)
+            })
+            .await,
+            Ok(SendDisposition::AccountedDrop)
+        );
+        assert_eq!(
+            report_frontier(&receiver),
+            before_failure,
+            "a non-written disposition must not confirm its report"
+        );
+
+        let mut cancelled_report = DeliveryReportPayload::default();
+        cancelled_report.per_class.reliable.abandoned = 5;
+        let mut cancelled_write =
+            Box::pin(write_queued_report(&receiver, cancelled_report, |_| {
+                std::future::pending()
+            }));
+        assert!(
+            futures_util::poll!(&mut cancelled_write).is_pending(),
+            "the cancellation boundary must be reached without timing"
+        );
+        drop(cancelled_write);
+        assert_eq!(
+            report_frontier(&receiver),
+            before_failure,
+            "cancelling an in-flight socket send must not confirm its report"
+        );
     }
 
     #[tokio::test(start_paused = true)]

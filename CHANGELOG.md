@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep protocol-v3 delivery counters tied to frames successfully written and
+  flushed to the recipient socket (issue #218). Cancelling or failing a queued
+  `DeliveryReport` send no longer advances the counter frontier used by the
+  teardown's final unsupported-format report, so that final report cannot
+  inherit counters from a frame whose socket send/flush never completed.
 - Stop unsupported-format accountability from evicting the recipient it exists
   to protect (issue #212). A binary payload that a peer's negotiated encoding
   cannot represent was reported with one `DeliveryReport` frame per omitted
