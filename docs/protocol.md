@@ -658,6 +658,13 @@ Practical consequences:
   `metricsSnapshot.connections.delivery_by_class` (`connections.delivery_by_class`
   within the raw snapshot) expose each class's attempted and terminal outcomes;
   the equality above holds at quiescence.
+- Close `4002 slow_consumer` describes the failed delivery contract, not a
+  diagnosis that the peer made zero physical progress. Sustained reliable input
+  above a recipient's drain rate must eventually fail closed even while each
+  individual write still advances; reliable traffic can neither be dropped nor
+  buffered without a bound. Use measured frame size, link rate, queue capacity,
+  and `max_sojourn_ms` to size that boundary. No separate oversubscription close
+  code is emitted.
 
 A binary game-data payload that cannot be converted for a v3 recipient is not
 silently dropped either: the server accounts the omission as an exact
@@ -688,7 +695,7 @@ surface and are never renumbered):
 | `4000` | `server_shutdown` | The server is shutting down after a graceful drain |
 | `4001` | `auth_timeout` | Never authenticated within `websocket.auth_timeout_secs` |
 | `4002` | `slow_consumer` | Delivery contract failed closed: reliable queue/sojourn timeout, selected socket write stopped progressing, or exact accountability/control priority could not be preserved |
-| `4003` | `activity_timeout` | The server WebSocket Ping write timed out, the matching Pong missed its deadline, or the `server.ping_timeout` activity reaper evicted the connection |
+| `4003` | `activity_timeout` | An idle server WebSocket Ping write timed out, the matching Pong missed its deadline while no inbound or outbound application progress superseded the probe, or the `server.ping_timeout` activity reaper evicted the connection. A Ping queued after outbound progress inherits the earlier capacity-wait/maximum-sojourn delivery budget and closes `4002` if that write stalls |
 | `4004` | `idle_timeout` | No inbound frame within `websocket.idle_timeout_secs` |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 

@@ -879,6 +879,30 @@ impl ConnectionManager {
             .collect()
     }
 
+    /// Atomically revalidate liveness and pin the activity-timeout close.
+    ///
+    /// Holding the DashMap entry guard excludes [`Self::record_ping`] between
+    /// the timestamp check and the close decision. A Pong that arrives after a
+    /// cleanup snapshot but before this call therefore rescues the connection;
+    /// a Pong that races after the guard is acquired observes an already-final
+    /// close instead of being silently discarded by a stale snapshot.
+    pub fn request_activity_timeout_if_expired(
+        &self,
+        player_id: &PlayerId,
+        ping_timeout: std::time::Duration,
+    ) -> bool {
+        let now = Instant::now();
+        let Some(connection) = self.clients.get(player_id) else {
+            return false;
+        };
+        if now.duration_since(connection.last_ping) <= ping_timeout {
+            return false;
+        }
+        connection
+            .close
+            .request_close(crate::coordination::CloseReason::ActivityTimeout)
+    }
+
     fn try_reserve_ip_slot(&self, ip: IpAddr) -> Result<usize, usize> {
         match self.connections_per_ip.entry(ip) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {

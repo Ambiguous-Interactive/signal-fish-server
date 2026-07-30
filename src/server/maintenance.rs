@@ -1,6 +1,7 @@
 use crate::protocol::{PlayerId, RoomId};
 use std::collections::HashSet;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::{chrono_duration_from_std, EnhancedGameServer};
@@ -187,9 +188,12 @@ impl EnhancedGameServer {
             }
 
             // Cleanup expired clients
-            let expired_clients = self
-                .connection_manager
-                .collect_expired_clients(self.config.ping_timeout);
+            let expired_clients = if self.config.ping_timeout.is_zero() {
+                Vec::new()
+            } else {
+                self.connection_manager
+                    .collect_expired_clients(self.config.ping_timeout)
+            };
 
             if self.is_draining() {
                 tracing::info!(
@@ -198,46 +202,6 @@ impl EnhancedGameServer {
                 );
                 break 'cleanup;
             }
-            // Loud eviction: tell each expired client WHY it is being closed
-            // before the unregister tears its socket down. Farewells are
-            // best-effort by contract — they never wait on a full queue and
-            // never reclassify the close as a slow-consumer disconnect (the
-            // eviction itself is the authoritative signal) — so this sweep is
-            // non-blocking regardless of how many clients expired at once.
-            for player_id in &expired_clients {
-                if self.is_draining() {
-                    tracing::info!(
-                        instance_id = %self.instance_id,
-                        "Cleanup task stopping for server shutdown drain during activity farewell"
-                    );
-                    break 'cleanup;
-                }
-                // Milliseconds, not truncated seconds: sub-second windows
-                // (tests, aggressive deployments) must not read as "0 seconds".
-                let timeout_ms = self.config.ping_timeout.as_millis();
-                let should_send = || !self.is_draining();
-                let enqueued = self
-                    .send_farewell_to_player_if(
-                        player_id,
-                        format!(
-                            "Disconnected: no activity received for {timeout_ms} ms \
-                             (server.ping_timeout)"
-                        ),
-                        // Deliberately NOT ConnectionIdleTimeout: that code is
-                        // the socket-level `websocket.idle_timeout_secs` close;
-                        // this eviction is the activity reaper's.
-                        Some(crate::protocol::ErrorCode::ActivityTimeout),
-                        &should_send,
-                    )
-                    .await;
-                if !enqueued {
-                    tracing::debug!(
-                        %player_id,
-                        "Expired client did not receive the eviction farewell (queue full or gone)"
-                    );
-                }
-            }
-
             let mut evicted_client_count = 0u64;
             let mut stop_for_drain = false;
             for player_id in expired_clients {
@@ -249,16 +213,77 @@ impl EnhancedGameServer {
                     stop_for_drain = true;
                     break;
                 }
+
+                // Loud eviction: tell this client WHY it is being closed
+                // before unregister tears its socket down. The final enqueue
+                // predicate atomically revalidates expiry and pins the close
+                // first, so terminal advice can never escape from a stale
+                // snapshot while a later pass rescues the connection.
+                let eviction_pinned = AtomicBool::new(false);
+                // Milliseconds, not truncated seconds: sub-second windows
+                // (tests, aggressive deployments) must not read as "0 seconds".
+                let timeout_ms = self.config.ping_timeout.as_millis();
+                let should_send = || {
+                    if eviction_pinned.load(Ordering::Acquire) {
+                        return true;
+                    }
+                    let pinned = !self.is_draining()
+                        && self.connection_manager.request_activity_timeout_if_expired(
+                            &player_id,
+                            self.config.ping_timeout,
+                        );
+                    eviction_pinned.store(pinned, Ordering::Release);
+                    pinned
+                };
+                let enqueued = self
+                    .send_farewell_to_player_if(
+                        &player_id,
+                        format!(
+                            "Disconnected: no activity received for {timeout_ms} ms \
+                             (server.ping_timeout)"
+                        ),
+                        // Deliberately NOT ConnectionIdleTimeout: that code is
+                        // the socket-level `websocket.idle_timeout_secs` close;
+                        // this eviction is the activity reaper's.
+                        Some(crate::protocol::ErrorCode::ActivityTimeout),
+                        &should_send,
+                    )
+                    .await;
+
+                let mut pinned = eviction_pinned.load(Ordering::Acquire);
+                if !pinned {
+                    if self.is_draining() {
+                        tracing::info!(
+                            instance_id = %self.instance_id,
+                            "Cleanup task stopping for server shutdown drain after activity farewell"
+                        );
+                        stop_for_drain = true;
+                        break;
+                    }
+                    // A missing coordinator route does not evaluate the
+                    // predicate. Close the still-expired socket without an
+                    // advisory, preserving the same pin-before-teardown
+                    // ordering.
+                    pinned = self
+                        .connection_manager
+                        .request_activity_timeout_if_expired(&player_id, self.config.ping_timeout);
+                }
+                if !pinned {
+                    tracing::debug!(
+                        %player_id,
+                        "Client refreshed activity after the cleanup snapshot; skipping eviction"
+                    );
+                    continue;
+                }
+                if !enqueued {
+                    tracing::debug!(
+                        %player_id,
+                        "Expired client did not receive the eviction farewell (queue full or gone)"
+                    );
+                }
+
                 evicted_client_count += 1;
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
-                // Pin the ActivityTimeout close code (4003) before the
-                // unregistration's generic reason could win the first-wins
-                // race: the close frame is the one signal a client can still
-                // read when the farewell above was undeliverable.
-                self.connection_manager.request_close_for(
-                    &player_id,
-                    crate::coordination::CloseReason::ActivityTimeout,
-                );
                 self.unregister_client(&player_id).await;
             }
             if evicted_client_count > 0 {

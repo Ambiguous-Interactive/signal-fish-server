@@ -110,7 +110,7 @@ Complete reference of all configuration options with environment variable overri
 | --- | --- | --- | --- |
 | `SIGNAL_FISH__PORT` | `port` | `3536` | Server listen port |
 | `SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS` | `server.default_max_players` | `8` | Default max players per room |
-| `SIGNAL_FISH__SERVER__PING_TIMEOUT` | `server.ping_timeout` | `30` | Seconds before a silent client is dropped |
+| `SIGNAL_FISH__SERVER__PING_TIMEOUT` | `server.ping_timeout` | `30` | Seconds before a silent client is dropped (`0` disables the activity reaper) |
 | `SIGNAL_FISH__SERVER__ROOM_CLEANUP_INTERVAL` | `server.room_cleanup_interval` | `60` | Seconds between room cleanup sweeps (must be > 0) |
 | `SIGNAL_FISH__SERVER__DRAIN_GRACE_SECS` | `server.drain_grace_secs` | `30` | Seconds between shutdown drain start and forced close `4000`; `0` closes immediately |
 | `SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME` | `server.max_rooms_per_game` | `1000` | Max rooms allowed per game name |
@@ -339,10 +339,22 @@ Complete reference of all configuration options with environment variable overri
   zombie sockets that would otherwise hold file descriptors open indefinitely.
 - `server_ping_interval_secs` / `pong_timeout_secs` - The server sends an RFC
   6455 Ping after an otherwise-idle 10-second interval by default and requires
-  its matching Pong within 5 seconds. Recent decoded inbound non-Pong activity skips the
-  probe; a non-Pong frame arriving after the write cancels it as fresh liveness.
-  The probe is written directly by the socket layer, outside the application
-  data/control queues; a silent miss closes with `4003 activity_timeout`.
+  its matching Pong within 5 seconds. Recent decoded inbound non-Pong activity
+  skips the probe. A completed outbound application write still allows the Ping
+  to be sent, so a read-only client can return an automatic Pong and refresh the
+  inbound-activity reaper, but it supersedes that probe's deadline because the
+  Ping may be queued behind constrained output. The probe is written directly
+  by the socket layer, outside the application data/control queues; a silent
+  authoritative miss closes with `4003 activity_timeout`. Queue sojourn and
+  selected-write deadlines independently close an outbound path that stops
+  draining with `4002 slow_consumer`. Completed outbound writes do not prove
+  that the client-to-server path works, so keep `server.ping_timeout` nonzero
+  when its independent inbound-activity bound is required. Size that timeout
+  above `server_ping_interval_secs` plus the worst measured Ping queue/write
+  delay and operational jitter; otherwise the activity reaper can legitimately
+  win before an automatic Pong arrives. The defaults provide nominal
+  headroom, but do not turn an arbitrarily backlogged network into a fixed
+  delivery guarantee.
   Set the interval to `0` to disable server probes. The Pong timeout must remain
   greater than `0`; both fields are capped at 3600 seconds.
 - `socket_send_buffer_bytes` - Requested TCP send buffer inherited by accepted

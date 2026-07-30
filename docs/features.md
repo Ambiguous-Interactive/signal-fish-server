@@ -717,12 +717,20 @@ probes the underlying WebSocket transport independently:
 
 After an otherwise-idle interval, the RFC 6455 Ping bypasses application
 queues; the bounded socket send buffer limits data already handed to TCP ahead
-of it. Decoded inbound non-Pong traffic skips an unnecessary probe or cancels an
-outstanding one, and compliant WebSocket stacks answer actual probes
-automatically. A silent missing matching Pong closes the socket with `4003
+of it. Decoded inbound non-Pong traffic skips an unnecessary probe. Completed
+outbound application writes supersede its Pong deadline, but the Ping is still
+sent so compliant WebSocket stacks on read-only clients answer and refresh
+inbound activity automatically. Outbound queue/sojourn deadlines still close a
+send path that stops progressing with `4002 slow_consumer`; a silent
+authoritative missing matching Pong closes the socket with `4003
 activity_timeout`. Set `server_ping_interval_secs` to `0` to disable probes.
 Separately, the activity reaper disconnects clients that send no traffic for
-longer than `server.ping_timeout`.
+longer than `server.ping_timeout`; keep it nonzero when continuous outbound
+traffic must not mask a client-to-server half-partition. Size it above
+`server_ping_interval_secs` plus the worst measured Ping queue/write delay and
+operational jitter. Otherwise the reaper can win before an automatic Pong
+arrives; the defaults provide nominal headroom, not a guarantee under arbitrary
+socket backlog.
 
 Prometheus reports missed matching-Pong deadlines with
 `signal_fish_websocket_ping_timeouts_total`. Successful probe latency uses the

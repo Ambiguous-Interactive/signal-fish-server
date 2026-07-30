@@ -4087,9 +4087,175 @@ async fn maintenance_cleanup_removes_expired_reconnections() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn draining_cleanup_task_exits_without_activity_timeout_eviction() {
+async fn zero_ping_timeout_disables_activity_reaper() {
     let server = create_test_server_with_config(ServerConfig {
         ping_timeout: Duration::ZERO,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (player_id, _receiver) = register_client(&server, "127.0.0.1:48013".parse().unwrap()).await;
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    // The cleanup interval fires immediately on startup. Give that first sweep
+    // enough time to run, then prove the documented zero value means disabled
+    // rather than "expire every client immediately."
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        server.connection_manager.client_ids().contains(&player_id),
+        "ping_timeout=0 must disable activity-reaper eviction"
+    );
+
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn activity_refresh_after_cleanup_snapshot_prevents_eviction() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_millis(
+            ServerConfig::default()
+                .websocket_config
+                .slow_consumer_timeout_ms,
+        ),
+        Arc::new(crate::metrics::ServerMetrics::new()),
+    ));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig {
+            ping_timeout: Duration::from_millis(100),
+            ..ServerConfig::default()
+        },
+        message_coordinator,
+    )
+    .await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let player_id = server
+        .register_client_with_close(sender, close, "127.0.0.1:48012".parse().unwrap())
+        .await
+        .expect("register client before activity-reaper snapshot");
+
+    tokio::time::sleep(Duration::from_millis(110)).await;
+    let coordinator_write = coordinator.local_clients.write().await;
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    server.record_client_activity(&player_id);
+    drop(coordinator_write);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    assert!(
+        server.connection_manager.client_ids().contains(&player_id),
+        "activity refreshed after collection must rescue the client"
+    );
+    assert_eq!(
+        listener.requested_reason(),
+        None,
+        "a stale cleanup snapshot must not pin activity_timeout"
+    );
+    assert_no_queued_message(
+        &mut receiver,
+        "a stale cleanup snapshot must not enqueue an ActivityTimeout farewell",
+    );
+    assert_eq!(
+        server
+            .metrics
+            .expired_players_cleaned
+            .load(Ordering::Relaxed),
+        0,
+        "rescued client must not count as evicted"
+    );
+
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn activity_reaper_does_not_override_an_existing_close_owner() {
+    let server = create_test_server_with_config(ServerConfig {
+        ping_timeout: Duration::from_nanos(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let player_id = server
+        .register_client_with_close(sender, close, "127.0.0.1:48015".parse().unwrap())
+        .await
+        .expect("register client before pre-pinning a close");
+    assert!(
+        server
+            .connection_manager
+            .request_close_for(&player_id, crate::coordination::CloseReason::SlowConsumer),
+        "test setup should pin the delivery owner"
+    );
+
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    assert!(
+        server.connection_manager.client_ids().contains(&player_id),
+        "the activity reaper must not unregister a close owned by another subsystem"
+    );
+    assert_eq!(
+        listener.requested_reason(),
+        Some(crate::coordination::CloseReason::SlowConsumer),
+        "the original close owner must remain authoritative"
+    );
+    assert_no_queued_message(
+        &mut receiver,
+        "the activity reaper must not enqueue a contradictory timeout farewell",
+    );
+    assert_eq!(
+        server
+            .metrics
+            .expired_players_cleaned
+            .load(Ordering::Relaxed),
+        0,
+        "the activity reaper must not count another close owner's connection",
+    );
+
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn draining_cleanup_task_exits_without_activity_timeout_eviction() {
+    let server = create_test_server_with_config(ServerConfig {
+        ping_timeout: Duration::from_nanos(1),
         ..ServerConfig::default()
     })
     .await;
@@ -4122,7 +4288,7 @@ async fn draining_cleanup_task_stops_when_drain_starts_during_activity_farewell(
     let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
     let server = create_test_server_with_message_coordinator(
         ServerConfig {
-            ping_timeout: Duration::ZERO,
+            ping_timeout: Duration::from_nanos(1),
             ..ServerConfig::default()
         },
         message_coordinator,
@@ -4186,7 +4352,7 @@ async fn draining_cleanup_task_skips_activity_farewell_when_drain_starts_during_
     let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
     let server = create_test_server_with_message_coordinator(
         ServerConfig {
-            ping_timeout: Duration::ZERO,
+            ping_timeout: Duration::from_nanos(1),
             ..ServerConfig::default()
         },
         message_coordinator,

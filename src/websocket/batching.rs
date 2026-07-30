@@ -8,10 +8,12 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::server::EnhancedGameServer;
 
+use super::connection::{record_outbound_probe_activity, PingProbeState};
 use super::sending::{
     preflight_binary_fallback, send_single_message, write_pending_unsupported_report,
     BinaryFallbackPreflight, SendAccounting, SendDisposition,
@@ -119,6 +121,7 @@ pub(super) async fn send_batch(
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
     close_signal: &ConnectionCloseSignal,
+    ping_probe_state: &watch::Sender<PingProbeState>,
     max_sojourn: Duration,
     write_phase: WritePhase,
 ) -> Result<(), QueueWriteError> {
@@ -135,6 +138,7 @@ pub(super) async fn send_batch(
                         player_id,
                         server,
                         close_signal,
+                        ping_probe_state,
                         max_sojourn,
                         write_phase,
                     )
@@ -170,6 +174,7 @@ pub(super) async fn send_batch(
             player_id,
             server,
             close_signal,
+            ping_probe_state,
             max_sojourn,
             write_phase,
         )
@@ -269,6 +274,7 @@ pub(super) async fn send_queued(
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
     close_signal: &ConnectionCloseSignal,
+    ping_probe_state: &watch::Sender<PingProbeState>,
     max_sojourn: Duration,
     write_phase: WritePhase,
 ) -> Result<(), QueueWriteError> {
@@ -311,12 +317,12 @@ pub(super) async fn send_queued(
     //   preceding it: a flush in front would move a counter that the very next
     //   frame then reports as lower.
     let flush_before = !fallback_preflight.is_unsupported() && !carries_queued_report;
-    let mut accounting = SendAccounting::new(receiver, server, *player_id, class);
+    let mut accounting = SendAccounting::new(receiver, server, ping_probe_state, *player_id, class);
     let recipient_supports_v3 = receiver.supports_v3();
     let recipient_format = receiver.game_data_format();
     let write = async {
-        if flush_before {
-            write_pending_unsupported_report(sender, receiver, player_id).await?;
+        if flush_before && write_pending_unsupported_report(sender, receiver, player_id).await? {
+            record_outbound_probe_activity(ping_probe_state, Instant::now());
         }
         let disposition = match queued.payload {
             OutboundPayload::Message(message) => {
@@ -346,7 +352,9 @@ pub(super) async fn send_queued(
                     )
                 })
                 .await?;
-                write_pending_unsupported_report(sender, receiver, player_id).await?;
+                if write_pending_unsupported_report(sender, receiver, player_id).await? {
+                    record_outbound_probe_activity(ping_probe_state, Instant::now());
+                }
                 disposition
             }
         };
@@ -383,6 +391,7 @@ pub(super) async fn send_queued(
     let disposition = result?;
     if disposition == SendDisposition::Written {
         accounting.complete_written();
+        record_outbound_probe_activity(ping_probe_state, Instant::now());
         #[cfg(feature = "trace-validation")]
         if let Some(delivery_id) = trace_write {
             close_signal.finish_trace_write(delivery_id, write_phase == WritePhase::CloseFlush);

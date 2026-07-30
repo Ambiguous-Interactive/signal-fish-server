@@ -6,6 +6,10 @@ use futures_util::SinkExt;
 use rmp_serde::{from_slice, to_vec_named};
 use serde::Serialize;
 use std::sync::Arc;
+use tokio::sync::watch;
+use tokio::time::Instant;
+
+use super::connection::{record_outbound_probe_activity, PingProbeState};
 
 /// Whether this binary message is guaranteed to take the accounted
 /// unsupported-format path for the recipient.
@@ -283,6 +287,7 @@ pub(super) enum SendDisposition {
 pub(super) struct SendAccounting<'a> {
     receiver: &'a OutboundReceiver,
     server: &'a Arc<EnhancedGameServer>,
+    ping_probe_state: &'a watch::Sender<PingProbeState>,
     player_id: PlayerId,
     class: Option<crate::protocol::DeliveryClass>,
     resolved: bool,
@@ -292,16 +297,22 @@ impl<'a> SendAccounting<'a> {
     pub(super) fn new(
         receiver: &'a OutboundReceiver,
         server: &'a Arc<EnhancedGameServer>,
+        ping_probe_state: &'a watch::Sender<PingProbeState>,
         player_id: PlayerId,
         class: Option<crate::protocol::DeliveryClass>,
     ) -> Self {
         Self {
             receiver,
             server,
+            ping_probe_state,
             player_id,
             class,
             resolved: false,
         }
+    }
+
+    fn record_outbound_progress(&self) {
+        record_outbound_probe_activity(self.ping_probe_state, Instant::now());
     }
 
     pub(super) fn complete_written(&mut self) {
@@ -443,7 +454,9 @@ async fn notify_or_close_on_fallback_failure(
                 // write what is pending, then hold this range in the emptied
                 // report. Holding only after the write keeps the two sets
                 // disjoint if the write is cancelled.
-                write_pending_unsupported_report(sender, accounting.receiver, player_id).await?;
+                if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
+                    accounting.record_outbound_progress();
+                }
                 accounting.hold_unsupported(metadata);
             }
             if let Some(suppressed) = accounting.unsupported_notice(from_player) {
@@ -451,7 +464,9 @@ async fn notify_or_close_on_fallback_failure(
                 // explains it, so the rate-limited notice is also the pending
                 // report's flush cadence: at most one report per sender per
                 // second instead of one per omitted message.
-                write_pending_unsupported_report(sender, accounting.receiver, player_id).await?;
+                if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
+                    accounting.record_outbound_progress();
+                }
                 let suppressed = if suppressed == 0 {
                     String::new()
                 } else {
@@ -466,6 +481,7 @@ async fn notify_or_close_on_fallback_failure(
                     error_code: Some(ErrorCode::UnsupportedGameDataFormat),
                 };
                 send_text_message(sender, &notice, player_id).await?;
+                accounting.record_outbound_progress();
             }
             Ok(SendDisposition::AccountedDrop)
         }
@@ -484,9 +500,9 @@ pub(super) async fn write_pending_unsupported_report(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     receiver: &OutboundReceiver,
     player_id: &PlayerId,
-) -> Result<(), ()> {
+) -> Result<bool, ()> {
     let Some(report) = receiver.pending_unsupported_report() else {
-        return Ok(());
+        return Ok(false);
     };
     send_text_message(
         sender,
@@ -495,7 +511,7 @@ pub(super) async fn write_pending_unsupported_report(
     )
     .await?;
     receiver.commit_pending_unsupported_report(&report);
-    Ok(())
+    Ok(true)
 }
 
 pub(super) async fn send_text_message(
