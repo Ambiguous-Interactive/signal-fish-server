@@ -55,15 +55,16 @@ checks the named invariants and action properties in each one:
 Run it:
 
 ```bash
-bash scripts/run-tla-model-check.sh            # all four models
+bash scripts/run-tla-model-check.sh            # every checked configuration
 bash scripts/run-tla-model-check.sh --config Mesh --verbose
 ```
 
 The script downloads a version-pinned, SHA256-verified `tla2tools.jar` (needs a
-JRE 11+) and exits nonzero on any violation. The four models cover the five
-capability profiles, both desired ceilings, the WebRTC-disabled (host+direct)
-path, and the all-transports-disabled relay floor (`RelayFloorOnly`: nothing is
-stored and every v3 publication is an explicit relay reset); observed state spaces are
+JRE 11+) and exits nonzero on any violation. The four
+`SignalFishSession.tla` configurations cover the five capability profiles,
+both desired ceilings, the WebRTC-disabled (host+direct) path, and the
+all-transports-disabled relay floor (`RelayFloorOnly`: nothing is stored and
+every v3 publication is an explicit relay reset); observed state spaces are
 ~17k–151k distinct states, ~2–7 s each. CI runs the same script via
 `.github/workflows/formal-verification.yml`.
 
@@ -171,6 +172,37 @@ The composed
 model proves these single-instance behaviors compose correctly. These
 counterexamples are the formal complement to the nightly two-process test in
 `tests/split_brain_two_instances_e2e.rs`.
+
+## Additional disconnect/outage exposure bound
+
+[`ReconnectLossBound.tla`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/tla/ReconnectLossBound.tla)
+does not claim to bound all gameplay omissions visible at reconnect.
+Delivery-class omissions already accounted before the cut stay outside this
+model. It checks only the additional exposure introduced by abandoning the old
+connection's pipeline and accepting room traffic while the recipient is absent:
+
+```text
+reconnectExposure <= QCAP + PCAP + BURST + RATE * WINDOW
+```
+
+`PCAP` covers every dequeued but client-application-unobserved stage: server
+batcher, active/partial write, kernel and network buffering, and the client
+receive path. It is not the configured socket-buffer byte request. `BURST` is
+available immediately; each elapsed outage quantum releases at most `RATE`
+more admissions. This is the discrete counterpart of the enforced arrival
+curve `A(T) <= B + ceil(R*T)`, not a conclusion from an average throughput
+measurement. The
+[consistency and durability contract](consistency-and-durability.md#additional-disconnectoutage-exposure-bound)
+gives the exact operator-facing formula and caveats.
+
+The positive configurations are exhaustive. `_Small` exercises a full queue, a
+full post-queue pipeline, an immediate burst, and two elapsed rate quanta.
+`_ZeroWindow` permits the burst while proving that no steady-rate admission is
+available before time advances. The CI runner also executes
+`_ExpectedFailure`: `IgnorePostQueuePipelineBug` removes `PCAP`, and the run
+passes only when TLC emits the exact expected
+`ReconnectExposureBounded` violation (`7 > 6`). A clean run or a different
+error fails CI, keeping the non-vacuity oracle live.
 
 ## Correspondence-maintenance rule
 

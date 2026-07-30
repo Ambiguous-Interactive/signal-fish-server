@@ -108,7 +108,10 @@ async fn main() -> anyhow::Result<()> {
 
 ## Custom Storage Backend
 
-Implement the `GameDatabase` trait for custom persistence:
+Implement the `GameDatabase` trait for custom room-record storage. This alone
+does not persist a live room across process restart; read the
+[consistency and durability contract](architecture/consistency-and-durability.md)
+before designing a custom backend:
 
 ```rust
 

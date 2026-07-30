@@ -95,12 +95,18 @@ updates:
       - "dependencies"
       - "rust"
       - "automated"
-    # Match the two direct holds already measured in the root graph.
+    # Dependabot follows the server path dependency and may propose root
+    # manifest edits from this standalone job. Mirror every root hold; the
+    # live config regression test enforces this as a superset automatically.
     ignore:
+      - dependency-name: "base64"
+        versions: ["0.23.x"]
       - dependency-name: "tokio-tungstenite"
         versions: ["0.30.x"]
       - dependency-name: "serial_test"
         versions: ["4.x"]
+      - dependency-name: "syn"
+        versions: ["3.x"]
     groups:
       cargo-native-updates:
         patterns:
@@ -131,6 +137,18 @@ updates:
       - "dependencies"
       - "rust"
       - "automated"
+    # Dependabot follows the server path dependency and may propose root
+    # manifest edits from this standalone job. Mirror every root hold; #229
+    # demonstrated that ignores do not carry across update entries.
+    ignore:
+      - dependency-name: "base64"
+        versions: ["0.23.x"]
+      - dependency-name: "tokio-tungstenite"
+        versions: ["0.30.x"]
+      - dependency-name: "serial_test"
+        versions: ["4.x"]
+      - dependency-name: "syn"
+        versions: ["3.x"]
     groups:
       cargo-fuzz-updates:
         patterns:
@@ -318,6 +336,8 @@ updates:
 # - Rust production image (Dockerfile): Aligned with MSRV policy, manual updates only
 # - Devcontainer Rust: No ignores, tracks latest stable for developer experience
 # - Native client: Hold the WebSocket-stack and MSRV-incompatible release lines
+# - Fuzz package: Mirror root manifest holds that path-dependency traversal can
+#   otherwise re-propose from the standalone update job
 # - Security scanning: cargo-deny runs in CI for supply chain vulnerabilities
 #
 # Labels:

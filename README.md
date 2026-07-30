@@ -524,7 +524,10 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 The `GameDatabase` trait is public, so you can implement your own storage
-backend if you need persistence beyond the built-in `InMemoryDatabase`.
+backend for room-record storage beyond the built-in `InMemoryDatabase`. That
+does not make live rooms restartable: connection routes, reconnect claims,
+replay buffers, relay counters, and session plans remain process-local. See the
+[consistency and durability contract](docs/architecture/consistency-and-durability.md).
 
 ## Building from Source
 

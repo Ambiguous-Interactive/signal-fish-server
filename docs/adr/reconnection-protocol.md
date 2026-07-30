@@ -4,6 +4,12 @@
 
 ADR-001 - Accepted
 
+> **Current guarantee:** ADR-0008 clarifies the durability language in this
+> legacy record. Reconnection restores identity and current control state from
+> one live home process; replay is bounded, `GameData` is never replayed, and
+> no room state survives loss of that process. The token and replay mechanisms
+> below remain accepted.
+
 ## Context
 
 WebSocket connections are inherently fragile and can be disrupted by network issues, mobile device sleep/wake
@@ -113,7 +119,9 @@ Core implementation lives in:
 ### Positive
 
 - **Seamless recovery**: Players can recover from brief network interruptions without losing their session
-- **Message continuity**: Event replay ensures no game state is lost during disconnection
+- **Control continuity**: Bounded event replay restores or explicitly marks gaps
+  in room-control history; gameplay state still requires application-level
+  synchronization
 - **Authority preservation**: Players can maintain their authority role across reconnections
 - **Configurable**: Can be disabled for simpler deployments or enabled with custom window sizes
 - **Observable**: Rich metrics enable monitoring of reconnection patterns and success rates
@@ -144,18 +152,21 @@ games includes reconnection support.
 
 ### 2. Stateless Reconnection (Client-Side State)
 
-**Rejected**: Would require clients to maintain and replay their own state, increasing client complexity and
-opening security holes (clients can fabricate state).
+**Rejected for identity and room control**: Letting a client fabricate its
+identity, membership, or authority state would open security holes. Gameplay
+state synchronization still belongs to the application because the signaling
+server does not own that state.
 
 ### 3. Persistent Connection IDs
 
 **Rejected**: Would require database persistence and doesn't align with our in-memory-only architecture.
 Reconnection tokens with time-limited validity are sufficient for the target use case.
 
-### 4. Full Room State Snapshot on Reconnect
+### 4. Full Application Gameplay Snapshot on Reconnect
 
-**Rejected**: Wasteful for rooms with frequent small updates. Event replay is more bandwidth-efficient and
-provides better message continuity.
+**Rejected**: The signaling server does not own application gameplay state and
+cannot serialize it. Reconnect does send an authoritative snapshot of the
+server-owned membership/lobby fields, plus bounded control replay.
 
 ## References
 

@@ -4,9 +4,12 @@
 # This crate is a standalone package OUTSIDE the root signal-fish-server
 # package, with its own Cargo.lock and an independent dependency graph (the
 # webrtc stack et al.) that the root deny.toml audit never sees. The policy
-# below mirrors the root configuration (same license allowlist, bans, and
-# source restrictions) so the supply-chain bar is identical; only this header
-# differs. CI enforces it via the client-deny job in
+# below mirrors the root bans and source restrictions. Its license allowlist is
+# deliberately the strict subset encountered by this graph; copying the root
+# `OpenSSL` allowance and legacy `ring` clarification produced an unmatched
+# policy warning instead of protecting anything. A live config test enforces
+# exact ban parity, strict source settings, and license-subset semantics. CI
+# enforces the graph via the client-deny job in
 # .github/workflows/webrtc-interop.yml.
 
 [graph]
@@ -44,12 +47,6 @@ allow = [
     "Zlib",
     "0BSD",
     "ISC",
-    # Mirrored verbatim from the root policy for `ring` (see the clarify
-    # below). The ring version resolved in THIS graph declares its license
-    # directly, so cargo-deny may report this allowance (and the clarify) as
-    # unmatched — that warning is expected; the entries are kept so the two
-    # policies stay diffable.
-    "OpenSSL",
 ]
 # Confidence threshold for license detection
 confidence-threshold = 0.8
@@ -58,16 +55,6 @@ confidence-threshold = 0.8
 exceptions = [
     # Example: { allow = ["LGPL-3.0"], name = "unicode-normalization" },
 ]
-
-# Mirrored verbatim from the root policy. Newer ring releases (0.17.14+, as
-# resolved in this crate's lockfile) declare `Apache-2.0 AND ISC` directly
-# and ship a different LICENSE file, so the hash below does not match and
-# this clarify is intentionally inert here — kept verbatim anyway so the
-# client policy stays a recognizable mirror of the root one.
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 # Warn on multiple versions of the same crate

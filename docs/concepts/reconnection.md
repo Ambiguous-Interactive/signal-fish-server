@@ -7,8 +7,10 @@ Without reconnection support, any of these events would force a player
 to re-authenticate, rejoin the room (which may already be full), and
 lose every event that happened while they were away.
 
-Signal Fish Server solves this with token-based reconnection and event
-replay.
+Signal Fish Server reduces that disruption with token-based reconnection,
+authoritative current-room snapshots, and bounded control-event replay.
+Gameplay payloads are not replayed; applications still synchronize game state
+after reconnect.
 
 ## How Reconnection Works
 
