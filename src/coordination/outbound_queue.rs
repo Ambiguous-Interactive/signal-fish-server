@@ -254,18 +254,13 @@ struct QueueState {
     sender_count: usize,
     permit_count: usize,
     counters: DeliveryCountersByClass,
+    /// The counter frontier successfully written and flushed to the socket.
+    ///
+    /// A queued report is stamped against this frontier immediately before its
+    /// socket write and advances it only after that write succeeds. A cancelled
+    /// or failed write therefore cannot influence any later report.
     wire_counters: DeliveryCountersByClass,
     pending_unsupported: PendingUnsupported,
-    /// The counter frontier the recipient has actually been shown.
-    ///
-    /// `wire_counters` advances when a queued report is handed to the writer, so
-    /// after a cancelled or failed write it can describe a frame nobody
-    /// received. A coalesced unsupported-format report is therefore built on
-    /// this value instead: its deltas are then exact against the last frame that
-    /// really landed, whatever happened to the one before it. Advanced by
-    /// [`OutboundReceiver::confirm_report_frontier`] and by committing a
-    /// coalesced report.
-    confirmed_wire_counters: DeliveryCountersByClass,
     enqueue_generation: u64,
     receive_generation: u64,
     active_room: Option<RoomId>,
@@ -409,7 +404,6 @@ impl QueueState {
             counters: DeliveryCountersByClass::default(),
             wire_counters: DeliveryCountersByClass::default(),
             pending_unsupported: PendingUnsupported::default(),
-            confirmed_wire_counters: DeliveryCountersByClass::default(),
             enqueue_generation: 0,
             receive_generation: 0,
             active_room: None,
@@ -1498,8 +1492,7 @@ impl OutboundReceiver {
             state.control.pop_front()
         } else {
             None
-        }
-        .map(|item| prepare_for_wire(&mut state, item));
+        };
         drop(state);
         if item.is_some() {
             self.shared.capacity_available.notify_waiters();
@@ -1543,7 +1536,7 @@ impl OutboundReceiver {
             None
         };
         let result = match item {
-            Some(item) => Ok(prepare_for_wire(&mut state, item)),
+            Some(item) => Ok(item),
             None if state.receiver_open && state.producers_open() => Err(PopState::Empty),
             None => Err(PopState::Disconnected),
         };
@@ -1652,7 +1645,7 @@ impl OutboundReceiver {
                     self.batch_remaining = 0;
                     state.receive_generation = item.generation;
                 }
-                Ok(prepare_for_wire(&mut state, item))
+                Ok(item)
             }
             None if state.receiver_open && state.producers_open() => Err(BatchedPopState::Empty),
             None => Err(BatchedPopState::Disconnected),
@@ -1792,16 +1785,31 @@ impl OutboundReceiver {
     /// `unsupported_format` counter delta whose exact ranges had not been sent.
     pub fn pending_unsupported_report(&self) -> Option<DeliveryReportPayload> {
         let state = self.shared.state();
-        state
-            .pending_unsupported
-            .peek(state.confirmed_wire_counters)
+        state.pending_unsupported.peek(state.wire_counters)
     }
 
-    /// Record that the report frame the queue last handed to the writer reached
-    /// the socket, so later reports can build on the counters it carried.
-    pub fn confirm_report_frontier(&self) {
+    /// Stamp a queued report against the last counter frontier successfully
+    /// sent and flushed to the socket, without advancing that frontier.
+    pub(crate) fn prepare_report_for_wire(&self, report: &mut DeliveryReportPayload) {
+        let state = self.shared.state();
+        report.per_class = max_counters(report.per_class, state.wire_counters);
+        // `state.counters` may already count omissions that are still pending
+        // (they are counted when discovered, reported when their coalesced range
+        // reaches the wire), so clamp unsupported-format counters to the
+        // frontier whose exact ranges were already written. The writer flushes
+        // the pending ranges immediately after this report.
+        report.per_class.reliable.unsupported_format =
+            state.wire_counters.reliable.unsupported_format;
+        report.per_class.latest.unsupported_format = state.wire_counters.latest.unsupported_format;
+        report.per_class.volatile.unsupported_format =
+            state.wire_counters.volatile.unsupported_format;
+    }
+
+    /// Advance the successful socket-write frontier after a queued report
+    /// send/flush succeeds.
+    pub(crate) fn confirm_report_written(&self, per_class: DeliveryCountersByClass) {
         let mut state = self.shared.state();
-        state.confirmed_wire_counters = state.wire_counters;
+        state.wire_counters = max_counters(state.wire_counters, per_class);
     }
 
     /// Retire the ranges a written report carried and advance the wire frontier
@@ -1810,8 +1818,6 @@ impl OutboundReceiver {
         let mut state = self.shared.state();
         state.pending_unsupported.commit(report);
         state.wire_counters = max_counters(state.wire_counters, report.per_class);
-        state.confirmed_wire_counters =
-            max_counters(state.confirmed_wire_counters, report.per_class);
     }
 
     /// When a coalesced unsupported-format report must reach the recipient even
@@ -2056,25 +2062,6 @@ fn enqueue_delivery_report(state: &mut QueueState, gaps: Vec<DeliveryGap>) {
         generation: state.enqueue_generation,
         transition_barrier: false,
     });
-}
-
-fn prepare_for_wire(state: &mut QueueState, mut item: QueuedOutbound) -> QueuedOutbound {
-    if let OutboundPayload::DeliveryReport(report) = &mut item.payload {
-        report.per_class = max_counters(report.per_class, state.wire_counters);
-        // `state.counters` may already count omissions that are still pending
-        // (they are counted when discovered, reported when their coalesced range
-        // reaches the wire), so the unsupported-format frontier is clamped to
-        // what has actually been sent rather than raised by a report carrying no
-        // ranges for it. The writer flushes the pending report immediately
-        // *after* this frame, which keeps both frames monotonic.
-        report.per_class.reliable.unsupported_format =
-            state.wire_counters.reliable.unsupported_format;
-        report.per_class.latest.unsupported_format = state.wire_counters.latest.unsupported_format;
-        report.per_class.volatile.unsupported_format =
-            state.wire_counters.volatile.unsupported_format;
-        state.wire_counters = report.per_class;
-    }
-    item
 }
 
 fn max_counters(
@@ -2659,8 +2646,14 @@ mod tests {
             "the first omission coalesces instead of costing its own frame"
         );
 
-        let queued = report(rx.recv().await.unwrap().unwrap());
+        let mut queued = report(rx.recv().await.unwrap().unwrap());
         assert_eq!(queued.per_class.latest.dropped_full, 1);
+        assert_eq!(
+            rx.shared.state().wire_counters,
+            DeliveryCountersByClass::default(),
+            "popping a report must not advance the frontier before its write succeeds"
+        );
+        rx.prepare_report_for_wire(&mut queued);
         assert_eq!(
             queued.per_class.reliable.unsupported_format, 0,
             "the frontier may not advance without the ranges that explain it"
@@ -2680,7 +2673,7 @@ mod tests {
         );
         assert_eq!(unconfirmed.per_class.reliable.unsupported_format, 1);
 
-        rx.confirm_report_frontier();
+        rx.confirm_report_written(queued.per_class);
         let pending = rx
             .pending_unsupported_report()
             .expect("the coalesced range is still waiting for its own frame");
@@ -2802,8 +2795,11 @@ mod tests {
             .unwrap();
         tx.try_enqueue_report_snapshot().unwrap();
 
-        let first = report(rx.recv().await.unwrap().unwrap());
-        let second = report(rx.recv().await.unwrap().unwrap());
+        let mut first = report(rx.recv().await.unwrap().unwrap());
+        rx.prepare_report_for_wire(&mut first);
+        rx.confirm_report_written(first.per_class);
+        let mut second = report(rx.recv().await.unwrap().unwrap());
+        rx.prepare_report_for_wire(&mut second);
         assert_eq!(first.per_class.latest.superseded, 2);
         assert_eq!(second.per_class.latest.superseded, 2);
         assert_eq!(first.gaps.len(), 2);
