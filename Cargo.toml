@@ -96,7 +96,7 @@ smallvec = { version = "1.15", features = ["union", "const_generics", "serde"] }
 dashmap = "6.2"
 
 # Crypto & security
-base64 = "0.22"
+base64 = "0.23"
 aes-gcm = { version = "0.11", features = ["aes"] }
 sha2 = "0.11"
 sha1 = "0.11"
@@ -133,7 +133,7 @@ tokio-test = "0.4"
 # read `tokio::time::Instant`, so `tokio::time::advance(..)` drives them).
 tokio = { version = "1.52", features = ["process", "test-util"] }
 tempfile = "3.27"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 futures = "0.3"
 regex = "1.12"
@@ -142,13 +142,13 @@ reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",
 ] }
-serial_test = "3.5"
+serial_test = "4.0"
 axum-test = "21.0"
 proptest = "1.11"
 once_cell = "1.21"
 criterion = "0.8"
 stats_alloc = "0.1.10"
-syn = { version = "2.0", features = ["full", "visit"] }
+syn = { version = "3.0", features = ["full", "visit"] }
 trybuild = "1.0"
 # YAML 1.2 parser used by tests/ci_config_tests.rs to validate workflow files by
 # actually parsing them, rather than approximating a parser with fragile quote/
