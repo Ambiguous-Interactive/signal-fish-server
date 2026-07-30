@@ -19,9 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep the standalone native reference client and fuzz dependency graphs
   current and reproducible (issue #225). Dependabot now monitors both packages,
-  the fuzz application commits a Rust 1.89-compatible lockfile, and stable,
-  nightly, cargo-deny, and cargo-audit gates reject graph or security-policy
-  drift before it reaches the server.
+  the fuzz application commits a Rust 1.89-compatible lockfile, and every
+  standalone update job that traverses the server path dependency must inherit
+  all measured root version holds. Stable, nightly, cargo-deny, and scheduled
+  cargo-audit gates now cover the root, native, and fuzz graphs; live policy
+  tests also keep native banned-crate/source rules aligned while allowing only
+  a narrower graph-specific license set.
+- Define the server's single-home consistency and durability contract
+  (issues #206 and #210): successful operations commit to one process's memory,
+  reconnect restores current control state but never missed gameplay payloads,
+  and drain or process loss requires clients to rebuild the room. Define the
+  additional disconnect/outage exposure as the old queue tail plus every
+  dequeued-but-client-unobserved pipeline frame plus traffic accepted while
+  absent. Machine-check its conditional burst/rate/window ceiling without
+  counting already-accounted delivery-class omissions or inventing a numeric
+  guarantee from defaults that impose no room-wide gameplay admission bound.
 - Reduce steady-state relay fan-out allocation operations by pre-sizing the
   recipient snapshot from room membership (issue #211). The measured cost is
   now flat at six allocation operations per coordinator fan-out for 2-, 8-,
@@ -57,7 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mozilla-actions/sccache-action` 0.0.11, and `actions/upload-artifact`),
   carrying Dependabot #202 and #215 forward.
 - Refresh the compatible dependency set (Tokio 1.53.1, serde 1.0.229, futures
-  0.3.33, clap 4.6.4, hdrhistogram 7.6.0 and others). The `tokio-tungstenite`
+  0.3.33, clap 4.6.4, hdrhistogram 7.6.0 and others), including a coherent
+  native-reference-client upgrade of the complete webrtc-rs family from 0.17.1
+  to 0.17.2. The `tokio-tungstenite`
   0.30, `serial_test` 4.0, `base64` 0.23, and `syn` 3.0 declarations proposed
   alongside them are deliberately not taken: the first duplicates the
   Tungstenite stack Axum still pins to 0.29, the second requires rustc 1.93.1

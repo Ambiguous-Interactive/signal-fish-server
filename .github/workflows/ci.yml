@@ -423,6 +423,8 @@ jobs:
           tool: cargo-audit
       - name: Run cargo-audit
         run: cargo audit
+      - name: Run cargo-audit (native reference client)
+        run: cargo audit --file clients/native/Cargo.lock
       - name: Run cargo-audit (fuzz package)
         run: cargo audit --file fuzz/Cargo.lock
 

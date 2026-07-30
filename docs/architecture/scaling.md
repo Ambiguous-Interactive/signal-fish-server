@@ -7,6 +7,10 @@ message supplies a room code. Read the
 [single-instance deployment contract](single-instance-deployment.md) before
 placing the server behind a load balancer.
 
+For the exact operation acknowledgement, process-loss, and reconnect gameplay
+loss boundaries, see the
+[consistency and durability contract](consistency-and-durability.md).
+
 ## What state a process holds
 
 A process keeps all authoritative state in memory:
@@ -274,6 +278,8 @@ estimate for these socket partitions.
 
 - [Single-instance deployment contract](single-instance-deployment.md) — the
   supported topology and proven split-brain failure catalog
+- [Consistency and durability](consistency-and-durability.md) — local commit
+  semantics and the conditional disconnect/outage-exposure formula
 - [Deployment guide](../deployment.md) — process/container operation
 - [TURN deployment guide](../deployment-turn.md) — relay capacity and cost
 - [Transport fallback](transport-fallback.md) — the relay floor

@@ -41,6 +41,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/ControlPriorityDelivery.tla` | Spec-first for v3/P10.E2: control-priority queue split + sojourn eviction (liveness) |
 | `tla/DeliveryClasses.tla`     | Spec-first for v3/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
 | `tla/EndToEndGapAccountability.tla` | Flagship v3/P10.D4 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal (validates E5); exhaustive `_Small` + simulation `_Sim` |
+| `tla/ReconnectLossBound.tla` | Additional disconnect/outage exposure: queue + all client-unobserved post-queue stages + burst/rate-bounded outage traffic; exhaustive `_Small` / `_ZeroWindow` + CI-pinned `_ExpectedFailure` |
 | `traces/slow-consumer-close-flush-invalid.jsonl` | Checked-in negative proving a slow-consumer close cannot enter the healthy lifecycle close-flush path |
 | `traces/post-queue-close-live-drain-invalid.jsonl` | Checked-in negative proving a canceled live writer cannot drain after finalization closes the queue |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
@@ -607,6 +608,47 @@ a **wider** shape (deeper send budget, 2-slot queue/buffer/ring, two cycles) und
 bounded random simulation, sampling interleavings the exhaustive model cannot
 afford. Both are green with all three bugs pinned `FALSE`.
 
+## Additional disconnect/outage exposure bound
+
+`ReconnectLossBound.tla` supplies the quantitative half deliberately absent
+from the flagship composition. It is not a bound on every gameplay omission
+visible at reconnect: latest/volatile supersession and other delivery-class
+omissions already accounted before the cut remain outside its scope. It models
+three disjoint sets created or exposed by one connection cut:
+
+```text
+reconnectExposure =
+    queuedAtDrop
+    + dequeuedButClientUnobservedAtDrop
+    + acceptedWhileAbsent
+```
+
+The post-queue term includes the server batcher, active/partial write,
+kernel/network buffers, and the client receive path up to application
+observation. `OldPipelineConservation` proves each frame committed to the old
+recipient pipeline is either observed or in exactly one tail stage.
+`AbsentArrivalCurve` permits `BURST` immediately, then releases at most `RATE`
+admissions per elapsed outage quantum. `ReconnectExposureBounded` composes:
+
+```text
+reconnectExposure <= QCAP + PCAP + BURST + RATE * WINDOW
+```
+
+This is the discrete counterpart of an enforced
+`A(T) <= B + ceil(R*T)` arrival curve. An observed average rate is
+insufficient: production intentionally has no room-wide `GameData` admission
+limit. `PCAP` must be independently bounded through client observation and
+cannot be inferred from the configured socket-buffer byte request. The
+[consistency contract](../docs/architecture/consistency-and-durability.md)
+defines how to apply the formula without overstating a default guarantee.
+
+`_Small` checks the positive two-quantum shape.
+`_ZeroWindow` proves the immediate-reconnect edge: its burst can be spent, but
+no steady-rate traffic is admissible. `_ExpectedFailure` sets
+`IgnorePostQueuePipelineBug = TRUE`; the runner accepts it only when TLC emits
+the exact expected `ReconnectExposureBounded` violation (`7 > 6`). A clean run,
+parse failure, or unrelated violation fails CI.
+
 ## Intentionally not modeled (and why)
 
 - **Rate limits / relay backpressure** — quantitative throttling and queue dynamics,
@@ -624,8 +666,12 @@ afford. Both are green with all three bugs pinned `FALSE`.
   conservation, no-silent-loss, first-close-reason-wins, close preemption against a
   wedged writer, and bounded sender blocking. Its `SilentDropBug` constant reintroduces
   the pre-#131 drop and makes TLC exhibit the `Conservation` counterexample, so the
-  invariant is demonstrably non-vacuous. What remains unmodeled is only the
-  _quantitative_ side (actual rates, timeout durations, queue sizing).
+  invariant is demonstrably non-vacuous. `ReconnectLossBound.tla` separately
+  proves the additional disconnect/outage-exposure arithmetic once queue,
+  complete post-queue pipeline, burst, rate, and window bounds are supplied.
+  Actual scheduler timing, end-to-end pipeline capacity, and
+  deployment-specific arrival curves remain external assumptions rather than
+  model constants inferred from defaults.
 - **`Signal` payload relay** — `handle_signal` is transport-only plumbing over opaque
   payloads (deliberately weaker than the session predicate, see
   `src/server/signaling.rs`); its gates are direct conditionals with no state evolution,

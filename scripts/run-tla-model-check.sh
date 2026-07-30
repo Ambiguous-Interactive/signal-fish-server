@@ -8,7 +8,10 @@
 # named <Module>_<Scenario>.cfg and the default run globs them all, so a new
 # spec or scenario is picked up automatically. Any invariant or property
 # violation exits nonzero; success is quiet (one summary line per
-# configuration).
+# configuration). A configuration ending `_ExpectedFailure.cfg` must declare
+# an exact `\* EXPECTED_TLC_FAILURE: ...` output line. The runner passes it only
+# when TLC fails with that exact diagnostic, so seeded bugs remain CI-pinned
+# without treating parser errors or unrelated invariant failures as success.
 #
 # TLC deadlock checking stays ENABLED on purpose: the spec's churn-budget
 # terminal states self-loop through an explicit `Done` stutter action, so a
@@ -232,6 +235,21 @@ for cfg in "${CONFIGS[@]}"; do
     # -metadir keeps TLC's state files out of the repository; deadlock
     # checking is deliberately left ON (see the header comment).
     module="$(module_of "$(basename "$cfg" .cfg)")"
+    expected_failure=""
+    case "$(basename "$cfg" .cfg)" in
+        *_ExpectedFailure)
+            expected_failure="$(
+                sed -n 's/^\\\* EXPECTED_TLC_FAILURE: //p' "${TLA_DIR}/${cfg}" |
+                    head -n 1
+            )"
+            if [ -z "$expected_failure" ]; then
+                echo "FAIL ${cfg}: expected-failure config is missing its exact diagnostic marker." >&2
+                overall_status=1
+                rm -rf "$metadir"
+                continue
+            fi
+            ;;
+    esac
 
     # A *_Sim configuration is checked by bounded random simulation instead of
     # exhaustive enumeration: its state space is deliberately too large to
@@ -281,13 +299,23 @@ for cfg in "${CONFIGS[@]}"; do
     summary="$(grep -iE "states generated|depth of the complete|states checked|Finished in" "$output_file" | tr '\n' ' ' || true)"
     # Exhaustive runs print "No error has been found"; simulation runs finish
     # quietly (no such banner), so for *_Sim a clean exit code is the verdict.
-    if [ "${#mode_args[@]}" -gt 0 ]; then
+    if [ -n "$expected_failure" ]; then
+        run_ok=$(
+            [ "$tlc_status" -ne 0 ] &&
+                grep -Fq "$expected_failure" "$output_file" &&
+                echo true || echo false
+        )
+    elif [ "${#mode_args[@]}" -gt 0 ]; then
         run_ok=$([ "$tlc_status" -eq 0 ] && echo true || echo false)
     else
         run_ok=$([ "$tlc_status" -eq 0 ] && grep -q "No error has been found" "$output_file" && echo true || echo false)
     fi
     if [ "$run_ok" = true ]; then
-        echo "OK   ${cfg}: ${summary}"
+        if [ -n "$expected_failure" ]; then
+            echo "OK   ${cfg}: observed expected failure: ${expected_failure}"
+        else
+            echo "OK   ${cfg}: ${summary}"
+        fi
     else
         overall_status=1
         echo "FAIL ${cfg} (TLC exit ${tlc_status}). Full TLC output:" >&2

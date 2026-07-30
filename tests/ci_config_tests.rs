@@ -12,9 +12,7 @@
 
 mod common;
 
-#[cfg(unix)]
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15347,8 +15345,7 @@ fn test_release_workflow_requires_preflight() {
     );
 }
 
-#[test]
-fn test_dependabot_holds_measured_incompatible_root_cargo_lines() {
+fn assert_dependabot_cargo_holds(directory: &str, expected: &[(&str, &str)]) {
     let path = repo_root().join(".github/dependabot.yml");
     let content = read_live_file(&path);
     let documents = Yaml::load_from_str(&content).expect("dependabot.yml must parse as YAML");
@@ -15359,30 +15356,26 @@ fn test_dependabot_holds_measured_incompatible_root_cargo_lines() {
     let Yaml::Sequence(updates) = updates else {
         panic!("dependabot.yml updates must be a sequence");
     };
-    let root_cargo = updates
+    let cargo_entry = updates
         .iter()
         .find(|entry| {
             entry
                 .as_mapping_get("package-ecosystem")
                 .and_then(Yaml::as_str)
                 == Some("cargo")
-                && entry.as_mapping_get("directory").and_then(Yaml::as_str) == Some("/")
+                && entry.as_mapping_get("directory").and_then(Yaml::as_str) == Some(directory)
         })
-        .unwrap_or_else(|| panic!("dependabot.yml must define the root Cargo update entry"));
-    let ignores = root_cargo
+        .unwrap_or_else(|| {
+            panic!("dependabot.yml must define the Cargo update entry for `{directory}`")
+        });
+    let ignores = cargo_entry
         .as_mapping_get("ignore")
-        .unwrap_or_else(|| panic!("root Cargo updates must retain measured version holds"));
+        .unwrap_or_else(|| panic!("Cargo updates for `{directory}` must retain version holds"));
     let Yaml::Sequence(ignores) = ignores else {
-        panic!("root Cargo update ignores must be a sequence");
+        panic!("Cargo update ignores for `{directory}` must be a sequence");
     };
 
-    let expected = [
-        ("base64", "0.23.x"),
-        ("tokio-tungstenite", "0.30.x"),
-        ("serial_test", "4.x"),
-        ("syn", "3.x"),
-    ];
-    for (dependency, version) in expected {
+    for &(dependency, version) in expected {
         let found = ignores.iter().any(|entry| {
             let dependency_matches = entry
                 .as_mapping_get("dependency-name")
@@ -15398,12 +15391,189 @@ fn test_dependabot_holds_measured_incompatible_root_cargo_lines() {
         });
         assert!(
             found,
-            "Dependabot root Cargo updates must ignore {dependency} {version} until its \
-             measured graph/MSRV incompatibility is resolved. Security advisory scanning \
-             remains independent of version-update ignores.\nFile: {}",
+            "Dependabot Cargo updates for `{directory}` must ignore {dependency} {version} \
+             until its measured graph/MSRV incompatibility is resolved. Security advisory \
+             scanning remains independent of version-update ignores.\nFile: {}",
             path.display()
         );
     }
+}
+
+fn dependabot_cargo_directories() -> BTreeSet<String> {
+    let path = repo_root().join(".github/dependabot.yml");
+    let content = read_live_file(&path);
+    dependabot_cargo_directories_from_yaml(&content)
+}
+
+fn dependabot_cargo_directories_from_yaml(content: &str) -> BTreeSet<String> {
+    let documents = Yaml::load_from_str(content).expect("dependabot.yml must parse as YAML");
+    let updates = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("updates"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("dependabot.yml must define an updates sequence"));
+
+    updates
+        .iter()
+        .filter(|entry| {
+            entry
+                .as_mapping_get("package-ecosystem")
+                .and_then(Yaml::as_str)
+                == Some("cargo")
+        })
+        .map(|entry| {
+            entry
+                .as_mapping_get("directory")
+                .and_then(Yaml::as_str)
+                .unwrap_or_else(|| panic!("every Dependabot Cargo entry must define a directory"))
+                .to_owned()
+        })
+        .collect()
+}
+
+fn dependabot_cargo_holds_by_directory() -> BTreeMap<String, BTreeSet<(String, String)>> {
+    let path = repo_root().join(".github/dependabot.yml");
+    let content = read_live_file(&path);
+    dependabot_cargo_holds_from_yaml(&content)
+}
+
+fn dependabot_cargo_holds_from_yaml(content: &str) -> BTreeMap<String, BTreeSet<(String, String)>> {
+    let documents = Yaml::load_from_str(content).expect("dependabot.yml must parse as YAML");
+    let updates = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("updates"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("dependabot.yml must define an updates sequence"));
+
+    updates
+        .iter()
+        .filter(|entry| {
+            entry
+                .as_mapping_get("package-ecosystem")
+                .and_then(Yaml::as_str)
+                == Some("cargo")
+        })
+        .map(|entry| {
+            let directory = entry
+                .as_mapping_get("directory")
+                .and_then(Yaml::as_str)
+                .unwrap_or_else(|| panic!("every Dependabot Cargo entry must define a directory"));
+            let holds = entry
+                .as_mapping_get("ignore")
+                .and_then(Yaml::as_sequence)
+                .into_iter()
+                .flatten()
+                .flat_map(|ignore| {
+                    let dependency = ignore
+                        .as_mapping_get("dependency-name")
+                        .and_then(Yaml::as_str);
+                    let versions = ignore
+                        .as_mapping_get("versions")
+                        .and_then(Yaml::as_sequence);
+                    versions.into_iter().flatten().filter_map(move |version| {
+                        Some((dependency?.to_owned(), version.as_str()?.to_owned()))
+                    })
+                })
+                .collect();
+            (directory.to_owned(), holds)
+        })
+        .collect()
+}
+
+#[test]
+fn test_dependabot_cargo_inventory_does_not_require_version_holds() {
+    let fixture = r#"
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    ignore:
+      - dependency-name: syn
+        versions: ["3.x"]
+  - package-ecosystem: cargo
+    directory: /standalone
+"#;
+
+    assert_eq!(
+        dependabot_cargo_directories_from_yaml(fixture),
+        BTreeSet::from(["/".to_owned(), "/standalone".to_owned()])
+    );
+    let holds = dependabot_cargo_holds_from_yaml(fixture);
+    assert_eq!(
+        holds.get("/"),
+        Some(&BTreeSet::from([("syn".to_owned(), "3.x".to_owned())]))
+    );
+    assert_eq!(
+        holds.get("/standalone"),
+        Some(&BTreeSet::new()),
+        "A standalone Dependabot Cargo job may have no incompatible-version holds; it must \
+         remain present in directory-based audit inventory."
+    );
+}
+
+#[test]
+fn test_dependabot_holds_measured_incompatible_root_cargo_lines() {
+    assert_dependabot_cargo_holds(
+        "/",
+        &[
+            ("base64", "0.23.x"),
+            ("tokio-tungstenite", "0.30.x"),
+            ("serial_test", "4.x"),
+            ("syn", "3.x"),
+        ],
+    );
+}
+
+#[test]
+fn test_standalone_dependabot_jobs_reaching_root_inherit_all_root_holds() {
+    let root = repo_root();
+    let canonical_root = fs::canonicalize(&root).expect("repository root must resolve");
+    let path_dependency =
+        Regex::new(r#"path\s*=\s*"([^"]+)""#).expect("path-dependency regex must compile");
+    let holds_by_directory = dependabot_cargo_holds_by_directory();
+    let root_holds = holds_by_directory
+        .get("/")
+        .expect("Dependabot must define root Cargo holds");
+    let mut root_path_jobs = BTreeSet::new();
+
+    for (directory, holds) in &holds_by_directory {
+        if directory == "/" {
+            continue;
+        }
+        let manifest = root
+            .join(directory.trim_start_matches('/'))
+            .join("Cargo.toml");
+        let manifest_content = read_live_file(&manifest);
+        let manifest_directory = manifest
+            .parent()
+            .expect("standalone Cargo.toml must have a parent directory");
+        let reaches_root = path_dependency
+            .captures_iter(&manifest_content)
+            .any(|capture| {
+                fs::canonicalize(manifest_directory.join(&capture[1]))
+                    .is_ok_and(|dependency_path| dependency_path == canonical_root)
+            });
+        if !reaches_root {
+            continue;
+        }
+
+        root_path_jobs.insert(directory.as_str());
+        let missing = root_holds.difference(holds).cloned().collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "Dependabot Cargo job `{directory}` traverses a path dependency to the root crate, \
+             so it can edit the root manifest and must inherit every root hold.\n\
+             Missing holds: {missing:?}\nFile: {}",
+            manifest.display()
+        );
+    }
+
+    assert_eq!(
+        root_path_jobs,
+        BTreeSet::from(["/clients/native", "/fuzz"]),
+        "The live Dependabot/path-dependency inventory changed. Every standalone Cargo job that \
+         reaches the root crate must remain covered by the root-hold superset check."
+    );
 }
 
 #[test]
@@ -20480,21 +20650,40 @@ fn test_audit_job_installs_cargo_audit() {
 }
 
 #[test]
-fn test_audit_job_runs_cargo_audit() {
-    // Validates that the audit job runs `cargo audit` to scan Cargo.lock for
-    // known RustSec vulnerabilities.
+fn test_audit_job_covers_every_dependabot_managed_cargo_graph() {
+    // Every graph that Dependabot advances needs the scheduled cargo-audit
+    // second opinion. Otherwise a standalone lockfile can receive updates
+    // without ever being scanned by this daily job.
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
     let audit_section = extract_audit_section(&ci_content);
     let audit_section_live = extract_audit_section(&strip_comment_lines(&ci_content));
+    let audit_commands = audit_section_live
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("run: "))
+        .collect::<BTreeSet<_>>();
 
-    assert!(
-        audit_section_live.contains("cargo audit"),
-        "Audit job must run `cargo audit` to scan for vulnerabilities.\n\
-         The audit job should invoke cargo-audit against the RustSec advisory database."
-    );
+    for directory in dependabot_cargo_directories() {
+        let lockfile = if directory == "/" {
+            "Cargo.lock".to_owned()
+        } else {
+            format!("{}/Cargo.lock", directory.trim_start_matches('/'))
+        };
+        let expected_command = if directory == "/" {
+            "cargo audit".to_owned()
+        } else {
+            format!("cargo audit --file {lockfile}")
+        };
+        assert!(
+            audit_commands.contains(expected_command.as_str()),
+            "The scheduled cargo-audit job must scan every Dependabot-managed Cargo graph.\n\
+             Missing command: {expected_command}\n\
+             Uncovered lockfile: {lockfile}\n\
+             Dependabot directory: {directory}"
+        );
+    }
 
     assert!(
         !audit_section.contains("cargo audit --locked"),
@@ -21899,6 +22088,127 @@ const REQUIRED_DENY_BANS: &[(&str, &str)] = &[
     ("net2", "std::net"),
     ("rustc-serialize", "serde"),
 ];
+
+fn deny_bans(content: &str) -> BTreeMap<String, String> {
+    let mut bans = BTreeMap::new();
+    let mut current_name = None;
+    let mut in_ban = false;
+
+    for line in content.lines().map(str::trim) {
+        if line == "[[bans.deny]]" {
+            if let Some(name) = current_name.take() {
+                panic!("deny entry for `{name}` must define a reason before the next entry");
+            }
+            in_ban = true;
+            continue;
+        }
+        if in_ban && line.starts_with('[') {
+            if let Some(name) = current_name.take() {
+                panic!("deny entry for `{name}` must define a reason before the next section");
+            }
+            in_ban = false;
+        }
+        if !in_ban {
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix("name = \"")
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            current_name = Some(name.to_owned());
+        } else if let Some(reason) = line
+            .strip_prefix("reason = \"")
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            let name = current_name
+                .take()
+                .expect("every deny reason must follow a crate name");
+            assert!(
+                bans.insert(name.clone(), reason.to_owned()).is_none(),
+                "deny policy must not contain duplicate entries for `{name}`"
+            );
+            in_ban = false;
+        }
+    }
+
+    if let Some(name) = current_name {
+        panic!("deny entry for `{name}` must define a reason");
+    }
+    bans
+}
+
+fn allowed_licenses(content: &str) -> BTreeSet<String> {
+    let licenses = content
+        .split_once("[licenses]")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\n[").map(|(section, _)| section))
+        .expect("deny policy must define a [licenses] section");
+    let allow = licenses
+        .split_once("allow = [")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once(']').map(|(array, _)| array))
+        .expect("deny policy [licenses] section must define an allow array");
+    let quoted =
+        Regex::new(r#""([^"]+)""#).expect("license allowlist extraction regex must compile");
+    quoted
+        .captures_iter(allow)
+        .map(|capture| capture[1].to_owned())
+        .collect()
+}
+
+#[test]
+fn test_native_deny_policy_matches_root_security_baseline_with_narrow_exceptions() {
+    let root = repo_root();
+    let root_policy = read_live_file(&root.join("deny.toml"));
+    let native_policy = read_live_file(&root.join("clients/native/deny.toml"));
+
+    assert_eq!(
+        deny_bans(&native_policy),
+        deny_bans(&root_policy),
+        "clients/native/deny.toml must retain the root policy's exact banned-crate names and \
+         reasons. Update both policies together."
+    );
+
+    for setting in [
+        "version = 2",
+        "yanked = \"deny\"",
+        "wildcards = \"deny\"",
+        "unknown-registry = \"deny\"",
+        "unknown-git = \"deny\"",
+        "allow-registry = [\"https://github.com/rust-lang/crates.io-index\"]",
+        "allow-git = []",
+    ] {
+        assert!(
+            root_policy.contains(setting) && native_policy.contains(setting),
+            "Root and native cargo-deny policies must both retain strict setting `{setting}`"
+        );
+    }
+
+    let root_licenses = allowed_licenses(&root_policy);
+    let native_licenses = allowed_licenses(&native_policy);
+    let widened = native_licenses
+        .difference(&root_licenses)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        widened.is_empty(),
+        "The native license allowlist may be a graph-specific strict subset of root policy, \
+         but must not widen it. Unexpected allowances: {widened:?}"
+    );
+    assert!(
+        !native_licenses.contains("OpenSSL") && !native_policy.contains("[[licenses.clarify]]"),
+        "The native graph's ring release declares Apache-2.0 AND ISC directly. Do not copy the \
+         root graph's unmatched OpenSSL allowance or legacy ring clarification."
+    );
+
+    assert!(
+        native_policy.contains("allow-wildcard-paths = true")
+            && read_live_file(&root.join("clients/native/Cargo.toml"))
+                .contains("signal-fish-server = { path = \"../..\" }"),
+        "The native policy's sole intentional relaxation permits its private path dependency \
+         on the root server crate; keep the exception and its live justification together."
+    );
+}
 
 #[test]
 fn test_deny_toml_bans_known_problematic_crates() {

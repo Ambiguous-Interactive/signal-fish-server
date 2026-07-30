@@ -106,6 +106,7 @@ See:
 - [Handoff & Topologies (v3)](architecture/handoff-and-topologies.md)
 - [Formal Verification (v3)](architecture/formal-verification.md)
 - [Single-Instance Deployment](architecture/single-instance-deployment.md)
+- [Consistency and Durability](architecture/consistency-and-durability.md)
 - [Scaling](architecture/scaling.md)
 
 ### Configuration

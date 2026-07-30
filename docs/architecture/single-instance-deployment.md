@@ -15,6 +15,11 @@ The server logs this contract at startup as structured fields:
 `deployment_mode=single_instance`, `room_state=in_memory`,
 `room_affinity_required=true`, and `session_handoff=false`.
 
+The [consistency and durability contract](consistency-and-durability.md)
+defines the acknowledgement and failure boundary for room entry, relay,
+signaling, reconnect, drain, and process loss. ADR-0008 records why the
+single-home boundary remains the supported product decision.
+
 ## What one home means
 
 Keep all of these operations on the same process:
@@ -97,6 +102,10 @@ runtime-dependency server.
 
 - [Scaling architecture](scaling.md) — scale-up guidance and future extension
   seams within this contract
+- [Consistency and durability](consistency-and-durability.md) — exact
+  per-operation commit, disconnect/outage exposure, and process-loss contract
+- [ADR-0008](../adr/0008-single-home-consistency-boundary.md) — accepted
+  single-home product decision
 - [Deployment guide](../deployment.md) — process and container operation
 - [Reconnection](../concepts/reconnection.md) — token lifetime and drain rules
 - [Protocol](../protocol.md#goingaway) — `GoingAway` and close code `4000`
