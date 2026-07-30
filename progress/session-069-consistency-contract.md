@@ -120,5 +120,32 @@ zero findings. Changelog classification and wording review pass.
 
 ## Publication and hosted evidence
 
-PR, exact-head CI, review, and issue disposition evidence is recorded after
-publication.
+- Ready-for-review PR
+  [#231](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/231)
+  targets `main`, is mergeable, and contains the contract, proof, dependency
+  fixes, and this session record.
+- Implementation head `98a578e1a15024f6488fd674d28b047e3a424017`
+  passed every applicable hosted workflow: CI, Advanced Safety, Verification
+  Nightly, Formal Verification, WebRTC Interop, Browser Interop, Documentation
+  Validation, Link Check, Workflow Hygiene, Unused Dependencies, Spellcheck,
+  Markdownlint, YAML Lint, and ActionLint. The Dependabot auto-merge workflow
+  skipped as intended for a human-authored branch.
+- The first hosted Link Check exposed deterministic `403` responses from two
+  DOI resolver URLs. Commit `98a578e` retains the DOI identifiers as citation
+  text but validates the papers through the authors' primary hosted copies;
+  the exact workflow then passed.
+- Bugbot reviewed implementation head `98a578e` and reported zero findings.
+  Copilot review was explicitly requested after both implementation pushes,
+  but the service returned its requester-quota-exhausted notice both times and
+  supplied no actionable review. GitHub reports no inline review threads.
+- Dependabot PRs #229 and #230 were diagnosed, superseded by the coherent fixes
+  in #231, and closed with root-cause comments. PR #231 closes concrete issue
+  #210 on merge. Broad research issues #206 and #220 remain open because this
+  session defines the current boundary and adds one bounded proof rather than
+  adopting distributed ownership or exhausting future formal work. Existing
+  issue #226 continues to track the unrelated Docker `HEALTHCHECK` parser
+  warning.
+
+This publication record is a documentation-only follow-up to the fully green
+implementation head. Its push must pass the same exact-head hosted gates and a
+fresh Bugbot/Copilot trigger before handoff.
