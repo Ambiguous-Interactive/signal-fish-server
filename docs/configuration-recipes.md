@@ -327,6 +327,17 @@ Size `send_queue_capacity` for burst headroom, but keep it consistent with
 batched item cannot complete within 15 seconds. Control uses its own enqueue
 age; latest/volatile queue age is handled by the class policy and gets a
 15-second write-progress budget only after selection.
+For a measured drain rate and encoded WebSocket-frame size, check
+`(socket_bytes_ahead + capacity * frame_bytes) / drain_bytes_per_second <=
+max_sojourn_seconds`.
+Apply the data capacity to reliable data and the separate 128-slot control
+capacity to reports. A capacity larger than this bound remains valid burst and
+memory protection, but a completely full queue is expected to hit maximum
+sojourn before it drains. Close `4002 slow_consumer` reports that bounded
+delivery-contract failure whether the recipient stopped entirely or merely
+remained below the offered reliable rate; there is no separate
+oversubscription close code. See the worked
+[queue and freeze budget](architecture/scaling.md#queue-and-freeze-budget).
 `slow_consumer_timeout_ms`
 (default `5000`) controls how long reliable delivery may wait for capacity;
 higher values ride out longer stalls but let one recipient pace reliable senders

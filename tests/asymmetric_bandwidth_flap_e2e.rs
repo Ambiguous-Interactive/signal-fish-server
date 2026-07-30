@@ -621,10 +621,34 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
     .await;
     total_sent += volatile_sent + 1;
 
-    let volatile = tokio::time::timeout(EVENT_DEADLINE, volatile_observer)
-        .await
-        .expect("volatile victim did not reach the post-fault marker")
-        .expect("volatile observer panicked");
+    let volatile = match tokio::time::timeout(EVENT_DEADLINE, volatile_observer).await {
+        Ok(observation) => observation.expect("volatile observer panicked"),
+        Err(_) => {
+            let slow_consumer_disconnects = metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed);
+            let ping_timeouts = metrics.websocket_ping_timeouts.load(Ordering::Relaxed);
+            let ping_probes_skipped = metrics
+                .websocket_ping_probes_skipped_activity
+                .load(Ordering::Relaxed);
+            let ping_probes_cancelled = metrics
+                .websocket_ping_probes_cancelled_activity
+                .load(Ordering::Relaxed);
+            let expired_players = metrics.expired_players_cleaned.load(Ordering::Relaxed);
+            let proxy_terminations = proxy.terminations();
+            let delivery = metrics.delivery_metrics_by_class();
+            let watcher_delivered = watcher_state.game_data.load(Ordering::Relaxed);
+            panic!(
+                "volatile victim did not reach the post-fault marker after {volatile_sent} \
+                 offers; server recorded {slow_consumer_disconnects} slow-consumer disconnects, \
+                 {ping_timeouts} ping timeouts, {ping_probes_skipped} skipped and \
+                 {ping_probes_cancelled} cancelled probes, and {expired_players} \
+                 activity-reaper evictions; delivery={delivery:?}; healthy watcher \
+                 delivered={watcher_delivered}/{total_sent}; proxy terminations: \
+                 {proxy_terminations:?}"
+            );
+        }
+    };
     poll_until("healthy watcher receives the complete H10 stream", || {
         watcher_state.game_data.load(Ordering::Relaxed) >= total_sent
     })
@@ -643,15 +667,18 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
         metrics.delivery_metrics_by_class().reliable.attempted > sender_baseline,
         "the final reliable marker did not traverse the delivery layer"
     );
-    assert_eq!(
-        volatile.delivered + volatile.reported_dropped,
-        volatile_sent,
-        "the constrained connection's cumulative volatile outcomes must conserve every offer"
-    );
-
     let slow_consumer_disconnects = metrics
         .websocket_slow_consumer_disconnects
         .load(Ordering::Relaxed);
+    let ping_timeouts = metrics.websocket_ping_timeouts.load(Ordering::Relaxed);
+    let ping_probes_skipped = metrics
+        .websocket_ping_probes_skipped_activity
+        .load(Ordering::Relaxed);
+    let ping_probes_cancelled = metrics
+        .websocket_ping_probes_cancelled_activity
+        .load(Ordering::Relaxed);
+    let expired_players = metrics.expired_players_cleaned.load(Ordering::Relaxed);
+    let proxy_terminations = proxy.terminations();
     match volatile
         .termination
         .as_ref()
@@ -673,17 +700,58 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
         }
         VolatileTermination::Close { code, reason } => panic!(
             "volatile traffic must remain connected through the marker; closed with \
-             {code} {reason} and {slow_consumer_disconnects} slow-consumer disconnects"
+             {code} {reason} after {volatile_sent} offers, {} deliveries, {} reported drops, \
+             and {} exact ranges; server recorded {slow_consumer_disconnects} slow-consumer \
+             disconnects, {ping_timeouts} ping timeouts, {ping_probes_skipped} skipped and \
+             {ping_probes_cancelled} cancelled probes, and {expired_players} activity-reaper \
+             evictions; proxy terminations: \
+             {proxy_terminations:?}",
+            volatile.delivered,
+            volatile.reported_dropped,
+            volatile.exact_gaps.len(),
         ),
         VolatileTermination::TransportError(error) => panic!(
             "volatile traffic must remain connected through the marker; transport failed with \
-             {error} and {slow_consumer_disconnects} slow-consumer disconnects"
+             {error} after {volatile_sent} offers, {} deliveries, {} reported drops, and {} \
+             exact ranges; server recorded {slow_consumer_disconnects} slow-consumer disconnects; \
+             {ping_timeouts} ping timeouts, {ping_probes_skipped} skipped and \
+             {ping_probes_cancelled} cancelled probes, and {expired_players} activity-reaper \
+             evictions; proxy terminations: \
+             {proxy_terminations:?}",
+            volatile.delivered,
+            volatile.reported_dropped,
+            volatile.exact_gaps.len(),
         ),
         VolatileTermination::Ended => panic!(
-            "volatile traffic must remain connected through the marker; socket ended with \
-             {slow_consumer_disconnects} slow-consumer disconnects"
+            "volatile traffic must remain connected through the marker; socket ended after \
+             {volatile_sent} offers, {} deliveries, {} reported drops, and {} exact ranges; \
+             server recorded {slow_consumer_disconnects} slow-consumer disconnects; proxy \
+             observed {ping_timeouts} ping timeouts, {ping_probes_skipped} skipped and \
+             {ping_probes_cancelled} cancelled probes, and {expired_players} activity-reaper \
+             evictions; proxy terminations: \
+             {proxy_terminations:?}",
+            volatile.delivered,
+            volatile.reported_dropped,
+            volatile.exact_gaps.len(),
         ),
     }
+    let exact_dropped = volatile
+        .exact_gaps
+        .iter()
+        .map(|gap| gap.to_seq - gap.from_seq + 1)
+        .sum::<u64>();
+    assert_eq!(
+        volatile.delivered + volatile.reported_dropped,
+        volatile_sent,
+        "the constrained connection's cumulative volatile outcomes must conserve every offer: \
+         delivered={} reported_dropped={} exact_dropped={} sent={} exact_ranges={} last_seq={}",
+        volatile.delivered,
+        volatile.reported_dropped,
+        exact_dropped,
+        volatile_sent,
+        volatile.exact_gaps.len(),
+        volatile.last_seq,
+    );
 
     let max_gap = *watcher_state
         .max_interarrival

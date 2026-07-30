@@ -49,6 +49,16 @@ pub enum Direction {
     ServerToClient,
 }
 
+/// Why one direction of a proxied connection ended before the proxy tore down
+/// the other half. Retained for fault-test diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PumpTermination {
+    pub direction: Direction,
+    pub cause: String,
+}
+
+const MAX_RETAINED_TERMINATIONS: usize = 64;
+
 /// How the proxy was told to sever its connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KillMode {
@@ -90,6 +100,7 @@ struct ProxyControl {
     server_to_client: DirectionControls,
     kill: watch::Sender<KillMode>,
     connections: Mutex<Vec<ConnectionSockets>>,
+    terminations: Mutex<Vec<PumpTermination>>,
 }
 
 impl ProxyControl {
@@ -138,6 +149,7 @@ impl ChaosProxy {
             server_to_client: DirectionControls::new(),
             kill: watch::Sender::new(KillMode::None),
             connections: Mutex::new(Vec::new()),
+            terminations: Mutex::new(Vec::new()),
         });
 
         let accept_control = Arc::clone(&control);
@@ -201,6 +213,15 @@ impl ChaosProxy {
             .direction(direction)
             .fragment_writes
             .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Snapshot the 64 most recent completed-pump diagnostics, oldest first.
+    pub fn terminations(&self) -> Vec<PumpTermination> {
+        self.control
+            .terminations
+            .lock()
+            .expect("chaos proxy termination registry poisoned")
+            .clone()
     }
 
     /// Abort every proxied connection with a TCP RST: `SO_LINGER = 0` is set
@@ -294,12 +315,43 @@ fn spawn_connection(control: &Arc<ProxyControl>, client: TcpStream, server: TcpS
         server,
         client,
     ));
+    let completion_control = Arc::clone(control);
     tokio::spawn(async move {
         tokio::select! {
-            _ = &mut client_to_server => server_to_client.abort(),
-            _ = &mut server_to_client => client_to_server.abort(),
+            result = &mut client_to_server => {
+                record_pump_termination(
+                    &completion_control,
+                    Direction::ClientToServer,
+                    result,
+                );
+                server_to_client.abort();
+            }
+            result = &mut server_to_client => {
+                record_pump_termination(
+                    &completion_control,
+                    Direction::ServerToClient,
+                    result,
+                );
+                client_to_server.abort();
+            }
         }
     });
+}
+
+fn record_pump_termination(
+    control: &ProxyControl,
+    direction: Direction,
+    result: Result<String, tokio::task::JoinError>,
+) {
+    let cause = result.unwrap_or_else(|error| format!("pump task failed: {error}"));
+    let mut terminations = control
+        .terminations
+        .lock()
+        .expect("chaos proxy termination registry poisoned");
+    if terminations.len() == MAX_RETAINED_TERMINATIONS {
+        terminations.remove(0);
+    }
+    terminations.push(PumpTermination { direction, cause });
 }
 
 /// When a throttled pump may release its next chunk.
@@ -343,7 +395,7 @@ async fn pump(
     direction: Direction,
     from: Arc<TcpStream>,
     to: Arc<TcpStream>,
-) {
+) -> String {
     let controls = control.direction(direction);
     let mut pause_rx = controls.paused.subscribe();
     let mut kill_rx = control.kill.subscribe();
@@ -357,12 +409,12 @@ async fn pump(
             tokio::select! {
                 _ = kill_rx.changed() => {
                     if *kill_rx.borrow() != KillMode::None {
-                        return;
+                        return "proxy killed while paused".to_string();
                     }
                 }
                 changed = pause_rx.changed() => {
                     if changed.is_err() {
-                        return;
+                        return "pause control closed".to_string();
                     }
                 }
             }
@@ -385,25 +437,25 @@ async fn pump(
             biased;
             _ = kill_rx.changed() => {
                 if *kill_rx.borrow() != KillMode::None {
-                    return;
+                    return "proxy killed while awaiting readability".to_string();
                 }
                 continue;
             }
             changed = pause_rx.changed() => {
                 if changed.is_err() {
-                    return;
+                    return "pause control closed".to_string();
                 }
                 continue;
             }
             readable = from.readable() => {
                 if readable.is_err() {
-                    return;
+                    return "source readiness failed".to_string();
                 }
                 match from.try_read(&mut buffer[..read_limit]) {
-                    Ok(0) => return, // EOF
+                    Ok(0) => return "source reached EOF".to_string(),
                     Ok(received) => received,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-                    Err(_) => return,
+                    Err(error) => return format!("source read failed: {error}"),
                 }
             }
         };
@@ -427,7 +479,7 @@ async fn pump(
             tokio::select! {
                 _ = kill_rx.changed() => {
                     if *kill_rx.borrow() != KillMode::None {
-                        return;
+                        return "proxy killed while pacing".to_string();
                     }
                 }
                 () = tokio::time::sleep_until(release) => {}
@@ -441,8 +493,8 @@ async fn pump(
         let fragment = controls.fragment_writes.load(Ordering::Relaxed);
         let chunk_size = if fragment { 1 } else { received };
         for piece in buffer[..received].chunks(chunk_size) {
-            if write_fully(&to, piece, &mut kill_rx).await.is_err() {
-                return;
+            if let Err(cause) = write_fully(&to, piece, &mut kill_rx).await {
+                return cause;
             }
         }
     }
@@ -453,23 +505,23 @@ async fn write_fully(
     to: &TcpStream,
     data: &[u8],
     kill_rx: &mut watch::Receiver<KillMode>,
-) -> Result<(), ()> {
+) -> Result<(), String> {
     let mut written = 0;
     while written < data.len() {
         tokio::select! {
             _ = kill_rx.changed() => {
                 if *kill_rx.borrow() != KillMode::None {
-                    return Err(());
+                    return Err("proxy killed while writing".to_string());
                 }
             }
             writable = to.writable() => {
                 if writable.is_err() {
-                    return Err(());
+                    return Err("destination readiness failed".to_string());
                 }
                 match to.try_write(&data[written..]) {
                     Ok(sent) => written += sent,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(_) => return Err(()),
+                    Err(error) => return Err(format!("destination write failed: {error}")),
                 }
             }
         }

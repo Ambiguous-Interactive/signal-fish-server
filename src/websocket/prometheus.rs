@@ -138,7 +138,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_websocket_ping_probes_cancelled_activity_total",
-        "Outstanding WebSocket liveness probes cancelled by non-Pong inbound activity",
+        "Outstanding WebSocket liveness probes cancelled by inbound activity or completed outbound application writes",
         snapshot
             .connections
             .websocket_ping_probes_cancelled_activity,

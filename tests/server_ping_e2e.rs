@@ -47,6 +47,37 @@ async fn start_server(
     (running, server)
 }
 
+async fn join_room(ws: &mut WsStream, room: &str, name: &str) {
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::JoinRoom {
+            game_name: "outbound-progress".to_string(),
+            room_code: Some(room.to_string()),
+            player_name: name.to_string(),
+            max_players: Some(2),
+            supports_authority: Some(true),
+            relay_transport: None,
+        })
+        .expect("serialize JoinRoom")
+        .into(),
+    ))
+    .await
+    .expect("send JoinRoom");
+    loop {
+        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for RoomJoined")
+            .expect("connection closed while joining")
+            .expect("websocket failed while joining");
+        if let Message::Text(text) = frame {
+            let message: ServerMessage =
+                serde_json::from_str(&text).expect("decode server message while joining");
+            if matches!(message, ServerMessage::RoomJoined(_)) {
+                return;
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn matching_pong_keeps_connection_alive_and_records_rtt() {
     let (running, server) = start_server(1, 2).await;
@@ -373,6 +404,207 @@ async fn non_pong_activity_cancels_an_outstanding_probe() {
         .await
         .expect("answer later idle probe");
 
+    running.shutdown().await;
+}
+
+/// Issue #217: successful application writes are reverse-path progress. A
+/// recipient steadily accepting relayed data must not be disconnected merely
+/// because the probe Pong is queued behind that same data. The Ping itself is
+/// still written so a read-only client can refresh inbound activity. Once
+/// writes stop, the ordinary deadline must still detect a client that never
+/// reads.
+#[tokio::test]
+async fn outbound_progress_supersedes_deadlines_until_the_connection_stops_draining() {
+    let (running, server) = start_server(1, 1).await;
+    let mut sender = connect(running.addr()).await;
+    let mut recipient = connect(running.addr()).await;
+    join_room(&mut sender, "OUT001", "Sender").await;
+    join_room(&mut recipient, "OUT001", "Recipient").await;
+
+    // Keep the sender conforming while deliberately never polling the
+    // recipient after its join. The recipient therefore cannot answer a Ping,
+    // but its server-to-client path is visibly accepting each relay write.
+    let (mut sender_sink, mut sender_stream) = sender.split();
+    let sender_reader = tokio::spawn(async move {
+        while let Some(frame) = sender_stream.next().await {
+            frame.expect("sender websocket failed during outbound-progress test");
+        }
+    });
+    let mut cadence = tokio::time::interval(tokio::time::Duration::from_millis(100));
+    let active_until = tokio::time::Instant::now() + tokio::time::Duration::from_millis(2_500);
+    let mut sequence = 0u64;
+    while tokio::time::Instant::now() < active_until {
+        cadence.tick().await;
+        sender_sink
+            .send(Message::Text(
+                serde_json::to_string(&ClientMessage::GameData {
+                    class: None,
+                    key: None,
+                    data: serde_json::json!({ "sequence": sequence }),
+                })
+                .expect("serialize relayed GameData")
+                .into(),
+            ))
+            .await
+            .expect("send relayed GameData");
+        sequence += 1;
+    }
+
+    assert_eq!(
+        server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "successful relay writes must prevent a false Pong timeout"
+    );
+    assert!(
+        server
+            .metrics()
+            .websocket_ping_probes_cancelled_activity
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1,
+        "outbound progress did not supersede scheduled probe deadlines"
+    );
+
+    // Stop writing. With no inbound or outbound evidence left, the next probe
+    // must time out: progress supersedes stale deadlines, not idle detection.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(4);
+    loop {
+        if server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 1
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "idle recipient was not reclaimed after outbound progress stopped"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    drop(recipient);
+    drop(sender_sink);
+    sender_reader.abort();
+    running.shutdown().await;
+}
+
+/// Issue #217: outbound progress that occurs after a Ping write must cancel the
+/// old Pong deadline, not merely suppress the next scheduled probe.
+#[tokio::test]
+async fn outbound_write_cancels_an_outstanding_probe() {
+    let (running, server) = start_server(1, 2).await;
+    let proxy = ChaosProxy::spawn(running.addr()).await;
+    let mut sender = connect(running.addr()).await;
+    let mut recipient = connect(proxy.addr()).await;
+    join_room(&mut sender, "OUT002", "Sender").await;
+    join_room(&mut recipient, "OUT002", "Recipient").await;
+
+    // Observe the exact recipient probe, but prevent tungstenite's automatic
+    // Pong from reaching the server. This synchronizes on the active probe
+    // instead of guessing its phase from wall-clock time.
+    proxy.pause(Direction::ClientToServer);
+    let probe_observed_at = loop {
+        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(5), recipient.next())
+            .await
+            .expect("recipient never observed a server Ping")
+            .expect("recipient closed before the server Ping")
+            .expect("recipient read failed before the server Ping");
+        if matches!(frame, Message::Ping(_)) {
+            break tokio::time::Instant::now();
+        }
+    };
+
+    // Cancel any contemporaneous sender-side probe first. The subsequent
+    // cancellation delta can then only come from the recipient's relay write.
+    sender
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::Ping)
+                .expect("serialize sender activity")
+                .into(),
+        ))
+        .await
+        .expect("send sender activity");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    let cancellation_baseline = server
+        .metrics()
+        .websocket_ping_probes_cancelled_activity
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    sender
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::GameData {
+                class: None,
+                key: None,
+                data: serde_json::json!({ "sequence": 1 }),
+            })
+            .expect("serialize relayed GameData")
+            .into(),
+        ))
+        .await
+        .expect("send relayed GameData");
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+    loop {
+        if server
+            .metrics()
+            .websocket_ping_probes_cancelled_activity
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > cancellation_baseline
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "outbound relay write did not cancel the outstanding probe"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "cancelled outbound-progress probe counted as a timeout"
+    );
+
+    // Keep application output progressing past the cancelled probe's original
+    // two-second deadline. A counter increment alone is not enough: the old
+    // deadline must be unable to close the connection after cancellation.
+    let survive_until = probe_observed_at + tokio::time::Duration::from_millis(2_200);
+    let mut cadence = tokio::time::interval(tokio::time::Duration::from_millis(100));
+    let mut sequence = 2_u64;
+    while tokio::time::Instant::now() < survive_until {
+        cadence.tick().await;
+        sender
+            .send(Message::Text(
+                serde_json::to_string(&ClientMessage::GameData {
+                    class: None,
+                    key: None,
+                    data: serde_json::json!({ "sequence": sequence }),
+                })
+                .expect("serialize post-cancellation GameData")
+                .into(),
+            ))
+            .await
+            .expect("connection died after outbound probe cancellation");
+        sequence += 1;
+    }
+    assert_eq!(
+        server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "connection did not survive the cancelled probe's old deadline"
+    );
+
+    proxy.resume(Direction::ClientToServer);
+    drop(recipient);
     running.shutdown().await;
 }
 

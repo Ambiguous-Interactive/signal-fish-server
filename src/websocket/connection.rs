@@ -55,24 +55,30 @@ pub(super) const REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS: u32 =
 struct ServerPingCommand {
     nonce: u64,
     baseline_generation: u64,
+    baseline_outbound_generation: u64,
     write_outcome: oneshot::Sender<PingWriteOutcome>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct PingWriteTiming {
     completed_at: Instant,
+    outbound_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum PingWriteOutcome {
     Written(PingWriteTiming),
-    SkippedActivity { generation: u64 },
+    SkippedActivity {
+        inbound_generation: u64,
+        outbound_generation: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PingProbeEvidence {
     MatchingPong { received_at: Instant },
     InboundActivity { received_at: Instant },
+    OutboundActivity { completed_at: Instant },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -83,8 +89,9 @@ struct ActivePingProbe {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct PingProbeState {
+pub(super) struct PingProbeState {
     inbound_generation: u64,
+    outbound_generation: u64,
     inbound_processing: bool,
     active: Option<ActivePingProbe>,
 }
@@ -93,7 +100,23 @@ struct PingProbeState {
 enum PingProbeResolution {
     MatchingPong(Duration),
     InboundActivity { generation: u64 },
+    OutboundActivity { generation: u64 },
     TimedOut,
+}
+
+fn ping_write_timeout_policy(
+    outbound_advanced: bool,
+    max_sojourn: Duration,
+    slow_consumer_timeout: Duration,
+) -> (Duration, CloseReason) {
+    if outbound_advanced {
+        (
+            max_sojourn.min(slow_consumer_timeout),
+            CloseReason::SlowConsumer,
+        )
+    } else {
+        (SERVER_PING_WRITE_TIMEOUT, CloseReason::ActivityTimeout)
+    }
 }
 
 fn begin_ping_probe(
@@ -128,6 +151,20 @@ fn record_inbound_probe_activity(state: &watch::Sender<PingProbeState>, received
         if let Some(active) = current.active.as_mut() {
             if active.evidence.is_none() && received_at >= active.started_at {
                 active.evidence = Some(PingProbeEvidence::InboundActivity { received_at });
+            }
+        }
+    });
+}
+
+pub(super) fn record_outbound_probe_activity(
+    state: &watch::Sender<PingProbeState>,
+    completed_at: Instant,
+) {
+    state.send_modify(|current| {
+        current.outbound_generation = current.outbound_generation.wrapping_add(1);
+        if let Some(active) = current.active.as_mut() {
+            if active.evidence.is_none() && completed_at >= active.started_at {
+                active.evidence = Some(PingProbeEvidence::OutboundActivity { completed_at });
             }
         }
     });
@@ -216,6 +253,13 @@ fn resolve_ping_probe(
             {
                 Some(PingProbeResolution::InboundActivity {
                     generation: current.inbound_generation,
+                })
+            }
+            Some(PingProbeEvidence::OutboundActivity { completed_at })
+                if completed_at <= deadline_at =>
+            {
+                Some(PingProbeResolution::OutboundActivity {
+                    generation: current.outbound_generation,
                 })
             }
             _ if deadline_reached => Some(PingProbeResolution::TimedOut),
@@ -393,6 +437,7 @@ async fn finalize_closed_connection(
     player_id: &PlayerId,
     server: &Arc<EnhancedGameServer>,
     close_signal: &ConnectionCloseSignal,
+    ping_probe_state: &watch::Sender<PingProbeState>,
     max_sojourn: Duration,
 ) {
     #[cfg(feature = "trace-validation")]
@@ -485,6 +530,7 @@ async fn finalize_closed_connection(
                             player_id,
                             server,
                             close_signal,
+                            ping_probe_state,
                             max_sojourn,
                             WritePhase::CloseFlush,
                         )
@@ -504,6 +550,7 @@ async fn finalize_closed_connection(
                                     player_id,
                                     server,
                                     close_signal,
+                                    ping_probe_state,
                                     max_sojourn,
                                     WritePhase::CloseFlush,
                                 )
@@ -888,7 +935,9 @@ pub(super) async fn handle_socket(
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(server_ping_interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut consumed_generation = probe_states.borrow().inbound_generation;
+            let initial_state = *probe_states.borrow();
+            let mut consumed_generation = initial_state.inbound_generation;
+            let mut consumed_outbound_generation = initial_state.outbound_generation;
             // Start probing after one full configured interval.
             ticker.tick().await;
             loop {
@@ -902,8 +951,10 @@ pub(super) async fn handle_socket(
 
                 let current_state = *probe_states.borrow_and_update();
                 let observed_generation = current_state.inbound_generation;
+                let observed_outbound_generation = current_state.outbound_generation;
                 if current_state.inbound_processing || observed_generation != consumed_generation {
                     consumed_generation = observed_generation;
+                    consumed_outbound_generation = observed_outbound_generation;
                     server_for_ping
                         .metrics()
                         .increment_websocket_ping_probes_skipped_activity();
@@ -915,6 +966,7 @@ pub(super) async fn handle_socket(
                 let command = ServerPingCommand {
                     nonce,
                     baseline_generation: consumed_generation,
+                    baseline_outbound_generation: consumed_outbound_generation,
                     write_outcome: write_outcome_tx,
                 };
                 tokio::select! {
@@ -942,8 +994,12 @@ pub(super) async fn handle_socket(
                 };
                 let write_timing = match write_outcome {
                     PingWriteOutcome::Written(timing) => timing,
-                    PingWriteOutcome::SkippedActivity { generation } => {
-                        consumed_generation = generation;
+                    PingWriteOutcome::SkippedActivity {
+                        inbound_generation,
+                        outbound_generation,
+                    } => {
+                        consumed_generation = inbound_generation;
+                        consumed_outbound_generation = outbound_generation;
                         probe_states.borrow_and_update();
                         server_for_ping
                             .metrics()
@@ -951,6 +1007,21 @@ pub(super) async fn handle_socket(
                         continue;
                     }
                 };
+                if write_timing.outbound_generation != consumed_outbound_generation {
+                    // The Ping was still written so a read-only client can
+                    // return an automatic Pong and refresh the independent
+                    // inbound-activity reaper. Do not enforce this particular
+                    // Pong deadline: application output completed since the
+                    // previous probe boundary and may still be ahead of the
+                    // Ping on a constrained connection.
+                    clear_ping_probe(&probe_state_updates, nonce);
+                    consumed_outbound_generation = write_timing.outbound_generation;
+                    probe_states.borrow_and_update();
+                    server_for_ping
+                        .metrics()
+                        .increment_websocket_ping_probes_cancelled_activity();
+                    continue;
+                }
 
                 let deadline_at = write_timing.completed_at + pong_timeout;
                 let deadline = tokio::time::sleep_until(deadline_at);
@@ -991,6 +1062,12 @@ pub(super) async fn handle_socket(
                     }
                     PingProbeResolution::InboundActivity { generation } => {
                         consumed_generation = generation;
+                        server_for_ping
+                            .metrics()
+                            .increment_websocket_ping_probes_cancelled_activity();
+                    }
+                    PingProbeResolution::OutboundActivity { generation } => {
+                        consumed_outbound_generation = generation;
                         server_for_ping
                             .metrics()
                             .increment_websocket_ping_probes_cancelled_activity();
@@ -1123,8 +1200,8 @@ pub(super) async fn handle_socket(
         let batch_size = config.websocket_config.batch_size;
         let batch_interval_ms = config.websocket_config.batch_interval_ms;
         let max_sojourn = Duration::from_millis(config.websocket_config.max_sojourn_ms);
-        let ping_write_timeout = SERVER_PING_WRITE_TIMEOUT;
-
+        let slow_consumer_timeout =
+            Duration::from_millis(config.websocket_config.slow_consumer_timeout_ms);
         let mut batcher = MessageBatcher::new(batch_size, batch_interval_ms);
 
         // The write loop runs INSIDE this select so a close request interrupts
@@ -1150,17 +1227,34 @@ pub(super) async fn handle_socket(
                                 break;
                             };
                             let write_started_at = Instant::now();
-                            if let Err(generation) = begin_ping_probe(
+                            let probe = begin_ping_probe(
                                 &ping_probe_state_for_send,
                                 command.baseline_generation,
                                 command.nonce,
                                 write_started_at,
-                            ) {
+                            );
+                            if let Err(inbound_generation) = probe {
+                                clear_ping_probe(&ping_probe_state_for_send, command.nonce);
                                 let _ = command.write_outcome.send(
-                                    PingWriteOutcome::SkippedActivity { generation }
+                                    PingWriteOutcome::SkippedActivity {
+                                        inbound_generation,
+                                        outbound_generation: ping_probe_state_for_send
+                                            .borrow()
+                                            .outbound_generation,
+                                    }
                                 );
                                 continue;
                             }
+                            let outbound_advanced = ping_probe_state_for_send
+                                .borrow()
+                                .outbound_generation
+                                != command.baseline_outbound_generation;
+                            let (ping_write_timeout, ping_write_timeout_reason) =
+                                ping_write_timeout_policy(
+                                    outbound_advanced,
+                                    max_sojourn,
+                                    slow_consumer_timeout,
+                                );
                             let payload = command.nonce.to_be_bytes().to_vec().into();
                             match tokio::time::timeout(
                                 ping_write_timeout,
@@ -1172,6 +1266,9 @@ pub(super) async fn handle_socket(
                                     let _ = command.write_outcome.send(
                                         PingWriteOutcome::Written(PingWriteTiming {
                                             completed_at: Instant::now(),
+                                            outbound_generation: ping_probe_state_for_send
+                                                .borrow()
+                                                .outbound_generation,
                                         })
                                     );
                                     continue;
@@ -1182,16 +1279,28 @@ pub(super) async fn handle_socket(
                                         error = %err,
                                         "Failed to write WebSocket Ping"
                                     );
-                                    send_task_close_signal
-                                        .request_close(CloseReason::ActivityTimeout);
+                                    if send_task_close_signal
+                                        .request_close(ping_write_timeout_reason)
+                                        && ping_write_timeout_reason == CloseReason::SlowConsumer
+                                    {
+                                        server_clone
+                                            .metrics()
+                                            .increment_websocket_slow_consumer_disconnects();
+                                    }
                                 }
                                 Err(_elapsed) => {
                                     clear_ping_probe(&ping_probe_state_for_send, command.nonce);
                                     if send_task_close_signal
-                                        .request_close(CloseReason::ActivityTimeout)
+                                        .request_close(ping_write_timeout_reason)
                                     {
+                                        if ping_write_timeout_reason == CloseReason::SlowConsumer {
+                                            server_clone
+                                                .metrics()
+                                                .increment_websocket_slow_consumer_disconnects();
+                                        }
                                         tracing::info!(
                                             timeout_secs = ping_write_timeout.as_secs(),
+                                            ?ping_write_timeout_reason,
                                             "WebSocket Ping write timed out - closing connection"
                                         );
                                     }
@@ -1212,15 +1321,21 @@ pub(super) async fn handle_socket(
                         } => {
                             let current_player_id =
                                 *effective_player_id_for_send.read().await;
-                            if write_pending_unsupported_report(
+                            match write_pending_unsupported_report(
                                 &mut sender,
                                 &rx,
                                 &current_player_id,
                             )
                             .await
-                            .is_err()
                             {
-                                break;
+                                Ok(true) => {
+                                    record_outbound_probe_activity(
+                                        &ping_probe_state_for_send,
+                                        Instant::now(),
+                                    );
+                                }
+                                Ok(false) => {}
+                                Err(()) => break,
                             }
                             continue;
                         }
@@ -1244,6 +1359,7 @@ pub(super) async fn handle_socket(
                                     &current_player_id,
                                     &server_clone,
                                     &send_task_close_signal,
+                                    &ping_probe_state_for_send,
                                     max_sojourn,
                                     WritePhase::Live,
                                 )
@@ -1270,6 +1386,7 @@ pub(super) async fn handle_socket(
                                     &current_player_id,
                                     &server_clone,
                                     &send_task_close_signal,
+                                    &ping_probe_state_for_send,
                                     max_sojourn,
                                     WritePhase::Live,
                                 )
@@ -1324,6 +1441,7 @@ pub(super) async fn handle_socket(
             &current_player_id,
             &server_clone,
             &send_task_close_signal,
+            &ping_probe_state_for_send,
             max_sojourn,
         )
         .await;
@@ -2092,6 +2210,23 @@ mod tests {
             resolve_ping_probe(&state, 8, deadline_at, true),
             Some(PingProbeResolution::TimedOut)
         );
+
+        assert_eq!(begin_ping_probe(&state, 0, 9, started_at), Ok(()));
+        record_outbound_probe_activity(&state, deadline_at);
+        record_outbound_probe_activity(&state, deadline_at + Duration::from_nanos(1));
+        assert_eq!(
+            resolve_ping_probe(&state, 9, deadline_at, true),
+            Some(PingProbeResolution::OutboundActivity { generation: 2 }),
+            "the first outbound evidence must stay latched when a late write follows it"
+        );
+
+        assert_eq!(begin_ping_probe(&state, 0, 10, started_at), Ok(()));
+        record_outbound_probe_activity(&state, deadline_at + Duration::from_nanos(1));
+        assert_eq!(
+            resolve_ping_probe(&state, 10, deadline_at, true),
+            Some(PingProbeResolution::TimedOut),
+            "late-only outbound progress cannot satisfy the expired probe"
+        );
     }
 
     #[test]
@@ -2099,6 +2234,27 @@ mod tests {
         for _ in 0..1_024 {
             assert_ne!(random_ping_nonce(), 0);
         }
+    }
+
+    #[test]
+    fn ping_write_timeout_uses_delivery_budget_after_outbound_progress() {
+        let max_sojourn = Duration::from_secs(15);
+        let slow_consumer_timeout = Duration::from_secs(5);
+        assert_eq!(
+            ping_write_timeout_policy(false, max_sojourn, slow_consumer_timeout),
+            (SERVER_PING_WRITE_TIMEOUT, CloseReason::ActivityTimeout),
+            "an idle probe retains the prompt transport-liveness timeout"
+        );
+        assert_eq!(
+            ping_write_timeout_policy(true, max_sojourn, slow_consumer_timeout),
+            (slow_consumer_timeout, CloseReason::SlowConsumer),
+            "a Ping behind progressing application output must inherit the delivery boundary"
+        );
+        assert_eq!(
+            ping_write_timeout_policy(true, Duration::from_secs(3), slow_consumer_timeout,),
+            (Duration::from_secs(3), CloseReason::SlowConsumer),
+            "maximum sojourn remains the owner when it is the earlier delivery boundary"
+        );
     }
 
     #[test]

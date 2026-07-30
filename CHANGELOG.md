@@ -54,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix false `4003 activity_timeout` disconnects for bandwidth-constrained
+  recipients that are still draining application traffic (issue #217).
+  Successful outbound application writes now supersede redundant WebSocket
+  Pong deadlines while the Ping is still sent to refresh read-only clients;
+  bounded queue sojourn and socket writes continue to close a genuinely stalled
+  or reliably oversubscribed recipient with `4002 slow_consumer`.
+- Make `server.ping_timeout = 0` actually disable the inbound-activity reaper as
+  documented instead of expiring every registered client on the next cleanup
+  sweep.
 - Keep protocol-v3 delivery counters tied to frames successfully written and
   flushed to the recipient socket (issue #218). Cancelling or failing a queued
   `DeliveryReport` send no longer advances the counter frontier used by the

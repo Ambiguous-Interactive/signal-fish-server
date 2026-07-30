@@ -147,9 +147,18 @@ For one recipient, estimate queue-fill time in messages, using encoded-message
 rates:
 
 ```text
+drain_messages_per_second = drain_bytes_per_second / encoded_frame_bytes
 excess_rate = max(0, incoming_messages_per_second - drain_messages_per_second)
 queue_fill_seconds = send_queue_capacity / excess_rate
 fail_loud_bound ≈ queue_fill_seconds + slow_consumer_timeout
+
+queue_drain_seconds =
+    (socket_bytes_ahead + send_queue_capacity * encoded_frame_bytes)
+    / drain_bytes_per_second
+available_queue_bytes =
+    max(0, drain_bytes_per_second * max_sojourn_seconds - socket_bytes_ahead)
+max_capacity_at_sojourn =
+    floor(available_queue_bytes / encoded_frame_bytes)
 ```
 
 If `excess_rate` is zero, the queue does not fill under steady state; still
@@ -170,6 +179,30 @@ bound is queue fill **plus** the 5-second capacity wait. Raising queue capacity
 absorbs a larger burst but retains more stale reliable work. Raising the
 timeout tolerates a longer drain pause but directly raises the maximum room
 freeze after the queue is full.
+
+The queue-drain calculation is a sizing check, not a throughput guarantee. It
+must use the encoded WebSocket-frame size, the capacity of the lane the frame
+actually occupies, and bytes already handed to TCP. At a measured 32 KiB/s
+drain rate, the default 15-second maximum sojourn, and an illustrative 64 KiB
+already ahead in the socket:
+
+| Frame and lane | Capacity | Drain rate | Full-path drain | Sojourn headroom |
+| --- | ---: | ---: | ---: | ---: |
+| 200-byte reliable data | 1,024 | 163.8 msg/s | 8.25 s | 6.75 s |
+| 600-byte reliable data | 1,024 | 54.6 msg/s | 20.75 s | -5.75 s |
+| 419-byte `DeliveryReport` control | 128 | 78.2 msg/s | 3.64 s | 11.36 s |
+
+The 600-byte row is intentionally over budget: at that link rate, the default
+1,024-slot data queue is burst/memory capacity, not a promise that a completely
+full queue can drain before the oldest item reaches 15 seconds. The corresponding
+maximum capacity is 709 messages after reserving that illustrative socket
+backlog, before additional WebSocket framing overhead. The configured send
+buffer is only a request and the kernel may clamp or account it differently, so
+measure the effective path rather than treating 709 as a portable safe value. Lower
+`send_queue_capacity`, increase measured egress, or classify replaceable data as
+`latest`/`volatile`; do not raise `max_sojourn_ms` without accepting the larger
+stale-data and room-freeze bound. Control reports use
+`control_queue_capacity=128`, not the data queue's 1,024 slots.
 
 ### Batching latency
 
@@ -197,24 +230,38 @@ disable Nagle; the option is set explicitly on each accepted stream.
 
 ## Directional partition detection
 
-A WebSocket can fail in only one direction. Do not use successful inbound or
-outbound application traffic as proof that the reverse path is healthy. The
-server has two independent fail-loud mechanisms:
+A WebSocket can fail in only one direction. One-way application traffic is not
+proof that both directions are healthy. Successful server writes do, however,
+prove progress at the bounded server socket-write boundary, so they suppress or
+cancel a redundant Pong deadline while queue sojourn and later writes continue
+to own reverse-path stalls. The server has two independent fail-loud
+mechanisms:
 
 | Fault | What may still work | Default detection path | Authoritative result |
 | --- | --- | --- | --- |
-| client → server blackhole | The client can keep receiving room traffic and RFC 6455 Ping frames | A probe scheduled just before the last inbound activity may be skipped, so the worst-case fixed-tick bound is nearly `2 × server_ping_interval_secs + pong_timeout_secs` (25 seconds by default) | close `4003 activity_timeout`; `signal_fish_websocket_ping_timeouts_total` increments |
+| client → server blackhole | The client can keep receiving room traffic and RFC 6455 Ping frames | While application writes keep completing, Pings are still emitted but their Pong deadlines are superseded because output may be ahead of them; the inbound-activity reaper owns detection (`server.ping_timeout`, 30 seconds by default). Once outbound traffic is idle, the next protocol probe deadline also applies; its worst-case fixed-tick bound from that idle point is nearly `2 × server_ping_interval_secs + pong_timeout_secs` (25 seconds by default) | close `4003 activity_timeout`; the activity-reaper or WebSocket-ping metric increments according to which mechanism wins |
 | server → client blackhole, both directions otherwise idle | No inbound non-Pong frame proves liveness | The client never receives the next protocol Ping, so no matching Pong returns; the same worst-case fixed-tick bound applies | close `4003 activity_timeout` |
-| server → client blackhole while client → server traffic continues | Client writes can still reach the server, so idle-only probes are skipped or cancelled | Outbound queue/socket pressure, a socket write failure, or an application-level policy; upstream traffic alone cannot prove the reverse path | close `4002 slow_consumer` when delivery pressure wins; otherwise detection requires another policy |
+| server → client blackhole while client → server traffic continues | Client writes can still reach the server, so inbound activity skips or cancels idle-only probes | Outbound queue/socket pressure, a socket write failure, or an application-level policy; upstream traffic alone cannot prove the reverse path | close `4002 slow_consumer` when delivery pressure wins; otherwise detection requires another policy |
 | symmetric blackhole | Neither direction carries new traffic | The next protocol probe cannot complete | close `4003 activity_timeout` |
 
 The close code describes the mechanism that won, not the physical direction of
-the fault. Idle-only probes deliberately treat decoded inbound non-Pong traffic as
-liveness so application backpressure cannot hide an already-arrived Pong. This
-means continuous client → server traffic does not independently test the
-reverse path; outbound pressure/failure or an application policy owns that
-case. Keep protocol Ping handling enabled, treat `4002` and `4003` as terminal
-for that physical connection, and reconnect according to the client contract.
+the fault. Idle-only probes deliberately treat decoded inbound non-Pong traffic
+and completed outbound application writes as progress. This prevents a Pong
+queued behind traffic on a constrained but draining connection from being
+misclassified as a transport timeout. Continuous client → server traffic does
+not independently test the reverse path; outbound pressure/failure or an
+application policy owns that case. Keep protocol Ping handling enabled, treat
+`4002` and `4003` as terminal for that physical connection, and reconnect
+according to the client contract.
+
+The converse also matters: continuous server → client application progress
+does not prove the client → server path. Because that progress can legitimately
+defer a Pong deadline behind constrained output, the default
+`server.ping_timeout` inbound-activity reaper supplies the independent
+30-second bound. Setting it to `0` disables that reaper; with continuous
+outbound progress, a client → server half-partition is then left to TCP failure
+or an application policy rather than a fixed server deadline. Keep the reaper
+nonzero when that bound is required.
 
 The directional real-socket experiments use shortened probe/grace values and
 prove all three distinct cases: the unaffected direction carries traffic,
