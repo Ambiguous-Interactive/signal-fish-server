@@ -257,13 +257,46 @@ cargo bench --locked --bench relay_allocations --features allocation-tracking
 
 The allocation harness uses a warmed current-thread runtime, prebuilt shared
 payload, and warmed classified queues to isolate coordinator routing, fan-out,
-and enqueue costs. Recipient and `join_all` storage is intentionally rebuilt
-inside each measured call. The harness excludes the inbound handler's stamp and
+and enqueue costs. Recipient snapshots and any actually-backpressured wait set
+are rebuilt inside each measured call; healthy recipients must resolve through
+the synchronous queue fast path, and the benchmark fails above four allocation
+operations per relay plus one fixed operation for the complete 4,096-relay
+sample. The harness excludes the inbound handler's stamp and
 message construction and its outer builder allocation. It repeats each sample
 five times and fails if the samples drift or if the attempt, enqueue, and
 receiver-drain ledgers do not prove every expected delivery. Its allocator uses
 sequentially consistent counters, so its output is an allocation baseline, not
 a latency benchmark; use the ordinary Criterion benchmarks for timing.
+
+The ignored real-WebSocket saturation diagnostic retains the exact 16-player
+rates used for release-profile comparisons without adding them to default CI:
+
+```bash
+
+cargo test --release --locked --all-features \
+  --test sixteen_player_matrix_e2e \
+  sixteen_player_relay_saturation_diagnostic_preserves_exact_delivery \
+  -- --exact --ignored --nocapture --test-threads=1
+
+```
+
+It runs 960 and 1,920 messages per second per sender, validates the complete
+delivery ledger, and prints throughput, latency, backpressure, and RSS
+observations. Compare revisions on the same idle machine in alternating order;
+the output is diagnostic rather than a portable capacity threshold.
+When the base revision predates this named test, apply only the harness diff to
+its clean worktree before building so both binaries execute identical inputs:
+
+```bash
+
+base_worktree=/path/to/clean/base-worktree
+git diff 875057d -- tests/sixteen_player_matrix_e2e.rs |
+  git -C "$base_worktree" apply -
+
+```
+
+Do not interpret a zero-test filter result from the unmodified base as a
+comparison run.
 
 ## Code Coverage
 

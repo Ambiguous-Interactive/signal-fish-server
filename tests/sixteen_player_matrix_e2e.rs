@@ -768,22 +768,7 @@ async fn fault_relay_matrix_recovers_completely_after_fault_lift() {
 #[serial_test::serial]
 #[ignore = "nightly-only (verification-nightly.yml): machine-measured 16-player saturation sweep"]
 async fn sixteen_player_relay_knee_sweep_preserves_exact_delivery() {
-    let cell = MatrixCell {
-        encoding: GameDataEncoding::Json,
-        players: 16,
-    };
-    let mut observations = Vec::new();
-
-    for sender_rate_hz in [30, 60, 120, 240, 480] {
-        observations.push(
-            run_cell(
-                cell,
-                NetworkProfile::Clean,
-                TrafficProfile::one_second_at(sender_rate_hz, false),
-            )
-            .await,
-        );
-    }
+    let observations = observe_sixteen_player_knee(&[30, 60, 120, 240, 480]).await;
 
     assert_eq!(
         observations.len(),
@@ -799,4 +784,34 @@ async fn sixteen_player_relay_knee_sweep_preserves_exact_delivery() {
     for observation in observations {
         eprintln!("relay knee observation: {observation}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+#[ignore = "manual-only: release-profile 16-player saturation comparison"]
+async fn sixteen_player_relay_saturation_diagnostic_preserves_exact_delivery() {
+    let observations = observe_sixteen_player_knee(&[960, 1_920]).await;
+    for observation in observations {
+        eprintln!("relay saturation observation: {observation}");
+    }
+}
+
+async fn observe_sixteen_player_knee(sender_rates_hz: &[u64]) -> Vec<CellObservation> {
+    let cell = MatrixCell {
+        encoding: GameDataEncoding::Json,
+        players: 16,
+    };
+    let mut observations = Vec::new();
+
+    for &sender_rate_hz in sender_rates_hz {
+        observations.push(
+            run_cell(
+                cell,
+                NetworkProfile::Clean,
+                TrafficProfile::one_second_at(sender_rate_hz, false),
+            )
+            .await,
+        );
+    }
+    observations
 }
