@@ -75,6 +75,9 @@ jobs:
           # robust regardless of how cargo-fuzz was installed. See the Fuzz step.
           targets: x86_64-unknown-linux-gnu
 
+      - name: Verify locked fuzz dependency graph
+        run: cargo +nightly-2026-02-01 metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2.9.1
         with:
@@ -110,7 +113,8 @@ jobs:
         # gnu runner that build fails: ASan is incompatible with musl's static crt
         # and musl std is not installed (cargo-fuzz#398). Pinning the gnu target
         # makes the instrumented build use gnu std + a working sanitizer. Do not
-        # remove. (No --locked: cargo-fuzz rejects it.)
+        # remove. cargo-fuzz rejects `--locked`; the locked metadata preflight
+        # above therefore guards the committed graph before this build starts.
         run: |
           cargo +nightly-2026-02-01 fuzz run ${{ matrix.target }} \
             --target x86_64-unknown-linux-gnu -- \

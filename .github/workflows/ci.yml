@@ -100,9 +100,10 @@ jobs:
       # runs on narrow paths and builds two other targets). Type-check every fuzz
       # target here against current library code on every PR. This is a no-codegen
       # `check` (no libFuzzer/sanitizer), so the pinned stable toolchain suffices;
-      # the nightly build/run stays in fuzz.yml. No --locked (matches fuzz.yml).
+      # the nightly build/run stays in fuzz.yml. The standalone lockfile is
+      # committed, so dependency drift fails here instead of rewriting it.
       - name: Check fuzz crate compiles
-        run: cargo check --manifest-path fuzz/Cargo.toml --bins
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
   lint:
     name: Lint (${{ matrix.os }})
@@ -312,6 +313,7 @@ jobs:
               # Cargo manifests/lockfiles (MSRV/toolchain/docs parity touchpoints).
               case "$f" in
                 Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
+                fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
                 clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
                 clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
@@ -380,6 +382,12 @@ jobs:
           # before executing cargo-deny. This avoids relying on preinstalled
           # aliases like `stable` that may be absent in the container image.
           rust-version: ${{ steps.deny-msrv.outputs.version }}
+      - name: Run cargo-deny (fuzz package)
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          arguments: --all-features
+          rust-version: ${{ steps.deny-msrv.outputs.version }}
 
   audit:
     name: Audit (cargo-audit)
@@ -415,6 +423,8 @@ jobs:
           tool: cargo-audit
       - name: Run cargo-audit
         run: cargo audit
+      - name: Run cargo-audit (fuzz package)
+        run: cargo audit --file fuzz/Cargo.lock
 
   msrv:
     name: MSRV Verification

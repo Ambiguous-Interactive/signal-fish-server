@@ -13,6 +13,8 @@ name = "signal-fish-server-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
+license = "MIT"
+rust-version = "1.89.0"
 
 [package.metadata]
 cargo-fuzz = true
@@ -36,6 +38,7 @@ uuid = { version = "1.23", features = ["v4"] }
 
 [dependencies.signal-fish-server]
 path = ".."
+version = "0.5.1"
 
 # Detach from the parent crate so the nightly fuzz build is fully independent of
 # the pinned-stable workspace.

@@ -38,6 +38,7 @@ allow = [
     "Zlib",
     "0BSD",
     "ISC",
+    "NCSA",
     "OpenSSL",
 ]
 # Confidence threshold for license detection

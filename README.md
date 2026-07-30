@@ -607,7 +607,6 @@ signal-fish-server/
 │   └── websocket/               # WebSocket handler, routes, batching
 ├── tests/                       # Integration, e2e, concurrency, load tests
 ├── benches/                     # Criterion benchmarks
-├── third_party/rmp/             # Patched rmp crate (removes paste dep)
 ├── Cargo.toml
 ├── Dockerfile
 ├── docker-compose.yml

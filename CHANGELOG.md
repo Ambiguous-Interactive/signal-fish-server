@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Keep the standalone native reference client and fuzz dependency graphs
+  current and reproducible (issue #225). Dependabot now monitors both packages,
+  the fuzz application commits a Rust 1.89-compatible lockfile, and stable,
+  nightly, cargo-deny, and cargo-audit gates reject graph or security-policy
+  drift before it reaches the server.
 - Reduce steady-state relay fan-out allocation operations by pre-sizing the
   recipient snapshot from room membership (issue #211). The measured cost is
   now flat at six allocation operations per coordinator fan-out for 2-, 8-,

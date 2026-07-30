@@ -9,10 +9,11 @@ const MATCHING_CLIENT_MANIFEST: &str = "[package]\nrust-version = \"1.88.0\"\n";
 const MISMATCHED_CLIENT_MANIFEST: &str = "[package]\nrust-version = \"1.87.0\"\n";
 const MATCHING_WASM_MANIFEST: &str = "[package]\nrust-version = \"1.94.0\"\n";
 const MISMATCHED_WASM_MANIFEST: &str = "[package]\nrust-version = \"1.93.0\"\n";
-const CLIENT_MANIFESTS: [&str; 3] = [
+const STANDALONE_MANIFESTS: [&str; 4] = [
     "clients/native/Cargo.toml",
     "clients/fortress/Cargo.toml",
     "clients/fortress-wasm/Cargo.toml",
+    "fuzz/Cargo.toml",
 ];
 
 fn copy_msrv_script(temp_root: &std::path::Path) {
@@ -98,6 +99,7 @@ channel="1.88.0"
             ("clients/native/Cargo.toml", cargo_toml),
             ("clients/fortress/Cargo.toml", cargo_toml),
             ("clients/fortress-wasm/Cargo.toml", MATCHING_WASM_MANIFEST),
+            ("fuzz/Cargo.toml", cargo_toml),
         ]);
 
         assert_eq!(
@@ -125,6 +127,7 @@ fn test_msrv_script_reports_mismatch_after_tolerant_parsing() {
         ("clients/native/Cargo.toml", MATCHING_CLIENT_MANIFEST),
         ("clients/fortress/Cargo.toml", MATCHING_CLIENT_MANIFEST),
         ("clients/fortress-wasm/Cargo.toml", MATCHING_WASM_MANIFEST),
+        ("fuzz/Cargo.toml", MATCHING_CLIENT_MANIFEST),
     ]);
 
     assert_eq!(
@@ -138,15 +141,15 @@ fn test_msrv_script_reports_mismatch_after_tolerant_parsing() {
 }
 
 #[test]
-fn test_msrv_script_reports_each_client_manifest_mismatch() {
-    for mismatched_path in CLIENT_MANIFESTS {
+fn test_msrv_script_reports_each_standalone_manifest_mismatch() {
+    for mismatched_path in STANDALONE_MANIFESTS {
         let mut files = vec![
             ("Cargo.toml", MATCHING_CLIENT_MANIFEST),
             ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.88.0\"\n"),
             ("clippy.toml", "msrv = \"1.88.0\"\n"),
             ("Dockerfile", "FROM rust:1.88-bookworm\n"),
         ];
-        files.extend(CLIENT_MANIFESTS.map(|path| {
+        files.extend(STANDALONE_MANIFESTS.map(|path| {
             let contents = match (path, path == mismatched_path) {
                 ("clients/fortress-wasm/Cargo.toml", true) => MISMATCHED_WASM_MANIFEST,
                 ("clients/fortress-wasm/Cargo.toml", false) => MATCHING_WASM_MANIFEST,
@@ -169,10 +172,10 @@ fn test_msrv_script_reports_each_client_manifest_mismatch() {
 }
 
 #[test]
-fn test_msrv_script_fails_when_each_client_manifest_is_missing() {
+fn test_msrv_script_fails_when_each_standalone_manifest_is_missing() {
     // Missing standalone manifests are hard failures: a move must update the
     // checker rather than silently dropping MSRV coverage.
-    for missing_path in CLIENT_MANIFESTS {
+    for missing_path in STANDALONE_MANIFESTS {
         let mut files = vec![
             ("Cargo.toml", MATCHING_CLIENT_MANIFEST),
             ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.88.0\"\n"),
@@ -180,7 +183,7 @@ fn test_msrv_script_fails_when_each_client_manifest_is_missing() {
             ("Dockerfile", "FROM rust:1.88-bookworm\n"),
         ];
         files.extend(
-            CLIENT_MANIFESTS
+            STANDALONE_MANIFESTS
                 .into_iter()
                 .filter(|path| *path != missing_path)
                 .map(|path| {
@@ -237,6 +240,7 @@ fn test_msrv_script_parses_dockerfile_from_line_variants() {
             ("clients/native/Cargo.toml", MATCHING_CLIENT_MANIFEST),
             ("clients/fortress/Cargo.toml", MATCHING_CLIENT_MANIFEST),
             ("clients/fortress-wasm/Cargo.toml", MATCHING_WASM_MANIFEST),
+            ("fuzz/Cargo.toml", MATCHING_CLIENT_MANIFEST),
         ]);
 
         assert_eq!(
@@ -273,6 +277,6 @@ fn test_repository_passes_msrv_consistency_script() {
         "Repository must satisfy scripts/check-msrv-consistency.sh (MSRV pinned \
          consistently across rust-toolchain.toml, clippy.toml, Dockerfile, and \
          clients/native/Cargo.toml, clients/fortress/Cargo.toml, and \
-         clients/fortress-wasm/Cargo.toml).\nOutput:\n{combined}",
+         clients/fortress-wasm/Cargo.toml, plus fuzz/Cargo.toml).\nOutput:\n{combined}",
     );
 }

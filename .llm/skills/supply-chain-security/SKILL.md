@@ -65,7 +65,7 @@ unmaintained = "workspace"
 
 ### `[licenses]` — allowlist of permissive licenses
 
-Allows MIT, Apache-2.0, BSD, ISC, OpenSSL, Unicode, Zlib, 0BSD, CC0-1.0.
+Allows MIT, Apache-2.0, BSD, ISC, NCSA, OpenSSL, Unicode, Zlib, 0BSD, CC0-1.0.
 Always run `cargo deny check licenses` before adding a new dependency.
 
 ### `[bans]` — block problematic crates, detect duplicates

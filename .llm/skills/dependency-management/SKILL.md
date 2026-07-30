@@ -51,7 +51,7 @@ cargo deny check sources      # Crate source restrictions
 ```
 
 The deny.toml configures: `vulnerability = "deny"`, `yanked = "deny"`, allowed licenses (MIT, Apache-2.0, BSD, ISC,
-etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
+NCSA, etc.), and banned/duplicate crate rules. Add `cargo deny check` to CI.
 
 ---
 
@@ -69,7 +69,7 @@ dependencies or evaluating alternatives.
 | `async-trait` | Native `async fn` in traits stabilized in Rust 1.75. The proc-macro adds compile time and allocations. | When updating a trait that uses `#[async_trait]` or adding a new async trait. | Native `async fn` in trait definitions |
 | `chrono` | Has had past RUSTSEC advisories (e.g., RUSTSEC-2020-0159 localtime_r segfault). Large dependency tree. | On any new RUSTSEC advisory, or when evaluating date/time needs. | `time` crate, or `jiff` for newer projects |
 | `futures-util` | Large dependency tree; many utilities overlap with tokio built-ins (`tokio::select!`, `tokio::pin!`). | When the only usage is a single combinator that tokio provides natively. | `tokio` built-in utilities, `futures-lite` |
-| `rmp-serde` | Vendored `rmp` decouples us from upstream, but `rmp-serde` itself could go unmaintained. Moderate maintenance cadence. | If `rmp-serde` goes unmaintained (>12 months without release) or a RUSTSEC advisory is filed. | `msgpacker`, `messagepack-rs`, or extend vendored `rmp` |
+| `rmp-serde` | MessagePack codec on the relay compatibility path with a moderate maintenance cadence. | If `rmp-serde` goes unmaintained (>12 months without release) or a RUSTSEC advisory is filed. | `msgpacker`, `messagepack-rs`, or a reviewed fork |
 
 ### Ban List Policy
 
@@ -234,8 +234,6 @@ in release. Consider `sccache` or `mold` linker for development.
 
 Vendor when: crate is unmaintained and you need patches, crate is <100 lines and you need one function,
 or you've forked with significant modifications. Depend normally otherwise.
-
-This project vendors `rmp` (MessagePack): `[patch.crates-io] rmp = { path = "third_party/rmp" }`
 
 ---
 

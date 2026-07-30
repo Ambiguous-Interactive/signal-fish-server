@@ -137,7 +137,18 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Check 5: clients/fortress/Cargo.toml (standalone interoperability fixture)
+# Check 5: fuzz/Cargo.toml (standalone coverage-guided fuzz package)
+# The nightly-only sanitizer runner is separate, but the package and locked
+# graph must still type-check at the server MSRV in the always-on CI gate.
+if [ -f fuzz/Cargo.toml ]; then
+    FUZZ_MSRV=$(bash scripts/read-toml-string.sh fuzz/Cargo.toml rust-version package || true)
+    check_file "fuzz/Cargo.toml" "$MSRV" "$FUZZ_MSRV" "rust-version"
+else
+    check_missing "fuzz/Cargo.toml"
+    FAILED=$((FAILED + 1))
+fi
+
+# Check 6: clients/fortress/Cargo.toml (standalone interoperability fixture)
 # This crate also runs under the repository toolchain in CI. Keep its declared
 # floor aligned so a server MSRV change cannot strand the issue-242 gate.
 if [ -f clients/fortress/Cargo.toml ]; then
@@ -148,7 +159,7 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Check 6: clients/fortress-wasm/Cargo.toml (Godot/WASM interoperability fixture)
+# Check 7: clients/fortress-wasm/Cargo.toml (Godot/WASM interoperability fixture)
 # signal-fish-client-godot 0.9.0 requires Rust 1.94. Keep this standalone
 # fixture honest about that higher dependency-imposed floor; it builds with the
 # separately pinned nightly toolchain in fortress-wasm-interop.yml.
@@ -160,7 +171,7 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# Check 7: .devcontainer/Dockerfile (informational only - may use newer Rust)
+# Check 8: .devcontainer/Dockerfile (informational only - may use newer Rust)
 if [ -f .devcontainer/Dockerfile ]; then
     # Extract MSRV comment if present
     if grep -q "# Project MSRV:" .devcontainer/Dockerfile; then
@@ -204,13 +215,16 @@ if [ "$FAILED" -ne 0 ]; then
     echo "4. Update clients/native/Cargo.toml:"
     echo "   rust-version = \"$MSRV\""
     echo ""
-    echo "5. Update clients/fortress/Cargo.toml:"
+    echo "5. Update fuzz/Cargo.toml:"
     echo "   rust-version = \"$MSRV\""
     echo ""
-    echo "6. Update clients/fortress-wasm/Cargo.toml:"
+    echo "6. Update clients/fortress/Cargo.toml:"
+    echo "   rust-version = \"$MSRV\""
+    echo ""
+    echo "7. Update clients/fortress-wasm/Cargo.toml:"
     echo "   rust-version = \"$FORTRESS_WASM_MSRV_REQUIRED\""
     echo ""
-    echo "7. Update .devcontainer/Dockerfile (optional):"
+    echo "8. Update .devcontainer/Dockerfile (optional):"
     echo "   # Project MSRV: $MSRV"
     echo ""
     echo "See .llm/skills/msrv-management/SKILL.md for detailed guidance."

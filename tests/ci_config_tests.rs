@@ -15407,6 +15407,236 @@ fn test_dependabot_holds_measured_incompatible_root_cargo_lines() {
 }
 
 #[test]
+fn test_dependabot_cargo_directories_cover_every_automated_package() {
+    // These are exact-release interoperability fixtures, not independently
+    // evolving products. Their dependency graphs move only when the pinned
+    // released client/Godot fixture is deliberately advanced and its
+    // interoperability cell is requalified.
+    const EXCLUDED_FIXTURES: &[(&str, &str)] = &[
+        (
+            "clients/fortress/Cargo.toml",
+            "native exact-release Fortress interoperability fixture",
+        ),
+        (
+            "clients/fortress-wasm/Cargo.toml",
+            "Godot/WASM exact-release Fortress interoperability fixture",
+        ),
+    ];
+
+    let root = repo_root();
+    let path = root.join(".github/dependabot.yml");
+    let content = read_live_file(&path);
+    let documents = Yaml::load_from_str(&content).expect("dependabot.yml must parse as YAML");
+    let updates = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("updates"))
+        .unwrap_or_else(|| panic!("dependabot.yml must define an updates sequence"));
+    let Yaml::Sequence(updates) = updates else {
+        panic!("dependabot.yml updates must be a sequence");
+    };
+
+    let configured: Vec<String> = updates
+        .iter()
+        .filter(|entry| {
+            entry
+                .as_mapping_get("package-ecosystem")
+                .and_then(Yaml::as_str)
+                == Some("cargo")
+        })
+        .map(|entry| {
+            let directory = entry
+                .as_mapping_get("directory")
+                .and_then(Yaml::as_str)
+                .unwrap_or_else(|| panic!("every Dependabot Cargo entry must define `directory`"));
+            assert!(
+                directory == "/"
+                    || (directory.starts_with('/')
+                        && !directory.ends_with('/')
+                        && !directory.contains("//")),
+                "Dependabot Cargo directory `{directory}` must be a canonical absolute \
+                 repository path (exactly `/` or `/path` with no trailing slash)"
+            );
+            directory.to_string()
+        })
+        .collect();
+    let configured_set: BTreeSet<String> = configured.iter().cloned().collect();
+    assert_eq!(
+        configured.len(),
+        configured_set.len(),
+        "Dependabot Cargo directories must be unique; configured {configured:?}"
+    );
+
+    let manifests: BTreeSet<String> = tracked_package_manifests(&root)
+        .into_iter()
+        .filter(|manifest| {
+            read_file(&root.join(manifest))
+                .lines()
+                .any(|line| line.trim() == "[package]")
+        })
+        .collect();
+    let excluded: BTreeSet<&str> = EXCLUDED_FIXTURES
+        .iter()
+        .map(|(manifest, reason)| {
+            assert!(
+                !reason.trim().is_empty(),
+                "Dependabot exclusion `{manifest}` must have a documented rationale"
+            );
+            assert!(
+                manifests.contains(*manifest),
+                "Dependabot exclusion `{manifest}` does not name a tracked Cargo package"
+            );
+            *manifest
+        })
+        .collect();
+    assert_eq!(
+        excluded.len(),
+        EXCLUDED_FIXTURES.len(),
+        "Dependabot package exclusions must be unique"
+    );
+    let expected: BTreeSet<String> = manifests
+        .iter()
+        .filter(|manifest| !excluded.contains(manifest.as_str()))
+        .map(|manifest| match manifest.rsplit_once('/') {
+            Some((directory, "Cargo.toml")) => format!("/{directory}"),
+            None if manifest == "Cargo.toml" => "/".to_string(),
+            _ => panic!("tracked package manifest has an unexpected path: {manifest}"),
+        })
+        .collect();
+
+    assert_eq!(
+        configured_set, expected,
+        "Dependabot Cargo coverage must equal the tracked package inventory minus the explicit \
+         exact-release fixture exclusions.\n\
+         Expected directories: {expected:?}\n\
+         Configured directories: {configured_set:?}\n\
+         Fix: remove stale entries and add one Cargo update entry for every newly evolving \
+         standalone package in .github/dependabot.yml."
+    );
+}
+
+#[test]
+fn test_fuzz_dependency_resolution_is_locked_in_ci() {
+    let root = repo_root();
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "--error-unmatch", "fuzz/Cargo.lock"])
+        .output()
+        .expect("`git ls-files` must be available to verify fuzz/Cargo.lock");
+    assert!(
+        tracked.status.success(),
+        "fuzz/Cargo.lock must be committed so the standalone fuzz graph is reproducible.\n\
+         Fix: remove Cargo.lock from fuzz/.gitignore, generate the lockfile with the pinned \
+         toolchain, and add it to version control."
+    );
+
+    let ci_path = root.join(".github/workflows/ci.yml");
+    let ci = read_live_file(&ci_path);
+    let ci_commands: Vec<String> = workflow_run_command_lines(&ci)
+        .into_iter()
+        .map(|(_, command)| command)
+        .collect();
+    assert!(
+        ci_commands
+            .iter()
+            .any(|command| command == "cargo check --manifest-path fuzz/Cargo.toml --bins --locked"),
+        "ci.yml must type-check every fuzz target with `--locked` so manifest drift fails \
+         instead of silently rewriting fuzz/Cargo.lock."
+    );
+
+    let fuzz_path = root.join(".github/workflows/fuzz.yml");
+    let fuzz = read_live_file(&fuzz_path);
+    let fuzz_documents =
+        Yaml::load_from_str(&fuzz).expect("fuzz.yml live configuration must parse as YAML");
+    let fuzz_job = fuzz_documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("fuzz"))
+        .unwrap_or_else(|| panic!("fuzz.yml must define jobs.fuzz"));
+    let fuzz_steps = fuzz_job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("fuzz.yml jobs.fuzz must define a steps sequence"));
+    let locked_preflight_index = fuzz_steps
+        .iter()
+        .position(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Verify locked fuzz dependency graph")
+        })
+        .unwrap_or_else(|| panic!("fuzz.yml must define a live locked dependency preflight"));
+    let locked_preflight = fuzz_steps
+        .get(locked_preflight_index)
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .unwrap_or_else(|| panic!("the locked fuzz dependency preflight must define `run`"));
+    assert!(
+        locked_preflight
+            == "cargo +nightly-2026-02-01 metadata --manifest-path fuzz/Cargo.toml --locked \
+                --format-version 1 >/dev/null",
+        "fuzz.yml must run a locked metadata preflight before cargo-fuzz. cargo-fuzz itself \
+         does not accept `--locked`, so the preflight is the reproducibility gate."
+    );
+
+    let fuzz_run_index = fuzz_steps
+        .iter()
+        .position(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Fuzz ${{ matrix.target }}")
+        })
+        .unwrap_or_else(|| panic!("fuzz.yml must define the live matrix cargo-fuzz command"));
+    let fuzz_run = fuzz_steps
+        .get(fuzz_run_index)
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .unwrap_or_else(|| panic!("the live matrix cargo-fuzz step must define `run`"));
+    assert!(
+        locked_preflight_index < fuzz_run_index,
+        "fuzz.yml must verify the committed dependency graph before cargo-fuzz can resolve or \
+         build it (preflight step {locked_preflight_index}, fuzz step {fuzz_run_index})."
+    );
+    assert!(
+        fuzz_run.contains("fuzz run ${{ matrix.target }}") && !fuzz_run.contains("--locked"),
+        "cargo-fuzz 0.13 rejects `--locked`; fuzz.yml must enforce the committed graph with \
+         the native Cargo metadata preflight and leave the cargo-fuzz invocation unflagged.\n\
+         Run command:\n{fuzz_run}"
+    );
+
+    let ci_documents =
+        Yaml::load_from_str(&ci).expect("ci.yml live configuration must parse as YAML");
+    let deny_steps = ci_documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("deny"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("ci.yml must define jobs.deny.steps"));
+    let fuzz_deny = deny_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Run cargo-deny (fuzz package)")
+        })
+        .unwrap_or_else(|| panic!("ci.yml must define the live fuzz cargo-deny step"));
+    let fuzz_deny_action = fuzz_deny
+        .as_mapping_get("uses")
+        .and_then(Yaml::as_str)
+        .and_then(parse_remote_action_reference);
+    assert!(
+        fuzz_deny_action.is_some_and(|(action, reference)| {
+            action == "EmbarkStudios/cargo-deny-action" && is_action_version_ref(reference)
+        }) && fuzz_deny
+            .as_mapping_get("with")
+            .and_then(|with| with.as_mapping_get("manifest-path"))
+            .and_then(Yaml::as_str)
+            == Some("fuzz/Cargo.toml")
+            && ci_commands
+                .iter()
+                .any(|command| command == "cargo audit --file fuzz/Cargo.lock"),
+        "ci.yml must apply both cargo-deny policy and the cargo-audit second opinion to the \
+         committed standalone fuzz graph."
+    );
+}
+
+#[test]
 fn test_dependabot_auto_merge_workflow_hardening() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/dependabot-auto-merge.yml");
@@ -22573,6 +22803,9 @@ fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message
                 "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live.contains(
+                "fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+            )
+            && dep_detect_step_live.contains(
                 "clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live.contains(
@@ -22583,7 +22816,7 @@ fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message
         "dep-detect must skip changelog for dependency-only Cargo changes using file classification, \
          not commit message heuristics.\n\
          Required logic:\n\
-         1. Track whether root/native/Fortress Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
+         1. Track whether root/native/fuzz/Fortress Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
          2. Set skip_changelog=true when HAS_CARGO_CHANGE=true and NON_INTERNAL=false.\n\
          This prevents merge commit messages from accidentally forcing the changelog gate."
     );
