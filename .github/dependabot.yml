@@ -18,14 +18,12 @@ updates:
   # Daily schedule: Rust security advisories are critical and frequent
   # Consolidated PR limit: Area-grouped updates reduce review overhead
   #
-  # Workspace Structure:
-  # This is a single-crate workspace with one vendored dependency:
-  # - Main crate: signal-fish-server (binary + library)
-  # - Vendored: third_party/rmp (MessagePack library, patched via [patch.crates-io])
-  #
-  # The root Cargo.toml uses [patch.crates-io] to override rmp with our vendored
-  # version, allowing local customizations while maintaining ecosystem compatibility.
-  # Dependabot monitors both locations separately to track upstream changes.
+  # Package structure:
+  # - Root server package: monitored here
+  # - Native reference client: monitored by its standalone entry below
+  # - Fuzz package: monitored by its standalone entry below
+  # - Fortress native/WASM packages: exact-release interoperability fixtures,
+  #   intentionally advanced only when their pinned fixture is requalified
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -36,7 +34,7 @@ updates:
       - "wallstop"
     # Explicit rebase strategy for clean merge history
     rebase-strategy: "auto"
-    # Use distinct prefix to differentiate from third_party dependencies
+    # Use a distinct prefix to differentiate root from standalone packages
     commit-message:
       prefix: "chore"
       include: "scope"
@@ -77,53 +75,66 @@ updates:
           - "patch"
 
   # ============================================================================
-  # Rust Dependencies (Cargo) - third_party/rmp
+  # Rust Dependencies (Cargo) - Native Reference Client
   # ============================================================================
-  # Vendored MessagePack library referenced in [patch.crates-io]
-  # Daily schedule: Must stay in sync with upstream rmp ecosystem
-  # Consolidated PR limit: Keep third_party updates grouped and manageable
+  # This package is excluded from the root workspace and owns Cargo.lock.
   - package-ecosystem: "cargo"
-    directory: "/third_party/rmp"
+    directory: "/clients/native"
     schedule:
       interval: "daily"
-      time: "03:00"
+      time: "03:15"
       timezone: "America/Los_Angeles"
     assignees:
       - "wallstop"
     rebase-strategy: "auto"
-    # Distinct prefix to clearly identify third_party dependency updates
     commit-message:
-      prefix: "chore(third_party)"
+      prefix: "chore(native)"
       include: "scope"
-    # Prefer a small number of grouped third_party PRs
     open-pull-requests-limit: 2
     labels:
       - "dependencies"
       - "rust"
-      - "third_party"
       - "automated"
-    # Coordinate rmp-serde related updates to prevent conflicts and PR spam
-    #
-    # Security Note: While patch updates are ignored here, security vulnerabilities
-    # are still monitored through:
-    # - GitHub Security Advisories (separate from Dependabot version updates)
-    # - cargo-deny in CI (see .github/workflows/ci.yml) for supply chain scanning
-    # - Manual review of upstream rmp releases for critical fixes
-    #
-    # Patch ignores exist only to prevent version drift within the rmp ecosystem,
-    # NOT to skip security patches. Security fixes override this policy.
+    # Match the two direct holds already measured in the root graph.
     ignore:
-      # rmp ecosystem packages should be updated together
-      # to maintain compatibility across the vendored library
-      - dependency-name: "rmp"
-        update-types: ["version-update:semver-patch"]
-      - dependency-name: "rmp-serde"
-        update-types: ["version-update:semver-patch"]
+      - dependency-name: "tokio-tungstenite"
+        versions: ["0.30.x"]
+      - dependency-name: "serial_test"
+        versions: ["4.x"]
     groups:
-      # Group all rmp-related dependencies for coordinated updates
-      rmp-ecosystem:
+      cargo-native-updates:
         patterns:
-          - "rmp*"
+          - "*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
+
+  # ============================================================================
+  # Rust Dependencies (Cargo) - Coverage-Guided Fuzz Package
+  # ============================================================================
+  # This package is excluded from the root workspace and owns Cargo.lock.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "daily"
+      time: "03:30"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(fuzz)"
+      include: "scope"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-fuzz-updates:
+        patterns:
+          - "*"
         update-types:
           - "major"
           - "minor"
@@ -290,7 +301,7 @@ updates:
 #
 # PR Limits Rationale:
 # - Cargo root (2): prioritize broad, consolidated dependency updates
-# - Cargo third_party (2): keep third_party updates grouped and manageable
+# - Cargo native/fuzz (2 each): keep standalone package updates grouped
 # - GitHub Actions (2): consolidate workflow updates into fewer PRs
 # - Docker main (2): group base image updates for coordinated validation
 # - Docker devcontainer (2): reduce noise in developer-experience updates
@@ -298,7 +309,7 @@ updates:
 # Grouping Strategy:
 # - Each ecosystem uses broad grouping to produce fewer, larger PRs
 # - Root Cargo updates are grouped together across major/minor/patch
-# - rmp ecosystem updates stay grouped to preserve compatibility
+# - Standalone native and fuzz package updates are grouped by package
 # - GitHub Actions and Docker updates are consolidated by area
 #
 # Ignore Rules:
@@ -306,7 +317,7 @@ updates:
 #   WebSocket/base64 graph, MSRV, or syn policy code can move coherently
 # - Rust production image (Dockerfile): Aligned with MSRV policy, manual updates only
 # - Devcontainer Rust: No ignores, tracks latest stable for developer experience
-# - rmp ecosystem patches: Ignored to prevent version drift, security overrides policy
+# - Native client: Hold the WebSocket-stack and MSRV-incompatible release lines
 # - Security scanning: cargo-deny runs in CI for supply chain vulnerabilities
 #
 # Labels:

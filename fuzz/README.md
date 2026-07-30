@@ -13,6 +13,15 @@ addition. It lives in its own package with an empty `[workspace]` table, so it
 **never** perturbs the pinned-stable build of the main crate, and it is run only
 on the nightly toolchain (locally or in the dedicated `fuzz` CI job).
 
+## Dependency policy
+
+`fuzz/Cargo.lock` is committed because this is an executable tooling graph, not
+a published library. Stable CI checks every target with `--locked`, and the
+nightly fuzz job runs a locked metadata preflight before invoking `cargo-fuzz`.
+The preflight is necessary because cargo-fuzz 0.13 does not accept `--locked`.
+Dependabot monitors this standalone package independently from the root server
+package.
+
 ## Targets
 
 | Target | Surface | Stable counterpart |

@@ -32,10 +32,9 @@
 //!
 //! Discovery uses `git ls-files`, so the protected set is exactly the lockfiles
 //! under version control — the only ones that can go stale-in-git and break a
-//! `--locked` build. Gitignored lockfiles (e.g. `fuzz/Cargo.lock`, which is
-//! regenerated fresh and built *without* `--locked` because cargo-fuzz rejects
-//! it) are correctly excluded; requiring one would wrongly fail on a clean
-//! checkout where it does not exist.
+//! `--locked` build. The standalone native and fuzz packages both commit their
+//! lockfiles; cargo-fuzz itself rejects `--locked`, so its workflow performs a
+//! locked Cargo metadata preflight before invoking cargo-fuzz.
 
 #![cfg(test)]
 
@@ -48,12 +47,11 @@ use std::process::Command;
 /// The workspace crate that committed nested lockfiles pin via a path dep.
 const ROOT_CRATE: &str = "signal-fish-server";
 
-/// Committed nested lockfile that must always be covered. Discovery is dynamic,
-/// but this is asserted present so a broken discovery can never make the guard
-/// pass vacuously — mirroring the "missing client manifest is a hard failure"
-/// philosophy in `msrv_consistency_script_tests.rs`. (`fuzz/Cargo.lock` is
-/// deliberately absent here: it is gitignored and built without `--locked`.)
-const REQUIRED_NESTED_LOCK: &str = "clients/native/Cargo.lock";
+/// Committed nested lockfiles that must always be covered. Discovery is dynamic,
+/// but these are asserted present so broken discovery can never pass vacuously
+/// — mirroring the "missing client manifest is a hard failure" philosophy in
+/// `msrv_consistency_script_tests.rs`.
+const REQUIRED_NESTED_LOCKS: &[&str] = &["clients/native/Cargo.lock", "fuzz/Cargo.lock"];
 
 #[test]
 fn every_tracked_cargo_lock_pins_current_root_crate_version() {
@@ -96,14 +94,16 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
     );
 
     // Discovery sanity: a broken walk/ls-files must fail loudly, not pass empty.
-    assert!(
-        checked
-            .iter()
-            .any(|rel| rel.replace('\\', "/") == REQUIRED_NESTED_LOCK),
-        "expected to verify the committed nested lockfile `{REQUIRED_NESTED_LOCK}`, but only \
-         checked {checked:?}; lockfile discovery may be broken or the crate moved (update \
-         REQUIRED_NESTED_LOCK in tests/workspace_lockfile_consistency.rs)"
-    );
+    for required in REQUIRED_NESTED_LOCKS {
+        assert!(
+            checked
+                .iter()
+                .any(|rel| rel.replace('\\', "/") == *required),
+            "expected to verify the committed nested lockfile `{required}`, but only checked \
+             {checked:?}; lockfile discovery may be broken or the crate moved (update \
+             REQUIRED_NESTED_LOCKS in tests/workspace_lockfile_consistency.rs)"
+        );
+    }
 }
 
 /// Parse `[package].version` from the root `Cargo.toml`.
