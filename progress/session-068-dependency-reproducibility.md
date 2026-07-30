@@ -95,4 +95,15 @@ The final audit found no remaining implementation issue. The session record is
 force-added in accordance with prior tracked session records; the intentionally
 local and historically untracked `PLAN.md` remains ignored.
 
-Hosted CI and reviewer evidence follow before the session is complete.
+## Publication and hosted evidence
+
+- Ready PR [#228](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/228)
+  targets `main`.
+- The base commit's main CI and all other substantive push workflows are
+  green. Its only red automation is the scheduled Dependabot job for the dead
+  `/third_party/rmp` directory fixed by this PR.
+- Cursor Bugbot and Copilot were explicitly triggered. Bugbot found no issues;
+  Copilot returned quota exhaustion rather than actionable feedback. The
+  thread-aware review audit found zero inline threads or requested changes.
+- The exact-head CI/reviewer completion audit is posted to the PR conversation
+  after every workflow reaches a terminal state.
