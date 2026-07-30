@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-in, non-vacuous allocation benchmark so future hot-path changes can be
   compared against the same workload without imposing runner-dependent CI
   thresholds.
+- Reduce repeated socket serialization for relayed game data by sharing each
+  exact v2/v3 text, binary, or mixed-format wire frame among compatible room
+  recipients (issue #222). At 16 players, measured relay time improves by
+  30.5% for JSON, 12.6% for MessagePack binary, and 25.9% for mixed
+  MessagePack-to-JSON traffic; allocation operations per relay fall from 81 to
+  12, 111 to 14, and 159 to 40 respectively. One-recipient performance and all
+  emitted wire bytes remain unchanged.
 - Count the teardown's final delivery report as its own registered close-write
   step, so `REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS` is 4 and the derived
   `registered_connection_shutdown_settle_timeout()` (and the binary's graceful
@@ -59,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `serial_test` 4.0.1 declares `rust-version = 1.93.1`, and compiling against
   `syn` 3.0 fails with `no field 'guard' on type '&Arm'` while syn 2 stays in
   the graph for `bytecheck_derive`, `derive_more-impl`, and `educe` regardless.
+  Dependabot now holds those exact incompatible major/minor lines instead of
+  reopening the same measured rejection while security advisory scanning
+  remains active.
 
 ### Fixed
 

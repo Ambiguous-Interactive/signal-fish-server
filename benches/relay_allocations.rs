@@ -242,7 +242,10 @@ impl QueueFixture {
                 .try_recv()
                 .expect("warmed reliable queue item must be available");
             assert!(
-                matches!(queued.payload, OutboundPayload::Message(_)),
+                matches!(
+                    queued.payload,
+                    OutboundPayload::Message(_) | OutboundPayload::Data(_)
+                ),
                 "classified reliable queue must return the submitted data frame"
             );
             deliveries += 1;
@@ -317,7 +320,10 @@ fn drain_recipients(receivers: &mut [(PlayerId, OutboundReceiver)], sender_id: P
                 .try_recv()
                 .expect("every non-sender recipient must have one queued relay");
             assert!(
-                matches!(queued.payload, OutboundPayload::Message(_)),
+                matches!(
+                    queued.payload,
+                    OutboundPayload::Message(_) | OutboundPayload::Data(_)
+                ),
                 "fan-out must enqueue a data message"
             );
             1

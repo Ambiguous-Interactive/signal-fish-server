@@ -975,6 +975,64 @@ fn room_message_for_recipient(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayProjectionCohort {
+    TextV2,
+    TextV3,
+    BinaryDirectV2,
+    BinaryDirectV3,
+    BinaryFallbackV2,
+    BinaryFallbackV3,
+}
+
+impl RelayProjectionCohort {
+    const fn cache_bit(self) -> u8 {
+        1 << self as u8
+    }
+
+    const fn is_binary_fallback(self) -> bool {
+        matches!(self, Self::BinaryFallbackV2 | Self::BinaryFallbackV3)
+    }
+}
+
+fn relay_projection_cohort(
+    message: &ServerMessage,
+    supports_v3: bool,
+    recipient_format: GameDataEncoding,
+) -> Option<RelayProjectionCohort> {
+    Some(match message {
+        ServerMessage::GameData { .. } if supports_v3 => RelayProjectionCohort::TextV3,
+        ServerMessage::GameData { .. } => RelayProjectionCohort::TextV2,
+        ServerMessage::GameDataBinary { encoding, .. }
+            if *encoding == recipient_format && supports_v3 =>
+        {
+            RelayProjectionCohort::BinaryDirectV3
+        }
+        ServerMessage::GameDataBinary { encoding, .. } if *encoding == recipient_format => {
+            RelayProjectionCohort::BinaryDirectV2
+        }
+        ServerMessage::GameDataBinary { .. } if supports_v3 => {
+            RelayProjectionCohort::BinaryFallbackV3
+        }
+        ServerMessage::GameDataBinary { .. } => RelayProjectionCohort::BinaryFallbackV2,
+        _ => return None,
+    })
+}
+
+fn relay_projection_work_repeats(cohorts: impl IntoIterator<Item = RelayProjectionCohort>) -> bool {
+    let mut seen = 0u8;
+    let mut saw_binary_fallback = false;
+    for cohort in cohorts {
+        let bit = cohort.cache_bit();
+        if seen & bit != 0 || (cohort.is_binary_fallback() && saw_binary_fallback) {
+            return true;
+        }
+        seen |= bit;
+        saw_binary_fallback |= cohort.is_binary_fallback();
+    }
+    false
+}
+
 use std::collections::HashSet;
 
 impl InMemoryMessageCoordinator {
@@ -1026,16 +1084,31 @@ impl InMemoryMessageCoordinator {
             return;
         }
 
+        let shared_relay = relay_projection_work_repeats(
+            recipients
+                .iter()
+                .filter_map(|(_, handle)| handle.sender.relay_projection())
+                .filter_map(|(supports_v3, format)| {
+                    relay_projection_cohort(&message, supports_v3, format)
+                }),
+        )
+        .then(|| {
+            crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(&message))
+        });
         let outcomes =
             futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
-                let message = room_message_for_recipient(&message, player_id);
+                let delivery = shared_relay.clone().unwrap_or_else(|| {
+                    crate::coordination::outbound_queue::DeliveryMessage::new(
+                        room_message_for_recipient(&message, player_id),
+                    )
+                });
                 async move {
-                    let outcome = crate::coordination::deliver_or_disconnect_in_room(
+                    let outcome = crate::coordination::deliver_message_or_disconnect_in_room(
                         &self.metrics,
                         self.slow_consumer_timeout,
                         player_id,
                         handle,
-                        message,
+                        delivery,
                         room_id,
                     )
                     .await;
@@ -1251,6 +1324,7 @@ impl InMemoryMessageCoordinator {
                 ));
             }
         };
+        let (message, _) = message.into_parts();
 
         self.metrics.increment_websocket_backpressure_events();
         if let Some(stats) = &connection_stats {
@@ -2631,5 +2705,48 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
 impl Default for InMemoryMessageCoordinator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod relay_projection_cache_tests {
+    use super::{
+        relay_projection_cohort, relay_projection_work_repeats, GameDataEncoding,
+        RelayProjectionCohort::*,
+    };
+    use crate::protocol::ServerMessage;
+    use uuid::Uuid;
+
+    #[test]
+    fn cache_is_created_only_when_projection_work_repeats() {
+        assert!(!relay_projection_work_repeats([
+            BinaryDirectV3,
+            BinaryFallbackV3,
+        ]));
+        assert!(!relay_projection_work_repeats([TextV2, TextV3]));
+        assert!(relay_projection_work_repeats([
+            BinaryDirectV3,
+            BinaryDirectV3,
+        ]));
+        assert!(relay_projection_work_repeats([
+            BinaryFallbackV2,
+            BinaryFallbackV3,
+        ]));
+
+        let binary = ServerMessage::GameDataBinary {
+            from_player: Uuid::nil(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: vec![0xc1].into(),
+            seq: Some(1),
+            epoch: Some(1),
+        };
+        assert_eq!(
+            relay_projection_cohort(&binary, true, GameDataEncoding::MessagePack),
+            Some(BinaryDirectV3)
+        );
+        assert_eq!(
+            relay_projection_cohort(&binary, true, GameDataEncoding::Json),
+            Some(BinaryFallbackV3)
+        );
     }
 }

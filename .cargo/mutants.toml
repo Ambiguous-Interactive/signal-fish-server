@@ -103,6 +103,11 @@ exclude_re = [
     # benchmark's attempt/enqueue/drain ledgers; mutating it under this oracle
     # is necessarily invisible, just like mutating a file under `benches/**`.
     "replace ClientDeliveryHandle::classified_for_allocation_benchmark -> Self with Default::default\\(\\)",
+    # Cache eligibility reads negotiated runtime state and changes only whether
+    # immutable wire work is reused, never which projection is selected. The
+    # pure policy unit test and nightly mixed-encoding backpressure experiment
+    # cover that performance result; the --lib mutant oracle cannot observe it.
+    "DeliverySender::relay_projection",
     "replace == with != in EnhancedGameServer::replan_host_session",
     # `MessageCoordinator::handle_membership_update`'s default body IS
     # `let _ = update; Ok(())` — the "replace -> anyhow::Result<()> with

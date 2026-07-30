@@ -285,6 +285,10 @@ pub(super) async fn send_queued(
         OutboundPayload::Message(message) => {
             close_signal.start_trace_write(message, write_phase == WritePhase::CloseFlush)
         }
+        OutboundPayload::Data(delivery) => close_signal.start_trace_write(
+            delivery.message_arc(),
+            write_phase == WritePhase::CloseFlush,
+        ),
         OutboundPayload::DeliveryReport(_) => None,
     };
     let class = queued.class();
@@ -292,7 +296,14 @@ pub(super) async fn send_queued(
     let write_started_at = Instant::now();
     let recipient_format = receiver.game_data_format();
     let fallback_preflight = match &queued.payload {
-        OutboundPayload::Message(message) => preflight_binary_fallback(message, recipient_format),
+        OutboundPayload::Message(message) => {
+            preflight_binary_fallback(message, recipient_format, None)
+        }
+        OutboundPayload::Data(delivery) => preflight_binary_fallback(
+            delivery.message(),
+            recipient_format,
+            delivery.relay_frame_cache(),
+        ),
         OutboundPayload::DeliveryReport(_) => BinaryFallbackPreflight::NotNeeded,
     };
     let deadline = queued_write_deadline(
@@ -329,6 +340,22 @@ pub(super) async fn send_queued(
                 send_single_message(
                     sender,
                     message,
+                    None,
+                    player_id,
+                    recipient_supports_v3,
+                    recipient_format,
+                    fallback_preflight,
+                    metadata,
+                    &mut accounting,
+                )
+                .await?
+            }
+            OutboundPayload::Data(delivery) => {
+                let (message, relay_cache) = delivery.into_parts();
+                send_single_message(
+                    sender,
+                    message,
+                    relay_cache.as_deref(),
                     player_id,
                     recipient_supports_v3,
                     recipient_format,
@@ -343,6 +370,7 @@ pub(super) async fn send_queued(
                     send_single_message(
                         sender,
                         message,
+                        None,
                         player_id,
                         recipient_supports_v3,
                         recipient_format,
