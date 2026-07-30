@@ -647,6 +647,13 @@ impl DeliverySender {
         }
     }
 
+    pub(crate) fn relay_projection(&self) -> Option<(bool, crate::protocol::GameDataEncoding)> {
+        let DeliverySenderKind::Classified { sender, .. } = &self.0 else {
+            return None;
+        };
+        Some((sender.supports_v3(), sender.game_data_format()))
+    }
+
     /// Whether two handles address the same physical queue generation.
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {

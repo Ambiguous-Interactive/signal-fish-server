@@ -79,8 +79,9 @@ Criterion median times were 2.169 ms, 14.693 ms, and 30.614 ms for JSON;
   `Arc<ServerMessage>` to its optional relay-wide cache. The whole carrier is
   returned on a full reliable queue and survives the parked retry, so cached
   frames cannot drift onto a different message.
-- Create one cache only when a game-data fan-out has more than one recipient.
-  Direct one-recipient delivery retains the uncached path.
+- Create one cache only when projection work actually repeats: an exact cohort
+  repeats, or multiple binary fallback cohorts can share one decode.
+  Unique-cohort and one-recipient fan-outs retain the uncached path.
 - Lazily initialize six exact cohorts: text v2/v3, direct binary v2/v3, and
   binary-to-text fallback v2/v3. `OnceLock` allows concurrent socket writers to
   initialize each immutable result at most once.
@@ -116,7 +117,7 @@ Criterion comparison against `issue222-pre`:
 
 All six multi-recipient cells improved with `p < 0.05`. The room-size-two cells
 showed no statistically significant runtime change, matching the design choice
-not to allocate a cache when there is only one recipient.
+to retain the uncached path when no projection work repeats.
 
 ## Verification
 
@@ -124,6 +125,10 @@ not to allocate a cache when there is only one recipient.
 - Criterion pre/post comparison across all nine cells
 - Exact pre/post output SHA-256 and wire-byte equality in every cell
 - Focused production projector and six-cohort cache unit tests
+- Hosted nightly mixed-encoding backpressure initially exposed cache overhead
+  in a three-player, unique-cohort fan-out. The eligibility fix retains the
+  uncached path there; the exact 5,000-relay reproduction completes with all
+  relays accounted and zero slow-consumer evictions.
 - Full classified outbound-queue unit suite
 - Exact 345-mutant inventory and unchanged 36-shard feasibility
 - `cargo fmt --all -- --check`

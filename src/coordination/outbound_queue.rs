@@ -744,6 +744,14 @@ impl OutboundSender {
         self.shared.v3()
     }
 
+    pub(crate) fn supports_v3(&self) -> bool {
+        self.shared.v3()
+    }
+
+    pub(crate) fn game_data_format(&self) -> GameDataEncoding {
+        encoding_from_tag(self.shared.game_data_format.load(Ordering::Acquire))
+    }
+
     pub fn record_abandoned(&self, class: DeliveryClass, count: u64) {
         let mut state = self.shared.state();
         increment_abandoned(&mut state.counters, class, count);
