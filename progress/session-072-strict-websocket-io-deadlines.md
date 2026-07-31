@@ -133,8 +133,23 @@ about 0.63 seconds to the lazy Rust panic classifier triggered by new test
 attributes. The intended staged hook path avoids the worktree-status cost and
 completed with profiling in 960 ms, below the repository's 1-second target.
 
-Hosted PR checks remain pending.
+The reviewed implementation head also passed every hosted workflow, including
+the coincident full nightly and advanced-safety lanes.
 
 ## Publication
 
-Pending.
+- Pull request:
+  [#235](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/235)
+- Green reviewed implementation head:
+  `98910a2f9d7d49895bef80f44120efcceaa4f5da`.
+- All 13 applicable hosted workflows succeeded: Advanced Safety, Browser
+  Interop, CI, Documentation Validation, Formal Verification, Fortress
+  Interop, Fortress WASM Interop, Link Check, Markdownlint, Spellcheck, Unused
+  Dependencies, Verification Nightly, and WebRTC Interop. The two Dependabot
+  auto-merge runs skipped as intended for this human-authored pull request.
+- Cursor Bugbot reviewed that exact head and found no issues, and no inline
+  review threads exist. Copilot was requested through both the reviewer API and
+  a tagged comment but reported requester quota exhaustion. The prior
+  repository audit found no distinct human contributor available to review a
+  pull request authored by its sole human contributor.
+- The pull request closes #233 and references its umbrella #205.
