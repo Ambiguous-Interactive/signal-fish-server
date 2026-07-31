@@ -131,8 +131,12 @@ instructions because the fail-closed matcher covered only `RUN` and `COPY`.
 The finding was accepted. The matcher now covers `RUN`, `COPY`, and `ADD`, plus
 their `ONBUILD` wrappers, and a compact opener matrix verifies that fake stage
 and healthcheck instructions in every covered heredoc body remain blocking.
-A hosted re-review of that follow-up diff is pending, so no zero-revision
-verdict is claimed for the updated hosted-review state yet.
+A hosted re-review of that follow-up diff was pending at that point, so the log
+did not yet claim a zero-revision verdict for the updated hosted-review state.
+
+Cursor Bugbot's hosted re-review of implementation head `2fd062e` found no new
+issues. The accepted finding's inline thread is resolved, and the final thread
+audit found no unresolved feedback.
 
 ## Verification
 
@@ -141,12 +145,34 @@ verdict is claimed for the updated hosted-review state yet.
 - All 20 message-coordinator tests pass with every feature enabled.
 - All healthcheck audit fixtures and the checked-in repository audit pass.
 - `cargo fmt --all -- --check`, strict all-target/all-feature clippy, and the
-  complete `cargo test --locked --all-features` suite pass on the final diff.
+  complete `cargo test --locked --all-features` suite pass on the production
+  implementation.
+- After the hosted follow-ups, strict clippy and the focused healthcheck fixture
+  suite pass; hosted nextest passes on Linux, macOS, and Windows.
 - Shellcheck, `cargo deny --all-features check`, and `git diff --check` pass.
 - Detailed follow-up issue #233 records the adjacent strict-deadline audit.
-- The remaining repository hook/policy gauntlet and hosted verification are
-  pending.
+- The repository documentation, MSRV, workflow-hygiene, markdown, link-text,
+  hook-readiness, pre-commit, and pre-push policy gauntlet passes.
+- The first hosted head exposed a Windows-only denied unused-variable lint in
+  the test helper. Separate Unix/non-Unix definitions preserve chmod/no-op
+  behavior and the corrected Windows clippy lane passes.
 
 ## Publication
 
-Pending.
+- Pull request:
+  [#234](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/234)
+- Green reviewed implementation head:
+  `2fd062e9448430884ae8a30f45afd590109f5cc7`.
+- All 11 applicable workflows succeeded: Advanced Safety, Browser Interop, CI,
+  Documentation Validation, Fortress Interop, Fortress WASM Interop, Link
+  Check, Markdownlint, Spellcheck, Unused Dependencies, and WebRTC Interop.
+  Dependabot auto-merge skipped as intended for the human-authored pull
+  request.
+- Cursor Bugbot found no new issues on the green implementation head, the
+  accepted earlier finding is resolved, and no inline review threads remain.
+  Copilot was triggered through both the review API and tagged comments after
+  each push but reported requester quota exhaustion. The repository has no
+  distinct human contributor available to review a pull request authored by
+  its sole human contributor.
+- The pull request closes #226 and references #205 plus the new detailed
+  follow-up issue #233.
