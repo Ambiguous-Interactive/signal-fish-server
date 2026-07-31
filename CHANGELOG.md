@@ -91,6 +91,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep every control-message capacity wait bounded by the configured
+  slow-consumer grace. Queue capacity that returns at or after the deadline can
+  no longer revive an expired room-join/reconnect baseline, lifecycle
+  notification, session plan, replan, or room transaction. Otherwise-live,
+  still-eligible recipients whose timeout initiates closure now follow the
+  documented `4002 slow_consumer` path.
 - Fix false `4003 activity_timeout` disconnects for bandwidth-constrained
   recipients that are still draining application traffic (issue #217).
   Successful outbound application writes now supersede redundant WebSocket
