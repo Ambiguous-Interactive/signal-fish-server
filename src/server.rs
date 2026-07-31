@@ -1095,33 +1095,55 @@ impl InMemoryMessageCoordinator {
         .then(|| {
             crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(&message))
         });
-        let outcomes =
-            futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
-                let delivery = shared_relay.clone().unwrap_or_else(|| {
-                    crate::coordination::outbound_queue::DeliveryMessage::new(
-                        room_message_for_recipient(&message, player_id),
-                    )
-                });
-                async move {
-                    let outcome = crate::coordination::deliver_message_or_disconnect_in_room(
-                        &self.metrics,
-                        self.slow_consumer_timeout,
-                        player_id,
-                        handle,
-                        delivery,
-                        room_id,
-                    )
-                    .await;
-                    (*player_id, handle.sender.clone(), outcome)
+        // The negotiated queue policy normally resolves through `try_send`.
+        // Start every recipient synchronously and build async machinery only
+        // for queues that are actually full. Waiting recipients still enter
+        // one join_all below, so waits remain concurrent and each grace
+        // deadline begins when that queue first reports `Full`.
+        let mut pending = Vec::new();
+        let mut slow_consumers = Vec::new();
+        for (player_id, handle) in recipients {
+            let delivery = shared_relay.clone().unwrap_or_else(|| {
+                crate::coordination::outbound_queue::DeliveryMessage::new(
+                    room_message_for_recipient(&message, &player_id),
+                )
+            });
+            match crate::coordination::start_message_delivery_in_room(
+                &self.metrics,
+                self.slow_consumer_timeout,
+                &player_id,
+                &handle,
+                delivery,
+                room_id,
+            ) {
+                crate::coordination::DeliveryStart::Complete(outcome) => {
+                    if outcome == DeliveryOutcome::SlowConsumer {
+                        slow_consumers.push((player_id, handle.sender));
+                    }
                 }
-            }))
-            .await;
+                crate::coordination::DeliveryStart::Backpressured(delivery) => {
+                    pending.push(delivery);
+                }
+            }
+        }
 
-        let slow_consumers: Vec<(PlayerId, DeliverySender)> = outcomes
-            .into_iter()
-            .filter(|(_, _, outcome)| *outcome == DeliveryOutcome::SlowConsumer)
-            .map(|(player_id, sender, _)| (player_id, sender))
-            .collect();
+        if !pending.is_empty() {
+            let outcomes =
+                futures_util::future::join_all(pending.into_iter().map(|delivery| async move {
+                    crate::coordination::finish_backpressured_delivery_in_room(
+                        &self.metrics,
+                        delivery,
+                    )
+                    .await
+                }))
+                .await;
+            slow_consumers.extend(
+                outcomes
+                    .into_iter()
+                    .filter(|(_, _, outcome)| *outcome == DeliveryOutcome::SlowConsumer)
+                    .map(|(player_id, sender, _)| (player_id, sender)),
+            );
+        }
 
         if !slow_consumers.is_empty() {
             // Remove immediately so senders stop paying the timeout for a
@@ -2712,9 +2734,19 @@ impl Default for InMemoryMessageCoordinator {
 mod relay_projection_cache_tests {
     use super::{
         relay_projection_cohort, relay_projection_work_repeats, GameDataEncoding,
-        RelayProjectionCohort::*,
+        InMemoryMessageCoordinator, RelayProjectionCohort::*,
     };
-    use crate::protocol::ServerMessage;
+    use crate::coordination::outbound_queue::DeliveryMessage;
+    use crate::coordination::{
+        finish_backpressured_delivery_in_room, start_message_delivery_in_room,
+        ClientDeliveryHandle, ConnectionCloseSignal, DeliveryOutcome, DeliveryStart,
+    };
+    use crate::metrics::ServerMetrics;
+    use crate::protocol::{PlayerId, ServerMessage};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     #[test]
@@ -2747,6 +2779,233 @@ mod relay_projection_cache_tests {
         assert_eq!(
             relay_projection_cohort(&binary, true, GameDataEncoding::Json),
             Some(BinaryFallbackV3)
+        );
+    }
+
+    fn legacy_delivery_handle(
+        capacity: usize,
+    ) -> (ClientDeliveryHandle, mpsc::Receiver<Arc<ServerMessage>>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            receiver,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bulk_delivery_polls_every_full_wait_before_the_first_resolves() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        ));
+        let (fast, mut fast_receiver) = legacy_delivery_handle(1);
+        let (first_full, mut first_full_receiver) = legacy_delivery_handle(1);
+        let (second_full, mut second_full_receiver) = legacy_delivery_handle(1);
+        for handle in [&first_full, &second_full] {
+            handle
+                .sender
+                .try_send(Arc::new(ServerMessage::Pong), None)
+                .expect("full-recipient prefill must fit");
+        }
+
+        let task = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move {
+                coordinator
+                    .deliver_to_all(
+                        vec![
+                            (PlayerId::from_u128(1), fast),
+                            (PlayerId::from_u128(2), first_full),
+                            (PlayerId::from_u128(3), second_full),
+                        ],
+                        Arc::new(ServerMessage::Pong),
+                        None,
+                    )
+                    .await;
+            })
+        };
+
+        for _ in 0..100 {
+            if metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed),
+            2,
+            "both full recipients must begin their waits concurrently"
+        );
+        let fast_message = fast_receiver
+            .try_recv()
+            .expect("fast recipient must resolve before full queues drain");
+        assert!(matches!(fast_message.as_ref(), ServerMessage::Pong));
+        assert_eq!(
+            metrics
+                .websocket_deliveries_enqueued
+                .load(Ordering::Relaxed),
+            1,
+            "only the fast recipient has landed before either full queue drains"
+        );
+
+        second_full_receiver
+            .recv()
+            .await
+            .expect("second prefill must be readable");
+        let mut second_delivery = None;
+        for _ in 0..100 {
+            match second_full_receiver.try_recv() {
+                Ok(delivered) => {
+                    second_delivery = Some(delivered);
+                    break;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("second full recipient disconnected before delivery")
+                }
+            }
+        }
+        let second_delivery =
+            second_delivery.expect("second full wait must progress while the first remains full");
+        assert!(matches!(second_delivery.as_ref(), ServerMessage::Pong));
+        assert_eq!(
+            metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics
+                .websocket_deliveries_enqueued
+                .load(Ordering::Relaxed),
+            2,
+            "the fast and independently drained recipients must be enqueued"
+        );
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(
+            !task.is_finished(),
+            "the first full recipient retains the entire configured grace"
+        );
+        tokio::time::advance(Duration::from_millis(2)).await;
+        task.await.expect("bulk delivery task must not panic");
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            1,
+            "the still-full recipient must time out at the shared deadline"
+        );
+        let first_prefill = first_full_receiver
+            .try_recv()
+            .expect("the timed-out recipient's prefill remains queued");
+        assert!(matches!(first_prefill.as_ref(), ServerMessage::Pong));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backpressured_delivery_deadline_starts_when_full_is_observed() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = PlayerId::from_u128(1);
+        let (handle, _receiver) = legacy_delivery_handle(1);
+        handle
+            .sender
+            .try_send(Arc::new(ServerMessage::Pong), None)
+            .expect("prefill must fit");
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(Arc::new(ServerMessage::Pong)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+
+        tokio::time::advance(Duration::from_millis(900)).await;
+        let task_metrics = Arc::clone(&metrics);
+        let task = tokio::spawn(async move {
+            finish_backpressured_delivery_in_room(&task_metrics, pending).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(101)).await;
+
+        assert_eq!(
+            task.await.expect("deadline task must not panic").2,
+            DeliveryOutcome::SlowConsumer,
+            "only the unspent portion of the original grace may remain"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_backpressured_delivery_cannot_enqueue_after_capacity_returns() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = PlayerId::from_u128(1);
+        let (handle, mut receiver) = legacy_delivery_handle(1);
+        handle
+            .sender
+            .try_send(Arc::new(ServerMessage::Pong), None)
+            .expect("prefill must fit");
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(Arc::new(ServerMessage::Pong)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+
+        tokio::time::advance(Duration::from_millis(1_001)).await;
+        let prefill = receiver
+            .try_recv()
+            .expect("capacity returns only after the deadline");
+        assert!(matches!(prefill.as_ref(), ServerMessage::Pong));
+        let (_, _, outcome) = finish_backpressured_delivery_in_room(&metrics, pending).await;
+
+        assert_eq!(outcome, DeliveryOutcome::SlowConsumer);
+        let late_delivery = receiver.try_recv();
+        assert!(
+            matches!(late_delivery, Err(mpsc::error::TryRecvError::Empty)),
+            "an expired logical delivery must not use capacity returned after its deadline"
+        );
+        assert_eq!(
+            metrics
+                .websocket_deliveries_enqueued
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+            1
         );
     }
 }

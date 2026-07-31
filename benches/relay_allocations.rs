@@ -33,6 +33,9 @@ use tokio::runtime::{Builder, Runtime};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const RELAYS_PER_SAMPLE: usize = 4_096;
+// One stable current-thread runtime/block_on allocation belongs to the whole
+// sample, not to any logical relay.
+const SAMPLE_FIXED_ALLOCATION_OPERATIONS: usize = 1;
 const REPEATS: usize = 5;
 const ROOM_SIZES: [usize; 3] = [2, 8, 16];
 const DATA_CAPACITY: usize = 32;
@@ -344,6 +347,18 @@ fn repeated_samples(mut measure: impl FnMut() -> Sample) -> Sample {
     first
 }
 
+fn assert_healthy_fanout_uses_synchronous_fast_path(room_size: usize, sample: Sample) {
+    let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
+    let maximum_operations = RELAYS_PER_SAMPLE * 4 + SAMPLE_FIXED_ALLOCATION_OPERATIONS;
+    assert!(
+        allocation_operations <= maximum_operations,
+        "healthy {room_size}-player fan-out used {allocation_operations} allocation operations \
+         across {RELAYS_PER_SAMPLE} relays; expected at most four operations per relay plus one \
+         fixed sample operation after removing async wait scaffolding from recipients whose \
+         queues accept synchronously"
+    );
+}
+
 fn print_sample(scope: &str, room_size: usize, relays: usize, sample: Sample) {
     let recipients = if scope == "fanout" { room_size - 1 } else { 1 };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
@@ -371,6 +386,7 @@ fn main() {
     for room_size in ROOM_SIZES {
         let mut fixture = FanoutFixture::new(room_size);
         let sample = repeated_samples(|| fixture.measure());
+        assert_healthy_fanout_uses_synchronous_fast_path(room_size, sample);
         print_sample("fanout", room_size, RELAYS_PER_SAMPLE, sample);
     }
 

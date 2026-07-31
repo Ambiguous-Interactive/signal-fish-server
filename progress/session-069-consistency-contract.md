@@ -146,6 +146,8 @@ zero findings. Changelog classification and wording review pass.
   issue #226 continues to track the unrelated Docker `HEALTHCHECK` parser
   warning.
 
-This publication record is a documentation-only follow-up to the fully green
-implementation head. Its push must pass the same exact-head hosted gates and a
-fresh Bugbot/Copilot trigger before handoff.
+The publication-record follow-up completed at
+`ebd33cdf821a4f00281d9edfac220786d518d897`: all 15 applicable workflows
+passed, Bugbot reported no findings, and Copilot again returned its
+requester-quota-exhausted notice. PR #231 merged to `main` as
+`875057df9748184a824961c6265d26fad010298a`.

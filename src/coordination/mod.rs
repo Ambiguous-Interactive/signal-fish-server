@@ -1106,6 +1106,54 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
     delivery: DeliveryMessage,
     room_id: Option<RoomId>,
 ) -> DeliveryOutcome {
+    match start_message_delivery_in_room(
+        metrics,
+        slow_consumer_timeout,
+        player_id,
+        handle,
+        delivery,
+        room_id,
+    ) {
+        DeliveryStart::Complete(outcome) => outcome,
+        DeliveryStart::Backpressured(pending) => {
+            finish_backpressured_delivery_in_room(metrics, pending)
+                .await
+                .2
+        }
+    }
+}
+
+pub(crate) enum DeliveryStart {
+    Complete(DeliveryOutcome),
+    Backpressured(BackpressuredDelivery),
+}
+
+/// State retained only when the non-blocking queue attempt reports `Full`.
+///
+/// Splitting the attempt from the wait lets room fan-out resolve healthy
+/// recipients without allocating one async future per recipient, while the
+/// scalar wrapper above still uses the exact same delivery state machine.
+pub(crate) struct BackpressuredDelivery {
+    player_id: PlayerId,
+    handle: ClientDeliveryHandle,
+    delivery: DeliveryMessage,
+    room_id: Option<RoomId>,
+    deadline: tokio::time::Instant,
+    timeout: std::time::Duration,
+    connection_stats: Option<Arc<crate::metrics::ConnectionDeliveryStats>>,
+    pending_class: Option<crate::protocol::DeliveryClass>,
+    #[cfg(feature = "trace-validation")]
+    trace_delivery_id: Option<u64>,
+}
+
+pub(crate) fn start_message_delivery_in_room(
+    metrics: &crate::metrics::ServerMetrics,
+    slow_consumer_timeout: std::time::Duration,
+    player_id: &PlayerId,
+    handle: &ClientDeliveryHandle,
+    delivery: DeliveryMessage,
+    room_id: Option<RoomId>,
+) -> DeliveryStart {
     #[cfg(feature = "trace-validation")]
     let trace_delivery_id = handle.close.begin_trace_delivery(delivery.message_arc());
     #[cfg(feature = "trace-validation")]
@@ -1142,7 +1190,11 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
                     Some("classified-fast-path-outcome"),
                 );
             }
-            return record_queue_outcome(metrics, connection_stats.as_ref(), outcome);
+            return DeliveryStart::Complete(record_queue_outcome(
+                metrics,
+                connection_stats.as_ref(),
+                outcome,
+            ));
         }
         Err(DeliveryTrySendError::Closed) => {
             #[cfg(feature = "trace-validation")]
@@ -1159,7 +1211,7 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
                 %player_id,
                 "Recipient connection already closing; message unroutable"
             );
-            return DeliveryOutcome::ChannelClosed;
+            return DeliveryStart::Complete(DeliveryOutcome::ChannelClosed);
         }
         Err(DeliveryTrySendError::Full(delivery)) => {
             #[cfg(feature = "trace-validation")]
@@ -1177,13 +1229,13 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
                 trace_delivery_id,
                 Some("accountability-unavailable"),
             );
-            return fail_delivery_closed(
+            return DeliveryStart::Complete(fail_delivery_closed(
                 metrics,
                 connection_stats.as_ref(),
                 player_id,
                 handle,
                 "Delivery accountability queue exhausted; closing recipient",
-            );
+            ));
         }
         Err(DeliveryTrySendError::InvalidMetadata) => {
             #[cfg(feature = "trace-validation")]
@@ -1196,13 +1248,13 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
                 handle.sender.record_rejected_with_close(class);
             }
             tracing::error!(%player_id, "Invalid internal outbound delivery metadata");
-            return fail_delivery_closed(
+            return DeliveryStart::Complete(fail_delivery_closed(
                 metrics,
                 connection_stats.as_ref(),
                 player_id,
                 handle,
                 "Invalid internal delivery metadata; closing recipient fail-closed",
-            );
+            ));
         }
     };
 
@@ -1212,14 +1264,54 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
             .backpressure_events
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    let pending_class = offered_class;
-    match tokio::time::timeout(
-        slow_consumer_timeout,
-        handle.sender.send_delivery(delivery, room_id),
-    )
-    .await
-    {
-        Ok(Ok(outcome)) => {
+    DeliveryStart::Backpressured(BackpressuredDelivery {
+        player_id: *player_id,
+        handle: handle.clone(),
+        delivery,
+        room_id,
+        deadline: tokio::time::Instant::now() + slow_consumer_timeout,
+        timeout: slow_consumer_timeout,
+        connection_stats,
+        pending_class: offered_class,
+        #[cfg(feature = "trace-validation")]
+        trace_delivery_id,
+    })
+}
+
+pub(crate) async fn finish_backpressured_delivery_in_room(
+    metrics: &crate::metrics::ServerMetrics,
+    pending: BackpressuredDelivery,
+) -> (PlayerId, DeliverySender, DeliveryOutcome) {
+    enum WaitResult {
+        Complete(Result<QueueEnqueueOutcome, DeliveryTrySendError>),
+        TimedOut,
+    }
+
+    let BackpressuredDelivery {
+        player_id,
+        handle,
+        delivery,
+        room_id,
+        deadline,
+        timeout,
+        connection_stats,
+        pending_class,
+        #[cfg(feature = "trace-validation")]
+        trace_delivery_id,
+    } = pending;
+    let sender = handle.sender.clone();
+    let send = handle.sender.send_delivery(delivery, room_id);
+    tokio::pin!(send);
+    // Tokio's Timeout polls its inner future before its timer. A biased select
+    // deliberately polls the deadline first so capacity that returns at or
+    // after expiry cannot revive the expired logical delivery.
+    let wait_result = tokio::select! {
+        biased;
+        _ = tokio::time::sleep_until(deadline) => WaitResult::TimedOut,
+        result = &mut send => WaitResult::Complete(result),
+    };
+    let outcome = match wait_result {
+        WaitResult::Complete(Ok(outcome)) => {
             #[cfg(feature = "trace-validation")]
             if trace_queue_outcome_supported(outcome) {
                 handle.close.record_trace(
@@ -1236,7 +1328,7 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
             }
             record_queue_outcome(metrics, connection_stats.as_ref(), outcome)
         }
-        Ok(Err(DeliveryTrySendError::Closed)) => {
+        WaitResult::Complete(Err(DeliveryTrySendError::Closed)) => {
             #[cfg(feature = "trace-validation")]
             handle.close.record_trace(
                 crate::trace_validation::DeliveryTraceAction::ParkedChannelClosed,
@@ -1250,7 +1342,7 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
             tracing::debug!(%player_id, "Recipient connection closed while backpressured");
             DeliveryOutcome::ChannelClosed
         }
-        Ok(Err(DeliveryTrySendError::AccountabilityUnavailable)) => {
+        WaitResult::Complete(Err(DeliveryTrySendError::AccountabilityUnavailable)) => {
             #[cfg(feature = "trace-validation")]
             handle.close.record_trace(
                 crate::trace_validation::DeliveryTraceAction::Unsupported,
@@ -1260,12 +1352,12 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
             fail_delivery_closed(
                 metrics,
                 connection_stats.as_ref(),
-                player_id,
-                handle,
+                &player_id,
+                &handle,
                 "Delivery accountability queue exhausted while waiting; closing recipient",
             )
         }
-        Ok(Err(DeliveryTrySendError::InvalidMetadata)) => {
+        WaitResult::Complete(Err(DeliveryTrySendError::InvalidMetadata)) => {
             #[cfg(feature = "trace-validation")]
             handle.close.record_trace(
                 crate::trace_validation::DeliveryTraceAction::Unsupported,
@@ -1279,12 +1371,12 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
             fail_delivery_closed(
                 metrics,
                 connection_stats.as_ref(),
-                player_id,
-                handle,
+                &player_id,
+                &handle,
                 "Invalid internal delivery metadata; closing recipient fail-closed",
             )
         }
-        Ok(Err(DeliveryTrySendError::Full(_))) => {
+        WaitResult::Complete(Err(DeliveryTrySendError::Full(_))) => {
             #[cfg(feature = "trace-validation")]
             handle.close.record_trace(
                 crate::trace_validation::DeliveryTraceAction::Unsupported,
@@ -1298,12 +1390,12 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
             fail_delivery_closed(
                 metrics,
                 connection_stats.as_ref(),
-                player_id,
-                handle,
+                &player_id,
+                &handle,
                 "Outbound queue invariant failed; closing recipient fail-closed",
             )
         }
-        Err(_elapsed) => {
+        WaitResult::TimedOut => {
             if let Some(class) = pending_class {
                 handle.sender.record_rejected_with_close(class);
             }
@@ -1329,14 +1421,15 @@ pub(crate) async fn deliver_message_or_disconnect_in_room(
             }
             tracing::warn!(
                 %player_id,
-                timeout_ms = slow_consumer_timeout.as_millis() as u64,
+                timeout_ms = timeout.as_millis() as u64,
                 initiated_close,
                 "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
                  instead of silently dropping messages"
             );
             DeliveryOutcome::SlowConsumer
         }
-    }
+    };
+    (player_id, sender, outcome)
 }
 
 #[cfg(feature = "trace-validation")]

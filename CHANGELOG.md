@@ -35,13 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting already-accounted delivery-class omissions or inventing a numeric
   guarantee from defaults that impose no room-wide gameplay admission bound.
 - Reduce steady-state relay fan-out allocation operations by pre-sizing the
-  recipient snapshot from room membership (issue #211). The measured cost is
-  now flat at six allocation operations per coordinator fan-out for 2-, 8-,
-  and 16-player rooms, down from six, seven, and eight respectively; the
-  classified per-recipient queue itself remains allocation-free. Add an
-  opt-in, non-vacuous allocation benchmark so future hot-path changes can be
-  compared against the same workload without imposing runner-dependent CI
-  thresholds.
+  recipient snapshot from room membership and reserving async wait machinery
+  for recipients that are actually backpressured (issues #207 and #211).
+  Current 2-, 8-, and 16-player fan-outs use 3, 4, and 4 allocation operations
+  instead of 6, 7, and 7, while allocated bytes fall by 61–86% and the
+  classified per-recipient queue remains allocation-free. Exact delivery,
+  concurrent slow-recipient waits, configured grace deadlines, and wire
+  behavior are unchanged.
 - Reduce repeated socket serialization for relayed game data by sharing each
   exact v2/v3 text, binary, or mixed-format wire frame among compatible room
   recipients (issue #222). At 16 players, measured relay time improves by
