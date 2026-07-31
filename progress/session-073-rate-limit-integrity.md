@@ -33,7 +33,7 @@ Before production fixes:
   zero-period interval panic.
 
 The relay-serialization allocation baseline was also preserved for a later
-#207 increment: v3 JSON used 8–9 allocations per relay, v3 MessagePack 10–11,
+issue #207 increment: v3 JSON used 8–9 allocations per relay, v3 MessagePack 10–11,
 and mixed MessagePack fan-out 18 allocations at two players and 37 at eight or
 sixteen.
 
