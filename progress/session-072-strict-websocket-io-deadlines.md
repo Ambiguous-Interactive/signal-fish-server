@@ -136,6 +136,32 @@ completed with profiling in 960 ms, below the repository's 1-second target.
 The reviewed implementation head also passed every hosted workflow, including
 the coincident full nightly and advanced-safety lanes.
 
+## Zero-flake CI follow-up
+
+A later documentation-validation run exposed a separate, pre-existing
+nondeterministic gate: Lychee timed out while probing the unowned
+`inria.hal.science` paper host. The same URL passed on the implementation head
+and the failed job passed when retried, confirming that application behavior
+and repository-owned documentation were not the cause.
+
+Required link checks in both `doc-validation.yml` and `link-check.yml` now run
+offline, so pull-request results depend only on the checkout. The weekly
+external-link audit remains available for link-rot discovery, but is explicitly
+scheduled and non-gating. A CI-config regression test locks that boundary.
+
+The local fast-link helper also stopped forcing a repository-root `--base-url`;
+that override made valid links in nested Markdown resolve from the wrong
+directory. Its all-file offline run now deterministically validates all 184
+tracked Markdown inputs with zero errors.
+
+Focused verification for the follow-up passed:
+
+- all 296 active CI-config tests (one intentional expensive test ignored);
+- the complete 184-file fast offline link check;
+- Lychee configuration validation, workflow hygiene, changed-file doc
+  consistency, `actionlint`, YAML validation, formatting, and
+  `git diff --check`.
+
 ## Publication
 
 - Pull request:

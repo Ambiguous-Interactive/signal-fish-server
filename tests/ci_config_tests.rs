@@ -1345,7 +1345,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     ("workflow-hygiene.yml", "Workflow configuration validation"),
     ("markdownlint.yml", "Markdown formatting validation"),
     ("spellcheck.yml", "Spell checking (typos)"),
-    ("link-check.yml", "External link validation (lychee)"),
+    (
+        "link-check.yml",
+        "Deterministic repository link validation plus scheduled external audit (lychee)",
+    ),
     (
         "release.yml",
         "Release automation (crates.io + GitHub release)",
@@ -8351,6 +8354,58 @@ fn test_link_check_workflow_exists_and_is_configured() {
 }
 
 #[test]
+fn test_required_link_checks_are_offline_and_external_audit_is_non_gating() {
+    // Required CI must not depend on the availability or latency of unowned
+    // network services. External link rot still matters, so link-check.yml keeps
+    // a scheduled audit, but that network-dependent step cannot fail the job.
+    let root = repo_root();
+    let link_check = read_live_file(&root.join(".github/workflows/link-check.yml"));
+    let doc_validation = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
+
+    let link_required_step = link_check
+        .split("- name: Repository Link Checker (offline)")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("- name: External Link Audit (scheduled, non-gating)")
+                .next()
+        })
+        .expect("link-check.yml must define the named offline repository-link step");
+    let doc_required_step = doc_validation
+        .split("- name: Check repository links with lychee (offline)")
+        .nth(1)
+        .and_then(|rest| rest.split("\n        env:").next())
+        .expect("doc-validation.yml must define the named offline repository-link step");
+
+    for (workflow, required_step) in [
+        ("link-check.yml", link_required_step),
+        ("doc-validation.yml", doc_required_step),
+    ] {
+        assert!(
+            required_step
+                .lines()
+                .any(|line| line.split_whitespace().any(|word| word == "--offline")),
+            "{workflow} required lychee validation must use --offline so pull-request \
+             results cannot depend on unowned network services"
+        );
+    }
+
+    let external_step = link_check
+        .split("- name: External Link Audit (scheduled, non-gating)")
+        .nth(1)
+        .expect("link-check.yml must define the scheduled external-link audit");
+    for required_fragment in [
+        "if: github.event_name == 'schedule'",
+        "continue-on-error: true",
+    ] {
+        assert!(
+            external_step.contains(required_fragment),
+            "link-check.yml external audit is missing `{required_fragment}`; external \
+             URL probing must remain scheduled and non-gating"
+        );
+    }
+}
+
+#[test]
 fn test_markdownlint_workflow_exists_and_is_configured() {
     // This test ensures the markdownlint workflow exists and is properly configured
     // Prevents markdown formatting issues from reaching main branch
@@ -13947,6 +14002,13 @@ fn test_internal_link_validators_check_tracked_targets() {
         "scripts/check-links-fast.sh must use Git's null-delimited file lists \
          for --all, --staged, and modified-file discovery. This avoids ignored \
          local artifacts and handles paths with spaces."
+    );
+
+    assert!(
+        !strip_comment_lines(&fast_link_content).contains("--base-url"),
+        "scripts/check-links-fast.sh must let lychee resolve relative links from \
+         each Markdown source file. A repository-root --base-url produces \
+         deterministic false failures for valid links in nested docs."
     );
 
     assert!(

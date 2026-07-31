@@ -270,12 +270,19 @@ Link checks stay out of git hooks. Run them through local CI or directly when
 working on docs:
 
 ```bash
-# Check specific file with full link checking
-lychee --config .lychee.toml docs/setup.md
+# Check specific file deterministically (repository-owned links only)
+lychee --config .lychee.toml --offline docs/setup.md
 
-# Check all files (includes external links)
+# Check all files deterministically
+lychee --config .lychee.toml --offline '**/*.md'
+
+# Optional network-dependent audit (never a required PR gate)
 lychee --config .lychee.toml '**/*.md'
 ```
+
+Required CI link checks run offline. A weekly, non-gating workflow audits
+external URLs for link rot without allowing an unowned host's latency or
+availability to make pull-request validation flaky.
 
 ### Bypassing Hooks (Not Recommended)
 
