@@ -197,13 +197,6 @@ fn test_ci_config_healthcheck_parser_rejects_inactive_or_unsafe_shapes() {
             "HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1 \\",
             "Dockerfile HEALTHCHECK has an unterminated backslash continuation.",
         ),
-        (
-            "heredoc-cannot-fake-healthcheck",
-            "RUN <<EOF\n\
-             HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1\n\
-             EOF\n",
-            "Dockerfile healthcheck audit cannot safely inspect heredoc instructions.",
-        ),
     ];
 
     for (name, dockerfile_tail, expected_diagnostic) in cases {
@@ -212,6 +205,31 @@ fn test_ci_config_healthcheck_parser_rejects_inactive_or_unsafe_shapes() {
         assert!(
             output.contains(expected_diagnostic),
             "{name} should report `{expected_diagnostic}`.\nOutput:\n{output}"
+        );
+    }
+
+    for (name, opener) in [
+        ("run", "RUN <<EOF"),
+        ("copy", "COPY <<EOF /tmp/payload"),
+        ("add", "ADD <<EOF /tmp/payload"),
+        ("onbuild-add", "ONBUILD ADD <<EOF /tmp/payload"),
+    ] {
+        let dockerfile_tail = format!(
+            "{opener}\n\
+             FROM scratch\n\
+             HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1\n\
+             EOF\n"
+        );
+        let (exit_code, output) = run_validator_with_dockerfile(&dockerfile_tail);
+        assert_eq!(
+            exit_code, 1,
+            "{name} heredoc should fail closed.\nOutput:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "Dockerfile healthcheck audit cannot safely inspect heredoc instructions."
+            ),
+            "{name} heredoc body must not impersonate FROM or HEALTHCHECK.\nOutput:\n{output}"
         );
     }
 }

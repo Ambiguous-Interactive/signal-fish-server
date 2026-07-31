@@ -115,7 +115,9 @@ if [[ -f Dockerfile ]]; then
                     healthcheck = ""
                     return
                 }
-                if (lower ~ /^(run|copy)([[:space:]]|$)/ && instruction ~ /<</) {
+                if ((lower ~ /^(run|copy|add)([[:space:]]|$)/ ||
+                        lower ~ /^onbuild[[:space:]]+(run|copy|add)([[:space:]]|$)/) &&
+                        instruction ~ /<</) {
                     audit_error = "unsupported-heredoc"
                     return
                 }

@@ -32,7 +32,8 @@ evaluation. It:
 
 - honors default backslash continuations plus CRLF;
 - removes full-line comments before instruction assembly;
-- rejects RUN/COPY heredoc input that it cannot safely inspect;
+- rejects RUN/COPY/ADD heredoc input, including ONBUILD-wrapped forms, that it
+  cannot safely inspect;
 - resets healthcheck state at each `FROM`, so only the final runtime stage
   counts; and
 - accepts only the repository's real `curl` probe of the exact
@@ -123,6 +124,15 @@ final-stage `EXPOSE`/`ENV` compatibility policy.
 After the final EOF-continuation and documentation corrections, the independent
 healthcheck reviewer, runtime reviewer, and complete-diff reviewer all returned
 explicit zero-revision verdicts.
+
+Hosted Cursor Bugbot subsequently identified one additional bypass: `ADD` and
+`ONBUILD ADD` heredoc bodies could still impersonate `FROM` or `HEALTHCHECK`
+instructions because the fail-closed matcher covered only `RUN` and `COPY`.
+The finding was accepted. The matcher now covers `RUN`, `COPY`, and `ADD`, plus
+their `ONBUILD` wrappers, and a compact opener matrix verifies that fake stage
+and healthcheck instructions in every covered heredoc body remain blocking.
+A hosted re-review of that follow-up diff is pending, so no zero-revision
+verdict is claimed for the updated hosted-review state yet.
 
 ## Verification
 
