@@ -6,8 +6,8 @@
 //! glare determinism, reconnect plans, transport-status fan-out, and v2 gating.
 
 use crate::config::{
-    AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    SessionConfig, TransportSecurityConfig, TurnConfig, WebSocketConfig,
+    CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+    TransportSecurityConfig, TurnConfig, WebSocketConfig,
 };
 use crate::database::{DatabaseConfig, GameDatabase, InMemoryDatabase};
 use crate::protocol::{
@@ -53,7 +53,6 @@ async fn create_test_server_with_config(config: ServerConfig) -> Arc<EnhancedGam
         TurnConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
-        AuthMaintenanceConfig::default(),
         CoordinationConfig::default(),
         TransportSecurityConfig::default(),
         Vec::new(),
@@ -112,7 +111,6 @@ async fn create_test_server_with_session_and_turn(
         turn,
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
-        AuthMaintenanceConfig::default(),
         CoordinationConfig::default(),
         TransportSecurityConfig::default(),
         Vec::new(),

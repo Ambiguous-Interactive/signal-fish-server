@@ -310,8 +310,9 @@ When a WebRTC plan is in play, peers exchange connection setup over a targeted
 `signal` payload; the server forwards it verbatim to that one peer and never
 parses it (by convention the payload is matchbox-compatible: `Offer`, `Answer`,
 or `IceCandidate`). Signal relay is gated by `session.enable_webrtc`. Signal
-dispatch and rejected-signal attempts are rate limited (see
-[Rate Limiting](#rate-limiting)).
+valid-signal dispatch is rate limited, while rejected signals receive detailed
+errors only up to a separate budget before generic rate-limit errors replace
+them (see [Rate Limiting](#rate-limiting)).
 
 ### Session Plans
 
@@ -398,7 +399,7 @@ Batching is transparent to clients.
 ## Rate Limiting
 
 In-memory rate limiting for room creation, join attempts, validated WebRTC
-Signal dispatch attempts, and rejected WebRTC signal attempts.
+Signal dispatch attempts, and detailed rejected-signal error responses.
 
 ```json
 
@@ -418,7 +419,7 @@ Signal dispatch attempts, and rejected WebRTC signal attempts.
 - `time_window` - Window duration in seconds
 - `max_join_attempts` - Max join attempts per player per window
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per window
-- `max_signal_errors` - Max rejected WebRTC signal attempts per player per window
+- `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 
 When auth is enabled, per-app rate limits apply:
 
@@ -472,16 +473,21 @@ Returns a camelCase, nested JSON document:
     "performance": { "queries": 0, "room_creation_latency": 0, "room_join_latency": 0, "query_latency": 0 },
     "errors": { "internal": 0, "websocket": 0, "total": 0 },
     "rateLimiting": {
-      "minute": { "limit": 0, "used": 0, "checks": 0, "rejections": 0 },
-      "hour": { "limit": 0, "used": 0, "checks": 0, "rejections": 0 },
-      "day": { "limit": 0, "used": 0, "checks": 0, "rejections": 0 },
       "total_rejections": 0,
-      "resets": 0
+      "auth_rejections": 0,
+      "room_creation_rejections": 0,
+      "join_attempt_rejections": 0,
+      "signal_rejections": 0,
+      "signal_error_rejections": 0
     }
   }
 }
 
 ```
+
+`total_rejections` is the sum of the five category counters. Room creation
+consumes both a room-creation slot and a join-attempt slot; a rejection is
+attributed to the budget that made the decision.
 
 Room and connection counters live under `serverMetrics.connections`
 (`total` / `active` / `disconnections`) and `serverMetrics.rooms`

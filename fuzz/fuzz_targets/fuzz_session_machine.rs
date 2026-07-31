@@ -30,8 +30,8 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use signal_fish_server::config::{
-    AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    SessionConfig, TransportSecurityConfig, TurnConfig,
+    CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+    TransportSecurityConfig, TurnConfig,
 };
 use signal_fish_server::database::DatabaseConfig;
 use signal_fish_server::protocol::{ClientMessage, DeliveryClass, RoomId, ServerMessage};
@@ -156,7 +156,6 @@ async fn build_server() -> Arc<EnhancedGameServer> {
         TurnConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
-        AuthMaintenanceConfig::default(),
         CoordinationConfig::default(),
         TransportSecurityConfig::default(),
         Vec::new(),

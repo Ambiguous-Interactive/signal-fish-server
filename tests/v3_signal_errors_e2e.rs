@@ -87,7 +87,6 @@ async fn start_server_with_config(
         signal_fish_server::config::TurnConfig::default(),
         signal_fish_server::database::DatabaseConfig::InMemory,
         signal_fish_server::config::MetricsConfig::default(),
-        signal_fish_server::config::AuthMaintenanceConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
         signal_fish_server::config::TransportSecurityConfig::default(),
         vec![app_entry()],

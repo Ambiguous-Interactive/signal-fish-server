@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replace permanently-zero minute/hour/day/reset/cache rate-limit telemetry
+  with production-wired rejection counters for authentication, room creation,
+  join attempts, signaling, and detailed signaling errors. The aggregate
+  `signal_fish_rate_limit_rejections_total` remains stable and equals the sum
+  of those five sources; the removed Prometheus series and JSON snapshot /
+  dashboard fields were never connected to enforcement. The corresponding
+  public `ServerMetrics` fields, `RateLimitWindow`, and dead record/cache
+  methods are also removed, making this a Rust library API change.
+- Remove the unused `AuthMaintenanceConfig`, root `Config.auth` field, and
+  `EnhancedGameServer::new` argument. The three documented `auth.rate_limit_cache_*`
+  settings never affected the bounded in-memory per-app limiter; legacy JSON
+  and environment keys remain tolerated and ignored, while `--print-config`
+  no longer advertises them. This is a Rust library API change.
+- Correct the `max_signal_errors` contract: it budgets detailed rejected-signal
+  responses before the server substitutes a generic rate-limit error; it does
+  not stop validation, drop subsequent attempts, or disconnect the client.
 - Keep the standalone native reference client and fuzz dependency graphs
   current and reproducible (issue #225). Dependabot now monitors both packages,
   the fuzz application commits a Rust 1.89-compatible lockfile, and every
@@ -91,6 +107,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make room creation atomically require both its creation and shared join
+  budgets, preventing partial accounting and `u32` overflow. Direct-library
+  zero windows can no longer disable enforcement, cleanup duration arithmetic
+  saturates, cleanup tasks no longer retain dropped limiters, expired debug
+  stats are truthful without moving enforcement windows, and live subsecond
+  retry durations round up instead of reporting zero seconds.
 - Enforce WebSocket I/O deadlines as exclusive boundaries (issue #233).
   Selected outbound and server Ping writes are accepted only when the server
   observes completion strictly before the deadline. Authentication and

@@ -250,7 +250,8 @@ a player to leave and retry, or create a new room by sending a
 Your client is sending messages faster than the server allows. Implement
 exponential backoff: wait 1 second, then 2, then 4, and so on before
 retrying. The `Authenticated` response includes a `rate_limits` object
-with your per-minute, per-hour, and per-day limits.
+whose per-minute value is enforced when configured. Its per-hour and per-day
+values are legacy advisory projections and are not enforced by the server.
 
 ### Reconnection expired (`RECONNECTION_EXPIRED`)
 

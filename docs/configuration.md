@@ -126,7 +126,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Max join attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS` | `rate_limit.max_signals` | `600` | Max validated WebRTC Signal dispatch attempts per player per window |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Max rejected WebRTC signal attempts per player per window |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Detailed WebRTC rejection errors per player per window before generic rate-limit errors |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH` | `protocol.max_game_name_length` | `64` | Max characters in a game name |
 | `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH` | `protocol.room_code_length` | `6` | Length of generated room codes |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH` | `protocol.max_player_name_length` | `32` | Max characters in a player name |
@@ -168,9 +168,6 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SUBPROTOCOL` | `security.transport.token_binding.subprotocol` | `signalfish.tokenbinding.v1` | Token-binding WebSocket subprotocol |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SCHEME` | `security.transport.token_binding.scheme` | `sec_websocket_key_sha256` | Token-binding signing scheme |
 | `SIGNAL_FISH__SECURITY__AUTHORIZED_APPS` | `security.authorized_apps` | `[]` | JSON array of authorized app entries |
-| `SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_CLEANUP_INTERVAL_SECS` | `auth.rate_limit_cache_cleanup_interval_secs` | `300` | Auth rate-limit cache cleanup interval |
-| `SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_RETENTION_SECS` | `auth.rate_limit_cache_retention_secs` | `172800` | Auth rate-limit cache retention window |
-| `SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_ALERT_ROWS` | `auth.rate_limit_cache_alert_rows` | `100000` | Auth rate-limit cache warning threshold |
 | `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CAPACITY` | `coordination.dedup_cache.capacity` | `100000` | In-memory coordinator dedup cache capacity (future-backend seam; not cross-process coordination) |
 | `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__TTL_SECS` | `coordination.dedup_cache.ttl_secs` | `60` | In-memory coordinator dedup cache TTL |
 | `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CLEANUP_INTERVAL_SECS` | `coordination.dedup_cache.cleanup_interval_secs` | `30` | In-memory coordinator dedup cache cleanup interval |
@@ -279,7 +276,7 @@ Complete reference of all configuration options with environment variable overri
 - `max_room_creations` - Max room creations per player per time window
 - `max_join_attempts` - Max room join attempts per player per time window
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per time window
-- `max_signal_errors` - Max rejected WebRTC signal attempts per player per time window
+- `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 - `time_window` - Rate limit window in seconds
 
 ## Protocol Settings

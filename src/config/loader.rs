@@ -283,6 +283,21 @@ mod tests {
     }
 
     #[test]
+    fn removed_auth_maintenance_environment_keys_are_tolerated_and_ignored() {
+        let config = config_with_env(&[
+            (
+                "SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_CLEANUP_INTERVAL_SECS",
+                "1",
+            ),
+            ("SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_RETENTION_SECS", "2"),
+            ("SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_ALERT_ROWS", "3"),
+        ]);
+
+        let serialized = serde_json::to_value(config).expect("config serializes");
+        assert!(serialized.get("auth").is_none());
+    }
+
+    #[test]
     fn env_overrides_preserve_comma_strings_and_parse_json_values() {
         let config = config_with_env(&[
             (

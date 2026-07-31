@@ -6,7 +6,7 @@ use super::logging::LoggingConfig;
 use super::metrics::MetricsConfig;
 use super::protocol::ProtocolConfig;
 use super::relay::RelayTypeConfig;
-use super::security::{AuthMaintenanceConfig, SecurityConfig};
+use super::security::SecurityConfig;
 use super::server::{RateLimitConfig, ServerConfig};
 use super::session::SessionConfig;
 use super::turn::TurnConfig;
@@ -28,8 +28,6 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub security: SecurityConfig,
-    #[serde(default)]
-    pub auth: AuthMaintenanceConfig,
     #[serde(default)]
     pub coordination: CoordinationConfig,
     #[serde(default)]
@@ -53,7 +51,6 @@ impl Default for Config {
             protocol: ProtocolConfig::default(),
             logging: LoggingConfig::default(),
             security: SecurityConfig::default(),
-            auth: AuthMaintenanceConfig::default(),
             coordination: CoordinationConfig::default(),
             metrics: MetricsConfig::default(),
             relay_types: RelayTypeConfig::default(),

@@ -84,6 +84,8 @@ pub struct AuthMiddleware {
     rate_limiter: Arc<InMemoryRateLimiter>,
     /// Whether authentication is enabled.
     auth_enabled: bool,
+    /// Shared server metrics when constructed by `EnhancedGameServer`.
+    metrics: Option<Arc<crate::metrics::ServerMetrics>>,
 }
 
 impl AuthMiddleware {
@@ -92,6 +94,20 @@ impl AuthMiddleware {
     /// A background rate-limiter cleanup task is started only when at least one
     /// configured application has a `rate_limit_per_minute` set.
     pub fn new(entries: Vec<AppAuthEntry>) -> Self {
+        Self::new_inner(entries, None)
+    }
+
+    pub(crate) fn with_metrics(
+        entries: Vec<AppAuthEntry>,
+        metrics: Arc<crate::metrics::ServerMetrics>,
+    ) -> Self {
+        Self::new_inner(entries, Some(metrics))
+    }
+
+    fn new_inner(
+        entries: Vec<AppAuthEntry>,
+        metrics: Option<Arc<crate::metrics::ServerMetrics>>,
+    ) -> Self {
         let has_rate_limited_app = entries.iter().any(|e| e.rate_limit_per_minute.is_some());
 
         let mut apps = HashMap::with_capacity(entries.len());
@@ -119,7 +135,7 @@ impl AuthMiddleware {
 
         let rate_limiter = Arc::new(InMemoryRateLimiter::new(Duration::from_secs(60)));
 
-        if has_rate_limited_app {
+        if has_rate_limited_app && tokio::runtime::Handle::try_current().is_ok() {
             let _cleanup_handle = rate_limiter.clone().start_cleanup_task();
         }
 
@@ -127,6 +143,7 @@ impl AuthMiddleware {
             apps,
             rate_limiter,
             auth_enabled: true,
+            metrics,
         }
     }
 
@@ -137,6 +154,7 @@ impl AuthMiddleware {
             apps: HashMap::new(),
             rate_limiter: Arc::new(InMemoryRateLimiter::new(Duration::from_secs(60))),
             auth_enabled: false,
+            metrics: None,
         }
     }
 
@@ -162,7 +180,7 @@ impl AuthMiddleware {
 
         // Enforce per-app rate limit if configured.
         if let Some(limit) = info.rate_limit_per_minute {
-            self.rate_limiter.check_rate_limit(app_id, limit)?;
+            self.check_rate_limit(app_id, limit)?;
         }
 
         Ok(info.clone())
@@ -183,10 +201,20 @@ impl AuthMiddleware {
 
         // Enforce per-app rate limit if configured.
         if let Some(limit) = info.rate_limit_per_minute {
-            self.rate_limiter.check_rate_limit(app_id, limit)?;
+            self.check_rate_limit(app_id, limit)?;
         }
 
         Ok(info.clone())
+    }
+
+    fn check_rate_limit(&self, app_id: &str, limit: u32) -> Result<(), AuthError> {
+        self.rate_limiter
+            .check_rate_limit(app_id, limit)
+            .inspect_err(|_| {
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_rate_limit_rejection(crate::metrics::RateLimitRejection::Auth);
+                }
+            })
     }
 
     /// Build a default `AppInfo` for use when auth is disabled.
@@ -251,6 +279,12 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn rate_limited_middleware_can_be_constructed_without_a_runtime() {
+        let middleware = AuthMiddleware::new(sample_entries());
+        assert!(middleware.auth_enabled);
+    }
+
     #[tokio::test]
     async fn valid_app_id_returns_info() {
         let mw = AuthMiddleware::new(sample_entries());
@@ -305,6 +339,31 @@ mod tests {
         // 4th should fail
         let result = mw.validate_app_id("limited").await;
         assert!(matches!(result.unwrap_err(), AuthError::RateLimitExceeded));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_rejection_updates_server_metrics() {
+        let entries = vec![AppAuthEntry {
+            app_id: "limited".to_string(),
+            app_secret: "s".to_string(),
+            app_name: "Limited App".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: Some(1),
+        }];
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let mw = AuthMiddleware::with_metrics(entries, metrics.clone());
+
+        assert!(mw.validate_app_id("limited").await.is_ok());
+        assert!(matches!(
+            mw.validate_app_id("limited").await,
+            Err(AuthError::RateLimitExceeded)
+        ));
+
+        let snapshot = metrics.snapshot().await.rate_limiting;
+        assert_eq!(snapshot.rate_limit_rejections, 1);
+        assert_eq!(snapshot.auth_rejections, 1);
+        assert_eq!(snapshot.room_creation_rejections, 0);
     }
 
     #[tokio::test]

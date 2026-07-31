@@ -333,6 +333,11 @@ Authentication successful. Includes app information and rate limits.
 
 ```
 
+`per_minute` is enforced when the authenticated app configures
+`rate_limit_per_minute`. The frozen v2 `per_hour` and `per_day` fields are
+legacy advisory projections for client budgeting and are not enforced by the
+server.
+
 Optional fields:
 
 - `organization` - Organization name (if any)

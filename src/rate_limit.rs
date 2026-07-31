@@ -15,7 +15,7 @@ pub struct RateLimitConfig {
     pub max_join_attempts: u32,
     /// Maximum number of WebRTC signaling messages per time window
     pub max_signals: u32,
-    /// Maximum number of rejected WebRTC signaling attempts per time window
+    /// Detailed rejected-signal responses before generic rate-limit errors.
     pub max_signal_errors: u32,
 }
 
@@ -26,7 +26,7 @@ impl Default for RateLimitConfig {
             time_window: Duration::from_secs(60),
             max_join_attempts: 20, // 20 join attempts per minute
             max_signals: 600,      // generous for trickle-ICE (~10/sec over the 60s window)
-            max_signal_errors: 60, // bound malformed/unsupported signal spam separately
+            max_signal_errors: 60, // detailed rejection responses before generic errors
         }
     }
 }
@@ -40,10 +40,16 @@ struct RateLimitEntry {
     join_attempts: u32,
     /// Number of WebRTC signaling messages in current window
     signals: u32,
-    /// Number of rejected WebRTC signaling attempts in current window
+    /// Number of detailed rejected-signal responses in the current window.
     signal_errors: u32,
     /// Window start time
     window_start: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomCreationLimit {
+    Creations,
+    Joins,
 }
 
 impl RateLimitEntry {
@@ -69,15 +75,18 @@ impl RateLimitEntry {
     }
 
     /// Check if room creation is allowed and increment counter
-    fn try_room_creation(&mut self, config: &RateLimitConfig) -> bool {
+    fn try_room_creation(&mut self, config: &RateLimitConfig) -> Result<(), RoomCreationLimit> {
         self.maybe_reset_window(config);
-        if self.room_creations < config.max_room_creations {
-            self.room_creations += 1;
-            self.join_attempts += 1;
-            true
-        } else {
-            false
+        if self.room_creations >= config.max_room_creations {
+            return Err(RoomCreationLimit::Creations);
         }
+        if self.join_attempts >= config.max_join_attempts {
+            return Err(RoomCreationLimit::Joins);
+        }
+
+        self.room_creations += 1;
+        self.join_attempts += 1;
+        Ok(())
     }
 
     /// Check if join attempt is allowed and increment counter
@@ -108,7 +117,7 @@ impl RateLimitEntry {
         self.signals < config.max_signals
     }
 
-    /// Check if a rejected signaling attempt is allowed and increment counter
+    /// Reserve one detailed rejected-signal response.
     fn try_signal_error(&mut self, config: &RateLimitConfig) -> bool {
         self.maybe_reset_window(config);
         if self.signal_errors < config.max_signal_errors {
@@ -132,13 +141,40 @@ pub struct RoomRateLimiter {
     config: RateLimitConfig,
     /// Rate limit entries by player ID
     entries: Arc<RwLock<HashMap<Uuid, RateLimitEntry>>>,
+    metrics: Option<Arc<crate::metrics::ServerMetrics>>,
 }
 
 impl RoomRateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
+        Self::new_inner(config, None)
+    }
+
+    fn new_inner(
+        mut config: RateLimitConfig,
+        metrics: Option<Arc<crate::metrics::ServerMetrics>>,
+    ) -> Self {
+        // This type is a public library API, so preserve a usable invariant
+        // when callers bypass the binary configuration validator.
+        if config.time_window.is_zero() {
+            config.time_window = Duration::from_secs(1);
+        }
         Self {
             config,
             entries: Arc::new(RwLock::new(HashMap::new())),
+            metrics,
+        }
+    }
+
+    pub(crate) fn with_metrics(
+        config: RateLimitConfig,
+        metrics: Arc<crate::metrics::ServerMetrics>,
+    ) -> Self {
+        Self::new_inner(config, Some(metrics))
+    }
+
+    fn record_rejection(&self, kind: crate::metrics::RateLimitRejection) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_rate_limit_rejection(kind);
         }
     }
 
@@ -149,13 +185,23 @@ impl RoomRateLimiter {
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
 
-        if entry.try_room_creation(&self.config) {
-            Ok(())
-        } else {
-            let reset_time = entry.time_until_reset(&self.config);
-            Err(RateLimitError::RoomCreationLimitExceeded {
-                retry_after: reset_time,
-            })
+        match entry.try_room_creation(&self.config) {
+            Ok(()) => Ok(()),
+            Err(limit) => {
+                let retry_after = entry.time_until_reset(&self.config);
+                let (kind, error) = match limit {
+                    RoomCreationLimit::Creations => (
+                        crate::metrics::RateLimitRejection::RoomCreation,
+                        RateLimitError::RoomCreationLimitExceeded { retry_after },
+                    ),
+                    RoomCreationLimit::Joins => (
+                        crate::metrics::RateLimitRejection::JoinAttempt,
+                        RateLimitError::JoinLimitExceeded { retry_after },
+                    ),
+                };
+                self.record_rejection(kind);
+                Err(error)
+            }
         }
     }
 
@@ -170,6 +216,7 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            self.record_rejection(crate::metrics::RateLimitRejection::JoinAttempt);
             Err(RateLimitError::JoinLimitExceeded {
                 retry_after: reset_time,
             })
@@ -187,6 +234,7 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            self.record_rejection(crate::metrics::RateLimitRejection::Signal);
             Err(RateLimitError::SignalLimitExceeded {
                 retry_after: reset_time,
             })
@@ -208,13 +256,14 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            self.record_rejection(crate::metrics::RateLimitRejection::Signal);
             Err(RateLimitError::SignalLimitExceeded {
                 retry_after: reset_time,
             })
         }
     }
 
-    /// Check if a rejected WebRTC signaling attempt is allowed for the given player
+    /// Reserve a detailed rejected-signal response for the given player.
     pub async fn check_signal_error(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.entries.write().await;
         let entry = entries
@@ -225,6 +274,7 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            self.record_rejection(crate::metrics::RateLimitRejection::SignalError);
             Err(RateLimitError::SignalErrorLimitExceeded {
                 retry_after: reset_time,
             })
@@ -237,7 +287,7 @@ impl RoomRateLimiter {
         let now = Instant::now();
 
         // Remove entries that haven't been used for 2x the time window
-        let cleanup_threshold = self.config.time_window * 2;
+        let cleanup_threshold = self.config.time_window.saturating_mul(2);
         entries.retain(|_, entry| now.duration_since(entry.window_start) < cleanup_threshold);
     }
 
@@ -254,11 +304,15 @@ impl RoomRateLimiter {
 
     /// Start a background task to periodically clean up old entries
     pub fn start_cleanup_task(self: Arc<Self>) {
-        let rate_limiter = Arc::clone(&self);
+        let cleanup_interval = self.cleanup_interval();
+        let rate_limiter = Arc::downgrade(&self);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(rate_limiter.cleanup_interval());
+            let mut interval = tokio::time::interval(cleanup_interval);
             loop {
                 interval.tick().await;
+                let Some(rate_limiter) = rate_limiter.upgrade() else {
+                    break;
+                };
                 rate_limiter.cleanup_old_entries().await;
             }
         });
@@ -267,12 +321,24 @@ impl RoomRateLimiter {
     /// Get current stats for a player (for debugging/monitoring)
     pub async fn get_player_stats(&self, player_id: &Uuid) -> Option<PlayerRateStats> {
         let entries = self.entries.read().await;
-        entries.get(player_id).map(|entry| PlayerRateStats {
-            room_creations: entry.room_creations,
-            join_attempts: entry.join_attempts,
-            signals: entry.signals,
-            signal_errors: entry.signal_errors,
-            time_until_reset: entry.time_until_reset(&self.config),
+        entries.get(player_id).map(|entry| {
+            if entry.window_start.elapsed() >= self.config.time_window {
+                PlayerRateStats {
+                    room_creations: 0,
+                    join_attempts: 0,
+                    signals: 0,
+                    signal_errors: 0,
+                    time_until_reset: Duration::ZERO,
+                }
+            } else {
+                PlayerRateStats {
+                    room_creations: entry.room_creations,
+                    join_attempts: entry.join_attempts,
+                    signals: entry.signals,
+                    signal_errors: entry.signal_errors,
+                    time_until_reset: entry.time_until_reset(&self.config),
+                }
+            }
         })
     }
 }
@@ -288,33 +354,39 @@ pub enum RateLimitError {
 
 impl std::fmt::Display for RateLimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn retry_after_secs(duration: &Duration) -> u64 {
+            duration
+                .as_secs()
+                .saturating_add(u64::from(duration.subsec_nanos() > 0))
+        }
+
         match self {
             Self::RoomCreationLimitExceeded { retry_after } => {
                 write!(
                     f,
                     "Room creation rate limit exceeded. Try again in {} seconds.",
-                    retry_after.as_secs()
+                    retry_after_secs(retry_after)
                 )
             }
             Self::JoinLimitExceeded { retry_after } => {
                 write!(
                     f,
                     "Join attempt rate limit exceeded. Try again in {} seconds.",
-                    retry_after.as_secs()
+                    retry_after_secs(retry_after)
                 )
             }
             Self::SignalLimitExceeded { retry_after } => {
                 write!(
                     f,
                     "Signaling rate limit exceeded. Try again in {} seconds.",
-                    retry_after.as_secs()
+                    retry_after_secs(retry_after)
                 )
             }
             Self::SignalErrorLimitExceeded { retry_after } => {
                 write!(
                     f,
                     "Signaling error rate limit exceeded. Try again in {} seconds.",
-                    retry_after.as_secs()
+                    retry_after_secs(retry_after)
                 )
             }
         }
@@ -347,7 +419,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_room_creation_rate_limit() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player_id = Uuid::new_v4();
@@ -360,7 +432,7 @@ mod tests {
         assert!(limiter.check_room_creation(&player_id).await.is_err());
 
         // Wait for window to reset
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::advance(Duration::from_millis(150)).await;
 
         // Should work again
         assert!(limiter.check_room_creation(&player_id).await.is_ok());
@@ -380,7 +452,7 @@ mod tests {
         assert!(limiter.check_join_attempt(&player_id).await.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_signal_rate_limit() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player_id = Uuid::new_v4();
@@ -393,7 +465,7 @@ mod tests {
         assert!(limiter.check_signal(&player_id).await.is_err());
 
         // Wait for window to reset, then it should work again.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::advance(Duration::from_millis(150)).await;
         assert!(limiter.check_signal(&player_id).await.is_ok());
     }
 
@@ -504,6 +576,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_creation_respects_creation_and_join_budgets_atomically() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_room_creations: 3,
+            max_join_attempts: 1,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+
+        assert!(limiter.check_room_creation(&player_id).await.is_ok());
+        assert!(matches!(
+            limiter.check_room_creation(&player_id).await,
+            Err(RateLimitError::JoinLimitExceeded { .. })
+        ));
+
+        let stats = limiter
+            .get_player_stats(&player_id)
+            .await
+            .expect("the accepted creation creates one stats entry");
+        assert_eq!(
+            (stats.room_creations, stats.join_attempts),
+            (1, 1),
+            "a rejected compound operation must not partially advance either budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_creation_cannot_overflow_an_exhausted_join_counter() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_room_creations: u32::MAX,
+            max_join_attempts: u32::MAX,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+        limiter.entries.write().await.insert(
+            player_id,
+            RateLimitEntry {
+                room_creations: 0,
+                join_attempts: u32::MAX,
+                window_start: Instant::now(),
+                ..RateLimitEntry::new()
+            },
+        );
+
+        assert!(matches!(
+            limiter.check_room_creation(&player_id).await,
+            Err(RateLimitError::JoinLimitExceeded { .. })
+        ));
+        let stats = limiter
+            .get_player_stats(&player_id)
+            .await
+            .expect("the preloaded stats entry remains present");
+        assert_eq!(
+            (stats.room_creations, stats.join_attempts),
+            (0, u32::MAX),
+            "an exhausted counter must reject instead of wrapping or partially advancing"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_window_does_not_disable_enforcement_for_library_callers() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_room_creations: 1,
+            max_join_attempts: 1,
+            time_window: Duration::ZERO,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+
+        assert!(limiter.check_room_creation(&player_id).await.is_ok());
+        assert!(matches!(
+            limiter.check_room_creation(&player_id).await,
+            Err(RateLimitError::RoomCreationLimitExceeded { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejected_budgets_are_reported_by_actual_source() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let player_id = Uuid::new_v4();
+
+        let room_creation = RoomRateLimiter::with_metrics(
+            RateLimitConfig {
+                max_room_creations: 0,
+                ..create_test_config()
+            },
+            metrics.clone(),
+        );
+        assert!(room_creation.check_room_creation(&player_id).await.is_err());
+
+        let join_attempt = RoomRateLimiter::with_metrics(
+            RateLimitConfig {
+                max_room_creations: 1,
+                max_join_attempts: 0,
+                ..create_test_config()
+            },
+            metrics.clone(),
+        );
+        assert!(matches!(
+            join_attempt.check_room_creation(&player_id).await,
+            Err(RateLimitError::JoinLimitExceeded { .. })
+        ));
+
+        let signal = RoomRateLimiter::with_metrics(
+            RateLimitConfig {
+                max_signals: 0,
+                max_signal_errors: 0,
+                ..create_test_config()
+            },
+            metrics.clone(),
+        );
+        assert!(signal.check_signal(&player_id).await.is_err());
+        assert!(signal.check_signal_error(&player_id).await.is_err());
+
+        let snapshot = metrics.snapshot().await.rate_limiting;
+        assert_eq!(snapshot.rate_limit_rejections, 4);
+        assert_eq!(snapshot.room_creation_rejections, 1);
+        assert_eq!(snapshot.join_attempt_rejections, 1);
+        assert_eq!(snapshot.signal_rejections, 1);
+        assert_eq!(snapshot.signal_error_rejections, 1);
+        assert_eq!(snapshot.auth_rejections, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_cleanup_old_entries() {
         let config = RateLimitConfig {
             max_room_creations: 1,
@@ -522,13 +717,27 @@ mod tests {
         assert!(limiter.get_player_stats(&player_id).await.is_some());
 
         // Wait for cleanup threshold (2x time window)
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::advance(Duration::from_millis(150)).await;
 
         // Run cleanup
         limiter.cleanup_old_entries().await;
 
         // Entry should be cleaned up
         assert!(limiter.get_player_stats(&player_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cleanup_threshold_saturates_for_maximum_window() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            time_window: Duration::MAX,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+        assert!(limiter.check_room_creation(&player_id).await.is_ok());
+
+        limiter.cleanup_old_entries().await;
+
+        assert!(limiter.get_player_stats(&player_id).await.is_some());
     }
 
     #[test]
@@ -566,5 +775,63 @@ mod tests {
         assert_eq!(stats.join_attempts, 2); // Room creation counts as join attempt too
         assert_eq!(stats.signals, 1);
         assert_eq!(stats.signal_errors, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn player_stats_reset_when_the_window_expires() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let player_id = Uuid::new_v4();
+        assert!(limiter.check_room_creation(&player_id).await.is_ok());
+
+        tokio::time::advance(Duration::from_millis(101)).await;
+        let stats = limiter
+            .get_player_stats(&player_id)
+            .await
+            .expect("the entry remains until cleanup");
+
+        assert_eq!(stats.room_creations, 0);
+        assert_eq!(stats.join_attempts, 0);
+        assert_eq!(stats.time_until_reset, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn player_stats_observation_does_not_move_the_enforcement_window() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_room_creations: 1,
+            max_join_attempts: 2,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+        assert!(limiter.check_room_creation(&player_id).await.is_ok());
+
+        tokio::time::advance(Duration::from_millis(101)).await;
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("stats entry remains")
+                .room_creations,
+            0
+        );
+
+        tokio::time::advance(Duration::from_millis(49)).await;
+        assert!(limiter.check_room_creation(&player_id).await.is_ok());
+        tokio::time::advance(Duration::from_millis(52)).await;
+        assert!(
+            limiter.check_room_creation(&player_id).await.is_err(),
+            "the accepted request, not the earlier stats read, must anchor the new window"
+        );
+    }
+
+    #[test]
+    fn retry_after_display_rounds_a_live_subsecond_window_up() {
+        let error = RateLimitError::JoinLimitExceeded {
+            retry_after: Duration::from_millis(1),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "Join attempt rate limit exceeded. Try again in 1 seconds."
+        );
     }
 }

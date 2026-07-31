@@ -246,8 +246,8 @@ mod tests {
     use super::super::{NegotiatedProtocol, ServerConfig};
     use super::*;
     use crate::config::{
-        AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-        SessionConfig, TransportSecurityConfig, TurnConfig,
+        CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+        TransportSecurityConfig, TurnConfig,
     };
     use crate::database::DatabaseConfig;
     use crate::protocol::{Topology, Transport};
@@ -317,7 +317,6 @@ mod tests {
             TurnConfig::default(),
             DatabaseConfig::InMemory,
             MetricsConfig::default(),
-            AuthMaintenanceConfig::default(),
             CoordinationConfig::default(),
             TransportSecurityConfig::default(),
             Vec::new(),
@@ -378,7 +377,6 @@ mod tests {
             TurnConfig::default(),
             DatabaseConfig::InMemory,
             MetricsConfig::default(),
-            AuthMaintenanceConfig::default(),
             CoordinationConfig::default(),
             TransportSecurityConfig::default(),
             Vec::new(),

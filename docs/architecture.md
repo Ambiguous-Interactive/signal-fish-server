@@ -140,7 +140,7 @@ Designed for extension with custom backends (Redis, PostgreSQL, etc.).
 App-based authentication and per-app rate limiting.
 
 - `middleware.rs` - `InMemoryAuthBackend`
-- `rate_limiter.rs` - Per-app token bucket rate limiter
+- `rate_limiter.rs` - Per-app sliding-window rate limiter
 - `error.rs` - Auth error types
 
 ### Coordination

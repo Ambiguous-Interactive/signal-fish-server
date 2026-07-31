@@ -191,7 +191,6 @@ pub async fn run_server(
         crate::config::TurnConfig::default(),
         database_config,
         crate::config::MetricsConfig::default(),
-        crate::config::AuthMaintenanceConfig::default(),
         crate::config::CoordinationConfig::default(),
         crate::config::TransportSecurityConfig::default(),
         Vec::new(),

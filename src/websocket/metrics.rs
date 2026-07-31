@@ -128,26 +128,15 @@ pub async fn metrics_handler(
                 "total": metrics_snapshot.errors.total_errors
             },
             "rateLimiting": {
-                "minute": {
-                    "limit": metrics_snapshot.rate_limiting.minute_limit,
-                    "used": metrics_snapshot.rate_limiting.minute_count,
-                    "checks": metrics_snapshot.rate_limiting.minute_checks,
-                    "rejections": metrics_snapshot.rate_limiting.minute_rejections
-                },
-                "hour": {
-                    "limit": metrics_snapshot.rate_limiting.hour_limit,
-                    "used": metrics_snapshot.rate_limiting.hour_count,
-                    "checks": metrics_snapshot.rate_limiting.hour_checks,
-                    "rejections": metrics_snapshot.rate_limiting.hour_rejections
-                },
-                "day": {
-                    "limit": metrics_snapshot.rate_limiting.day_limit,
-                    "used": metrics_snapshot.rate_limiting.day_count,
-                    "checks": metrics_snapshot.rate_limiting.day_checks,
-                    "rejections": metrics_snapshot.rate_limiting.day_rejections
-                },
                 "total_rejections": metrics_snapshot.rate_limiting.rate_limit_rejections,
-                "resets": metrics_snapshot.rate_limiting.rate_limit_resets
+                "auth_rejections": metrics_snapshot.rate_limiting.auth_rejections,
+                "room_creation_rejections":
+                    metrics_snapshot.rate_limiting.room_creation_rejections,
+                "join_attempt_rejections":
+                    metrics_snapshot.rate_limiting.join_attempt_rejections,
+                "signal_rejections": metrics_snapshot.rate_limiting.signal_rejections,
+                "signal_error_rejections":
+                    metrics_snapshot.rate_limiting.signal_error_rejections
             }
         }
     });
@@ -203,7 +192,6 @@ mod tests {
             crate::config::TurnConfig::default(),
             DatabaseConfig::InMemory,
             crate::config::MetricsConfig::default(),
-            crate::config::AuthMaintenanceConfig::default(),
             crate::config::CoordinationConfig::default(),
             crate::config::TransportSecurityConfig::default(),
             Vec::new(),

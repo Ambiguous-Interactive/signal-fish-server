@@ -481,7 +481,6 @@ mod tests {
             crate::config::TurnConfig::default(),
             DatabaseConfig::InMemory,
             crate::config::MetricsConfig::default(),
-            crate::config::AuthMaintenanceConfig::default(),
             crate::config::CoordinationConfig::default(),
             crate::config::TransportSecurityConfig::default(),
             Vec::new(),

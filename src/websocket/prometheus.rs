@@ -251,45 +251,33 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
-        "signal_fish_rate_limit_resets_total",
-        "Total rate limit resets processed",
-        snapshot.rate_limiting.rate_limit_resets,
+        "signal_fish_rate_limit_auth_rejections_total",
+        "Authentication attempts rejected by the per-app rate limit",
+        snapshot.rate_limiting.auth_rejections,
     );
-    gauge(
+    counter(
         &mut buf,
-        "signal_fish_rate_limit_minute_limit",
-        "Configured per-minute request limit",
-        snapshot.rate_limiting.minute_limit,
+        "signal_fish_rate_limit_room_creation_rejections_total",
+        "Room creations rejected by the room-creation rate limit",
+        snapshot.rate_limiting.room_creation_rejections,
     );
-    gauge(
+    counter(
         &mut buf,
-        "signal_fish_rate_limit_minute_used",
-        "Requests counted in the current minute window",
-        snapshot.rate_limiting.minute_count,
+        "signal_fish_rate_limit_join_attempt_rejections_total",
+        "Room joins or creations rejected by the shared join-attempt rate limit",
+        snapshot.rate_limiting.join_attempt_rejections,
     );
-    gauge(
+    counter(
         &mut buf,
-        "signal_fish_rate_limit_hour_limit",
-        "Configured per-hour request limit",
-        snapshot.rate_limiting.hour_limit,
+        "signal_fish_rate_limit_signal_rejections_total",
+        "Validated signaling operations rejected by their rate limit",
+        snapshot.rate_limiting.signal_rejections,
     );
-    gauge(
+    counter(
         &mut buf,
-        "signal_fish_rate_limit_hour_used",
-        "Requests counted in the current hour window",
-        snapshot.rate_limiting.hour_count,
-    );
-    gauge(
-        &mut buf,
-        "signal_fish_rate_limit_day_limit",
-        "Configured per-day request limit",
-        snapshot.rate_limiting.day_limit,
-    );
-    gauge(
-        &mut buf,
-        "signal_fish_rate_limit_day_used",
-        "Requests counted in the current day window",
-        snapshot.rate_limiting.day_count,
+        "signal_fish_rate_limit_signal_error_rejections_total",
+        "Rejected signaling attempts whose detailed error was replaced by a rate-limit error",
+        snapshot.rate_limiting.signal_error_rejections,
     );
 
     counter(
@@ -654,7 +642,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{RateLimitWindow, ServerMetrics};
+    use crate::metrics::{RateLimitRejection, ServerMetrics};
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
@@ -711,10 +699,7 @@ mod tests {
         metrics.increment_connections();
         metrics.increment_connections();
         metrics.decrement_active_connections();
-        metrics.record_rate_limit_limit(RateLimitWindow::Minute, 120);
-        metrics.record_rate_limit_usage(RateLimitWindow::Minute, 42);
-        metrics.record_rate_limit_check(RateLimitWindow::Minute);
-        metrics.record_rate_limit_rejection(RateLimitWindow::Minute);
+        metrics.record_rate_limit_rejection(RateLimitRejection::Auth);
         metrics.increment_query_count();
 
         let snapshot = metrics.snapshot().await;
@@ -725,8 +710,8 @@ mod tests {
             "expected connections counter line"
         );
         assert!(
-            rendered.contains("signal_fish_rate_limit_minute_limit 120"),
-            "expected minute limit gauge"
+            rendered.contains("signal_fish_rate_limit_auth_rejections_total 1"),
+            "expected auth rate limit rejection counter"
         );
         assert!(
             rendered.contains("signal_fish_rate_limit_rejections_total 1"),

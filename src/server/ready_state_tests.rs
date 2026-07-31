@@ -1,6 +1,6 @@
 use crate::config::{
-    AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    SessionConfig, TransportSecurityConfig, TurnConfig,
+    CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+    TransportSecurityConfig, TurnConfig,
 };
 use crate::database::DatabaseConfig;
 use crate::protocol::{
@@ -37,7 +37,6 @@ async fn create_test_server_with_session(session: SessionConfig) -> Arc<Enhanced
         TurnConfig::default(),
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
-        AuthMaintenanceConfig::default(),
         CoordinationConfig::default(),
         TransportSecurityConfig::default(),
         Vec::new(),

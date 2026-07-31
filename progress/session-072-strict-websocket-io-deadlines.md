@@ -179,3 +179,4 @@ Focused verification for the follow-up passed:
   repository audit found no distinct human contributor available to review a
   pull request authored by its sole human contributor.
 - The pull request closes #233 and references its umbrella #205.
+- PR #235 was squash-merged to `main` as `60884be`.
