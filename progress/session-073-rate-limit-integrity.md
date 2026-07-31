@@ -77,5 +77,29 @@ all-feature tests, fuzz-target check, dependency policy, advisory audit, CI and
 MSRV policy scripts, documentation consistency, Markdown lint and links, hook
 readiness, and pre-push validation. The adversarial review loop also completed
 without remaining implementation, compatibility, documentation, concurrency,
-lifecycle, or test-design blockers. Hosted and publication results will be
-recorded before the phase is marked complete.
+lifecycle, or test-design blockers.
+
+## Publication
+
+- Pull request:
+  [#237](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/237)
+- Green reviewed implementation head:
+  `f81dfc6b5d03904e8ba0e9c512c77abfc4c4404c`.
+- All 15 applicable hosted workflows succeeded: Advanced Safety, Browser
+  Interop, CI, Documentation Validation, Formal Verification, Fortress Interop,
+  Fortress WASM Interop, Fuzzing, Link Check, Markdownlint, Mutation Testing,
+  Spellcheck, Unused Dependencies, Verification Nightly, and WebRTC Interop.
+  Dependabot auto-merge skipped as intended for a human-authored pull request.
+- The first pushed head exposed one process miss: the new ignored progress file
+  was force-added only after the earlier local Markdown scan, so a wrapped
+  issue reference beginning with `#` was parsed as a malformed heading in
+  hosted Markdownlint. The reference was corrected, the now-tracked set of 187
+  Markdown files passed locally, and the replacement head passed hosted lint.
+- Cursor Bugbot reviewed the green implementation head and found no issues;
+  there are zero inline review threads. Copilot was requested through both the
+  reviewer API and a tagged comment after every push but reported requester
+  quota exhaustion. The repository exposes no distinct human contributor who
+  can review a pull request authored by its sole human contributor.
+- The pull request closes #236 and references #205. The measured relay
+  allocation follow-up under #207 remains separate future work rather than a
+  blocker for this safety phase.
