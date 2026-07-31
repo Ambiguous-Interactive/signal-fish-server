@@ -106,7 +106,9 @@ Clients must authenticate within the configured timeout:
 
 ```
 
-If the client doesn't send `Authenticate` within this window, the connection is closed.
+`Authenticate` must be read by the server strictly before this exclusive
+deadline. Input that is ready but not observed until the boundary or later is
+rejected, and the connection closes with `4001 auth_timeout`.
 
 ## Metrics Authentication
 

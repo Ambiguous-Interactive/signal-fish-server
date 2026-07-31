@@ -285,15 +285,15 @@ complete reference.
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `false`   | Opt-in outbound batching (off keeps relay latency low) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch                              |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
-| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Seconds to wait for auth after connect              |
-| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Post-auth idle timeout in seconds (`0` disables)    |
+| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Exclusive auth-input deadline after connect         |
+| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Exclusive post-auth idle deadline (`0` disables)    |
 | `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Server RFC 6455 Ping cadence (`0` disables)       |
 | `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS`       | `websocket.pong_timeout_secs`      | `5`       | Matching Pong deadline before close `4003`          |
 | `SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES` | `websocket.socket_send_buffer_bytes` | `65536` | TCP handoff bound ahead of control (`0` = OS default) |
 | `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY`     | `websocket.send_queue_capacity`    | `1024`    | Per-connection data queue capacity                  |
 | `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY`  | `websocket.control_queue_capacity` | `128`     | Per-connection v3 control queue capacity            |
 | `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000`  | Reliable capacity wait before close `4002`          |
-| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS`          | `websocket.max_sojourn_ms`         | `15000`   | Reliable/control sojourn and socket-write deadline  |
+| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS`          | `websocket.max_sojourn_ms`         | `15000`   | Exclusive reliable/control sojourn/write deadline   |
 | `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Periodic v3 counter snapshots (`0` disables)        |
 | `RUST_LOG`                                       | --                                 | `info`    | Standard `tracing` log filter                       |
 

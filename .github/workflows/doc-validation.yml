@@ -629,11 +629,13 @@ jobs:
   link-check:
     name: Documentation Link Check
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # Moderate timeout for checking all external and internal links
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
-      # Use lychee for comprehensive link checking (external + internal + anchors)
-      - name: Check all links with lychee
+      # Required validation checks repository-owned links only. External hosts are
+      # audited by the scheduled, non-gating pass in link-check.yml so their
+      # availability cannot make pull-request validation flaky.
+      - name: Check repository links with lychee (offline)
         uses: lycheeverse/lychee-action@v2.9.0
         with:
           # Override bundled lychee version (v0.21.0) to include hidden-file matcher
@@ -650,6 +652,7 @@ jobs:
           args: >-
             --verbose
             --no-progress
+            --offline
             --accept 200,204,301,302,307,308,429
             --config .lychee.toml
             --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"

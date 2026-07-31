@@ -760,9 +760,11 @@ connection that produces no inbound WebSocket frame of any kind (including
 Ping/Pong) for that long, surfacing the
 [`CONNECTION_IDLE_TIMEOUT`](reference/error-codes.md) error and disconnecting
 through the normal path (so the reconnection grace period still applies). This
-is distinct from `server.ping_timeout` (the server-side activity reaper, default
-30s): clients that heartbeat as `server.ping_timeout` already requires are never
-affected by the 300s default, which only reclaims zombie sockets.
+is an exclusive boundary: the server must observe a frame strictly before the
+deadline; input ready but unobserved at the boundary does not reset the window.
+This is distinct from `server.ping_timeout` (the server-side activity reaper,
+default 30s): clients that heartbeat as `server.ping_timeout` already requires
+are never affected by the 300s default, which only reclaims zombie sockets.
 
 ## Structured Logging
 

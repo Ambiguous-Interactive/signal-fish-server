@@ -183,8 +183,11 @@ echo "Running lychee link checker..."
 echo ""
 
 # For fast local checks, use --offline to skip network requests
-# This checks internal links and markdown structure only
-if lychee --config .lychee.toml --offline --verbose --no-progress --base-url "$REPO_ROOT" "${TO_CHECK[@]}"; then
+# This checks internal links and markdown structure only. Do not force a
+# repository-root --base-url: Markdown relative links resolve from each source
+# file, and overriding that base turns valid docs/foo.md -> ../bar.md links into
+# false failures.
+if lychee --config .lychee.toml --offline --verbose --no-progress "${TO_CHECK[@]}"; then
     echo ""
     echo -e "${GREEN}✓ All local links are valid${NC}"
     echo ""
