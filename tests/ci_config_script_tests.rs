@@ -25,17 +25,18 @@ fn copy_validator_script(temp_root: &Path) {
     write_file(&destination, &script);
 }
 
+#[cfg(unix)]
 fn make_executable(path: &Path) {
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(path)
-            .unwrap_or_else(|error| panic!("Failed to stat {}: {error}", path.display()))
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)
-            .unwrap_or_else(|error| panic!("Failed to chmod {}: {error}", path.display()));
-    }
+    let mut permissions = fs::metadata(path)
+        .unwrap_or_else(|error| panic!("Failed to stat {}: {error}", path.display()))
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)
+        .unwrap_or_else(|error| panic!("Failed to chmod {}: {error}", path.display()));
 }
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) {}
 
 fn install_fake_cargo_tools(temp_root: &Path) -> PathBuf {
     let fake_bin = temp_root.join("bin");
