@@ -102,20 +102,106 @@ if [[ -f Dockerfile ]]; then
         error "Dockerfile missing ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false — server will crash without auth config."
     fi
 
-    # Verify HEALTHCHECK port matches EXPOSE port using portable awk/sed parsing.
-    # gsub strips any CR so EXPOSE_PORT compares equal to the sed-extracted
-    # HEALTH_PORT on a CRLF-checked-out Dockerfile (sed's trailing `.*` already
-    # swallows the CR; awk's `$2` would otherwise retain it).
+    # Dockerfile instructions may span physical lines. Assemble them without
+    # evaluating their contents, then inspect only the final-stage HEALTHCHECK.
+    HEALTHCHECK_RESULT=$(
+        awk '
+            function inspect_instruction(    instruction, lower, arguments) {
+                instruction = logical
+                sub(/^[[:space:]]+/, "", instruction)
+                sub(/[[:space:]]+$/, "", instruction)
+                lower = tolower(instruction)
+                if (lower ~ /^from([[:space:]]|$)/) {
+                    healthcheck = ""
+                    return
+                }
+                if (lower ~ /^(run|copy)([[:space:]]|$)/ && instruction ~ /<</) {
+                    audit_error = "unsupported-heredoc"
+                    return
+                }
+                if (lower !~ /^healthcheck([[:space:]]|$)/) {
+                    return
+                }
+
+                arguments = instruction
+                sub(/^[^[:space:]]+[[:space:]]*/, "", arguments)
+                gsub(/[[:space:]]+/, " ", arguments)
+                if (tolower(arguments) == "none") {
+                    healthcheck = "none"
+                    return
+                }
+                while (arguments ~ /^--[^[:space:]]+[[:space:]]+/) {
+                    sub(/^--[^[:space:]]+[[:space:]]+/, "", arguments)
+                }
+                if (arguments !~ /^CMD([[:space:]]|$)/) {
+                    healthcheck = "malformed"
+                    return
+                }
+                sub(/^CMD[[:space:]]*/, "", arguments)
+                if (arguments ~ /^curl[[:space:]]+-f[[:space:]]+http:\/\/localhost:[0-9][0-9]*\/v2\/health[[:space:]]+[|][|][[:space:]]+exit[[:space:]]+1$/) {
+                    match(arguments, /localhost:[0-9][0-9]*/)
+                    port = substr(arguments, RSTART, RLENGTH)
+                    sub(/^.*:/, "", port)
+                    healthcheck = "port:" port
+                } else {
+                    healthcheck = "unsupported"
+                }
+            }
+
+            {
+                sub(/\r$/, "")
+                line = $0
+                if (line ~ /^[[:space:]]*#/) {
+                    next
+                }
+
+                logical = logical line
+                if (substr(line, length(line), 1) == "\\") {
+                    logical = substr(logical, 1, length(logical) - 1)
+                    continuing = 1
+                    next
+                }
+
+                inspect_instruction()
+                logical = ""
+                continuing = 0
+            }
+
+            END {
+                if (continuing) {
+                    audit_error = "unterminated-continuation"
+                } else if (logical != "") {
+                    inspect_instruction()
+                }
+                if (audit_error != "") {
+                    print audit_error
+                } else {
+                    print healthcheck
+                }
+            }
+        ' Dockerfile
+    )
+
     EXPOSE_PORT=$(awk '/^EXPOSE[[:space:]]+[0-9]+/ { port = $2; sub(/\/.*/, "", port); gsub(/\r/, "", port); print port; exit }' Dockerfile)
-    HEALTH_PORT=$(sed -nE '/HEALTHCHECK.*localhost:/ { s/.*localhost:([0-9]+).*/\1/; p; q; }' Dockerfile)
-    if [[ -n "$HEALTH_PORT" && -n "$EXPOSE_PORT" ]]; then
+    if [[ "$HEALTHCHECK_RESULT" == port:* ]]; then
+        HEALTH_PORT=${HEALTHCHECK_RESULT#port:}
         if [[ "$HEALTH_PORT" == "$EXPOSE_PORT" ]]; then
             success "HEALTHCHECK port ($HEALTH_PORT) matches EXPOSE port ($EXPOSE_PORT)."
         else
             error "HEALTHCHECK port ($HEALTH_PORT) does not match EXPOSE port ($EXPOSE_PORT)."
         fi
-    elif [[ -z "$HEALTH_PORT" ]]; then
-        warn "No HEALTHCHECK directive found in Dockerfile."
+    elif [[ "$HEALTHCHECK_RESULT" == "none" ]]; then
+        error "Dockerfile disables its health probe with 'HEALTHCHECK NONE'."
+    elif [[ "$HEALTHCHECK_RESULT" == "malformed" ]]; then
+        error "Dockerfile HEALTHCHECK must use 'CMD ...' or 'NONE' grammar."
+    elif [[ "$HEALTHCHECK_RESULT" == "unsupported" ]]; then
+        error "Dockerfile HEALTHCHECK must run the supported localhost curl probe."
+    elif [[ "$HEALTHCHECK_RESULT" == "unsupported-heredoc" ]]; then
+        error "Dockerfile healthcheck audit cannot safely inspect heredoc instructions."
+    elif [[ "$HEALTHCHECK_RESULT" == "unterminated-continuation" ]]; then
+        error "Dockerfile HEALTHCHECK has an unterminated backslash continuation."
+    else
+        error "No active HEALTHCHECK directive found in Dockerfile."
     fi
 else
     error "Dockerfile not found."
