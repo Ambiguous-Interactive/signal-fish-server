@@ -29,8 +29,8 @@ impl EnhancedGameServer {
 #[cfg(test)]
 mod tests {
     use crate::config::{
-        AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-        SessionConfig, TransportSecurityConfig, TurnConfig,
+        CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+        TransportSecurityConfig, TurnConfig,
     };
     use crate::database::DatabaseConfig;
     use crate::rate_limit::RateLimitConfig;
@@ -52,7 +52,6 @@ mod tests {
             TurnConfig::default(),
             DatabaseConfig::InMemory,
             MetricsConfig::default(),
-            AuthMaintenanceConfig::default(),
             CoordinationConfig::default(),
             TransportSecurityConfig::default(),
             Vec::new(),

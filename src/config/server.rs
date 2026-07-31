@@ -95,7 +95,7 @@ pub struct RateLimitConfig {
     /// Maximum number of WebRTC signaling messages per time window
     #[serde(default = "default_max_signals")]
     pub max_signals: u32,
-    /// Maximum number of rejected WebRTC signaling attempts per time window
+    /// Detailed rejected-signal responses before generic rate-limit errors.
     #[serde(default = "default_max_signal_errors")]
     pub max_signal_errors: u32,
 }

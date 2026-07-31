@@ -351,21 +351,6 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("[]"),
     },
     ConfigReferenceRow {
-        env: "SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_CLEANUP_INTERVAL_SECS",
-        path: "auth.rate_limit_cache_cleanup_interval_secs",
-        default: Some("300"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_RETENTION_SECS",
-        path: "auth.rate_limit_cache_retention_secs",
-        default: Some("172800"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__AUTH__RATE_LIMIT_CACHE_ALERT_ROWS",
-        path: "auth.rate_limit_cache_alert_rows",
-        default: Some("100000"),
-    },
-    ConfigReferenceRow {
         env: "SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CAPACITY",
         path: "coordination.dedup_cache.capacity",
         default: Some("100000"),
@@ -850,6 +835,26 @@ fn test_config_roundtrip_serialization() {
     assert_eq!(
         config.protocol.max_game_name_length,
         deserialized.protocol.max_game_name_length
+    );
+}
+
+#[test]
+fn legacy_auth_maintenance_block_is_tolerated_but_not_serialized() {
+    let config: Config = serde_json::from_str(
+        r#"{
+            "auth": {
+                "rate_limit_cache_cleanup_interval_secs": 1,
+                "rate_limit_cache_retention_secs": 2,
+                "rate_limit_cache_alert_rows": 3
+            }
+        }"#,
+    )
+    .expect("legacy unknown auth keys remain tolerated during migration");
+
+    let serialized = serde_json::to_value(config).expect("config serializes");
+    assert!(
+        serialized.get("auth").is_none(),
+        "removed no-op auth maintenance settings must not be advertised"
     );
 }
 
@@ -1434,7 +1439,7 @@ async fn test_metrics_endpoint_no_auth_required() {
     let app = create_router("*").with_state(server);
     let test_server = axum_test::TestServer::new(app);
 
-    let response = test_server.get("/metrics").await;
+    let response = test_server.get("/metrics?includeSnapshot=true").await;
     response.assert_status_ok();
 
     // Should return JSON with expected structure
@@ -1446,6 +1451,40 @@ async fn test_metrics_endpoint_no_auth_required() {
     assert!(
         json.get("serverMetrics").is_some(),
         "metrics should contain serverMetrics"
+    );
+
+    let dashboard = json["serverMetrics"]["rateLimiting"]
+        .as_object()
+        .expect("dashboard rate-limiting object");
+    let mut dashboard_keys: Vec<_> = dashboard.keys().map(String::as_str).collect();
+    dashboard_keys.sort_unstable();
+    assert_eq!(
+        dashboard_keys,
+        [
+            "auth_rejections",
+            "join_attempt_rejections",
+            "room_creation_rejections",
+            "signal_error_rejections",
+            "signal_rejections",
+            "total_rejections",
+        ]
+    );
+
+    let snapshot = json["metricsSnapshot"]["rate_limiting"]
+        .as_object()
+        .expect("raw rate-limiting snapshot");
+    let mut snapshot_keys: Vec<_> = snapshot.keys().map(String::as_str).collect();
+    snapshot_keys.sort_unstable();
+    assert_eq!(
+        snapshot_keys,
+        [
+            "auth_rejections",
+            "join_attempt_rejections",
+            "rate_limit_rejections",
+            "room_creation_rejections",
+            "signal_error_rejections",
+            "signal_rejections",
+        ]
     );
 }
 

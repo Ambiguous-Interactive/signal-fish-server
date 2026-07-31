@@ -8,8 +8,8 @@
 //! plan for v3 members and no plan for v2 members (Appendix K).
 
 use crate::config::{
-    AuthMaintenanceConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-    SessionConfig, TransportSecurityConfig,
+    CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+    TransportSecurityConfig,
 };
 use crate::coordination::FinalizedRoom;
 use crate::database::DatabaseConfig;
@@ -1292,7 +1292,6 @@ async fn create_server_with_session_and_turn(
         turn,
         DatabaseConfig::InMemory,
         MetricsConfig::default(),
-        AuthMaintenanceConfig::default(),
         CoordinationConfig::default(),
         TransportSecurityConfig::default(),
         Vec::new(),

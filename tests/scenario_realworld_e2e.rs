@@ -737,7 +737,6 @@ async fn start_reconnect_server() -> (RunningTestServer, Arc<EnhancedGameServer>
         signal_fish_server::config::TurnConfig::default(),
         signal_fish_server::database::DatabaseConfig::InMemory,
         signal_fish_server::config::MetricsConfig::default(),
-        signal_fish_server::config::AuthMaintenanceConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
         signal_fish_server::config::TransportSecurityConfig::default(),
         vec![AppAuthEntry {

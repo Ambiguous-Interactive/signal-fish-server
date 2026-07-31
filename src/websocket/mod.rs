@@ -19,7 +19,7 @@ mod batching;
 mod connection;
 mod handler;
 mod metrics;
-mod prometheus;
+pub(crate) mod prometheus;
 mod routes;
 mod sending;
 mod token_binding;

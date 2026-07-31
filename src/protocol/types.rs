@@ -356,11 +356,11 @@ impl PeerConnectionInfo {
 /// Rate limit information for an application
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct RateLimitInfo {
-    /// Requests allowed per minute
+    /// Requests allowed per minute; enforced when explicitly configured.
     pub per_minute: u32,
-    /// Requests allowed per hour
+    /// Legacy advisory hourly projection; not enforced by the server.
     pub per_hour: u32,
-    /// Requests allowed per day
+    /// Legacy advisory daily projection; not enforced by the server.
     pub per_day: u32,
 }
 

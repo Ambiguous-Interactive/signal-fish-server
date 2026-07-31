@@ -245,7 +245,6 @@ impl EnhancedGameServer {
         turn_config: crate::config::TurnConfig,
         database_config: DatabaseConfig,
         metrics_config: crate::config::MetricsConfig,
-        _auth_config: crate::config::AuthMaintenanceConfig,
         _coordination_config: crate::config::CoordinationConfig,
         transport_security: crate::config::TransportSecurityConfig,
         authorized_apps: Vec<AppAuthEntry>,
@@ -256,10 +255,12 @@ impl EnhancedGameServer {
 
         let instance_id = Uuid::new_v4();
 
-        let rate_limiter = Arc::new(RoomRateLimiter::new(config.rate_limit_config.clone()));
-        rate_limiter.clone().start_cleanup_task();
-
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let rate_limiter = Arc::new(RoomRateLimiter::with_metrics(
+            config.rate_limit_config.clone(),
+            metrics.clone(),
+        ));
+        rate_limiter.clone().start_cleanup_task();
 
         let cache_refresh_interval =
             Duration::from_secs(metrics_config.dashboard_cache_refresh_interval_secs.max(1));
@@ -328,7 +329,10 @@ impl EnhancedGameServer {
                     "Auth enabled with configured applications"
                 );
             }
-            Arc::new(crate::auth::AuthMiddleware::new(authorized_apps))
+            Arc::new(crate::auth::AuthMiddleware::with_metrics(
+                authorized_apps,
+                metrics.clone(),
+            ))
         } else {
             Arc::new(crate::auth::AuthMiddleware::disabled())
         };
@@ -3062,5 +3066,108 @@ mod relay_projection_cache_tests {
             metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn production_limiters_export_exact_rejection_categories() {
+        let config = super::ServerConfig {
+            auth_enabled: true,
+            rate_limit_config: crate::rate_limit::RateLimitConfig {
+                max_room_creations: 0,
+                max_join_attempts: 0,
+                max_signals: 0,
+                max_signal_errors: 0,
+                time_window: Duration::from_secs(60),
+            },
+            ..super::ServerConfig::default()
+        };
+        let authorized_apps = vec![crate::config::AppAuthEntry {
+            app_id: "limited".to_string(),
+            app_secret: "secret".to_string(),
+            app_name: "Limited".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: Some(1),
+        }];
+        let server = super::EnhancedGameServer::new(
+            config,
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            authorized_apps,
+        )
+        .await
+        .expect("construct production server");
+
+        assert!(server
+            .auth_middleware
+            .validate_app_id("limited")
+            .await
+            .is_ok());
+        assert!(server
+            .auth_middleware
+            .validate_app_id("limited")
+            .await
+            .is_err());
+
+        let player_id = Uuid::new_v4();
+        assert!(server
+            .rate_limiter
+            .check_room_creation(&player_id)
+            .await
+            .is_err());
+        assert!(server
+            .rate_limiter
+            .check_join_attempt(&player_id)
+            .await
+            .is_err());
+        assert!(server.rate_limiter.check_signal(&player_id).await.is_err());
+        assert!(server
+            .rate_limiter
+            .check_signal_error(&player_id)
+            .await
+            .is_err());
+
+        let snapshot = server.metrics.snapshot().await;
+        let rate_limits = &snapshot.rate_limiting;
+        assert_eq!(rate_limits.rate_limit_rejections, 5);
+        assert_eq!(rate_limits.auth_rejections, 1);
+        assert_eq!(rate_limits.room_creation_rejections, 1);
+        assert_eq!(rate_limits.join_attempt_rejections, 1);
+        assert_eq!(rate_limits.signal_rejections, 1);
+        assert_eq!(rate_limits.signal_error_rejections, 1);
+        assert_eq!(
+            rate_limits.rate_limit_rejections,
+            rate_limits.auth_rejections
+                + rate_limits.room_creation_rejections
+                + rate_limits.join_attempt_rejections
+                + rate_limits.signal_rejections
+                + rate_limits.signal_error_rejections
+        );
+
+        let rendered = crate::websocket::prometheus::render_prometheus_metrics(&snapshot);
+        for expected in [
+            "signal_fish_rate_limit_rejections_total 5",
+            "signal_fish_rate_limit_auth_rejections_total 1",
+            "signal_fish_rate_limit_room_creation_rejections_total 1",
+            "signal_fish_rate_limit_join_attempt_rejections_total 1",
+            "signal_fish_rate_limit_signal_rejections_total 1",
+            "signal_fish_rate_limit_signal_error_rejections_total 1",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected}");
+        }
+        for removed in [
+            "signal_fish_rate_limit_resets_total",
+            "signal_fish_rate_limit_minute_",
+            "signal_fish_rate_limit_hour_",
+            "signal_fish_rate_limit_day_",
+        ] {
+            assert!(!rendered.contains(removed), "stale series {removed}");
+        }
     }
 }

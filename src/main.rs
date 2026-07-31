@@ -159,7 +159,6 @@ async fn main() -> anyhow::Result<()> {
         cfg.turn.clone(),
         database_config,
         cfg.metrics.clone(),
-        cfg.auth.clone(),
         cfg.coordination.clone(),
         cfg.security.transport.clone(),
         cfg.security.authorized_apps.clone(),

@@ -199,8 +199,11 @@ pub struct PeerConnectionInfo {
 /// Rate limit information for an authenticated app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitInfo {
+    /// Enforced when the app configures a per-minute limit.
     pub per_minute: u32,
+    /// Legacy advisory projection; not enforced by the server.
     pub per_hour: u32,
+    /// Legacy advisory projection; not enforced by the server.
     pub per_day: u32,
 }
 
@@ -1857,7 +1860,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Authenticated as: {app_name}"
                 );
                 println!(
-                    "Rate limits: {}/min, {}/hr, {}/day",
+                    "Rate limit: {}/min (advisory: {}/hr, {}/day)",
                     rate_limits.per_minute,
                     rate_limits.per_hour,
                     rate_limits.per_day

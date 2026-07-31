@@ -49,7 +49,7 @@ impl InMemoryRateLimiter {
 
         // Trim expired entries from the front of the deque.
         while let Some(&front) = timestamps.front() {
-            if now.duration_since(front) > window {
+            if now.duration_since(front) >= window {
                 timestamps.pop_front();
             } else {
                 break;
@@ -69,13 +69,20 @@ impl InMemoryRateLimiter {
     ///
     /// Returns the `JoinHandle` so callers can abort the task during shutdown.
     pub fn start_cleanup_task(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let interval = self.cleanup_interval;
+        // The limiter is public and may be embedded without the binary's
+        // configuration validation. Keep that path from silently killing its
+        // maintenance task on Tokio's zero-period panic.
+        let interval = self.cleanup_interval.max(Duration::from_secs(1));
+        let limiter = Arc::downgrade(&self);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
-                self.cleanup();
+                let Some(limiter) = limiter.upgrade() else {
+                    break;
+                };
+                limiter.cleanup();
             }
         })
     }
@@ -89,7 +96,7 @@ impl InMemoryRateLimiter {
         self.windows.retain(|_key, timestamps| {
             // Trim expired entries.
             while let Some(&front) = timestamps.front() {
-                if now.duration_since(front) > window {
+                if now.duration_since(front) >= window {
                     timestamps.pop_front();
                 } else {
                     break;
@@ -162,16 +169,13 @@ mod tests {
         assert!(limiter.check_rate_limit("app1", 1).is_err());
     }
 
-    #[tokio::test]
-    async fn cleanup_removes_expired_entries() {
-        let limiter = InMemoryRateLimiter::new(Duration::from_secs(60))
-            .with_window_duration(Duration::from_millis(1));
+    #[test]
+    fn cleanup_removes_expired_entries() {
+        let limiter =
+            InMemoryRateLimiter::new(Duration::from_secs(60)).with_window_duration(Duration::ZERO);
 
         limiter.check_rate_limit("app1", 100).unwrap();
         assert!(!limiter.windows.is_empty());
-
-        // Wait for the window to expire.
-        tokio::time::sleep(Duration::from_millis(5)).await;
 
         limiter.cleanup();
         assert!(
@@ -205,5 +209,33 @@ mod tests {
             accepted, limit,
             "exactly {limit} requests should have been accepted, but {accepted} were"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_cleanup_interval_does_not_kill_the_background_task() {
+        let limiter = Arc::new(InMemoryRateLimiter::new(Duration::ZERO));
+        let handle = Arc::clone(&limiter).start_cleanup_task();
+
+        tokio::task::yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "a public zero cleanup interval must be clamped instead of panicking its task"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_task_does_not_keep_limiter_alive() {
+        let limiter = Arc::new(InMemoryRateLimiter::new(Duration::from_secs(1)));
+        let weak = Arc::downgrade(&limiter);
+        let handle = Arc::clone(&limiter).start_cleanup_task();
+
+        drop(limiter);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(weak.upgrade().is_none());
+        assert!(handle.is_finished());
     }
 }

@@ -254,22 +254,6 @@ pub fn default_token_binding_subprotocol() -> String {
 }
 
 // =============================================================================
-// Auth Maintenance Defaults
-// =============================================================================
-
-pub const fn default_rate_limit_cache_cleanup_interval_secs() -> u64 {
-    300
-}
-
-pub const fn default_rate_limit_cache_retention_secs() -> u64 {
-    172_800
-}
-
-pub const fn default_rate_limit_cache_alert_rows() -> u64 {
-    100_000
-}
-
-// =============================================================================
 // Metrics Defaults
 // =============================================================================
 

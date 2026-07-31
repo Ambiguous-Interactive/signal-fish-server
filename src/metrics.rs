@@ -167,22 +167,11 @@ pub struct ServerMetrics {
     pub latency_histogram_clamped_samples: AtomicU64,
 
     // Rate limiting metrics
-    pub rate_limit_rejections: AtomicU64,
-    pub rate_limit_resets: AtomicU64,
-    pub rate_limit_minute_limit: AtomicU64,
-    pub rate_limit_hour_limit: AtomicU64,
-    pub rate_limit_day_limit: AtomicU64,
-    pub rate_limit_minute_count: AtomicU64,
-    pub rate_limit_hour_count: AtomicU64,
-    pub rate_limit_day_count: AtomicU64,
-    pub rate_limit_minute_checks: AtomicU64,
-    pub rate_limit_hour_checks: AtomicU64,
-    pub rate_limit_day_checks: AtomicU64,
-    pub rate_limit_minute_rejections: AtomicU64,
-    pub rate_limit_hour_rejections: AtomicU64,
-    pub rate_limit_day_rejections: AtomicU64,
-    pub rate_limit_cache_purged: AtomicU64,
-    pub rate_limit_cache_rows: AtomicU64,
+    pub rate_limit_auth_rejections: AtomicU64,
+    pub rate_limit_room_creation_rejections: AtomicU64,
+    pub rate_limit_join_attempt_rejections: AtomicU64,
+    pub rate_limit_signal_rejections: AtomicU64,
+    pub rate_limit_signal_error_rejections: AtomicU64,
 
     // Player activity metrics
     pub players_joined: AtomicU64,
@@ -293,10 +282,12 @@ pub struct ServerMetrics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RateLimitWindow {
-    Minute,
-    Hour,
-    Day,
+pub enum RateLimitRejection {
+    Auth,
+    RoomCreation,
+    JoinAttempt,
+    Signal,
+    SignalError,
 }
 
 #[derive(Debug, Clone)]
@@ -438,21 +429,11 @@ pub struct OperationLatencyMetrics {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RateLimitingMetrics {
     pub rate_limit_rejections: u64,
-    pub rate_limit_resets: u64,
-    pub minute_limit: u64,
-    pub hour_limit: u64,
-    pub day_limit: u64,
-    pub minute_count: u64,
-    pub hour_count: u64,
-    pub day_count: u64,
-    pub minute_checks: u64,
-    pub hour_checks: u64,
-    pub day_checks: u64,
-    pub minute_rejections: u64,
-    pub hour_rejections: u64,
-    pub day_rejections: u64,
-    pub cache_rows: u64,
-    pub cache_purged: u64,
+    pub auth_rejections: u64,
+    pub room_creation_rejections: u64,
+    pub join_attempt_rejections: u64,
+    pub signal_rejections: u64,
+    pub signal_error_rejections: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -591,22 +572,11 @@ impl ServerMetrics {
             dashboard_cache_last_refresh_epoch: AtomicU64::new(0),
             dashboard_cache_refresh_failures: AtomicU64::new(0),
             latency_histogram_clamped_samples: AtomicU64::new(0),
-            rate_limit_rejections: AtomicU64::new(0),
-            rate_limit_resets: AtomicU64::new(0),
-            rate_limit_minute_limit: AtomicU64::new(0),
-            rate_limit_hour_limit: AtomicU64::new(0),
-            rate_limit_day_limit: AtomicU64::new(0),
-            rate_limit_minute_count: AtomicU64::new(0),
-            rate_limit_hour_count: AtomicU64::new(0),
-            rate_limit_day_count: AtomicU64::new(0),
-            rate_limit_minute_checks: AtomicU64::new(0),
-            rate_limit_hour_checks: AtomicU64::new(0),
-            rate_limit_day_checks: AtomicU64::new(0),
-            rate_limit_minute_rejections: AtomicU64::new(0),
-            rate_limit_hour_rejections: AtomicU64::new(0),
-            rate_limit_day_rejections: AtomicU64::new(0),
-            rate_limit_cache_purged: AtomicU64::new(0),
-            rate_limit_cache_rows: AtomicU64::new(0),
+            rate_limit_auth_rejections: AtomicU64::new(0),
+            rate_limit_room_creation_rejections: AtomicU64::new(0),
+            rate_limit_join_attempt_rejections: AtomicU64::new(0),
+            rate_limit_signal_rejections: AtomicU64::new(0),
+            rate_limit_signal_error_rejections: AtomicU64::new(0),
             players_joined: AtomicU64::new(0),
             players_left: AtomicU64::new(0),
             authority_transfers: AtomicU64::new(0),
@@ -1009,89 +979,16 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    // Rate limiting metrics
-    #[allow(dead_code)]
-    pub fn increment_rate_limit_rejections(&self) {
-        self.rate_limit_rejections.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub fn increment_rate_limit_resets(&self) {
-        self.rate_limit_resets.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn record_rate_limit_limit(&self, window: RateLimitWindow, limit: u32) {
-        let limit = u64::from(limit);
-        match window {
-            RateLimitWindow::Minute => {
-                self.rate_limit_minute_limit.store(limit, Ordering::Relaxed);
-            }
-            RateLimitWindow::Hour => {
-                self.rate_limit_hour_limit.store(limit, Ordering::Relaxed);
-            }
-            RateLimitWindow::Day => {
-                self.rate_limit_day_limit.store(limit, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn record_rate_limit_usage(&self, window: RateLimitWindow, count: u32) {
-        let count = u64::from(count);
-        match window {
-            RateLimitWindow::Minute => {
-                self.rate_limit_minute_count.store(count, Ordering::Relaxed);
-            }
-            RateLimitWindow::Hour => {
-                self.rate_limit_hour_count.store(count, Ordering::Relaxed);
-            }
-            RateLimitWindow::Day => {
-                self.rate_limit_day_count.store(count, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn record_rate_limit_check(&self, window: RateLimitWindow) {
-        match window {
-            RateLimitWindow::Minute => {
-                self.rate_limit_minute_checks
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            RateLimitWindow::Hour => {
-                self.rate_limit_hour_checks.fetch_add(1, Ordering::Relaxed);
-            }
-            RateLimitWindow::Day => {
-                self.rate_limit_day_checks.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn record_rate_limit_rejection(&self, window: RateLimitWindow) {
-        self.rate_limit_rejections.fetch_add(1, Ordering::Relaxed);
-        match window {
-            RateLimitWindow::Minute => {
-                self.rate_limit_minute_rejections
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            RateLimitWindow::Hour => {
-                self.rate_limit_hour_rejections
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            RateLimitWindow::Day => {
-                self.rate_limit_day_rejections
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn add_rate_limit_cache_purged(&self, count: u64) {
-        if count > 0 {
-            self.rate_limit_cache_purged
-                .fetch_add(count, Ordering::Relaxed);
-        }
-    }
-
-    pub fn set_rate_limit_cache_rows(&self, rows: u64) {
-        self.rate_limit_cache_rows.store(rows, Ordering::Relaxed);
+    /// Record one rejection by the concrete budget that made the decision.
+    pub fn record_rate_limit_rejection(&self, kind: RateLimitRejection) {
+        let counter = match kind {
+            RateLimitRejection::Auth => &self.rate_limit_auth_rejections,
+            RateLimitRejection::RoomCreation => &self.rate_limit_room_creation_rejections,
+            RateLimitRejection::JoinAttempt => &self.rate_limit_join_attempt_rejections,
+            RateLimitRejection::Signal => &self.rate_limit_signal_rejections,
+            RateLimitRejection::SignalError => &self.rate_limit_signal_error_rejections,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     // Player activity metrics
@@ -1480,23 +1377,32 @@ impl ServerMetrics {
                     .dashboard_cache_refresh_failures
                     .load(Ordering::Relaxed),
             },
-            rate_limiting: RateLimitingMetrics {
-                rate_limit_rejections: self.rate_limit_rejections.load(Ordering::Relaxed),
-                rate_limit_resets: self.rate_limit_resets.load(Ordering::Relaxed),
-                minute_limit: self.rate_limit_minute_limit.load(Ordering::Relaxed),
-                hour_limit: self.rate_limit_hour_limit.load(Ordering::Relaxed),
-                day_limit: self.rate_limit_day_limit.load(Ordering::Relaxed),
-                minute_count: self.rate_limit_minute_count.load(Ordering::Relaxed),
-                hour_count: self.rate_limit_hour_count.load(Ordering::Relaxed),
-                day_count: self.rate_limit_day_count.load(Ordering::Relaxed),
-                minute_checks: self.rate_limit_minute_checks.load(Ordering::Relaxed),
-                hour_checks: self.rate_limit_hour_checks.load(Ordering::Relaxed),
-                day_checks: self.rate_limit_day_checks.load(Ordering::Relaxed),
-                minute_rejections: self.rate_limit_minute_rejections.load(Ordering::Relaxed),
-                hour_rejections: self.rate_limit_hour_rejections.load(Ordering::Relaxed),
-                day_rejections: self.rate_limit_day_rejections.load(Ordering::Relaxed),
-                cache_rows: self.rate_limit_cache_rows.load(Ordering::Relaxed),
-                cache_purged: self.rate_limit_cache_purged.load(Ordering::Relaxed),
+            rate_limiting: {
+                let auth_rejections = self.rate_limit_auth_rejections.load(Ordering::Relaxed);
+                let room_creation_rejections = self
+                    .rate_limit_room_creation_rejections
+                    .load(Ordering::Relaxed);
+                let join_attempt_rejections = self
+                    .rate_limit_join_attempt_rejections
+                    .load(Ordering::Relaxed);
+                let signal_rejections = self.rate_limit_signal_rejections.load(Ordering::Relaxed);
+                let signal_error_rejections = self
+                    .rate_limit_signal_error_rejections
+                    .load(Ordering::Relaxed);
+                let rate_limit_rejections = auth_rejections
+                    .saturating_add(room_creation_rejections)
+                    .saturating_add(join_attempt_rejections)
+                    .saturating_add(signal_rejections)
+                    .saturating_add(signal_error_rejections);
+
+                RateLimitingMetrics {
+                    rate_limit_rejections,
+                    auth_rejections,
+                    room_creation_rejections,
+                    join_attempt_rejections,
+                    signal_rejections,
+                    signal_error_rejections,
+                }
             },
             players: PlayerMetrics {
                 players_joined: self.players_joined.load(Ordering::Relaxed),
@@ -1957,6 +1863,63 @@ mod tests {
         assert_eq!(
             total, 100,
             "total_connections should be 100 (never decremented), got {total}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_aggregate_is_conserved_during_concurrent_updates() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let writer_metrics = Arc::clone(&metrics);
+        let writer = tokio::spawn(async move {
+            let kinds = [
+                RateLimitRejection::Auth,
+                RateLimitRejection::RoomCreation,
+                RateLimitRejection::JoinAttempt,
+                RateLimitRejection::Signal,
+                RateLimitRejection::SignalError,
+            ];
+            for index in 0..10_000 {
+                writer_metrics.record_rate_limit_rejection(kinds[index % kinds.len()]);
+                if index % 32 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+
+        for _ in 0..1_000 {
+            let rate_limits = metrics.snapshot().await.rate_limiting;
+            assert_eq!(
+                rate_limits.rate_limit_rejections,
+                rate_limits.auth_rejections
+                    + rate_limits.room_creation_rejections
+                    + rate_limits.join_attempt_rejections
+                    + rate_limits.signal_rejections
+                    + rate_limits.signal_error_rejections
+            );
+            tokio::task::yield_now().await;
+        }
+        writer.await.expect("writer task must not panic");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_aggregate_is_derived_from_category_samples() {
+        let metrics = ServerMetrics::new();
+        metrics
+            .rate_limit_auth_rejections
+            .store(2, Ordering::Relaxed);
+        metrics
+            .rate_limit_signal_rejections
+            .store(3, Ordering::Relaxed);
+
+        let rate_limits = metrics.snapshot().await.rate_limiting;
+        assert_eq!(rate_limits.rate_limit_rejections, 5);
+        assert_eq!(
+            rate_limits.rate_limit_rejections,
+            rate_limits.auth_rejections
+                + rate_limits.room_creation_rejections
+                + rate_limits.join_attempt_rejections
+                + rate_limits.signal_rejections
+                + rate_limits.signal_error_rejections
         );
     }
 }

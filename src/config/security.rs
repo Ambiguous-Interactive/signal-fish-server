@@ -220,29 +220,3 @@ pub struct AppAuthEntry {
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
 }
-
-/// Auth maintenance configuration.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AuthMaintenanceConfig {
-    /// Interval between rate_limit_cache cleanup sweeps (seconds)
-    #[serde(default = "super::defaults::default_rate_limit_cache_cleanup_interval_secs")]
-    pub rate_limit_cache_cleanup_interval_secs: u64,
-    /// Retention window for rate_limit_cache rows (seconds)
-    #[serde(default = "super::defaults::default_rate_limit_cache_retention_secs")]
-    pub rate_limit_cache_retention_secs: u64,
-    /// Row-count threshold that triggers warning logs for cache drift
-    #[serde(default = "super::defaults::default_rate_limit_cache_alert_rows")]
-    pub rate_limit_cache_alert_rows: u64,
-}
-
-impl Default for AuthMaintenanceConfig {
-    fn default() -> Self {
-        Self {
-            rate_limit_cache_cleanup_interval_secs:
-                super::defaults::default_rate_limit_cache_cleanup_interval_secs(),
-            rate_limit_cache_retention_secs:
-                super::defaults::default_rate_limit_cache_retention_secs(),
-            rate_limit_cache_alert_rows: super::defaults::default_rate_limit_cache_alert_rows(),
-        }
-    }
-}

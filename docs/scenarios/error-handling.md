@@ -70,9 +70,10 @@ After too many requests in a short window, the server returns an `Error`:
 ```
 
 Next: the client must **back off** before retrying — stop sending, wait an increasing interval (exponential
-backoff with jitter is recommended), then resume. The rate limits the client received in the `Authenticated`
-message (`per_minute`, `per_hour`, `per_day`) tell it the ceilings to stay under. The connection itself stays open;
-only the rate-limited message was dropped.
+backoff with jitter is recommended), then resume. In the `Authenticated`
+message, `per_minute` is the enforced ceiling when the app configures one;
+`per_hour` and `per_day` are legacy advisory projections for client budgeting.
+The connection itself stays open; only the rate-limited message was dropped.
 
 ## SIGNAL_TOO_LARGE — split the payload
 

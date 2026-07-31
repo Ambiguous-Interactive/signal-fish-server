@@ -152,7 +152,6 @@ async fn build_test_server(
         signal_fish_server::config::TurnConfig::default(),
         database_config,
         signal_fish_server::config::MetricsConfig::default(),
-        signal_fish_server::config::AuthMaintenanceConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
         signal_fish_server::config::TransportSecurityConfig::default(),
         vec![],

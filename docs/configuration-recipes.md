@@ -363,6 +363,9 @@ gap-bearing `DeliveryReport` frames remain event-driven. See
 Per-player rate limits that bound abusive room creation, join, and signaling
 traffic.
 
+A room creation consumes one room-creation slot and one join-attempt slot, and
+is rejected atomically when either budget is exhausted.
+
 ```json
 {
   "rate_limit": {
@@ -392,8 +395,8 @@ When to adjust:
 - `max_signals` — raise for v3 WebRTC games with heavy ICE/SDP exchange (mesh
   topologies signal more than host); lower for relay-only deployments that never
   signal.
-- `max_signal_errors` — the ceiling on _rejected_ signal attempts; lower it to
-  disconnect misbehaving or buggy clients sooner.
+- `max_signal_errors` — the ceiling on detailed rejected-signal error responses;
+  lower it to replace validation errors with a generic rate-limit error sooner.
 - `time_window` — the window (seconds) all the above counts apply over; must be
   `> 0`.
 
