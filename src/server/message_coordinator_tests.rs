@@ -1,7 +1,7 @@
-use super::{ConnectionManager, InMemoryMessageCoordinator};
+use super::{ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator};
 use crate::coordination::{
-    ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator, RoomMessageTransactionOutcome,
-    RoomRecipientMessages,
+    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, MessageCoordinator,
+    RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 use crate::metrics::ServerMetrics;
 use crate::protocol::{LobbyState, PlayerId, RoomId, ServerMessage, SpectatorJoinedPayload};
@@ -9,6 +9,187 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::Duration;
+
+#[derive(Clone, Copy, Debug)]
+enum ControlCapacityWait {
+    InitialTransition,
+    ConditionalDelivery,
+    ConditionalReservation,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ControlQueueKind {
+    Legacy,
+    Classified,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DeadlineBoundary {
+    Exact,
+    Post,
+}
+
+impl DeadlineBoundary {
+    fn elapsed(self) -> Duration {
+        match self {
+            Self::Exact => Duration::from_secs(1),
+            Self::Post => Duration::from_millis(1_001),
+        }
+    }
+}
+
+enum ControlReceiver {
+    Legacy(mpsc::Receiver<Arc<ServerMessage>>),
+    Classified(crate::coordination::outbound_queue::OutboundReceiver),
+}
+
+impl ControlReceiver {
+    fn close(&mut self) {
+        match self {
+            Self::Legacy(receiver) => receiver.close(),
+            Self::Classified(receiver) => receiver.close(),
+        }
+    }
+
+    fn pop_message(&mut self, context: &str) -> Arc<ServerMessage> {
+        match self {
+            Self::Legacy(receiver) => receiver.try_recv().expect(context),
+            Self::Classified(receiver) => {
+                let queued = receiver.try_recv().expect(context);
+                match queued.payload {
+                    crate::coordination::outbound_queue::OutboundPayload::Message(message) => {
+                        message
+                    }
+                    payload => panic!("{context}: expected control message, got {payload:?}"),
+                }
+            }
+        }
+    }
+
+    fn assert_empty(&mut self, context: &str) {
+        match self {
+            Self::Legacy(receiver) => assert!(
+                matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{context}: legacy queue must remain open and empty"
+            ),
+            Self::Classified(receiver) => assert!(
+                matches!(
+                    receiver.try_recv(),
+                    Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+                ),
+                "{context}: classified queue must remain open and empty"
+            ),
+        }
+    }
+
+    fn assert_disconnected(&mut self, context: &str) {
+        match self {
+            Self::Legacy(receiver) => assert!(
+                matches!(
+                    receiver.try_recv(),
+                    Err(mpsc::error::TryRecvError::Disconnected)
+                ),
+                "{context}: legacy queue must be disconnected"
+            ),
+            Self::Classified(receiver) => assert!(
+                matches!(
+                    receiver.try_recv(),
+                    Err(crate::coordination::outbound_queue::TryReceiveError::Disconnected)
+                ),
+                "{context}: classified queue must be disconnected"
+            ),
+        }
+    }
+}
+
+fn full_control_queue(
+    kind: ControlQueueKind,
+) -> (
+    ClientDeliveryHandle,
+    crate::coordination::ConnectionCloseListener,
+    ControlReceiver,
+) {
+    let (close, close_listener) = ConnectionCloseSignal::channel();
+    match kind {
+        ControlQueueKind::Legacy => {
+            let (sender, receiver) = mpsc::channel(1);
+            sender
+                .try_send(Arc::new(ServerMessage::Pong))
+                .expect("prefill must occupy the legacy control queue");
+            (
+                ClientDeliveryHandle::new(sender, close),
+                close_listener,
+                ControlReceiver::Legacy(receiver),
+            )
+        }
+        ControlQueueKind::Classified => {
+            let (sender, receiver) = crate::coordination::outbound_queue::channel(1, 1);
+            sender.set_protocol_version(3);
+            sender
+                .try_enqueue_control_scoped(Arc::new(ServerMessage::Pong), None, 0)
+                .expect("prefill must occupy the classified control lane");
+            (
+                ClientDeliveryHandle::classified(sender, close),
+                close_listener,
+                ControlReceiver::Classified(receiver),
+            )
+        }
+    }
+}
+
+fn start_control_capacity_wait(
+    case: ControlCapacityWait,
+    coordinator: Arc<InMemoryMessageCoordinator>,
+    player_id: PlayerId,
+    handle: ClientDeliveryHandle,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = DeliveryOutcome> + Send>> {
+    match case {
+        ControlCapacityWait::InitialTransition => Box::pin(async move {
+            match coordinator
+                .reserve_initial_transition(player_id, &handle)
+                .await
+            {
+                Ok(_permit) => DeliveryOutcome::Delivered,
+                Err(outcome) => outcome,
+            }
+        }),
+        ControlCapacityWait::ConditionalDelivery => {
+            let (drain_tx, drain) = watch::channel(false);
+            Box::pin(async move {
+                let _drain_tx = drain_tx;
+                coordinator
+                    .deliver_to_one_if(
+                        player_id,
+                        handle,
+                        Arc::new(ServerMessage::Pong),
+                        &|| true,
+                        drain,
+                    )
+                    .await
+                    .unwrap_or(DeliveryOutcome::Canceled)
+            })
+        }
+        ControlCapacityWait::ConditionalReservation => {
+            let (drain_tx, drain) = watch::channel(false);
+            Box::pin(async move {
+                let _drain_tx = drain_tx;
+                match coordinator
+                    .reserve_one_if(player_id, handle, &|| true, drain, None)
+                    .await
+                {
+                    ConditionalDeliveryReservation::SlowConsumer { .. } => {
+                        DeliveryOutcome::SlowConsumer
+                    }
+                    ConditionalDeliveryReservation::ChannelClosed { .. } => {
+                        DeliveryOutcome::ChannelClosed
+                    }
+                    ConditionalDeliveryReservation::Canceled => DeliveryOutcome::Canceled,
+                    ConditionalDeliveryReservation::Reserved { .. } => DeliveryOutcome::Delivered,
+                }
+            })
+        }
+    }
+}
 
 async fn wait_for_counter(context: &str, max_yields: usize, mut condition: impl FnMut() -> bool) {
     for _ in 0..max_yields {
@@ -18,6 +199,243 @@ async fn wait_for_counter(context: &str, max_yields: usize, mut condition: impl 
         tokio::task::yield_now().await;
     }
     panic!("{context}: counter condition never held");
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_control_capacity_waits_cannot_revive_after_capacity_returns() {
+    let cases = [
+        ControlCapacityWait::InitialTransition,
+        ControlCapacityWait::ConditionalDelivery,
+        ControlCapacityWait::ConditionalReservation,
+    ];
+    let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
+    let boundaries = [DeadlineBoundary::Exact, DeadlineBoundary::Post];
+
+    for (case_index, case) in cases.into_iter().enumerate() {
+        for (kind_index, kind) in queue_kinds.into_iter().enumerate() {
+            for (boundary_index, boundary) in boundaries.into_iter().enumerate() {
+                let metrics = Arc::new(ServerMetrics::new());
+                let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+                    Duration::from_secs(1),
+                    Arc::clone(&metrics),
+                ));
+                let player_id = PlayerId::from_u128(
+                    0x660B_70BA_DA11_4CE1_8168_DA1A_D311_1000
+                        + (case_index * 100 + kind_index * 10 + boundary_index) as u128,
+                );
+                let (handle, close_listener, mut receiver) = full_control_queue(kind);
+                let mut wait = start_control_capacity_wait(
+                    case,
+                    Arc::clone(&coordinator),
+                    player_id,
+                    handle.clone(),
+                );
+
+                assert!(
+                    futures_util::poll!(wait.as_mut()).is_pending(),
+                    "{case:?}/{kind:?}/{boundary:?} must wait while the control queue is full"
+                );
+                tokio::time::advance(boundary.elapsed()).await;
+                let prefill = receiver.pop_message("capacity must return at the test boundary");
+                assert!(matches!(prefill.as_ref(), ServerMessage::Pong));
+
+                assert_eq!(
+                    wait.await,
+                    DeliveryOutcome::SlowConsumer,
+                    "{case:?}/{kind:?}/{boundary:?} must not use capacity returned at or after its deadline"
+                );
+                receiver.assert_empty(&format!("{case:?}/{kind:?}/{boundary:?}"));
+                assert_eq!(
+                    close_listener.requested_reason(),
+                    Some(CloseReason::SlowConsumer),
+                    "{case:?}/{kind:?}/{boundary:?} must expose the slow-consumer close reason"
+                );
+                assert_eq!(
+                    metrics
+                        .websocket_slow_consumer_disconnects
+                        .load(Ordering::Relaxed),
+                    1,
+                    "{case:?}/{kind:?}/{boundary:?} must request exactly one slow-consumer close"
+                );
+                assert_eq!(
+                    metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+                    1,
+                    "{case:?}/{kind:?}/{boundary:?} must account for exactly one expired delivery"
+                );
+                assert_eq!(
+                    metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+                    1,
+                    "{case:?}/{kind:?}/{boundary:?} must account for one logical delivery attempt"
+                );
+                assert_eq!(
+                    metrics
+                        .websocket_backpressure_events
+                        .load(Ordering::Relaxed),
+                    1,
+                    "{case:?}/{kind:?}/{boundary:?} must account for one full-queue wait"
+                );
+                assert_eq!(
+                    metrics
+                        .websocket_deliveries_enqueued
+                        .load(Ordering::Relaxed),
+                    0,
+                    "{case:?}/{kind:?}/{boundary:?} must not account an expired delivery as enqueued"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_closure_at_or_after_the_deadline_precedes_slow_consumer_expiry() {
+    let cases = [
+        ControlCapacityWait::InitialTransition,
+        ControlCapacityWait::ConditionalDelivery,
+        ControlCapacityWait::ConditionalReservation,
+    ];
+    let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
+    let boundaries = [DeadlineBoundary::Exact, DeadlineBoundary::Post];
+
+    for case in cases {
+        for kind in queue_kinds {
+            for boundary in boundaries {
+                let metrics = Arc::new(ServerMetrics::new());
+                let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+                    Duration::from_secs(1),
+                    Arc::clone(&metrics),
+                ));
+                let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_2000);
+                let (handle, close_listener, mut receiver) = full_control_queue(kind);
+                let mut wait = start_control_capacity_wait(case, coordinator, player_id, handle);
+
+                assert!(
+                    futures_util::poll!(wait.as_mut()).is_pending(),
+                    "{case:?}/{kind:?}/{boundary:?} must enter backpressure"
+                );
+                tokio::time::advance(boundary.elapsed()).await;
+                receiver.close();
+
+                assert_eq!(
+                    wait.await,
+                    DeliveryOutcome::ChannelClosed,
+                    "{case:?}/{kind:?}/{boundary:?} must preserve closure at or after the deadline"
+                );
+                assert_eq!(
+                    close_listener.requested_reason(),
+                    None,
+                    "{case:?}/{kind:?}/{boundary:?} must not misclassify closure as slow consumption"
+                );
+                assert_eq!(
+                    metrics
+                        .websocket_deliveries_channel_closed
+                        .load(Ordering::Relaxed),
+                    1
+                );
+                assert_eq!(
+                    metrics
+                        .websocket_slow_consumer_disconnects
+                        .load(Ordering::Relaxed),
+                    0
+                );
+                assert_eq!(
+                    metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+                    0
+                );
+                let prefill = receiver.pop_message("closed queue retains its existing item");
+                assert!(matches!(prefill.as_ref(), ServerMessage::Pong));
+                receiver.assert_disconnected(&format!("{case:?}/{kind:?}/{boundary:?}"));
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn classified_generation_cancellation_at_the_deadline_precedes_slow_consumer_expiry() {
+    let cases = [
+        ControlCapacityWait::InitialTransition,
+        ControlCapacityWait::ConditionalDelivery,
+        ControlCapacityWait::ConditionalReservation,
+    ];
+
+    for (index, case) in cases.into_iter().enumerate() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        ));
+        let player_id =
+            PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_3000 + index as u128);
+        let (handle, close_listener, mut receiver) =
+            full_control_queue(ControlQueueKind::Classified);
+        let mut wait =
+            start_control_capacity_wait(case, Arc::clone(&coordinator), player_id, handle.clone());
+
+        assert!(
+            futures_util::poll!(wait.as_mut()).is_pending(),
+            "{case:?} must enter classified backpressure"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let prefill = receiver.pop_message("release the classified control lane");
+        assert!(matches!(prefill.as_ref(), ServerMessage::Pong));
+
+        // Generation zero may legitimately reserve generation one's
+        // transition. Move initial-transition waits two generations ahead so
+        // every case is unambiguously stale at the exact deadline.
+        let generation_advances = if matches!(case, ControlCapacityWait::InitialTransition) {
+            2
+        } else {
+            1
+        };
+        let mut current_sender = handle.sender.clone();
+        for advance in 0..generation_advances {
+            current_sender = current_sender.next_generation();
+            current_sender
+                .try_send(Arc::new(ServerMessage::RoomLeft), None)
+                .expect("advance classified queue generation at the deadline");
+            if advance + 1 < generation_advances {
+                let transition =
+                    receiver.pop_message("release capacity for the next generation transition");
+                assert!(matches!(transition.as_ref(), ServerMessage::RoomLeft));
+            }
+        }
+
+        assert_eq!(
+            wait.await,
+            DeliveryOutcome::Canceled,
+            "{case:?} must preserve the classified generation fence at the deadline"
+        );
+        assert_eq!(
+            close_listener.requested_reason(),
+            None,
+            "{case:?} must not close a stale classified generation as a slow consumer"
+        );
+        assert_eq!(
+            metrics
+                .websocket_deliveries_canceled
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            metrics
+                .websocket_deliveries_enqueued
+                .load(Ordering::Relaxed),
+            0,
+            "{case:?} must not account any late coordinator enqueue"
+        );
+        let transition = receiver.pop_message("only the explicit generation transition remains");
+        assert!(matches!(transition.as_ref(), ServerMessage::RoomLeft));
+        receiver.assert_empty(&format!("{case:?} classified generation cancellation"));
+    }
 }
 
 #[tokio::test]

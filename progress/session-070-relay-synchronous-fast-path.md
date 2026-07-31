@@ -223,3 +223,12 @@ findings.
 This publication-only follow-up records the immutable implementation-head
 evidence. Its own exact head must independently complete hosted workflows and
 reviewer retriggers before the session is closed.
+
+## Closure
+
+PR #232 completed at final reviewed head
+`65256bb495c2f6ec586e7cb47d2e1eaec645a56d`. All 14 applicable workflows
+passed, reviewer feedback was resolved, and the pull request merged as
+`664f415bd90376237f860ffe65d500de1d1dd536`. That merge is the session's
+canonical production state; the implementation head above remains the
+immutable measurement reference.
