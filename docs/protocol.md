@@ -637,7 +637,11 @@ data cannot expire a fresh report. Latest/volatile queue age is resolved by
 their explicit coalesce/drop policy; after selection, the same duration bounds
 socket-write progress so a transport that stops draining cannot wedge the sole
 writer. Deadline expiry fails closed with `4002 slow_consumer`. Farewell
-`Error` frames are best effort; the close code is authoritative.
+`Error` frames are best effort; the close code is authoritative. These are
+exclusive deadlines: socket-write completion must be observed strictly before
+the boundary. A write that becomes ready at or after the deadline is expired,
+even when scheduler delay makes both the write and timer ready on the same
+poll.
 
 Practical consequences:
 
@@ -693,10 +697,10 @@ surface and are never renumbered):
 | Code | Reason string | Meaning |
 | ---- | ------------- | ------- |
 | `4000` | `server_shutdown` | The server is shutting down after a graceful drain |
-| `4001` | `auth_timeout` | Never authenticated within `websocket.auth_timeout_secs` |
+| `4001` | `auth_timeout` | Authentication input was not observed strictly before the `websocket.auth_timeout_secs` deadline |
 | `4002` | `slow_consumer` | Delivery contract failed closed: reliable queue/sojourn timeout, selected socket write stopped progressing, or exact accountability/control priority could not be preserved |
 | `4003` | `activity_timeout` | An idle server WebSocket Ping write timed out, the matching Pong missed its deadline while no inbound or outbound application progress superseded the probe, or the `server.ping_timeout` activity reaper evicted the connection. A Ping queued after outbound progress inherits the earlier capacity-wait/maximum-sojourn delivery budget and closes `4002` if that write stalls |
-| `4004` | `idle_timeout` | No inbound frame within `websocket.idle_timeout_secs` |
+| `4004` | `idle_timeout` | No inbound frame was observed strictly before the `websocket.idle_timeout_secs` deadline |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 
 During a shutdown drain the process stops accepting new WebSocket upgrades,

@@ -14,6 +14,7 @@ use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError}
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngExt;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use tokio::time::Instant;
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
 use super::sending::{send_immediate_server_message, write_pending_unsupported_report};
 use super::token_binding::{parse_client_message, TokenBindingHandshake};
-use super::CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT;
+use super::{complete_before_deadline, CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT};
 
 const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -104,6 +105,150 @@ enum PingProbeResolution {
     TimedOut,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum InboundRead<T> {
+    CloseRequested(Option<CloseReason>),
+    DeadlineElapsed,
+    Completed(T),
+}
+
+/// Read one inbound item while preserving the connection's lifecycle
+/// precedence and the exclusive deadline contract.
+///
+/// A close already requested when this future is polled wins over both the
+/// timer and a ready frame. With no deadline, only close or input can resolve.
+async fn read_before_deadline<F>(
+    close: &mut ConnectionCloseListener,
+    deadline: Option<Instant>,
+    read: F,
+) -> InboundRead<F::Output>
+where
+    F: Future,
+{
+    let wait_for_deadline = async {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(read);
+    tokio::pin!(wait_for_deadline);
+    tokio::select! {
+        biased;
+        reason = close.closed() => InboundRead::CloseRequested(reason),
+        () = &mut wait_for_deadline => InboundRead::DeadlineElapsed,
+        output = &mut read => InboundRead::Completed(output),
+    }
+}
+
+async fn run_until_close<F>(
+    close: &mut ConnectionCloseListener,
+    operation: F,
+) -> Option<Option<CloseReason>>
+where
+    F: Future<Output = ()>,
+{
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        reason = close.closed() => Some(reason),
+        () = &mut operation => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InboundDeadlineKind {
+    Authentication,
+    Idle,
+}
+
+impl InboundDeadlineKind {
+    const fn close_reason(self) -> CloseReason {
+        match self {
+            Self::Authentication => CloseReason::AuthTimeout,
+            Self::Idle => CloseReason::IdleTimeout,
+        }
+    }
+
+    const fn error_code(self) -> ErrorCode {
+        match self {
+            Self::Authentication => ErrorCode::AuthenticationTimeout,
+            Self::Idle => ErrorCode::ConnectionIdleTimeout,
+        }
+    }
+
+    fn error_message(self, timeout_secs: u64) -> String {
+        match self {
+            Self::Authentication => {
+                format!("Authentication timeout - must authenticate within {timeout_secs} seconds")
+            }
+            Self::Idle => {
+                format!("Idle timeout - no messages received for {timeout_secs} seconds")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InboundDeadline {
+    at: Option<Instant>,
+    kind: InboundDeadlineKind,
+    timeout_secs: u64,
+}
+
+impl InboundDeadline {
+    fn for_connection(
+        authenticated: bool,
+        auth_deadline: Instant,
+        auth_timeout_secs: u64,
+        idle_timeout: Option<Duration>,
+        idle_timeout_secs: u64,
+    ) -> Self {
+        if authenticated {
+            Self {
+                at: idle_timeout.map(|window| Instant::now() + window),
+                kind: InboundDeadlineKind::Idle,
+                timeout_secs: idle_timeout_secs,
+            }
+        } else {
+            Self {
+                at: Some(auth_deadline),
+                kind: InboundDeadlineKind::Authentication,
+                timeout_secs: auth_timeout_secs,
+            }
+        }
+    }
+
+    async fn read<F>(self, close: &mut ConnectionCloseListener, read: F) -> InboundRead<F::Output>
+    where
+        F: Future,
+    {
+        read_before_deadline(close, self.at, read).await
+    }
+
+    fn expire(
+        self,
+        tx: &OutboundSender,
+        close_signal: &ConnectionCloseSignal,
+        player_id: &PlayerId,
+    ) {
+        enqueue_farewell_message(
+            tx,
+            close_signal,
+            player_id,
+            ServerMessage::Error {
+                message: self.kind.error_message(self.timeout_secs),
+                error_code: Some(self.kind.error_code()),
+            },
+            match self.kind {
+                InboundDeadlineKind::Authentication => "authentication timeout",
+                InboundDeadlineKind::Idle => "idle timeout error",
+            },
+        );
+        close_signal.request_close(self.kind.close_reason());
+    }
+}
+
 fn ping_write_timeout_policy(
     outbound_advanced: bool,
     max_sojourn: Duration,
@@ -116,6 +261,56 @@ fn ping_write_timeout_policy(
         )
     } else {
         (SERVER_PING_WRITE_TIMEOUT, CloseReason::ActivityTimeout)
+    }
+}
+
+#[derive(Debug)]
+enum PingWriteFailure<E> {
+    Socket(E),
+    DeadlineElapsed,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_ping_write<F, E>(
+    write_started_at: Instant,
+    timeout: Duration,
+    timeout_reason: CloseReason,
+    write: F,
+    probe_state: &watch::Sender<PingProbeState>,
+    nonce: u64,
+    close_signal: &ConnectionCloseSignal,
+    server: &EnhancedGameServer,
+) -> Result<PingWriteTiming, PingWriteFailure<E>>
+where
+    F: Future<Output = Result<(), E>>,
+{
+    match complete_before_deadline(write_started_at + timeout, write).await {
+        Ok(Ok(())) => Ok(PingWriteTiming {
+            completed_at: Instant::now(),
+            outbound_generation: probe_state.borrow().outbound_generation,
+        }),
+        Ok(Err(error)) => {
+            clear_ping_probe(probe_state, nonce);
+            if close_signal.request_close(timeout_reason)
+                && timeout_reason == CloseReason::SlowConsumer
+            {
+                server
+                    .metrics()
+                    .increment_websocket_slow_consumer_disconnects();
+            }
+            Err(PingWriteFailure::Socket(error))
+        }
+        Err(_) => {
+            clear_ping_probe(probe_state, nonce);
+            if close_signal.request_close(timeout_reason)
+                && timeout_reason == CloseReason::SlowConsumer
+            {
+                server
+                    .metrics()
+                    .increment_websocket_slow_consumer_disconnects();
+            }
+            Err(PingWriteFailure::DeadlineElapsed)
+        }
     }
 }
 
@@ -1211,205 +1406,183 @@ pub(super) async fn handle_socket(
         // arm would only observe it BETWEEN writes, and a wedged write never
         // finishes; the sink half would then never drop and the connection
         // would linger as a zombie socket.
-        let close_request: Option<Option<CloseReason>> = tokio::select! {
-            reason = send_task_close.closed() => Some(reason),
-            () = async {
-                let batch_interval = Duration::from_millis(batch_interval_ms.max(1));
-                loop {
-                    // Read outside the `select!`: the arm below only needs the
-                    // deadline value, and borrowing `rx` inside the select would
-                    // conflict with the `&mut` receive arm.
-                    let pending_flush_deadline = rx.pending_unsupported_flush_deadline();
-                    let received = tokio::select! {
-                        biased;
-                        command = ping_command_rx.recv() => {
-                            let Some(command) = command else {
-                                break;
-                            };
-                            let write_started_at = Instant::now();
-                            let probe = begin_ping_probe(
-                                &ping_probe_state_for_send,
-                                command.baseline_generation,
-                                command.nonce,
-                                write_started_at,
+        let close_request = run_until_close(&mut send_task_close, async {
+            let batch_interval = Duration::from_millis(batch_interval_ms.max(1));
+            loop {
+                // Read outside the `select!`: the arm below only needs the
+                // deadline value, and borrowing `rx` inside the select would
+                // conflict with the `&mut` receive arm.
+                let pending_flush_deadline = rx.pending_unsupported_flush_deadline();
+                let received = tokio::select! {
+                    biased;
+                    command = ping_command_rx.recv() => {
+                        let Some(command) = command else {
+                            break;
+                        };
+                        let write_started_at = Instant::now();
+                        let probe = begin_ping_probe(
+                            &ping_probe_state_for_send,
+                            command.baseline_generation,
+                            command.nonce,
+                            write_started_at,
+                        );
+                        if let Err(inbound_generation) = probe {
+                            clear_ping_probe(&ping_probe_state_for_send, command.nonce);
+                            let _ = command.write_outcome.send(
+                                PingWriteOutcome::SkippedActivity {
+                                    inbound_generation,
+                                    outbound_generation: ping_probe_state_for_send
+                                        .borrow()
+                                        .outbound_generation,
+                                }
                             );
-                            if let Err(inbound_generation) = probe {
-                                clear_ping_probe(&ping_probe_state_for_send, command.nonce);
+                            continue;
+                        }
+                        let outbound_advanced = ping_probe_state_for_send
+                            .borrow()
+                            .outbound_generation
+                            != command.baseline_outbound_generation;
+                        let (ping_write_timeout, ping_write_timeout_reason) =
+                            ping_write_timeout_policy(
+                                outbound_advanced,
+                                max_sojourn,
+                                slow_consumer_timeout,
+                            );
+                        let payload = command.nonce.to_be_bytes().to_vec().into();
+                        match complete_ping_write(
+                            write_started_at,
+                            ping_write_timeout,
+                            ping_write_timeout_reason,
+                            sender.send(Message::Ping(payload)),
+                            &ping_probe_state_for_send,
+                            command.nonce,
+                            &send_task_close_signal,
+                            &server_clone,
+                        )
+                        .await
+                        {
+                            Ok(timing) => {
                                 let _ = command.write_outcome.send(
-                                    PingWriteOutcome::SkippedActivity {
-                                        inbound_generation,
-                                        outbound_generation: ping_probe_state_for_send
-                                            .borrow()
-                                            .outbound_generation,
-                                    }
+                                    PingWriteOutcome::Written(timing)
                                 );
                                 continue;
                             }
-                            let outbound_advanced = ping_probe_state_for_send
-                                .borrow()
-                                .outbound_generation
-                                != command.baseline_outbound_generation;
-                            let (ping_write_timeout, ping_write_timeout_reason) =
-                                ping_write_timeout_policy(
-                                    outbound_advanced,
-                                    max_sojourn,
-                                    slow_consumer_timeout,
+                            Err(PingWriteFailure::Socket(err)) => {
+                                tracing::debug!(
+                                    error = %err,
+                                    "Failed to write WebSocket Ping"
                                 );
-                            let payload = command.nonce.to_be_bytes().to_vec().into();
-                            match tokio::time::timeout(
-                                ping_write_timeout,
-                                sender.send(Message::Ping(payload)),
-                            )
-                            .await
-                            {
-                                Ok(Ok(())) => {
-                                    let _ = command.write_outcome.send(
-                                        PingWriteOutcome::Written(PingWriteTiming {
-                                            completed_at: Instant::now(),
-                                            outbound_generation: ping_probe_state_for_send
-                                                .borrow()
-                                                .outbound_generation,
-                                        })
-                                    );
-                                    continue;
-                                }
-                                Ok(Err(err)) => {
-                                    clear_ping_probe(&ping_probe_state_for_send, command.nonce);
-                                    tracing::debug!(
-                                        error = %err,
-                                        "Failed to write WebSocket Ping"
-                                    );
-                                    if send_task_close_signal
-                                        .request_close(ping_write_timeout_reason)
-                                        && ping_write_timeout_reason == CloseReason::SlowConsumer
-                                    {
-                                        server_clone
-                                            .metrics()
-                                            .increment_websocket_slow_consumer_disconnects();
-                                    }
-                                }
-                                Err(_elapsed) => {
-                                    clear_ping_probe(&ping_probe_state_for_send, command.nonce);
-                                    if send_task_close_signal
-                                        .request_close(ping_write_timeout_reason)
-                                    {
-                                        if ping_write_timeout_reason == CloseReason::SlowConsumer {
-                                            server_clone
-                                                .metrics()
-                                                .increment_websocket_slow_consumer_disconnects();
-                                        }
-                                        tracing::info!(
-                                            timeout_secs = ping_write_timeout.as_secs(),
-                                            ?ping_write_timeout_reason,
-                                            "WebSocket Ping write timed out - closing connection"
-                                        );
-                                    }
-                                }
                             }
+                            Err(PingWriteFailure::DeadlineElapsed) => {
+                                tracing::info!(
+                                    timeout_secs = ping_write_timeout.as_secs(),
+                                    ?ping_write_timeout_reason,
+                                    "WebSocket Ping write timed out - closing connection"
+                                );
+                            }
+                        }
+                        break;
+                    }
+                    // An idle recipient must still learn about coalesced
+                    // omissions within a bounded time: without this the last
+                    // range of a burst would wait for the next omission or
+                    // for the connection to close. `recv`/`recv_batched` are
+                    // cancel-safe, so losing this race costs nothing.
+                    () = async {
+                        match pending_flush_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        let current_player_id =
+                            *effective_player_id_for_send.read().await;
+                        match write_pending_unsupported_report(
+                            &mut sender,
+                            &rx,
+                            &current_player_id,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                record_outbound_probe_activity(
+                                    &ping_probe_state_for_send,
+                                    Instant::now(),
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(()) => break,
+                        }
+                        continue;
+                    }
+                    received = async {
+                        if batching_enabled {
+                            rx.recv_batched(batch_size, batch_interval).await
+                        } else {
+                            rx.recv().await
+                        }
+                    } => received,
+                };
+                match received {
+                    Ok(Some(message)) if message.is_control() => {
+                        let current_player_id = *effective_player_id_for_send.read().await;
+                        if send_queued(
+                            &mut sender,
+                            message,
+                            None,
+                            &rx,
+                            &current_player_id,
+                            &server_clone,
+                            &send_task_close_signal,
+                            &ping_probe_state_for_send,
+                            max_sojourn,
+                            WritePhase::Live,
+                        )
+                        .await
+                        .is_err()
+                        {
                             break;
                         }
-                        // An idle recipient must still learn about coalesced
-                        // omissions within a bounded time: without this the last
-                        // range of a burst would wait for the next omission or
-                        // for the connection to close. `recv`/`recv_batched` are
-                        // cancel-safe, so losing this race costs nothing.
-                        () = async {
-                            match pending_flush_deadline {
-                                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                None => std::future::pending().await,
-                            }
-                        } => {
-                            let current_player_id =
-                                *effective_player_id_for_send.read().await;
-                            match write_pending_unsupported_report(
-                                &mut sender,
-                                &rx,
-                                &current_player_id,
-                            )
-                            .await
-                            {
-                                Ok(true) => {
-                                    record_outbound_probe_activity(
-                                        &ping_probe_state_for_send,
-                                        Instant::now(),
-                                    );
-                                }
-                                Ok(false) => {}
-                                Err(()) => break,
-                            }
-                            continue;
+                    }
+                    Ok(Some(message)) => {
+                        // The receiver holds a batch in the shared queue
+                        // until it is ready, then releases one item at a
+                        // time. Never stage multiple undelivered data
+                        // messages outside the queue: keyed-latest
+                        // coalescing and exact gap reporting must still
+                        // see every item not actively being written.
+                        batcher.queue(message);
+                        let current_player_id = *effective_player_id_for_send.read().await;
+                        if send_batch(
+                            &mut sender,
+                            &mut batcher,
+                            &mut rx,
+                            &current_player_id,
+                            &server_clone,
+                            &send_task_close_signal,
+                            &ping_probe_state_for_send,
+                            max_sojourn,
+                            WritePhase::Live,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
                         }
-                        received = async {
-                            if batching_enabled {
-                                rx.recv_batched(batch_size, batch_interval).await
-                            } else {
-                                rx.recv().await
-                            }
-                        } => received,
-                    };
-                    match received {
-                            Ok(Some(message)) if message.is_control() => {
-                                let current_player_id =
-                                    *effective_player_id_for_send.read().await;
-                                if send_queued(
-                                    &mut sender,
-                                    message,
-                                    None,
-                                    &rx,
-                                    &current_player_id,
-                                    &server_clone,
-                                    &send_task_close_signal,
-                                    &ping_probe_state_for_send,
-                                    max_sojourn,
-                                    WritePhase::Live,
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Ok(Some(message)) => {
-                                // The receiver holds a batch in the shared queue
-                                // until it is ready, then releases one item at a
-                                // time. Never stage multiple undelivered data
-                                // messages outside the queue: keyed-latest
-                                // coalescing and exact gap reporting must still
-                                // see every item not actively being written.
-                                batcher.queue(message);
-                                let current_player_id =
-                                    *effective_player_id_for_send.read().await;
-                                if send_batch(
-                                    &mut sender,
-                                    &mut batcher,
-                                    &mut rx,
-                                    &current_player_id,
-                                    &server_clone,
-                                    &send_task_close_signal,
-                                    &ping_probe_state_for_send,
-                                    max_sojourn,
-                                    WritePhase::Live,
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Ok(None) => break,
-                            Err(TryReceiveError::AccountabilityFailed) => {
-                                if send_task_close_signal.request_close(CloseReason::SlowConsumer) {
-                                    server_clone
-                                        .metrics()
-                                        .increment_websocket_slow_consumer_disconnects();
-                                }
-                                break;
-                            }
-                            Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
+                    }
+                    Ok(None) => break,
+                    Err(TryReceiveError::AccountabilityFailed) => {
+                        if send_task_close_signal.request_close(CloseReason::SlowConsumer) {
+                            server_clone
+                                .metrics()
+                                .increment_websocket_slow_consumer_disconnects();
                         }
+                        break;
+                    }
+                    Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
                 }
-            } => None,
-        };
+            }
+        })
+        .await;
 
         // A close was requested (slow consumer, unregistration): the write
         // loop above was cancelled wherever it was; run the bounded farewell/
@@ -1421,7 +1594,8 @@ pub(super) async fn handle_socket(
         // an observability standpoint.
         // The write loop can end on its own (queue senders dropped by
         // unregistration) in the same instant a close reason was requested;
-        // the unbiased select above may then have taken the loop-ended arm.
+        // the select above may then have taken the loop-ended arm before it
+        // observed the close request.
         // Resolve the close reason and ALWAYS finalize through the one path,
         // so every server-side teardown gets its bounded flush, honest drop
         // accounting, and a SEMANTIC close frame — never a bare, code-less
@@ -1475,9 +1649,7 @@ pub(super) async fn handle_socket(
         let mut active_player_id = player_id;
         let token_binding = token_binding_for_receive;
         let close_signal = close_signal_for_receive;
-        // Create authentication timeout timer
-        let auth_deadline = tokio::time::sleep_until(connection_start + auth_timeout);
-        tokio::pin!(auth_deadline);
+        let auth_deadline = connection_start + auth_timeout;
 
         // Post-auth idle timeout (0 = disabled). Wrapping each `receiver.next()`
         // means ANY inbound frame — Text, Binary, Ping, Pong, Close — counts as
@@ -1487,111 +1659,49 @@ pub(super) async fn handle_socket(
         let idle_timeout = (idle_timeout_secs > 0).then(|| Duration::from_secs(idle_timeout_secs));
 
         loop {
-            let msg = if authenticated {
-                // If authenticated, enforce only the idle timeout (when enabled)
-                tokio::select! {
-                    // Server-side close request (slow consumer, unregistration):
-                    // stop reading; the send task writes the farewell and
-                    // closes the sink.
-                    reason = receive_task_close.closed() => {
-                        tracing::debug!(
-                            %active_player_id,
-                            ?reason,
-                            "Connection close requested; ending receive task"
-                        );
-                        break;
-                    }
-                    next_frame = async {
-                        match idle_timeout {
-                            Some(window) => tokio::time::timeout(window, receiver.next()).await,
-                            None => Ok(receiver.next().await),
+            let inbound_deadline = InboundDeadline::for_connection(
+                authenticated,
+                auth_deadline,
+                auth_timeout_secs,
+                idle_timeout,
+                idle_timeout_secs,
+            );
+            let msg = match inbound_deadline
+                .read(&mut receive_task_close, receiver.next())
+                .await
+            {
+                InboundRead::CloseRequested(reason) => {
+                    tracing::debug!(
+                        %active_player_id,
+                        ?reason,
+                        "Connection close requested; ending receive task"
+                    );
+                    break;
+                }
+                InboundRead::Completed(Some(msg)) => msg,
+                InboundRead::Completed(None) => break,
+                InboundRead::DeadlineElapsed => {
+                    match inbound_deadline.kind {
+                        InboundDeadlineKind::Authentication => {
+                            tracing::warn!(
+                                %active_player_id,
+                                timeout_secs = inbound_deadline.timeout_secs,
+                                "Authentication timeout, closing connection"
+                            );
                         }
-                    } => match next_frame {
-                        Ok(Some(msg)) => msg,
-                        Ok(None) => break, // Connection closed
-                        Err(_elapsed) => {
-                            // Idle timeout: deliver the error through this
-                            // connection's OWN outbound channel, not the
-                            // coordinator. With production defaults the
-                            // `server.ping_timeout` reaper (30s) unregisters a
-                            // silent client from the coordinator long before
-                            // the idle window (300s) elapses, so a
-                            // coordinator-routed error would be unroutable.
-                            // The send task flushes this channel before the
-                            // socket is torn down, so the frame reaches the
-                            // client regardless of registration state. Then
-                            // close via the normal disconnect path so the
-                            // reconnection grace period still applies.
+                        InboundDeadlineKind::Idle => {
                             tracing::info!(
                                 %active_player_id,
-                                timeout_secs = idle_timeout_secs,
+                                timeout_secs = inbound_deadline.timeout_secs,
                                 "Idle timeout - no frames received, closing connection"
                             );
-                            // Farewell semantics (best-effort, no waiting):
-                            // this connection is closing as idle; a full
-                            // queue must not stall the teardown nor
-                            // reclassify the close as a slow-consumer one.
-                            enqueue_farewell_message(
-                                &tx_clone,
-                                &close_signal,
-                                &active_player_id,
-                                ServerMessage::Error {
-                                    message: format!(
-                                        "Idle timeout - no messages received for {idle_timeout_secs} seconds"
-                                    ),
-                                    error_code: Some(ErrorCode::ConnectionIdleTimeout),
-                                },
-                                "idle timeout error",
-                            );
-                            // Pin the IdleTimeout close code (4004) before the
-                            // teardown's generic unregistration reason could
-                            // win the first-wins race.
-                            close_signal.request_close(CloseReason::IdleTimeout);
-                            break;
                         }
                     }
-                }
-            } else {
-                // If not authenticated, enforce timeout
-                tokio::select! {
-                    reason = receive_task_close.closed() => {
-                        tracing::debug!(
-                            %active_player_id,
-                            ?reason,
-                            "Connection close requested during authentication; ending receive task"
-                        );
-                        break;
-                    }
-                    msg_opt = receiver.next() => {
-                        match msg_opt {
-                            Some(msg) => msg,
-                            None => break, // Connection closed
-                        }
-                    }
-                    () = &mut auth_deadline => {
-                        // Authentication timeout. Farewell semantics: the
-                        // connection closes right below, so this frame must
-                        // neither wait on queue capacity nor let a full queue
-                        // reclassify the close as a slow-consumer disconnect.
-                        tracing::warn!(%active_player_id, timeout_secs = auth_timeout_secs, "Authentication timeout, closing connection");
-                        enqueue_farewell_message(
-                            &tx_clone,
-                            &close_signal,
-                            &active_player_id,
-                            ServerMessage::Error {
-                                message: format!(
-                                    "Authentication timeout - must authenticate within {auth_timeout_secs} seconds"
-                                ),
-                                error_code: Some(ErrorCode::AuthenticationTimeout),
-                            },
-                            "authentication timeout",
-                        );
-                        // Pin the AuthTimeout close code (4001) before the
-                        // teardown's generic unregistration reason could win
-                        // the first-wins race.
-                        close_signal.request_close(CloseReason::AuthTimeout);
-                        break;
-                    }
+                    // Timeout farewells use this connection's own outbound
+                    // channel and never wait for capacity. The semantic close
+                    // reason is pinned before generic unregistration can win.
+                    inbound_deadline.expire(&tx_clone, &close_signal, &active_player_id);
+                    break;
                 }
             };
 
@@ -2130,7 +2240,26 @@ mod tests {
     use crate::protocol::{ClientMessage, ServerMessage};
     use crate::server::ServerConfig;
     use std::net::SocketAddr;
+    use std::sync::atomic::AtomicBool;
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
+
+    async fn test_server() -> Arc<EnhancedGameServer> {
+        EnhancedGameServer::new(
+            ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::AuthMaintenanceConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct connection test server")
+    }
 
     async fn closed_with_timeout(
         listener: &mut ConnectionCloseListener,
@@ -2139,6 +2268,357 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), listener.closed())
             .await
             .unwrap_or_else(|_| panic!("{context}: close listener never resolved"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_deadlines_reject_frames_ready_at_or_after_boundary() {
+        for (kind, advance_by, context) in [
+            (
+                InboundDeadlineKind::Authentication,
+                Duration::from_millis(10),
+                "authentication input at deadline",
+            ),
+            (
+                InboundDeadlineKind::Authentication,
+                Duration::from_millis(11),
+                "authentication input after deadline",
+            ),
+            (
+                InboundDeadlineKind::Idle,
+                Duration::from_millis(10),
+                "idle input at deadline",
+            ),
+            (
+                InboundDeadlineKind::Idle,
+                Duration::from_millis(11),
+                "idle input after deadline",
+            ),
+        ] {
+            let (_signal, mut close) = ConnectionCloseSignal::channel();
+            let (release, read) = tokio::sync::oneshot::channel();
+            let deadline = Instant::now() + Duration::from_millis(10);
+            let policy = InboundDeadline::for_connection(
+                kind == InboundDeadlineKind::Idle,
+                deadline,
+                10,
+                Some(Duration::from_millis(10)),
+                10,
+            );
+            assert_eq!(policy.kind, kind, "{context}: selected policy");
+            let mut bounded = Box::pin(policy.read(&mut close, read));
+
+            assert!(
+                futures_util::poll!(&mut bounded).is_pending(),
+                "{context}: read must first be observed pending"
+            );
+            tokio::time::advance(advance_by).await;
+            release.send(()).expect("release inbound frame");
+
+            assert!(
+                matches!(bounded.await, InboundRead::DeadlineElapsed),
+                "{context}: expired input must not be admitted for {kind:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_deadlines_accept_frames_strictly_before_boundary() {
+        for kind in [
+            InboundDeadlineKind::Authentication,
+            InboundDeadlineKind::Idle,
+        ] {
+            let (_signal, mut close) = ConnectionCloseSignal::channel();
+            let (release, read) = tokio::sync::oneshot::channel();
+            let deadline = Instant::now() + Duration::from_millis(10);
+            let policy = InboundDeadline::for_connection(
+                kind == InboundDeadlineKind::Idle,
+                deadline,
+                10,
+                Some(Duration::from_millis(10)),
+                10,
+            );
+            assert_eq!(policy.kind, kind);
+            let mut bounded = Box::pin(policy.read(&mut close, read));
+
+            assert!(
+                futures_util::poll!(&mut bounded).is_pending(),
+                "{kind:?}: read must first be observed pending"
+            );
+            tokio::time::advance(Duration::from_millis(9)).await;
+            release.send(()).expect("release inbound frame");
+
+            assert!(
+                matches!(bounded.await, InboundRead::Completed(Ok(()))),
+                "{kind:?}: input strictly before the deadline must remain healthy"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_close_request_precedes_ready_deadline_and_frame() {
+        let (signal, mut close) = ConnectionCloseSignal::channel();
+        let (release, read) = tokio::sync::oneshot::channel();
+        let deadline = Instant::now() + Duration::from_millis(10);
+        let policy = InboundDeadline::for_connection(false, deadline, 10, None, 0);
+        let mut bounded = Box::pin(policy.read(&mut close, read));
+
+        assert!(
+            futures_util::poll!(&mut bounded).is_pending(),
+            "read must first be observed pending"
+        );
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert!(signal.request_close(CloseReason::Shutdown));
+        release.send(()).expect("release inbound frame");
+
+        assert!(matches!(
+            bounded.await,
+            InboundRead::CloseRequested(Some(CloseReason::Shutdown))
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_loop_close_request_precedes_ready_socket_work() {
+        let (signal, mut close) = ConnectionCloseSignal::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_by_operation = Arc::clone(&completed);
+        let operation = async move {
+            gate.await.expect("send-loop gate released");
+            completed_by_operation.store(true, Ordering::Release);
+        };
+        let mut send_loop = Box::pin(run_until_close(&mut close, operation));
+
+        assert!(
+            futures_util::poll!(&mut send_loop).is_pending(),
+            "send loop must first be pending"
+        );
+        assert!(signal.request_close(CloseReason::Shutdown));
+        release.send(()).expect("make socket work ready");
+
+        assert_eq!(send_loop.await, Some(Some(CloseReason::Shutdown)));
+        assert!(
+            !completed.load(Ordering::Acquire),
+            "an already-requested close must cancel simultaneously-ready socket work"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_read_without_deadline_remains_enabled_after_time_advances() {
+        let (_signal, mut close) = ConnectionCloseSignal::channel();
+        let (release, read) = tokio::sync::oneshot::channel();
+        let policy = InboundDeadline::for_connection(true, Instant::now(), 10, None, 0);
+        assert_eq!(policy.at, None);
+        let mut unbounded = Box::pin(policy.read(&mut close, read));
+
+        assert!(
+            futures_util::poll!(&mut unbounded).is_pending(),
+            "read must first be observed pending"
+        );
+        tokio::time::advance(Duration::from_secs(86_400)).await;
+        release.send(()).expect("release inbound frame");
+
+        assert!(
+            matches!(unbounded.await, InboundRead::Completed(Ok(()))),
+            "disabled idle enforcement must not synthesize a deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_timeout_kinds_pin_expected_close_reason_and_error() {
+        for (kind, close_reason, error_code, expected_message) in [
+            (
+                InboundDeadlineKind::Authentication,
+                CloseReason::AuthTimeout,
+                ErrorCode::AuthenticationTimeout,
+                "Authentication timeout - must authenticate within 7 seconds",
+            ),
+            (
+                InboundDeadlineKind::Idle,
+                CloseReason::IdleTimeout,
+                ErrorCode::ConnectionIdleTimeout,
+                "Idle timeout - no messages received for 7 seconds",
+            ),
+        ] {
+            assert_eq!(kind.close_reason(), close_reason);
+            assert_eq!(kind.error_code(), error_code);
+            assert_eq!(kind.error_message(7), expected_message);
+
+            let (signal, listener) = ConnectionCloseSignal::channel();
+            let (tx, mut rx) = outbound_queue::channel(2, 2);
+            let policy = InboundDeadline {
+                at: Some(Instant::now()),
+                kind,
+                timeout_secs: 7,
+            };
+            policy.expire(&tx, &signal, &PlayerId::from_u128(1));
+            assert_eq!(listener.requested_reason(), Some(close_reason));
+            let farewell = rx
+                .try_recv()
+                .expect("timeout farewell must be queued synchronously");
+            let crate::coordination::outbound_queue::OutboundPayload::Message(message) =
+                farewell.payload
+            else {
+                panic!("{kind:?}: timeout farewell must be a server message");
+            };
+            let ServerMessage::Error {
+                message,
+                error_code: observed_code,
+            } = message.as_ref()
+            else {
+                panic!("{kind:?}: timeout farewell must use ServerMessage::Error");
+            };
+            assert_eq!(
+                message, expected_message,
+                "{kind:?}: production timeout handler must preserve exact text"
+            );
+            assert_eq!(
+                *observed_code,
+                Some(error_code),
+                "{kind:?}: production timeout handler must preserve exact error code"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ping_write_expiry_clears_probe_and_preserves_reason_ownership() {
+        for (reason, expected_metric) in [
+            (CloseReason::ActivityTimeout, 0),
+            (CloseReason::SlowConsumer, 1),
+        ] {
+            for (advance_by, context) in [
+                (Duration::from_millis(10), "exact deadline"),
+                (Duration::from_millis(11), "after deadline"),
+            ] {
+                let server = test_server().await;
+                let (close, close_listener) = ConnectionCloseSignal::channel();
+                let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+                let nonce = 7;
+                let started_at = Instant::now();
+                assert_eq!(begin_ping_probe(&probe_state, 0, nonce, started_at), Ok(()));
+                let (release, gate) = tokio::sync::oneshot::channel();
+                let completed = Arc::new(AtomicBool::new(false));
+                let completed_by_write = Arc::clone(&completed);
+                let write = async move {
+                    gate.await.expect("Ping-write gate released");
+                    completed_by_write.store(true, Ordering::Release);
+                    Ok::<(), ()>(())
+                };
+                let mut ping_write = Box::pin(complete_ping_write(
+                    started_at,
+                    Duration::from_millis(10),
+                    reason,
+                    write,
+                    &probe_state,
+                    nonce,
+                    &close,
+                    &server,
+                ));
+
+                assert!(
+                    futures_util::poll!(&mut ping_write).is_pending(),
+                    "{reason:?}, {context}: Ping write must first be pending"
+                );
+                tokio::time::advance(advance_by).await;
+                release.send(()).expect("make Ping write ready");
+
+                assert!(
+                    matches!(ping_write.await, Err(PingWriteFailure::DeadlineElapsed)),
+                    "{reason:?}, {context}: Ping must expire through the production seam"
+                );
+                assert!(
+                    !completed.load(Ordering::Acquire),
+                    "{reason:?}, {context}: expired Ping send must be cancelled"
+                );
+                assert!(
+                    probe_state.borrow().active.is_none(),
+                    "{reason:?}, {context}: expired Ping probe must be cleared"
+                );
+                assert_eq!(
+                    close_listener.requested_reason(),
+                    Some(reason),
+                    "{reason:?}, {context}: policy-selected close reason must win"
+                );
+                assert_eq!(
+                    server
+                        .metrics()
+                        .websocket_slow_consumer_disconnects
+                        .load(Ordering::Relaxed),
+                    expected_metric,
+                    "{reason:?}, {context}: only close 4002 increments the slow-consumer metric"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ping_write_completes_strictly_before_deadline_and_keeps_probe_active() {
+        let server = test_server().await;
+        let (close, close_listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let nonce = 7;
+        let started_at = Instant::now();
+        assert_eq!(begin_ping_probe(&probe_state, 0, nonce, started_at), Ok(()));
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let mut ping_write = Box::pin(complete_ping_write(
+            started_at,
+            Duration::from_millis(10),
+            CloseReason::ActivityTimeout,
+            async move {
+                gate.await.expect("Ping-write gate released");
+                Ok::<(), ()>(())
+            },
+            &probe_state,
+            nonce,
+            &close,
+            &server,
+        ));
+
+        assert!(
+            futures_util::poll!(&mut ping_write).is_pending(),
+            "Ping write must first be pending"
+        );
+        tokio::time::advance(Duration::from_millis(9)).await;
+        release.send(()).expect("make Ping write ready");
+
+        let timing = ping_write.await.expect("just-before Ping write succeeds");
+        assert_eq!(timing.completed_at, Instant::now());
+        assert!(
+            probe_state.borrow().active.is_some(),
+            "successful Ping write keeps the probe active for Pong resolution"
+        );
+        assert_eq!(close_listener.requested_reason(), None);
+    }
+
+    #[tokio::test]
+    async fn ping_socket_error_clears_probe_and_requests_policy_reason() {
+        let server = test_server().await;
+        let (close, close_listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let nonce = 7;
+        let started_at = Instant::now();
+        assert_eq!(begin_ping_probe(&probe_state, 0, nonce, started_at), Ok(()));
+
+        let result = complete_ping_write(
+            started_at,
+            Duration::from_secs(1),
+            CloseReason::ActivityTimeout,
+            async { Err::<(), _>("socket closed") },
+            &probe_state,
+            nonce,
+            &close,
+            &server,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(PingWriteFailure::Socket("socket closed"))
+        ));
+        assert!(probe_state.borrow().active.is_none());
+        assert_eq!(
+            close_listener.requested_reason(),
+            Some(CloseReason::ActivityTimeout)
+        );
     }
 
     #[test]

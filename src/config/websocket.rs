@@ -21,10 +21,11 @@ pub struct WebSocketConfig {
     /// Maximum time in milliseconds to wait before flushing batch
     #[serde(default = "default_batch_interval_ms")]
     pub batch_interval_ms: u64,
-    /// Authentication timeout in seconds (time allowed for clients to authenticate)
+    /// Exclusive authentication-input deadline in seconds.
     #[serde(default = "default_auth_timeout_secs")]
     pub auth_timeout_secs: u64,
-    /// Post-authentication idle timeout in seconds; `0` disables the timeout.
+    /// Exclusive post-authentication idle-input deadline in seconds; `0`
+    /// disables the timeout.
     ///
     /// An authenticated connection that produces no inbound WebSocket frame of
     /// any kind (including Ping/Pong) for this long is closed (normal
@@ -74,7 +75,7 @@ pub struct WebSocketConfig {
     /// notified through the normal disconnect flow.
     #[serde(default = "default_slow_consumer_timeout_ms")]
     pub slow_consumer_timeout_ms: u64,
-    /// Maximum reliable/control queue sojourn and per-write progress time.
+    /// Maximum exclusive reliable/control sojourn and per-write progress time.
     ///
     /// Reliable traffic uses an end-to-end queue-plus-write deadline. Control
     /// traffic uses its own enqueue age, while latest/volatile traffic uses

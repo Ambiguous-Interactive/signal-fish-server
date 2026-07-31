@@ -195,15 +195,15 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `false` | Opt-in outbound message batching (off keeps real-time relay latency low; on trades up to `batch_interval_ms` per hop for fewer writes) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
-| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Seconds to wait for auth after connect |
-| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Seconds without any inbound frame before an authenticated connection is closed (`0` disables) |
+| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Exclusive deadline for authentication input after connect |
+| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Exclusive inbound-frame deadline for authenticated connections (`0` disables) |
 | `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Cadence for server-initiated RFC 6455 Ping frames (`0` disables; must be ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS` | `websocket.pong_timeout_secs` | `5` | Seconds allowed for the matching Pong before close `4003 activity_timeout` (must be > `0` and ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES` | `websocket.socket_send_buffer_bytes` | `65536` | Requested TCP send-buffer bound ahead of WebSocket control traffic (`0` keeps the platform default; must be ≤ `16777216`) |
 | `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY` | `websocket.send_queue_capacity` | `1024` | Per-connection data queue capacity (must be ≥ 1); only reliable delivery waits when full |
 | `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY` | `websocket.control_queue_capacity` | `128` | Per-connection v3 priority control queue capacity (must be ≥ 2) |
 | `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000` | Milliseconds reliable delivery may wait for data-queue space before closing the recipient with `4002 slow_consumer` (must be > 0 and ≤ `600000`) |
-| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS` | `websocket.max_sojourn_ms` | `15000` | Reliable/control sojourn and selected socket-write progress deadline before `4002 slow_consumer` (must be > `0` and exceed `batch_interval_ms` when batching is enabled) |
+| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS` | `websocket.max_sojourn_ms` | `15000` | Exclusive reliable/control sojourn and selected socket-write completion deadline before `4002 slow_consumer` (must be > `0` and exceed `batch_interval_ms` when batching is enabled) |
 | `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Seconds between v3 aggregate `RelayStats` and counter-only `DeliveryReport` snapshots (`0` disables periodic snapshots, not exact gap reports; must be ≤ `3600`) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
@@ -325,9 +325,10 @@ Complete reference of all configuration options with environment variable overri
 - `enable_batching` - Opt-in outbound batching (off by default; on adds up to `batch_interval_ms` latency per hop)
 - `batch_size` - Max messages per batch
 - `batch_interval_ms` - Batch flush interval
-- `auth_timeout_secs` - Seconds to wait for auth after connect
-- `idle_timeout_secs` - Post-authentication idle timeout (default: 300; `0`
-  disables). An authenticated connection that produces no inbound WebSocket
+- `auth_timeout_secs` - Exclusive deadline for authentication input after
+  connect
+- `idle_timeout_secs` - Exclusive post-authentication inbound-frame deadline
+  (default: 300; `0` disables). An authenticated connection that produces no inbound WebSocket
   frame of any kind (including Ping/Pong) for this long receives a
   `CONNECTION_IDLE_TIMEOUT` error and is closed through the normal disconnect
   path, so the reconnection grace period still applies. The error is delivered
@@ -387,8 +388,10 @@ Complete reference of all configuration options with environment variable overri
   Control messages use their own enqueue timestamp, so stale lossy data cannot
   age a fresh report. Latest/volatile queue age is resolved by their explicit
   drop/coalesce policy; once selected for the socket, this value bounds write
-  progress so a transport that stops draining cannot wedge the writer. It must
-  exceed `batch_interval_ms` when batching is enabled.
+  progress so a transport that stops draining cannot wedge the writer. Write
+  completion must be observed strictly before this exclusive deadline; a
+  completion ready at or after it expires. The value must exceed
+  `batch_interval_ms` when batching is enabled.
 - `delivery_stats_interval_secs` - Periodic v3 aggregate/counter snapshot
   cadence (default: 0, disabled; must be ≤ 3600). This does not suppress exact
   gap-bearing `DeliveryReport` frames, which are emitted whenever a lossy class

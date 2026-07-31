@@ -91,6 +91,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce WebSocket I/O deadlines as exclusive boundaries (issue #233).
+  Selected outbound and server Ping writes are accepted only when the server
+  observes completion strictly before the deadline. Authentication and
+  authenticated-idle input are likewise accepted only when the server observes
+  receipt strictly before the deadline; readiness at or after it cannot revive
+  expired work. Existing `4002 slow_consumer`, `4003 activity_timeout`, `4001
+  auth_timeout`, and `4004 idle_timeout` attribution remains unchanged, and an
+  already-requested connection close retains precedence.
 - Keep every control-message capacity wait bounded by the configured
   slow-consumer grace. Queue capacity that returns at or after the deadline can
   no longer revive an expired room-join/reconnect baseline, lifecycle

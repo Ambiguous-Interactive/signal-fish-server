@@ -13,6 +13,7 @@ use tokio::time::Instant;
 
 use crate::server::EnhancedGameServer;
 
+use super::complete_before_deadline;
 use super::connection::{record_outbound_probe_activity, PingProbeState};
 use super::sending::{
     preflight_binary_fallback, send_single_message, write_pending_unsupported_report,
@@ -241,6 +242,44 @@ fn queued_write_deadline(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn complete_selected_write<F>(
+    deadline: Instant,
+    write: F,
+    player_id: &PlayerId,
+    server: &EnhancedGameServer,
+    close_signal: &ConnectionCloseSignal,
+    max_sojourn: Duration,
+) -> Result<F::Output, QueueWriteError>
+where
+    F: Future,
+{
+    match complete_before_deadline(deadline, write).await {
+        Ok(result) => Ok(result),
+        Err(_) => {
+            #[cfg(feature = "trace-validation")]
+            close_signal.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                None,
+                Some("writer-sojourn-expired"),
+            );
+            let initiated_close = close_signal.request_close(CloseReason::SlowConsumer);
+            if initiated_close {
+                server
+                    .metrics()
+                    .increment_websocket_slow_consumer_disconnects();
+            }
+            tracing::warn!(
+                %player_id,
+                max_sojourn_ms = max_sojourn.as_millis() as u64,
+                initiated_close,
+                "Outbound message exceeded the maximum queue sojourn; closing recipient"
+            );
+            Err(QueueWriteError::SojournExpired)
+        }
+    }
+}
+
 /// Materialize and write one queued delivery report, advancing its counter
 /// frontier only after the sink's send/flush future succeeds.
 ///
@@ -391,30 +430,16 @@ pub(super) async fn send_queued(
     let result = if max_sojourn.is_zero() {
         write.await.map_err(|()| QueueWriteError::SocketClosed)
     } else {
-        match tokio::time::timeout_at(deadline, write).await {
-            Ok(result) => result.map_err(|()| QueueWriteError::SocketClosed),
-            Err(_) => {
-                #[cfg(feature = "trace-validation")]
-                close_signal.record_trace(
-                    crate::trace_validation::DeliveryTraceAction::Unsupported,
-                    None,
-                    Some("writer-sojourn-expired"),
-                );
-                let initiated_close = close_signal.request_close(CloseReason::SlowConsumer);
-                if initiated_close {
-                    server
-                        .metrics()
-                        .increment_websocket_slow_consumer_disconnects();
-                }
-                tracing::warn!(
-                    %player_id,
-                    max_sojourn_ms = max_sojourn.as_millis() as u64,
-                    initiated_close,
-                    "Outbound message exceeded the maximum queue sojourn; closing recipient"
-                );
-                return Err(QueueWriteError::SojournExpired);
-            }
-        }
+        complete_selected_write(
+            deadline,
+            write,
+            player_id,
+            server,
+            close_signal,
+            max_sojourn,
+        )
+        .await?
+        .map_err(|()| QueueWriteError::SocketClosed)
     };
     let disposition = result?;
     if disposition == SendDisposition::Written {
@@ -440,9 +465,30 @@ mod tests {
     use super::*;
 
     use crate::coordination::outbound_queue::{channel, DataDeliveryMetadata, OutboundData};
+    use crate::database::DatabaseConfig;
     use crate::protocol::{DeliveryClass, DeliveryCountersByClass, GameDataEncoding, RoomId};
+    use crate::server::ServerConfig;
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+
+    async fn test_server() -> Arc<EnhancedGameServer> {
+        EnhancedGameServer::new(
+            ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::AuthMaintenanceConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct selected-write test server")
+    }
 
     fn data(class: DeliveryClass, seq: u64) -> OutboundData {
         let from_player = PlayerId::from_u128(1);
@@ -493,6 +539,102 @@ mod tests {
         let mut probe = DeliveryReportPayload::default();
         receiver.prepare_report_for_wire(&mut probe);
         probe.per_class
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_write_expires_at_or_after_deadline_without_completing_accounting() {
+        for (advance_by, context) in [
+            (Duration::from_millis(10), "exact deadline"),
+            (Duration::from_millis(11), "after deadline"),
+        ] {
+            let server = test_server().await;
+            let player_id = PlayerId::from_u128(1);
+            let (close, close_listener) = ConnectionCloseSignal::channel();
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let completed = Arc::new(AtomicBool::new(false));
+            let completed_by_write = Arc::clone(&completed);
+            let write = async move {
+                gate.await.expect("selected-write gate released");
+                completed_by_write.store(true, Ordering::Release);
+            };
+            let deadline = Instant::now() + Duration::from_millis(10);
+            let mut selected = Box::pin(complete_selected_write(
+                deadline,
+                write,
+                &player_id,
+                &server,
+                &close,
+                Duration::from_millis(10),
+            ));
+
+            assert!(
+                futures_util::poll!(&mut selected).is_pending(),
+                "{context}: selected write must first be pending"
+            );
+            tokio::time::advance(advance_by).await;
+            release.send(()).expect("make selected write ready");
+
+            assert_eq!(
+                selected.await,
+                Err(QueueWriteError::SojournExpired),
+                "{context}: selected write must fail with the production outcome"
+            );
+            assert!(
+                !completed.load(Ordering::Acquire),
+                "{context}: expired socket work must be cancelled before accounting can complete"
+            );
+            assert_eq!(
+                close_listener.requested_reason(),
+                Some(CloseReason::SlowConsumer),
+                "{context}: selected-write expiry must own close 4002"
+            );
+            assert_eq!(
+                server
+                    .metrics()
+                    .websocket_slow_consumer_disconnects
+                    .load(Ordering::Relaxed),
+                1,
+                "{context}: the winning expiry must increment its metric exactly once"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_write_completes_strictly_before_deadline() {
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(1);
+        let (close, close_listener) = ConnectionCloseSignal::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let deadline = Instant::now() + Duration::from_millis(10);
+        let mut selected = Box::pin(complete_selected_write(
+            deadline,
+            gate,
+            &player_id,
+            &server,
+            &close,
+            Duration::from_millis(10),
+        ));
+
+        assert!(
+            futures_util::poll!(&mut selected).is_pending(),
+            "selected write must first be pending"
+        );
+        tokio::time::advance(Duration::from_millis(9)).await;
+        release.send(()).expect("make selected write ready");
+
+        assert_eq!(selected.await, Ok(Ok(())));
+        assert_eq!(
+            close_listener.requested_reason(),
+            None,
+            "healthy completion must not request a close"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0
+        );
     }
 
     /// Issue #218: exercise the production seam used by `send_queued` with a

@@ -12,7 +12,8 @@
 // - metrics: Metrics endpoints and authentication
 // - prometheus: Prometheus metrics rendering
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
+use tokio::time::Instant;
 
 mod batching;
 mod connection;
@@ -24,6 +25,29 @@ mod sending;
 mod token_binding;
 
 pub(crate) use sending::RelayFrameCache;
+
+/// Run an operation only while its exclusive deadline remains live.
+///
+/// Success means the operation was observed complete strictly before
+/// `deadline`; when both the operation and timer are ready on the same poll,
+/// expiry wins.
+pub(super) async fn complete_before_deadline<F>(
+    deadline: Instant,
+    operation: F,
+) -> Result<F::Output, DeadlineElapsed>
+where
+    F: Future,
+{
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(deadline) => Err(DeadlineElapsed),
+        output = &mut operation => Ok(output),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DeadlineElapsed;
 
 /// Narrow, dev-only exports used by the relay serialization benchmarks.
 ///
@@ -111,4 +135,54 @@ pub fn registered_connection_shutdown_settle_timeout() -> Duration {
     CONNECTION_CLOSE_WRITE_TIMEOUT
         .saturating_mul(REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
         .saturating_add(REGISTERED_SHUTDOWN_SETTLE_MARGIN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn exclusive_deadline_rejects_completion_ready_at_or_after_boundary() {
+        for (advance_by, boundary) in [
+            (Duration::from_millis(10), "exact deadline"),
+            (Duration::from_millis(11), "after deadline"),
+        ] {
+            let (release, operation) = tokio::sync::oneshot::channel();
+            let deadline = Instant::now() + Duration::from_millis(10);
+            let mut bounded = Box::pin(complete_before_deadline(deadline, operation));
+
+            assert!(
+                futures_util::poll!(&mut bounded).is_pending(),
+                "{boundary}: operation must first be observed pending"
+            );
+            tokio::time::advance(advance_by).await;
+            release.send(()).expect("release operation at boundary");
+
+            assert_eq!(
+                bounded.await,
+                Err(DeadlineElapsed),
+                "{boundary}: expired work must not be revived"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exclusive_deadline_accepts_completion_before_boundary() {
+        let (release, operation) = tokio::sync::oneshot::channel();
+        let deadline = Instant::now() + Duration::from_millis(10);
+        let mut bounded = Box::pin(complete_before_deadline(deadline, operation));
+
+        assert!(
+            futures_util::poll!(&mut bounded).is_pending(),
+            "operation must first be observed pending"
+        );
+        tokio::time::advance(Duration::from_millis(9)).await;
+        release.send(()).expect("release operation before boundary");
+
+        assert_eq!(
+            bounded.await,
+            Ok(Ok(())),
+            "completion strictly before the deadline must remain healthy"
+        );
+    }
 }
