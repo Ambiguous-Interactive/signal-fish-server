@@ -4249,6 +4249,69 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
          allowlist and once in the staged release_files array.\nJob block:\n{prepare}"
     );
 
+    let reuse_guard = prepare
+        .find("if [ \"$BRANCH_EXISTS\" = \"true\" ]; then")
+        .expect("release delivery must branch on verified remote branch existence");
+    let absent_branch = reuse_guard
+        + prepare[reuse_guard..]
+            .find("\n          else\n")
+            .expect("release delivery must have an absent-branch arm");
+    let delivery_end = absent_branch
+        + prepare[absent_branch..]
+            .find("\n          fi\n")
+            .expect("release delivery branch must terminate before PR verification");
+    let verified_sha_positions: Vec<_> = prepare
+        .match_indices("expected_head_sha=$VERIFIED_BRANCH_SHA")
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(
+        verified_sha_positions.len(),
+        1,
+        "exact branch reuse must propagate the verified remote SHA exactly once.\nJob block:\n{prepare}"
+    );
+    assert!(
+        verified_sha_positions[0] > reuse_guard && verified_sha_positions[0] < absent_branch,
+        "the existing-branch arm must use VERIFIED_BRANCH_SHA before the absent-branch arm.\n\
+         Job block:\n{prepare}"
+    );
+    for mutation in [
+        "git checkout -b \"$BRANCH\"",
+        "release_files=(",
+        "git add \"${release_files[@]}\"",
+        "git commit -m \"release: ${VERSION}\"",
+        "push origin \"HEAD:refs/heads/${BRANCH}\"",
+        "expected_head_sha=$(git rev-parse HEAD)",
+    ] {
+        let positions: Vec<_> = prepare
+            .match_indices(mutation)
+            .map(|(position, _)| position)
+            .collect();
+        assert_eq!(
+            positions.len(),
+            1,
+            "release delivery must contain `{mutation}` exactly once.\nJob block:\n{prepare}"
+        );
+        let position = positions[0];
+        assert!(
+            position > absent_branch && position < delivery_end,
+            "`{mutation}` must run only when the verified release branch is absent; an exact \
+             existing branch must be reused without a redundant local commit.\nJob block:\n{prepare}"
+        );
+    }
+    let ensure_positions: Vec<_> = prepare
+        .match_indices("bash scripts/ensure-release-pr.sh")
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(
+        ensure_positions.len(),
+        1,
+        "release delivery must verify its PR exactly once.\nJob block:\n{prepare}"
+    );
+    assert!(
+        ensure_positions[0] > delivery_end,
+        "PR verification must run after either branch-delivery arm.\nJob block:\n{prepare}"
+    );
+
     assert!(
         prepare
             .contains("The workflow derives version \\`${VERSION}\\` from the reviewed Cargo.toml")
