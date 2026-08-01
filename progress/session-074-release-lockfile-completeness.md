@@ -73,9 +73,12 @@ policy tests, shell syntax and ShellCheck, CI configuration validation, workflow
 hygiene, tooling parity, and MSRV consistency are green. The first hosted
 candidate exposed the `cargo-deny` wildcard rule in the fuzz graph; its focused
 corrective test, the exact fuzz `cargo deny check bans`, locked metadata, format,
-ShellCheck, and deny-warnings Clippy validation are also green. Final hosted
-validation and the reviewer loop are recorded on PR #238 before publication
-completes.
+ShellCheck, and deny-warnings Clippy validation are also green. The final
+nightly AddressSanitizer lane exposed Cargo's newer `--locked` diagnostic
+(`cannot update the lock file`) in the stale-graph negative test; the assertion
+now accepts both supported Cargo phrasings while still requiring the lockfile
+and `--locked` evidence. Final hosted validation and the reviewer loop are
+recorded on PR #238 before publication completes.
 
 ## Follow-up
 

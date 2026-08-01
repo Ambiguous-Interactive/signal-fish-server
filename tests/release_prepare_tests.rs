@@ -783,7 +783,10 @@ fn release_metadata_preflight_rejects_a_future_stale_graph_missing_the_root_entr
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("lock file") && stderr.contains("needs to be updated"),
+        stderr.contains("lock file")
+            && (stderr.contains("needs to be updated")
+                || stderr.contains("cannot update the lock file"))
+            && stderr.contains("--locked"),
         "unexpected stale graph diagnostic:\n{}",
         stderr
     );
