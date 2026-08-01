@@ -95,6 +95,7 @@ if ! is_real_calendar_date "$RELEASE_DATE"; then
     exit 2
 fi
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "ERROR: prepare-release.sh must run inside a Git worktree." >&2
     exit 1
@@ -103,9 +104,74 @@ cd "$REPO_ROOT"
 
 for required in \
     Cargo.toml Cargo.lock CHANGELOG.md .llm/context.md docs/library-usage.md \
-    clients/native/Cargo.lock scripts/check-doc-consistency.sh; do
+    clients/native/Cargo.toml clients/native/Cargo.lock \
+    fuzz/Cargo.toml fuzz/Cargo.lock scripts/check-doc-consistency.sh; do
     if [ ! -f "$required" ]; then
         echo "ERROR: Required release file is missing: $required" >&2
+        exit 1
+    fi
+done
+for required_helper in \
+    "$SCRIPT_DIR/list-release-lockfiles.sh" \
+    "$SCRIPT_DIR/release-lockfile-packages.awk"; do
+    if [ ! -f "$required_helper" ]; then
+        echo "ERROR: Required release helper is missing: $required_helper" >&2
+        exit 1
+    fi
+done
+
+# Validate every committed manifest before lock contents are used to select
+# rewrite targets. A newly added path dependency can make its sibling lockfile
+# stale before that lockfile contains the root package, so manifest discovery is
+# deliberately independent of package-block discovery.
+TRACKED_MANIFESTS=()
+while IFS= read -r -d '' manifest; do
+    TRACKED_MANIFESTS+=("$manifest")
+done < <(git ls-files -z -- ':(glob)**/Cargo.toml')
+if [ "${#TRACKED_MANIFESTS[@]}" -eq 0 ]; then
+    echo "ERROR: No tracked Cargo.toml manifests were found." >&2
+    exit 1
+fi
+
+# Discover every committed standalone lockfile that embeds the root path package
+# and therefore needs its local package identity rewritten for this release.
+RELEASE_LOCKFILES=()
+while IFS= read -r -d '' lockfile; do
+    RELEASE_LOCKFILES+=("$lockfile")
+done < <(bash "$SCRIPT_DIR/list-release-lockfiles.sh")
+
+if [ "${#RELEASE_LOCKFILES[@]}" -eq 0 ]; then
+    echo "ERROR: No tracked Cargo.lock embeds the signal-fish-server path package." >&2
+    exit 1
+fi
+
+for required_lockfile in Cargo.lock clients/native/Cargo.lock fuzz/Cargo.lock; do
+    required_found=0
+    for lockfile in "${RELEASE_LOCKFILES[@]}"; do
+        if [ "$lockfile" = "$required_lockfile" ]; then
+            required_found=1
+            break
+        fi
+    done
+    if [ "$required_found" -ne 1 ]; then
+        echo "ERROR: Expected exactly one signal-fish-server package entry in $required_lockfile." >&2
+        exit 1
+    fi
+done
+
+manifest_for_lockfile() {
+    local lockfile="$1"
+    if [ "$lockfile" = "Cargo.lock" ]; then
+        printf '%s\n' Cargo.toml
+    else
+        printf '%s/Cargo.toml\n' "${lockfile%/Cargo.lock}"
+    fi
+}
+
+for lockfile in "${RELEASE_LOCKFILES[@]}"; do
+    manifest=$(manifest_for_lockfile "$lockfile")
+    if [ ! -f "$manifest" ]; then
+        echo "ERROR: Tracked release lockfile $lockfile has no sibling manifest at $manifest." >&2
         exit 1
     fi
 done
@@ -198,29 +264,23 @@ fi
 PREPARE_RELEASE_CARGO_BIN=${PREPARE_RELEASE_CARGO_BIN:-cargo}
 PREPARE_RELEASE_DOC_CHECK=${PREPARE_RELEASE_DOC_CHECK:-scripts/check-doc-consistency.sh}
 
-# Validate the released baseline before touching any of the six output files.
+# Validate the released baseline before touching any release output file.
 # The documentation checker is deliberately file-only: fetched tags and clone
 # depth cannot change whether the comparison chain is valid.
-for lockfile in Cargo.lock clients/native/Cargo.lock; do
-    lock_entry_state=$(awk -v current_version="$CURRENT_VERSION" '
-        BEGIN { target = 0; entries = 0; matching = 0 }
-        /^\[\[package\]\]$/ { target = 0 }
-        /^name = "signal-fish-server"$/ { target = 1 }
-        target == 1 && /^version = "/ {
-            entries++
-            if ($0 == "version = \"" current_version "\"") matching++
-            target = 0
-        }
-        END { print entries ":" matching }
-    ' "$lockfile")
+for lockfile in "${RELEASE_LOCKFILES[@]}"; do
+    lock_entry_state=$(awk \
+        -v mode=state \
+        -v expected_version="$CURRENT_VERSION" \
+        -f "$SCRIPT_DIR/release-lockfile-packages.awk" \
+        -- "$lockfile")
     if [ "$lock_entry_state" != "1:1" ]; then
         echo "ERROR: Expected exactly one signal-fish-server package entry at version $CURRENT_VERSION in $lockfile." >&2
         exit 1
     fi
 done
 "$PREPARE_RELEASE_DOC_CHECK" --skip-changelog-gate
-for manifest in Cargo.toml clients/native/Cargo.toml; do
-    "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --no-deps --format-version 1 \
+for manifest in "${TRACKED_MANIFESTS[@]}"; do
+    "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --format-version 1 \
         --manifest-path "$manifest" >/dev/null
 done
 
@@ -270,19 +330,12 @@ replace_locked_path_package_version() {
     local output count_file
     output=$(mktemp)
     count_file=$(mktemp)
-    awk -v next_version="$next_version" -v count_file="$count_file" '
-        BEGIN { target = 0; changed = 0 }
-        /^\[\[package\]\]$/ { target = 0 }
-        /^name = "signal-fish-server"$/ { target = 1 }
-        target == 1 && /^version = "/ {
-            print "version = \"" next_version "\""
-            changed++
-            target = 0
-            next
-        }
-        { print }
-        END { print changed > count_file }
-    ' "$file" > "$output"
+    awk \
+        -v mode=rewrite \
+        -v next_version="$next_version" \
+        -v count_file="$count_file" \
+        -f "$SCRIPT_DIR/release-lockfile-packages.awk" \
+        -- "$file" > "$output"
     if [ "$(cat "$count_file")" -ne 1 ]; then
         echo "ERROR: Expected exactly one signal-fish-server package entry in $file." >&2
         rm -f "$output" "$count_file"
@@ -388,8 +441,35 @@ cut_changelog_release() {
     rm -f "$count_file"
 }
 
+ROLLBACK_DIR=$(mktemp -d)
+ROLLBACK_FILES=(
+    Cargo.toml
+    "${RELEASE_LOCKFILES[@]}"
+    CHANGELOG.md
+    docs/library-usage.md
+    .llm/context.md
+)
+for file in "${ROLLBACK_FILES[@]}"; do
+    mkdir -p "$ROLLBACK_DIR/$(dirname -- "$file")"
+    cp -p "$file" "$ROLLBACK_DIR/$file"
+done
+ROLLBACK_ACTIVE=1
+restore_on_failure() {
+    local status=$?
+    trap - EXIT
+    if [ "$ROLLBACK_ACTIVE" -eq 1 ] && [ "$status" -ne 0 ]; then
+        for file in "${ROLLBACK_FILES[@]}"; do
+            cp -p "$ROLLBACK_DIR/$file" "$file"
+        done
+        echo "ERROR: Release preparation failed; restored every release file." >&2
+    fi
+    rm -rf "$ROLLBACK_DIR"
+    exit "$status"
+}
+trap restore_on_failure EXIT
+
 replace_root_package_version Cargo.toml "$NEXT_VERSION"
-for lockfile in Cargo.lock clients/native/Cargo.lock; do
+for lockfile in "${RELEASE_LOCKFILES[@]}"; do
     replace_locked_path_package_version "$lockfile" "$NEXT_VERSION"
 done
 replace_documented_version docs/library-usage.md "$CURRENT_VERSION" "$NEXT_VERSION"
@@ -401,13 +481,16 @@ if [ "$(read_package_version)" != "$NEXT_VERSION" ]; then
     exit 1
 fi
 
-for manifest in Cargo.toml clients/native/Cargo.toml; do
-    "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --no-deps --format-version 1 \
+for lockfile in "${RELEASE_LOCKFILES[@]}"; do
+    manifest=$(manifest_for_lockfile "$lockfile")
+    "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --format-version 1 \
         --manifest-path "$manifest" >/dev/null
 done
 "$PREPARE_RELEASE_DOC_CHECK" --changed-files \
-    Cargo.toml Cargo.lock clients/native/Cargo.lock \
+    Cargo.toml "${RELEASE_LOCKFILES[@]}" \
     CHANGELOG.md docs/library-usage.md .llm/context.md
+
+ROLLBACK_ACTIVE=0
 
 printf 'Prepared Signal Fish Server %s -> %s (%s).\n' \
     "$CURRENT_VERSION" "$NEXT_VERSION" "$RELEASE_DATE"

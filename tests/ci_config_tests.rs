@@ -4217,12 +4217,16 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "toolchain: ${{ steps.toolchain.outputs.channel }}",
         "bash scripts/prepare-release.sh --bump \"$BUMP\"",
         "git diff --check",
-        "branch=\"release/v${version}\"",
+        "bash scripts/list-release-lockfiles.sh",
+        "release_files=(",
+        "git add \"${release_files[@]}\"",
+        "bash scripts/resolve-prepared-release.sh",
+        "VERIFIED_BRANCH_SHA: ${{ steps.release.outputs.branch_sha }}",
+        "if: ${{ always() && !inputs.dry_run }}",
+        "bash scripts/ensure-release-pr.sh",
+        "\"$body_file\" \"$expected_head_sha\"",
         "auth_header=$(printf 'x-access-token:%s' \"$GH_TOKEN\" | base64 | tr -d '\\n')",
-        "ls-remote --exit-code --tags",
-        "ls-remote --exit-code --heads",
         "push origin \"HEAD:refs/heads/${BRANCH}\"",
-        "gh pr create",
         "Release - Publish Crate",
         "actions/upload-artifact@v7.0.1",
     ] {
@@ -4254,10 +4258,9 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
                  ${auth_header}\""
             )
             .count(),
-        3,
-        "Every remote git operation (tag probe, branch probe, and branch push) must use the \
-         installation-token authorization header; unauthenticated probes can fail on private \
-         repositories or anonymous rate limits."
+        1,
+        "The release-branch push must use the installation-token authorization header; the \
+         tested release-state helper authenticates its remote probes separately."
     );
 
     let checkout = prepare
@@ -4278,6 +4281,21 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
             && install_toolchain < prepare_files,
         "The pinned Rust toolchain must be installed after checkout and before release \
          preparation invokes Cargo."
+    );
+
+    let recovery = prepare
+        .find("Create recovery patch")
+        .expect("prepare job must capture recovery state");
+    let push = prepare
+        .find("Push release branch and open pull request")
+        .expect("prepare job must deliver the release branch");
+    let upload = prepare
+        .find("Upload release preparation recovery patch")
+        .expect("prepare job must upload recovery state after a failure");
+    assert!(
+        recovery < push && push < upload,
+        "Recovery data must be captured before delivery can fail and uploaded only after that \
+         failure."
     );
 }
 
@@ -4460,11 +4478,18 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         "Cargo.toml",
         "Cargo.lock",
         "clients/native/Cargo.lock",
+        "fuzz/Cargo.lock",
+        "RELEASE_LOCKFILES",
+        "TRACKED_MANIFESTS",
+        "git ls-files -z -- ':(glob)**/Cargo.toml'",
+        "required_lockfile in Cargo.lock clients/native/Cargo.lock fuzz/Cargo.lock",
+        "list-release-lockfiles.sh",
+        "release-lockfile-packages.awk",
         "docs/library-usage.md",
         ".llm/context.md",
         "Unreleased",
         "cut_changelog_release CHANGELOG.md \"$NEXT_VERSION\" \"$RELEASE_DATE\" \"$CURRENT_VERSION\"",
-        "metadata --locked --no-deps --format-version 1",
+        "metadata --locked --format-version 1",
         "scripts/check-doc-consistency.sh",
     ] {
         assert!(
@@ -4474,7 +4499,7 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         );
     }
 
-    for manifest in ["Cargo.toml", "clients/native/Cargo.toml"] {
+    for manifest in ["Cargo.toml", "clients/native/Cargo.toml", "fuzz/Cargo.toml"] {
         assert!(
             script.contains(manifest),
             "prepare-release.sh must validate {manifest} with locked Cargo metadata."

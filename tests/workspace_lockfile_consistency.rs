@@ -68,18 +68,24 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
             .display()
             .to_string();
         let text = read_file(lock);
-        match locked_root_crate_version(&text) {
+        let versions = locked_root_crate_versions(&text);
+        match versions.as_slice() {
             // Lockfiles that do not reference the workspace crate are irrelevant
             // to this guard (none today, but stay future-proof).
-            None => continue,
-            Some(found) if found == expected => checked.push(rel),
-            Some(found) => {
+            [] => continue,
+            [found] if found == &expected => checked.push(rel),
+            [found] => {
                 checked.push(rel.clone());
+                let manifest = manifest_for_lockfile(&rel);
                 problems.push(format!(
                     "  - {rel}  pins {ROOT_CRATE} {found}, but root Cargo.toml is {expected}\n    \
-                     fix: cargo update -p {ROOT_CRATE} --manifest-path {rel}"
+                     fix: run `cargo update -p {ROOT_CRATE}` using manifest path {manifest:?}"
                 ));
             }
+            _ => problems.push(format!(
+                "  - {rel} contains {} unsourced {ROOT_CRATE} package entries; expected exactly one",
+                versions.len()
+            )),
         }
     }
 
@@ -104,6 +110,33 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
              REQUIRED_NESTED_LOCKS in tests/workspace_lockfile_consistency.rs)"
         );
     }
+}
+
+fn manifest_for_lockfile(lockfile: &str) -> String {
+    let normalized = lockfile.replace('\\', "/");
+    match normalized.strip_suffix("/Cargo.lock") {
+        Some(directory) => format!("{directory}/Cargo.toml"),
+        None => "Cargo.toml".to_string(),
+    }
+}
+
+#[test]
+fn lockfile_diagnostics_point_to_cargo_manifests() {
+    for (lockfile, expected) in [
+        ("Cargo.lock", "Cargo.toml"),
+        ("clients/native/Cargo.lock", "clients/native/Cargo.toml"),
+        ("fuzz\\Cargo.lock", "fuzz/Cargo.toml"),
+        (
+            "tools/replay client/Cargo.lock",
+            "tools/replay client/Cargo.toml",
+        ),
+    ] {
+        assert_eq!(manifest_for_lockfile(lockfile), expected, "{lockfile}");
+    }
+    assert_eq!(
+        format!("{:?}", "tools/replay client's/Cargo.toml"),
+        "\"tools/replay client's/Cargo.toml\""
+    );
 }
 
 /// Parse `[package].version` from the root `Cargo.toml`.
@@ -136,12 +169,23 @@ fn root_crate_version(root: &Path) -> String {
 /// Extract the value of a `version = "X"` (or `'X'`) assignment, ignoring
 /// surrounding whitespace. Returns `None` for any other line.
 fn parse_version_assignment(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("version")?.trim_start();
+    parse_string_assignment(line, "version")
+}
+
+fn parse_string_assignment(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?.trim_start();
     let rest = rest.strip_prefix('=')?.trim();
-    let value = rest
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))?;
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|quote| matches!(quote, '"' | '\''))?;
+    let rest = &rest[quote.len_utf8()..];
+    let closing = rest.find(quote)?;
+    let value = &rest[..closing];
+    let suffix = rest[closing + quote.len_utf8()..].trim();
+    if !suffix.is_empty() && !suffix.starts_with('#') {
+        return None;
+    }
     Some(value.to_string())
 }
 
@@ -151,25 +195,119 @@ fn parse_version_assignment(line: &str) -> Option<String> {
 /// line; we still scan forward to the first `version = "..."` within the block
 /// (bounded by the next `[[package]]` / blank line) so a future cargo lockfile
 /// field-ordering change cannot silently break the parse.
-fn locked_root_crate_version(lock_text: &str) -> Option<String> {
-    let needle = format!("name = \"{ROOT_CRATE}\"");
-    let mut lines = lock_text.lines();
-    while let Some(line) = lines.next() {
-        if line.trim() != needle {
-            continue;
-        }
-        for block_line in lines.by_ref() {
-            let trimmed = block_line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("[[") {
-                break; // end of this package block without a version
+fn locked_root_crate_versions(lock_text: &str) -> Vec<String> {
+    lock_text
+        .split("[[package]]")
+        .skip(1)
+        .filter_map(|block| {
+            let mut is_root = false;
+            let mut has_source = false;
+            let mut version = None;
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("[[") {
+                    break;
+                }
+                is_root |= parse_string_assignment(trimmed, "name").as_deref() == Some(ROOT_CRATE);
+                has_source |= parse_string_assignment(trimmed, "source").is_some();
+                if version.is_none() {
+                    version = parse_version_assignment(trimmed);
+                }
             }
-            if let Some(version) = parse_version_assignment(trimmed) {
-                return Some(version);
-            }
-        }
-        return None;
+            (is_root && !has_source).then_some(version).flatten()
+        })
+        .collect()
+}
+
+#[test]
+fn lockfile_parser_distinguishes_path_and_registry_packages() {
+    let path = "[[package]] # local table\nname = \"signal-fish-server\" # local package\nversion = \"1.2.3\" # local version\n";
+    let registry = "[[package]]\nname = \"signal-fish-server\"\nversion = \"9.9.9\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\" # registry package\nchecksum = \"abc\"\n";
+
+    for (description, contents, expected) in [
+        ("path only", path.to_string(), vec!["1.2.3".to_string()]),
+        ("registry only", registry.to_string(), Vec::new()),
+        (
+            "mixed registry and path",
+            format!("{registry}\n{path}"),
+            vec!["1.2.3".to_string()],
+        ),
+    ] {
+        assert_eq!(
+            locked_root_crate_versions(&contents),
+            expected,
+            "{description}"
+        );
     }
-    None
+}
+
+#[test]
+fn tracked_root_path_dependencies_do_not_pin_the_root_version() {
+    let root = repo_root();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "-z", "--", ":(glob)**/Cargo.toml"])
+        .output()
+        .expect("discover tracked Cargo manifests");
+    assert!(output.status.success(), "git manifest discovery failed");
+
+    let mut checked = 0;
+    let mut problems = Vec::new();
+    for relative in String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+    {
+        checked += 1;
+        let manifest = root.join(relative);
+        let metadata = Command::new("cargo")
+            .args([
+                "metadata",
+                "--locked",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .output()
+            .unwrap_or_else(|error| panic!("run cargo metadata for {relative}: {error}"));
+        assert!(
+            metadata.status.success(),
+            "cargo metadata failed for {relative}:\n{}",
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+        if metadata_has_versioned_root_path_dependency(&metadata.stdout) {
+            problems.push(relative.to_string());
+        }
+    }
+    assert!(checked > 0, "git found no tracked Cargo.toml files");
+    assert!(
+        problems.is_empty(),
+        "Local {ROOT_CRATE} path dependencies must omit redundant `version` constraints so \
+         patch, minor, and major release preparation all remain valid. Remove `version` from:\n  - {}",
+        problems.join("\n  - ")
+    );
+}
+
+fn metadata_has_versioned_root_path_dependency(metadata: &[u8]) -> bool {
+    let metadata: serde_json::Value =
+        serde_json::from_slice(metadata).expect("cargo metadata must be valid JSON");
+    metadata["packages"]
+        .as_array()
+        .expect("cargo metadata packages must be an array")
+        .iter()
+        .flat_map(|package| {
+            package["dependencies"]
+                .as_array()
+                .expect("cargo metadata dependencies must be an array")
+        })
+        .any(|dependency| {
+            dependency["name"] == ROOT_CRATE
+                && dependency["source"].is_null()
+                && dependency["path"].is_string()
+                && dependency["req"] != "*"
+        })
 }
 
 /// Committed `Cargo.lock` paths (absolute), discovered via `git ls-files` — the
@@ -184,7 +322,7 @@ fn tracked_cargo_locks(root: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["ls-files", "-z", "--", "*Cargo.lock", "Cargo.lock"])
+        .args(["ls-files", "-z", "--", ":(glob)**/Cargo.lock"])
         .output()
         .unwrap_or_else(|e| {
             panic!("`git ls-files` failed ({e}); this guard requires a git checkout")

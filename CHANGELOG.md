@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Install `rust-analyzer` with the pinned developer toolchain so VS Code's Rust
+  extension works in compatible local and devcontainer environments without a
+  separate component bootstrap.
 - Replace permanently-zero minute/hour/day/reset/cache rate-limit telemetry
   with production-wired rejection counters for authentication, room creation,
   join attempts, signaling, and detailed signaling errors. The aggregate
@@ -109,6 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make release preparation include every tracked standalone Cargo graph that
+  uses the local server package, while ignoring same-named registry packages.
+  Patch, minor, and major preparation now resolve every graph, restore all
+  release files after a failed postflight, and safely resume only while a
+  matching release branch and pull-request head remain at the verified commit.
 - Make room creation atomically require both its creation and shared join
   budgets, preventing partial accounting and `u32` overflow. Direct-library
   zero windows can no longer disable enforcement, cleanup duration arithmetic
