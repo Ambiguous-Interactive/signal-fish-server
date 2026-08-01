@@ -6,9 +6,9 @@
 //!
 //! Two wire formats are locked here, matching production serialization:
 //! - JSON via `serde_json` (the default text-frame encoding).
-//! - MessagePack via `rmp_serde::to_vec_named` (matches the binary send path in
-//!   `src/websocket/sending.rs`, which uses `to_vec_named` so map keys are
-//!   field-named, not positional).
+//! - Named MessagePack via `rmp_serde::to_vec_named` (equivalent to the
+//!   production relay envelope's `rmp_serde::encode::write_named`, so map keys
+//!   are field-named rather than positional).
 //!
 //! Assertion strategy:
 //! - JSON: assert structural equality against a `serde_json::Value` built with
@@ -133,8 +133,8 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Assert that `value` serializes via `rmp_serde::to_vec_named` (production
-/// binary path) to exactly the hex-encoded `expected_hex` bytes.
+/// Assert that `value` serializes via named MessagePack to exactly the
+/// hex-encoded `expected_hex` bytes.
 fn assert_msgpack<T: Serialize>(value: &T, expected_hex: &str) {
     let bytes = rmp_serde::to_vec_named(value).expect("msgpack bytes");
     let actual_hex = hex(&bytes);

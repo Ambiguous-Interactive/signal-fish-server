@@ -3,8 +3,9 @@ use crate::protocol::{ErrorCode, GameDataEncoding, PlayerId, ServerMessage};
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::SinkExt;
-use rmp_serde::{from_slice, to_vec_named};
+use rmp_serde::{encode::write_named, from_slice};
 use serde::Serialize;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -810,7 +811,7 @@ impl<'a> BorrowedGameDataEnvelope<'a> {
 /// `{type, data}` envelope. The `ServerMessage::GameDataBinary` variant is only
 /// an *in-memory* carrier used to route the payload through the broadcast layer;
 /// `send_single_message` intercepts it and instead serializes this bare struct
-/// via `rmp_serde::to_vec_named` (see `encode_binary_game_data`). V2 JSON and
+/// via named MessagePack encoding (see `encode_binary_game_data`). V2 JSON and
 /// rkyv frames remain raw payload passthrough; the legacy MessagePack frame is
 /// retained only to preserve the frozen v2 wire contract.
 #[derive(Serialize)]
@@ -864,18 +865,66 @@ pub(super) fn encode_binary_game_data(
                 seq,
                 epoch,
             };
-            to_vec_named(&frame).map_err(|err| err.to_string())
+            encode_named_binary_frame(&frame, payload.len())
         }
         (None, None) => match encoding {
-            GameDataEncoding::MessagePack => to_vec_named(&LegacyBinaryGameDataFrame {
-                from_player,
-                encoding,
-                payload,
-            })
-            .map_err(|err| err.to_string()),
+            GameDataEncoding::MessagePack => encode_named_binary_frame(
+                &LegacyBinaryGameDataFrame {
+                    from_player,
+                    encoding,
+                    payload,
+                },
+                payload.len(),
+            ),
             GameDataEncoding::Json | GameDataEncoding::Rkyv => Ok(payload.to_vec()),
         },
         _ => Err("binary delivery seq and epoch must be present or absent together".to_string()),
+    }
+}
+
+/// Encode a named MessagePack envelope without repeatedly growing its output
+/// buffer. The opaque payload length is known and dominates relay frame size;
+/// 128 bytes covers the fixed field names, UUID, encoding, stamps, and
+/// MessagePack container headers.
+fn encode_named_binary_frame<T: Serialize>(
+    frame: &T,
+    payload_len: usize,
+) -> Result<Vec<u8>, String> {
+    const ENVELOPE_HEADROOM: usize = 128;
+
+    let capacity = payload_len
+        .checked_add(ENVELOPE_HEADROOM)
+        .ok_or_else(|| "binary frame capacity overflow".to_string())?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| "failed to reserve binary frame capacity".to_string())?;
+    write_named(&mut FallibleVecWriter(&mut bytes), frame).map_err(|err| err.to_string())?;
+    Ok(bytes)
+}
+
+/// Preserve rmp-serde's fallible allocation behavior while supplying a
+/// pre-sized output vector. Writing directly to `Vec<u8>` would use its
+/// infallible `Write` implementation if fixed envelope headroom ever became
+/// insufficient.
+struct FallibleVecWriter<'a>(&'a mut Vec<u8>);
+
+impl Write for FallibleVecWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.write_all(buffer)?;
+        Ok(buffer.len())
+    }
+
+    fn write_all(&mut self, buffer: &[u8]) -> std::io::Result<()> {
+        self.0
+            .try_reserve(buffer.len())
+            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        self.0.extend_from_slice(buffer);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1406,6 +1455,72 @@ mod tests {
                 "epoch": 3
             }),
             "v3 binary frame field-name/casing drift (BREAKING v3 wire change?)"
+        );
+    }
+
+    #[test]
+    fn binary_game_data_encoder_matches_named_encoding_at_bin_boundaries() {
+        for payload_len in [0, 255, 256, 65_535, 65_536] {
+            let payload = vec![0xa5; payload_len];
+            let legacy = LegacyBinaryGameDataFrame {
+                from_player: player_a(),
+                encoding: GameDataEncoding::MessagePack,
+                payload: &payload,
+            };
+            assert_eq!(
+                encode_binary_game_data(
+                    player_a(),
+                    GameDataEncoding::MessagePack,
+                    &payload,
+                    None,
+                    None,
+                )
+                .expect("preallocated legacy binary encode"),
+                rmp_serde::to_vec_named(&legacy).expect("reference legacy binary encode"),
+                "legacy payload length {payload_len} changed named MessagePack bytes"
+            );
+
+            for encoding in [
+                GameDataEncoding::Json,
+                GameDataEncoding::MessagePack,
+                GameDataEncoding::Rkyv,
+            ] {
+                let v3 = V3BinaryGameDataFrame {
+                    from_player: player_a(),
+                    encoding,
+                    payload: &payload,
+                    seq: u64::MAX,
+                    epoch: u32::MAX,
+                };
+                assert_eq!(
+                    encode_binary_game_data(
+                        player_a(),
+                        encoding,
+                        &payload,
+                        Some(u64::MAX),
+                        Some(u32::MAX),
+                    )
+                    .expect("preallocated v3 binary encode"),
+                    rmp_serde::to_vec_named(&v3).expect("reference v3 binary encode"),
+                    "v3 {encoding:?} payload length {payload_len} changed named MessagePack bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn binary_frame_capacity_overflow_is_reported() {
+        let error = encode_named_binary_frame(&0_u8, usize::MAX)
+            .expect_err("capacity arithmetic overflow must fail before allocation");
+        assert!(error.contains("capacity overflow"));
+    }
+
+    #[test]
+    fn binary_frame_growth_preserves_named_encoding() {
+        let body = "x".repeat(256);
+        assert_eq!(
+            encode_named_binary_frame(&body, 0).expect("fallible growth encode"),
+            rmp_serde::to_vec_named(&body).expect("reference growth encode")
         );
     }
 

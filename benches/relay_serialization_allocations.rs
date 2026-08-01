@@ -77,6 +77,46 @@ fn print_sample(scenario: Scenario, room_size: usize, sample: &Sample) {
     );
 }
 
+fn assert_allocation_ceiling(scenario: Scenario, room_size: usize, sample: &Sample) {
+    let (maximum_operations_per_relay, maximum_reallocations_per_relay, maximum_bytes_per_relay) =
+        match (scenario, room_size) {
+            (Scenario::V3JsonText, 2) => (8, 3, 2_587),
+            (Scenario::V3JsonText, 8) => (9, 3, 3_507),
+            (Scenario::V3JsonText, 16) => (9, 3, 3_827),
+            (Scenario::V3MessagePackBinary, 2) => (5, 0, 1_581),
+            (Scenario::V3MessagePackBinary, 8) => (6, 0, 2_501),
+            (Scenario::V3MessagePackBinary, 16) => (6, 0, 2_821),
+            (Scenario::MixedMessagePackSource, 2) => (18, 3, 4_450),
+            (Scenario::MixedMessagePackSource, 8) => (28, 6, 9_845),
+            (Scenario::MixedMessagePackSource, 16) => (28, 6, 10_165),
+            _ => panic!("room-{room_size} has no checked-in allocation baseline"),
+        };
+    let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
+    let maximum_operations = maximum_operations_per_relay * RELAYS_PER_SAMPLE + 1;
+    let maximum_reallocations = maximum_reallocations_per_relay * RELAYS_PER_SAMPLE;
+    let maximum_bytes = maximum_bytes_per_relay * RELAYS_PER_SAMPLE;
+    assert!(
+        allocation_operations <= maximum_operations,
+        "{} room-{room_size} projection used {allocation_operations} allocation operations across \
+         {RELAYS_PER_SAMPLE} relays; expected at most {maximum_operations}",
+        scenario.name()
+    );
+    assert!(
+        sample.stats.reallocations <= maximum_reallocations,
+        "{} room-{room_size} projection used {} reallocations across {RELAYS_PER_SAMPLE} relays; \
+         expected at most {maximum_reallocations}",
+        scenario.name(),
+        sample.stats.reallocations
+    );
+    assert!(
+        sample.stats.bytes_allocated <= maximum_bytes,
+        "{} room-{room_size} projection allocated {} bytes across {RELAYS_PER_SAMPLE} relays; \
+         expected at most {maximum_bytes}",
+        scenario.name(),
+        sample.stats.bytes_allocated
+    );
+}
+
 fn main() {
     println!(
         "scenario,room_size,recipients,relays,materialized,text_frames,binary_frames,\
@@ -89,6 +129,7 @@ fn main() {
         for room_size in ROOM_SIZES {
             let mut fixture = Fixture::new(room_size, scenario);
             let sample = repeated_sample(&mut fixture);
+            assert_allocation_ceiling(scenario, room_size, &sample);
             print_sample(scenario, room_size, &sample);
         }
     }

@@ -193,6 +193,21 @@ Key design decisions:
 **Test that enforces this:** `test_ci_workflow_has_required_jobs`
 (validates the audit job exists in ci.yml)
 
+#### Relay Allocation Ceilings
+
+The CI workflow runs the production-seam relay allocation harness on Linux for
+every push and pull request. The job checks allocation operations,
+reallocations, and allocated bytes for JSON, direct MessagePack, and mixed
+relay projections at room sizes 2, 8, and 16. It is a required branch
+protection check named `CI / Relay Allocation Ceilings`; changes to the
+serializer, allocator accounting, or its ceilings therefore cannot merge while
+the deterministic gate is failing or incomplete. The daily security schedule
+excludes this job because it does not inspect newly published advisories.
+
+**Tests that enforce this:** `test_ci_enforces_relay_allocation_ceilings`,
+`test_ci_workflow_has_required_jobs`, `test_required_check_names_are_consistent`,
+and `test_ci_schedule_only_runs_security_jobs`.
+
 #### 4. Documentation Validation Alignment Tests
 
 Tests that ensure the doc-validation workflow stays aligned with the naming contract and quality standards:
