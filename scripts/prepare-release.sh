@@ -492,7 +492,7 @@ cut_changelog_release() {
     rm -f "$count_file"
 }
 
-ROLLBACK_DIR=$(mktemp -d)
+ROLLBACK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/signal-fish-release-rollback.XXXXXX")
 ROLLBACK_FILES=(
     Cargo.toml
     fuzz/Cargo.toml

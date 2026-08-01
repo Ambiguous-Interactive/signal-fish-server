@@ -820,6 +820,13 @@ fn release_metadata_preflight_rejects_a_future_stale_graph_missing_the_root_entr
 }
 
 #[test]
+fn release_rollback_uses_a_bsd_and_gnu_mktemp_template() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = read(root.join("scripts/prepare-release.sh"));
+    assert!(script.contains("mktemp -d \"${TMPDIR:-/tmp}/signal-fish-release-rollback.XXXXXX\""));
+}
+
+#[test]
 fn prepared_release_resolver_handles_every_remote_state() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::tempdir().expect("create resolver test directory");
@@ -834,6 +841,7 @@ if [ "${1:-}" = "-c" ]; then
     authenticated=true
     shift 2
 fi
+printf '%s\n' "$*" >> "$GIT_LOG"
 case "${1:-}" in
     ls-remote)
         [ "$authenticated" = true ]
@@ -849,6 +857,10 @@ case "${1:-}" in
         ;;
     fetch)
         [ "$authenticated" = true ]
+        ;;
+    rev-parse)
+        [ "$*" = "rev-parse FETCH_HEAD" ]
+        printf '%s\n' "${FETCHED_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
         ;;
     diff)
         exit "${TREE_STATUS:-0}"
@@ -872,16 +884,58 @@ esac
     );
     let resolver = root.join("scripts/resolve-prepared-release.sh");
 
-    for (description, tag_status, branch_status, tree_status, success, expected) in [
-        ("absent branch", "2", "2", "0", true, "branch_exists=false"),
-        ("matching branch", "2", "0", "0", true, "branch_exists=true"),
-        ("conflicting tree", "2", "0", "1", false, "different tree"),
-        ("tag exists", "0", "2", "0", false, "already exists"),
+    for (description, tag_status, branch_status, tree_status, fetched_sha, success, expected) in [
+        (
+            "absent branch",
+            "2",
+            "2",
+            "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            true,
+            "branch_exists=false",
+        ),
+        (
+            "matching branch",
+            "2",
+            "0",
+            "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            true,
+            "branch_exists=true",
+        ),
+        (
+            "branch changed during verification",
+            "2",
+            "0",
+            "0",
+            "cccccccccccccccccccccccccccccccccccccccc",
+            false,
+            "changed while it was being verified",
+        ),
+        (
+            "conflicting tree",
+            "2",
+            "0",
+            "1",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            false,
+            "different tree",
+        ),
+        (
+            "tag exists",
+            "0",
+            "2",
+            "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            false,
+            "already exists",
+        ),
         (
             "branch API failure",
             "2",
             "128",
             "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             false,
             "Failed to check",
         ),
@@ -890,11 +944,13 @@ esac
             "2",
             "0",
             "3",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             false,
             "Failed to compare",
         ),
     ] {
         let github_output = temp.path().join(format!("{description}.output"));
+        let git_log = temp.path().join(format!("{description}.git.log"));
         let output = Command::new("bash")
             .arg(&resolver)
             .current_dir(root)
@@ -904,6 +960,8 @@ esac
             .env("TAG_STATUS", tag_status)
             .env("BRANCH_STATUS", branch_status)
             .env("TREE_STATUS", tree_status)
+            .env("FETCHED_SHA", fetched_sha)
+            .env("GIT_LOG", &git_log)
             .output()
             .unwrap_or_else(|error| panic!("run {description} resolver case: {error}"));
         assert_eq!(output.status.success(), success, "{description}");
@@ -918,6 +976,10 @@ esac
         );
         if description == "matching branch" {
             assert!(evidence.contains("branch_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+            let log = read(&git_log);
+            assert!(log.contains("fetch --no-tags origin refs/heads/release/v0.5.2"));
+            assert!(log.contains("rev-parse FETCH_HEAD"));
+            assert!(log.contains("diff --quiet FETCH_HEAD --"));
         }
     }
 }

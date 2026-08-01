@@ -37,10 +37,15 @@ fi
 branch_sha=""
 if [ "$branch_status" -eq 0 ]; then
     remote_sha=${branch_result%%[[:space:]]*}
-    branch_sha=$remote_sha
-    remote_git fetch --no-tags origin "$remote_sha"
+    remote_git fetch --no-tags origin "refs/heads/${branch}"
+    fetched_sha=$(git rev-parse FETCH_HEAD)
+    if [ "$fetched_sha" != "$remote_sha" ]; then
+        echo "ERROR: Release branch ${branch} changed while it was being verified." >&2
+        exit 1
+    fi
+    branch_sha=$fetched_sha
     set +e
-    git diff --quiet "$remote_sha" --
+    git diff --quiet FETCH_HEAD --
     tree_status=$?
     set -e
     if [ "$tree_status" -eq 1 ]; then
