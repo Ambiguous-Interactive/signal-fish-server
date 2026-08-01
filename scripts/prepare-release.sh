@@ -154,7 +154,7 @@ for required_lockfile in Cargo.lock clients/native/Cargo.lock fuzz/Cargo.lock; d
         fi
     done
     if [ "$required_found" -ne 1 ]; then
-        echo "ERROR: Expected exactly one signal-fish-server package entry in $required_lockfile." >&2
+        echo "ERROR: Required release lockfile $required_lockfile is not tracked or does not embed the unsourced signal-fish-server path package." >&2
         exit 1
     fi
 done

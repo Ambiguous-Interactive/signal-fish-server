@@ -193,7 +193,7 @@ fn parse_string_assignment(line: &str, key: &str) -> Option<String> {
 ///
 /// Cargo writes each `[[package]]` block as `name` then `version` on the next
 /// line; we still scan forward to the first `version = "..."` within the block
-/// (bounded by the next `[[package]]` / blank line) so a future cargo lockfile
+/// (bounded by the next array-table header) so a future cargo lockfile
 /// field-ordering change cannot silently break the parse.
 fn locked_root_crate_versions(lock_text: &str) -> Vec<String> {
     lock_text
@@ -222,10 +222,16 @@ fn locked_root_crate_versions(lock_text: &str) -> Vec<String> {
 #[test]
 fn lockfile_parser_distinguishes_path_and_registry_packages() {
     let path = "[[package]] # local table\nname = \"signal-fish-server\" # local package\nversion = \"1.2.3\" # local version\n";
+    let path_version_first = "[[package]]\nversion = \"1.2.3\"\nname = \"signal-fish-server\"\n";
     let registry = "[[package]]\nname = \"signal-fish-server\"\nversion = \"9.9.9\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\" # registry package\nchecksum = \"abc\"\n";
 
     for (description, contents, expected) in [
         ("path only", path.to_string(), vec!["1.2.3".to_string()]),
+        (
+            "path with version before name",
+            path_version_first.to_string(),
+            vec!["1.2.3".to_string()],
+        ),
         ("registry only", registry.to_string(), Vec::new()),
         (
             "mixed registry and path",

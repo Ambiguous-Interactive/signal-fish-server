@@ -387,17 +387,43 @@ fn prepare_release_fails_closed_on_empty_notes_existing_version_or_lock_drift() 
             &lock_drift.root.join(lockfile),
             "version = 4\n\n[[package]]\nname = \"different-package\"\nversion = \"1.2.3\"\n",
         );
+        let before = release_file_snapshot(&lock_drift);
         let output = lock_drift.run(&["--bump", "patch", "--date", RELEASE_DATE]);
         assert!(
             !output.status.success(),
             "{lockfile} drift unexpectedly passed"
         );
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("exactly one signal-fish-server"),
+            String::from_utf8_lossy(&output.stderr).contains(&format!(
+                "Required release lockfile {lockfile} is not tracked or does not embed the unsourced signal-fish-server path package"
+            )),
             "unexpected {lockfile} diagnostic:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert_release_files_unchanged(&lock_drift, &before);
     }
+
+    let untracked = Fixture::new("1.2.3");
+    let lockfile = "clients/native/Cargo.lock";
+    let before = release_file_snapshot(&untracked);
+    assert!(git_at(&untracked.root)
+        .args(["rm", "--cached", "--quiet", lockfile])
+        .status()
+        .expect("untrack required lockfile while retaining it on disk")
+        .success());
+    let output = untracked.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(
+        !output.status.success(),
+        "untracked required lockfile unexpectedly passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "Required release lockfile {lockfile} is not tracked or does not embed the unsourced signal-fish-server path package"
+        )),
+        "unexpected untracked {lockfile} diagnostic:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_release_files_unchanged(&untracked, &before);
 }
 
 #[test]

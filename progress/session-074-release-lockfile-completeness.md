@@ -77,8 +77,10 @@ ShellCheck, and deny-warnings Clippy validation are also green. The final
 nightly AddressSanitizer lane exposed Cargo's newer `--locked` diagnostic
 (`cannot update the lock file`) in the stale-graph negative test; the assertion
 now accepts both supported Cargo phrasings while still requiring the lockfile
-and `--locked` evidence. Final hosted validation and the reviewer loop are
-recorded on PR #238 before publication completes.
+and `--locked` evidence. The final Copilot pass also aligned the missing
+mandatory-lock diagnostic with the discovery condition and corrected the
+workspace-lock parser contract comment. Final hosted validation and the
+reviewer loop are recorded on PR #238 before publication completes.
 
 ## Follow-up
 
