@@ -246,7 +246,7 @@ fn fuzz_root_path_dependency_pins_the_current_root_version() {
     let root = repo_root();
     let expected = root_crate_version(&root);
     let output = bash_command()
-        .arg(root.join("scripts/read-toml-string.sh"))
+        .arg("scripts/read-toml-string.sh")
         .args([
             "fuzz/Cargo.toml",
             "version",
