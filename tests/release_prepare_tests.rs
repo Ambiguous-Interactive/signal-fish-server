@@ -678,6 +678,7 @@ fn release_lockfile_awk_is_portable_and_gawk_lint_clean_in_every_mode() {
         let output = command
             .arg("-f")
             .arg(&script)
+            .arg("--")
             .arg(&lockfile)
             .output()
             .unwrap_or_else(|error| panic!("run AWK lint in {mode} mode: {error}"));
@@ -706,6 +707,7 @@ fn release_lockfile_awk_is_portable_and_gawk_lint_clean_in_every_mode() {
                 ])
                 .arg("-f")
                 .arg(&script)
+                .arg("--")
                 .args(inputs)
                 .output()
                 .unwrap_or_else(|error| panic!("run multi-input AWK in {mode} mode: {error}"));

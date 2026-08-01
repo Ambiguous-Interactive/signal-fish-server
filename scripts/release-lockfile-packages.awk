@@ -10,7 +10,12 @@
 BEGIN {
     input_files = 0
     for (argument_index = 1; argument_index < ARGC; argument_index++) {
-        if (ARGV[argument_index] != "" && ARGV[argument_index] != "--") input_files++
+        if (ARGV[argument_index] == "--") {
+            # Awk implementations may retain the option sentinel as a filename.
+            ARGV[argument_index] = ""
+        } else if (ARGV[argument_index] != "") {
+            input_files++
+        }
     }
     input_error = mode != "list" && input_files != 1
     if (input_error) {
