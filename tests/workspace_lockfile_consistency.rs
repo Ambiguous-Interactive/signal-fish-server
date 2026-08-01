@@ -46,6 +46,8 @@ use std::process::Command;
 
 /// The workspace crate that committed nested lockfiles pin via a path dep.
 const ROOT_CRATE: &str = "signal-fish-server";
+const MISSING_ROOT_VERSION: &str =
+    "contains an unsourced signal-fish-server package entry without a parseable version";
 
 /// Committed nested lockfiles that must always be covered. Discovery is dynamic,
 /// but these are asserted present so broken discovery can never pass vacuously
@@ -69,31 +71,14 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
             .to_string();
         let text = read_file(lock);
         let versions = locked_root_crate_versions(&text);
-        match versions.as_slice() {
-            // Lockfiles that do not reference the workspace crate are irrelevant
-            // to this guard (none today, but stay future-proof).
-            [] => continue,
-            [found] if found == &expected => checked.push(rel),
-            [found] => {
-                checked.push(rel.clone());
-                let manifest = manifest_for_lockfile(&rel);
-                problems.push(format!(
-                    "  - {rel}  pins {ROOT_CRATE} {found}, but root Cargo.toml is {expected}\n    \
-                     fix: run `cargo update -p {ROOT_CRATE}` using manifest path {manifest:?}"
-                ));
-            }
-            _ => problems.push(format!(
-                "  - {rel} contains {} unsourced {ROOT_CRATE} package entries; expected exactly one",
-                versions.len()
-            )),
-        }
+        record_lockfile_check(&rel, &expected, &versions, &mut checked, &mut problems);
     }
 
     assert!(
         problems.is_empty(),
-        "Stale committed lockfile(s) detected — these pin an outdated {ROOT_CRATE} version and \
-         will fail `--locked` CI builds (e.g. the interop workflows) with a cryptic \
-         \"lock file needs to be updated\" error:\n{}\n\n\
+        "Invalid or stale committed lockfile(s) detected — these do not encode exactly one \
+         valid {ROOT_CRATE} path-package version matching root Cargo.toml and can fail \
+         `--locked` CI builds (e.g. the interop workflows):\n{}\n\n\
          The root Cargo.toml version is the single source of truth; regenerate the lockfile(s) \
          above and commit them.",
         problems.join("\n")
@@ -109,6 +94,34 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
              {checked:?}; lockfile discovery may be broken or the crate moved (update \
              REQUIRED_NESTED_LOCKS in tests/workspace_lockfile_consistency.rs)"
         );
+    }
+}
+
+fn record_lockfile_check(
+    rel: &str,
+    expected: &str,
+    versions: &[Result<String, &'static str>],
+    checked: &mut Vec<String>,
+    problems: &mut Vec<String>,
+) {
+    if versions.is_empty() {
+        return;
+    }
+    checked.push(rel.to_string());
+    match versions {
+        [Ok(found)] if found == expected => {}
+        [Ok(found)] => {
+            let manifest = manifest_for_lockfile(rel);
+            problems.push(format!(
+                "  - {rel}  pins {ROOT_CRATE} {found}, but root Cargo.toml is {expected}\n    \
+                 fix: run `cargo update -p {ROOT_CRATE}` using manifest path {manifest:?}"
+            ));
+        }
+        [Err(problem)] => problems.push(format!("  - {rel} {problem}")),
+        _ => problems.push(format!(
+            "  - {rel} contains {} unsourced {ROOT_CRATE} package entries; expected exactly one",
+            versions.len()
+        )),
     }
 }
 
@@ -194,8 +207,10 @@ fn parse_string_assignment(line: &str, key: &str) -> Option<String> {
 /// Cargo writes each `[[package]]` block as `name` then `version` on the next
 /// line; we still scan forward to the first `version = "..."` within the block
 /// (bounded by the next array-table header) so a future cargo lockfile
-/// field-ordering change cannot silently break the parse.
-fn locked_root_crate_versions(lock_text: &str) -> Vec<String> {
+/// field-ordering change cannot silently break the parse. A matching unsourced
+/// block without a parseable version is retained as an error so malformed
+/// lockfiles cannot be mistaken for irrelevant graphs.
+fn locked_root_crate_versions(lock_text: &str) -> Vec<Result<String, &'static str>> {
     lock_text
         .split("[[package]]")
         .skip(1)
@@ -214,7 +229,7 @@ fn locked_root_crate_versions(lock_text: &str) -> Vec<String> {
                     version = parse_version_assignment(trimmed);
                 }
             }
-            (is_root && !has_source).then_some(version).flatten()
+            (is_root && !has_source).then(|| version.ok_or(MISSING_ROOT_VERSION))
         })
         .collect()
 }
@@ -223,20 +238,38 @@ fn locked_root_crate_versions(lock_text: &str) -> Vec<String> {
 fn lockfile_parser_distinguishes_path_and_registry_packages() {
     let path = "[[package]] # local table\nname = \"signal-fish-server\" # local package\nversion = \"1.2.3\" # local version\n";
     let path_version_first = "[[package]]\nversion = \"1.2.3\"\nname = \"signal-fish-server\"\n";
+    let missing_version = "[[package]]\nname = \"signal-fish-server\"\n";
+    let sourced_missing_version = "[[package]]\nname = \"signal-fish-server\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+    let unrelated_missing_version = "[[package]]\nname = \"different-package\"\n";
     let registry = "[[package]]\nname = \"signal-fish-server\"\nversion = \"9.9.9\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\" # registry package\nchecksum = \"abc\"\n";
 
     for (description, contents, expected) in [
-        ("path only", path.to_string(), vec!["1.2.3".to_string()]),
+        ("path only", path.to_string(), vec![Ok("1.2.3".to_string())]),
         (
             "path with version before name",
             path_version_first.to_string(),
-            vec!["1.2.3".to_string()],
+            vec![Ok("1.2.3".to_string())],
+        ),
+        (
+            "path missing version",
+            missing_version.to_string(),
+            vec![Err(MISSING_ROOT_VERSION)],
+        ),
+        (
+            "sourced root package missing version",
+            sourced_missing_version.to_string(),
+            Vec::new(),
+        ),
+        (
+            "unrelated package missing version",
+            unrelated_missing_version.to_string(),
+            Vec::new(),
         ),
         ("registry only", registry.to_string(), Vec::new()),
         (
             "mixed registry and path",
             format!("{registry}\n{path}"),
-            vec!["1.2.3".to_string()],
+            vec![Ok("1.2.3".to_string())],
         ),
     ] {
         assert_eq!(
@@ -245,6 +278,27 @@ fn lockfile_parser_distinguishes_path_and_registry_packages() {
             "{description}"
         );
     }
+}
+
+#[test]
+fn malformed_root_package_is_counted_and_reported_with_its_lockfile() {
+    let versions = locked_root_crate_versions(
+        "[[package]]\nname = \"signal-fish-server\"\nchecksum = \"truncated\"\n",
+    );
+    let mut checked = Vec::new();
+    let mut problems = Vec::new();
+    record_lockfile_check(
+        "clients/native/Cargo.lock",
+        "1.2.3",
+        &versions,
+        &mut checked,
+        &mut problems,
+    );
+
+    assert_eq!(checked, ["clients/native/Cargo.lock"]);
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].contains("clients/native/Cargo.lock"));
+    assert!(problems[0].contains(MISSING_ROOT_VERSION));
 }
 
 #[test]

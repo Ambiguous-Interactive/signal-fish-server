@@ -79,8 +79,10 @@ nightly AddressSanitizer lane exposed Cargo's newer `--locked` diagnostic
 now accepts both supported Cargo phrasings while still requiring the lockfile
 and `--locked` evidence. The final Copilot pass also aligned the missing
 mandatory-lock diagnostic with the discovery condition and corrected the
-workspace-lock parser contract comment. Final hosted validation and the
-reviewer loop are recorded on PR #238 before publication completes.
+workspace-lock parser contract comment. The parser guard also retains a
+matching unsourced root package with no parseable version as an explicit error
+instead of treating the malformed graph as irrelevant. Final hosted validation
+and the reviewer loop are recorded on PR #238 before publication completes.
 
 ## Follow-up
 
