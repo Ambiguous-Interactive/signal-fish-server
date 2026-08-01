@@ -324,6 +324,57 @@ replace_root_package_version() {
     rm -f "$count_file"
 }
 
+replace_fuzz_root_dependency_version() {
+    local file="$1"
+    local current_version="$2"
+    local next_version="$3"
+    local found output count_file
+
+    found=$(bash "$SCRIPT_DIR/read-toml-string.sh" \
+        "$file" version dependencies.signal-fish-server || true)
+    if [ "$found" != "$current_version" ]; then
+        echo "ERROR: Expected $file [dependencies.signal-fish-server].version to equal $current_version (found: ${found:-none})." >&2
+        exit 1
+    fi
+
+    output=$(mktemp)
+    count_file=$(mktemp)
+    awk \
+        -v current_version="$current_version" \
+        -v next_version="$next_version" \
+        -v count_file="$count_file" '
+        BEGIN { section = ""; changed = 0 }
+        /^[[:space:]]*\[\[?[^]]+\]\]?[[:space:]]*(#.*)?$/ {
+            section = $0
+            sub(/[[:space:]]*#.*$/, "", section)
+            gsub(/^[[:space:]]*\[\[?|\]\]?[[:space:]]*$/, "", section)
+        }
+        section == "dependencies.signal-fish-server" \
+            && /^[[:space:]]*version[[:space:]]*=/ {
+            equals = index($0, "=")
+            prefix = substr($0, 1, equals)
+            suffix = substr($0, equals + 1)
+            position = index(suffix, current_version)
+            if (position != 0) {
+                suffix = substr(suffix, 1, position - 1) next_version \
+                    substr(suffix, position + length(current_version))
+                print prefix suffix
+                changed++
+                next
+            }
+        }
+        { print }
+        END { print changed > count_file }
+    ' "$file" > "$output"
+    if [ "$(cat "$count_file")" -ne 1 ]; then
+        echo "ERROR: Expected exactly one fuzz root dependency version in $file." >&2
+        rm -f "$output" "$count_file"
+        exit 1
+    fi
+    mv "$output" "$file"
+    rm -f "$count_file"
+}
+
 replace_locked_path_package_version() {
     local file="$1"
     local next_version="$2"
@@ -444,6 +495,7 @@ cut_changelog_release() {
 ROLLBACK_DIR=$(mktemp -d)
 ROLLBACK_FILES=(
     Cargo.toml
+    fuzz/Cargo.toml
     "${RELEASE_LOCKFILES[@]}"
     CHANGELOG.md
     docs/library-usage.md
@@ -469,6 +521,7 @@ restore_on_failure() {
 trap restore_on_failure EXIT
 
 replace_root_package_version Cargo.toml "$NEXT_VERSION"
+replace_fuzz_root_dependency_version fuzz/Cargo.toml "$CURRENT_VERSION" "$NEXT_VERSION"
 for lockfile in "${RELEASE_LOCKFILES[@]}"; do
     replace_locked_path_package_version "$lockfile" "$NEXT_VERSION"
 done
@@ -488,7 +541,7 @@ for lockfile in "${RELEASE_LOCKFILES[@]}"; do
 done
 "$PREPARE_RELEASE_DOC_CHECK" --changed-files \
     Cargo.toml "${RELEASE_LOCKFILES[@]}" \
-    CHANGELOG.md docs/library-usage.md .llm/context.md
+    CHANGELOG.md docs/library-usage.md .llm/context.md fuzz/Cargo.toml
 
 ROLLBACK_ACTIVE=0
 

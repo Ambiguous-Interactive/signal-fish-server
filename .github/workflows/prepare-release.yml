@@ -114,7 +114,8 @@ jobs:
             .llm/context.md \
             CHANGELOG.md \
             Cargo.toml \
-            docs/library-usage.md > "$expected"
+            docs/library-usage.md \
+            fuzz/Cargo.toml > "$expected"
           while IFS= read -r -d '' lockfile; do
             printf '%s\n' "$lockfile" >> "$expected"
           done < <(bash scripts/list-release-lockfiles.sh)
@@ -171,6 +172,7 @@ jobs:
             CHANGELOG.md
             Cargo.toml
             docs/library-usage.md
+            fuzz/Cargo.toml
           )
           while IFS= read -r -d '' lockfile; do
             release_files+=("$lockfile")

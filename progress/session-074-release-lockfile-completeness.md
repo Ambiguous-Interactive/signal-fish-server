@@ -44,9 +44,11 @@ graphs.
 - Every tracked manifest receives a full locked-metadata preflight before lock
   contents select rewrite targets, so a future graph whose stale lock has not
   yet gained the root-package entry is rejected instead of silently omitted.
-- The unpublished fuzz package's redundant path-dependency version constraint
-  was removed. A tracked-manifest policy prevents its return, and real Cargo
-  resolution proves patch, minor, and major prepared fuzz graphs build locked.
+- The unpublished fuzz package retains an exact local path-dependency version:
+  `cargo-deny` deliberately rejects a path-only dependency as a wildcard. The
+  release preparer synchronizes that constraint with the root version, includes
+  the manifest in byte-identical rollback, and real Cargo resolution proves
+  patch, minor, and major prepared fuzz graphs build locked.
 - The preparation workflow derives both its exact allowed diff and staged file
   set from the same dynamic graph rule.
 - A future standalone-package fixture proves new tracked graphs are included
@@ -68,8 +70,12 @@ graphs.
 Focused release tests (including real Cargo resolution, path/registry/mixed
 graphs, lookalike filenames, and rollback), workspace-lockfile tests, workflow
 policy tests, shell syntax and ShellCheck, CI configuration validation, workflow
-hygiene, tooling parity, and MSRV consistency are green. Full local and hosted
-validation plus the reviewer loop are recorded before publication completes.
+hygiene, tooling parity, and MSRV consistency are green. The first hosted
+candidate exposed the `cargo-deny` wildcard rule in the fuzz graph; its focused
+corrective test, the exact fuzz `cargo deny check bans`, locked metadata, format,
+ShellCheck, and deny-warnings Clippy validation are also green. Final hosted
+validation and the reviewer loop are recorded on PR #238 before publication
+completes.
 
 ## Follow-up
 

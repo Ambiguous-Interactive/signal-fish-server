@@ -40,7 +40,7 @@
 
 mod common;
 
-use common::{read_file, repo_root};
+use common::{bash_command, read_file, repo_root};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -242,7 +242,30 @@ fn lockfile_parser_distinguishes_path_and_registry_packages() {
 }
 
 #[test]
-fn tracked_root_path_dependencies_do_not_pin_the_root_version() {
+fn fuzz_root_path_dependency_pins_the_current_root_version() {
+    let root = repo_root();
+    let expected = root_crate_version(&root);
+    let output = bash_command()
+        .arg(root.join("scripts/read-toml-string.sh"))
+        .args([
+            "fuzz/Cargo.toml",
+            "version",
+            "dependencies.signal-fish-server",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("read fuzz root dependency version");
+    assert!(
+        output.status.success(),
+        "fuzz/Cargo.toml must pin its local {ROOT_CRATE} dependency because cargo-deny rejects \
+         path-only dependencies as wildcards:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+}
+
+#[test]
+fn tracked_non_fuzz_root_path_dependencies_do_not_pin_the_root_version() {
     let root = repo_root();
     let output = Command::new("git")
         .arg("-C")
@@ -256,7 +279,7 @@ fn tracked_root_path_dependencies_do_not_pin_the_root_version() {
     let mut problems = Vec::new();
     for relative in String::from_utf8_lossy(&output.stdout)
         .split('\0')
-        .filter(|path| !path.is_empty())
+        .filter(|path| !path.is_empty() && *path != "fuzz/Cargo.toml")
     {
         checked += 1;
         let manifest = root.join(relative);
@@ -281,11 +304,13 @@ fn tracked_root_path_dependencies_do_not_pin_the_root_version() {
             problems.push(relative.to_string());
         }
     }
-    assert!(checked > 0, "git found no tracked Cargo.toml files");
+    assert!(checked > 0, "git found no non-fuzz Cargo.toml files");
     assert!(
         problems.is_empty(),
-        "Local {ROOT_CRATE} path dependencies must omit redundant `version` constraints so \
-         patch, minor, and major release preparation all remain valid. Remove `version` from:\n  - {}",
+        "Only fuzz/Cargo.toml may pin the local {ROOT_CRATE} path dependency because its \
+         cargo-deny lane rejects wildcards. Other tracked manifests must omit redundant \
+         version constraints so every semantic release bump remains valid. Remove `version` \
+         from:\n  - {}",
         problems.join("\n  - ")
     );
 }

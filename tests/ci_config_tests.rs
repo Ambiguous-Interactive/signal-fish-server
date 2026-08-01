@@ -4242,6 +4242,13 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
          runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
     );
 
+    assert_eq!(
+        prepare.matches("fuzz/Cargo.toml").count(),
+        2,
+        "The synchronized fuzz dependency manifest must appear once in the exact prepared-diff \
+         allowlist and once in the staged release_files array.\nJob block:\n{prepare}"
+    );
+
     assert!(
         prepare
             .contains("The workflow derives version \\`${VERSION}\\` from the reviewed Cargo.toml")
@@ -4491,6 +4498,7 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         "cut_changelog_release CHANGELOG.md \"$NEXT_VERSION\" \"$RELEASE_DATE\" \"$CURRENT_VERSION\"",
         "metadata --locked --format-version 1",
         "scripts/check-doc-consistency.sh",
+        "CHANGELOG.md docs/library-usage.md .llm/context.md fuzz/Cargo.toml",
     ] {
         assert!(
             script.contains(required),

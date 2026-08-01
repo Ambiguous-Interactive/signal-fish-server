@@ -55,7 +55,9 @@ impl Fixture {
         write(
             &root.join("fuzz/Cargo.toml"),
             "[package]\nname = \"signal-fish-server-fuzz\"\nversion = \"0.0.0\"\n\n\
-             [dependencies]\nsignal-fish-server = { path = \"..\" }\n",
+               [dependencies.signal-fish-server] # synchronized local dependency\n\
+             path = \"..\"\n  version = '1.2.3' # preserve this formatting\n\n\
+             [[package.metadata.fixture]]\nversion = \"1.2.3\"\n",
         );
         for source in ["src/lib.rs", "clients/native/src/lib.rs", "fuzz/src/lib.rs"] {
             write(&root.join(source), "");
@@ -207,9 +209,10 @@ fn read(path: impl AsRef<Path>) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
-const RELEASE_FILES: [&str; 7] = [
+const RELEASE_FILES: [&str; 8] = [
     "Cargo.toml",
     "Cargo.lock",
+    "fuzz/Cargo.toml",
     "clients/native/Cargo.lock",
     "fuzz/Cargo.lock",
     "CHANGELOG.md",
@@ -252,6 +255,11 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
         let cargo_toml = read(fixture.root.join("Cargo.toml"));
         assert!(cargo_toml.contains(&format!("version = \"{expected}\"")));
         assert!(cargo_toml.contains("description = \"Fixture marker 9.9.9\""));
+        let fuzz_manifest = read(fixture.root.join("fuzz/Cargo.toml"));
+        assert!(fuzz_manifest.contains(&format!(
+            "  version = '{expected}' # preserve this formatting"
+        )));
+        assert!(fuzz_manifest.contains("[[package.metadata.fixture]]\nversion = \"1.2.3\""));
 
         for lock in ["Cargo.lock", "clients/native/Cargo.lock", "fuzz/Cargo.lock"] {
             let contents = read(fixture.root.join(lock));
