@@ -113,11 +113,13 @@ jobs:
           printf '%s\n' \
             .llm/context.md \
             CHANGELOG.md \
-            Cargo.lock \
             Cargo.toml \
-            clients/native/Cargo.lock \
             docs/library-usage.md \
-            | sort > "$expected"
+            fuzz/Cargo.toml > "$expected"
+          while IFS= read -r -d '' lockfile; do
+            printf '%s\n' "$lockfile" >> "$expected"
+          done < <(bash scripts/list-release-lockfiles.sh)
+          sort -o "$expected" "$expected"
           git diff --name-only | sort > "$actual"
           if ! diff -u "$expected" "$actual"; then
             echo "ERROR: Release preparation changed an unexpected file set." >&2
@@ -128,51 +130,12 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        run: |
-          set -euo pipefail
-          version=$(bash scripts/read-toml-string.sh Cargo.toml version package || true)
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "ERROR: Prepared Cargo.toml version is not strict X.Y.Z semver: $version" >&2
-            exit 1
-          fi
-          branch="release/v${version}"
-          tag="v${version}"
-          auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-
-          set +e
-          tag_result=$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
-            ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1)
-          tag_status=$?
-          branch_result=$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
-            ls-remote --exit-code --heads origin "refs/heads/${branch}" 2>&1)
-          branch_status=$?
-          set -e
-
-          if [ "$tag_status" -eq 0 ]; then
-            echo "ERROR: Release tag ${tag} already exists." >&2
-            exit 1
-          elif [ "$tag_status" -ne 2 ]; then
-            echo "ERROR: Failed to check release tag ${tag}: ${tag_result}" >&2
-            exit "$tag_status"
-          fi
-          if [ "$branch_status" -eq 0 ]; then
-            echo "ERROR: Release branch ${branch} already exists." >&2
-            exit 1
-          elif [ "$branch_status" -ne 2 ]; then
-            echo "ERROR: Failed to check release branch ${branch}: ${branch_result}" >&2
-            exit "$branch_status"
-          fi
-
-          {
-            echo "version=$version"
-            echo "tag=$tag"
-            echo "branch=$branch"
-          } >> "$GITHUB_OUTPUT"
+        run: bash scripts/resolve-prepared-release.sh
 
       - name: Create recovery patch
-        if: ${{ !inputs.dry_run }}
+        if: ${{ always() && !inputs.dry_run }}
         env:
-          VERSION: ${{ steps.release.outputs.version }}
+          VERSION: ${{ steps.release.outputs.version || 'unknown' }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/release-prepare
@@ -196,24 +159,36 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
           TAG: ${{ steps.release.outputs.tag }}
           BRANCH: ${{ steps.release.outputs.branch }}
+          BRANCH_EXISTS: ${{ steps.release.outputs.branch_exists }}
+          VERIFIED_BRANCH_SHA: ${{ steps.release.outputs.branch_sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git add \
-            .llm/context.md \
-            CHANGELOG.md \
-            Cargo.lock \
-            Cargo.toml \
-            clients/native/Cargo.lock \
-            docs/library-usage.md
-          git commit -m "release: ${VERSION}"
 
-          auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
-            push origin "HEAD:refs/heads/${BRANCH}"
+          if [ "$BRANCH_EXISTS" = "true" ]; then
+            echo "Reusing exact existing release branch ${BRANCH}."
+            expected_head_sha=$VERIFIED_BRANCH_SHA
+          else
+            git checkout -b "$BRANCH"
+            release_files=(
+              .llm/context.md
+              CHANGELOG.md
+              Cargo.toml
+              docs/library-usage.md
+              fuzz/Cargo.toml
+            )
+            while IFS= read -r -d '' lockfile; do
+              release_files+=("$lockfile")
+            done < <(bash scripts/list-release-lockfiles.sh)
+            git add "${release_files[@]}"
+            git commit -m "release: ${VERSION}"
+            auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+              push origin "HEAD:refs/heads/${BRANCH}"
+            expected_head_sha=$(git rev-parse HEAD)
+          fi
 
           body_file=$(mktemp)
           {
@@ -233,12 +208,8 @@ jobs:
             echo "It creates the GitHub Release and attaches the SBOM and platform archives."
           } > "$body_file"
 
-          gh pr create \
-            --repo "$GITHUB_REPOSITORY" \
-            --base "$DEFAULT_BRANCH" \
-            --head "$BRANCH" \
-            --title "release: ${VERSION}" \
-            --body-file "$body_file"
+          bash scripts/ensure-release-pr.sh \
+            "$DEFAULT_BRANCH" "$BRANCH" "$VERSION" "$TAG" "$body_file" "$expected_head_sha"
 
       - name: Upload release preparation recovery patch
         if: ${{ failure() && !inputs.dry_run }}

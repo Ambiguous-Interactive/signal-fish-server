@@ -21,9 +21,12 @@ impl Fixture {
         for directory in [
             ".llm/code-samples/protocol",
             "clients/native",
+            "clients/native/src",
             "docs/guides",
             "fuzz",
+            "fuzz/src",
             "scripts",
+            "src",
         ] {
             fs::create_dir_all(root.join(directory)).expect("create fixture directory");
         }
@@ -31,11 +34,11 @@ impl Fixture {
         write(
             &root.join("Cargo.toml"),
             &format!(
-                "[package]\nname = \"signal-fish-server\"\nversion = \"{version}\"\n\n\
-                 [dependencies]\nexample = {{ version = \"9.9.9\" }}\n"
+                "[package]\nname = \"signal-fish-server\"\nversion = \"{version}\"\n\
+                 description = \"Fixture marker 9.9.9\"\n"
             ),
         );
-        for lock in ["Cargo.lock", "clients/native/Cargo.lock"] {
+        for lock in ["Cargo.lock", "clients/native/Cargo.lock", "fuzz/Cargo.lock"] {
             write(
                 &root.join(lock),
                 &format!(
@@ -46,8 +49,19 @@ impl Fixture {
         }
         write(
             &root.join("clients/native/Cargo.toml"),
-            "[package]\nname = \"native\"\nversion = \"0.1.0\"\n",
+            "[package]\nname = \"native\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nsignal-fish-server = { path = \"../..\" }\n",
         );
+        write(
+            &root.join("fuzz/Cargo.toml"),
+            "[package]\nname = \"signal-fish-server-fuzz\"\nversion = \"0.0.0\"\n\n\
+               [dependencies.signal-fish-server] # synchronized local dependency\n\
+             path = \"..\"\n  version = '1.2.3' # preserve this formatting\n\n\
+             [[package.metadata.fixture]]\nversion = \"1.2.3\"\n",
+        );
+        for source in ["src/lib.rs", "clients/native/src/lib.rs", "fuzz/src/lib.rs"] {
+            write(&root.join(source), "");
+        }
         write(
             &root.join("docs/library-usage.md"),
             &format!(
@@ -153,6 +167,31 @@ impl Fixture {
             .output()
             .expect("run prepare-release.sh with real document checker")
     }
+
+    fn run_with_cargo_bin(&self, arguments: &[&str], cargo_bin: &Path) -> Output {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/prepare-release.sh");
+        Command::new("bash")
+            .arg(script)
+            .args(arguments)
+            .current_dir(&self.root)
+            .env_remove("GIT_INDEX_FILE")
+            .env("PREPARE_RELEASE_CARGO_BIN", cargo_bin)
+            .env("PREPARE_RELEASE_DOC_CHECK", "true")
+            .output()
+            .expect("run prepare-release.sh with controlled Cargo")
+    }
+
+    fn run_with_actual_cargo(&self, arguments: &[&str]) -> Output {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/prepare-release.sh");
+        Command::new("bash")
+            .arg(script)
+            .args(arguments)
+            .current_dir(&self.root)
+            .env_remove("GIT_INDEX_FILE")
+            .env("PREPARE_RELEASE_DOC_CHECK", "true")
+            .output()
+            .expect("run prepare-release.sh with actual Cargo")
+    }
 }
 
 fn git_at(root: &Path) -> Command {
@@ -170,10 +209,12 @@ fn read(path: impl AsRef<Path>) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
-const RELEASE_FILES: [&str; 6] = [
+const RELEASE_FILES: [&str; 8] = [
     "Cargo.toml",
     "Cargo.lock",
+    "fuzz/Cargo.toml",
     "clients/native/Cargo.lock",
+    "fuzz/Cargo.lock",
     "CHANGELOG.md",
     "docs/library-usage.md",
     ".llm/context.md",
@@ -213,9 +254,14 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
 
         let cargo_toml = read(fixture.root.join("Cargo.toml"));
         assert!(cargo_toml.contains(&format!("version = \"{expected}\"")));
-        assert!(cargo_toml.contains("example = { version = \"9.9.9\" }"));
+        assert!(cargo_toml.contains("description = \"Fixture marker 9.9.9\""));
+        let fuzz_manifest = read(fixture.root.join("fuzz/Cargo.toml"));
+        assert!(fuzz_manifest.contains(&format!(
+            "  version = '{expected}' # preserve this formatting"
+        )));
+        assert!(fuzz_manifest.contains("[[package.metadata.fixture]]\nversion = \"1.2.3\""));
 
-        for lock in ["Cargo.lock", "clients/native/Cargo.lock"] {
+        for lock in ["Cargo.lock", "clients/native/Cargo.lock", "fuzz/Cargo.lock"] {
             let contents = read(fixture.root.join(lock));
             assert!(
                 contents.contains(&format!(
@@ -249,6 +295,43 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
         assert!(changelog.contains(&format!(
             "[{expected}]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v1.2.3...v{expected}"
         )));
+    }
+}
+
+#[test]
+fn prepare_release_supported_bumps_pass_real_cargo_resolution() {
+    for (bump, expected) in [("patch", "1.2.4"), ("minor", "1.3.0"), ("major", "2.0.0")] {
+        let fixture = Fixture::new("1.2.3");
+        for manifest in ["Cargo.toml", "clients/native/Cargo.toml", "fuzz/Cargo.toml"] {
+            let generated = Command::new("cargo")
+                .args(["generate-lockfile", "--manifest-path", manifest])
+                .current_dir(&fixture.root)
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .expect("generate realistic fixture lockfile");
+            assert!(
+                generated.status.success(),
+                "failed to generate {manifest}:\n{}",
+                String::from_utf8_lossy(&generated.stderr)
+            );
+        }
+        let output = fixture.run_with_actual_cargo(&["--bump", bump, "--date", RELEASE_DATE]);
+        assert!(
+            output.status.success(),
+            "{bump} preparation failed real Cargo resolution:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let check = Command::new("cargo")
+            .args(["check", "--locked", "--manifest-path", "fuzz/Cargo.toml"])
+            .current_dir(&fixture.root)
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .expect("run real locked fuzz check");
+        assert!(
+            check.status.success(),
+            "{bump} prepared fuzz graph rejected {expected}:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
     }
 }
 
@@ -298,14 +381,188 @@ fn prepare_release_fails_closed_on_empty_notes_existing_version_or_lock_drift() 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("already contains"));
 
-    let lock_drift = Fixture::new("1.2.3");
-    write(
-        &lock_drift.root.join("clients/native/Cargo.lock"),
-        "version = 4\n\n[[package]]\nname = \"different-package\"\nversion = \"1.2.3\"\n",
+    for lockfile in ["clients/native/Cargo.lock", "fuzz/Cargo.lock"] {
+        let lock_drift = Fixture::new("1.2.3");
+        write(
+            &lock_drift.root.join(lockfile),
+            "version = 4\n\n[[package]]\nname = \"different-package\"\nversion = \"1.2.3\"\n",
+        );
+        let before = release_file_snapshot(&lock_drift);
+        let output = lock_drift.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+        assert!(
+            !output.status.success(),
+            "{lockfile} drift unexpectedly passed"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(&format!(
+                "Required release lockfile {lockfile} is not tracked or does not embed the unsourced signal-fish-server path package"
+            )),
+            "unexpected {lockfile} diagnostic:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_release_files_unchanged(&lock_drift, &before);
+    }
+
+    let untracked = Fixture::new("1.2.3");
+    let lockfile = "clients/native/Cargo.lock";
+    let before = release_file_snapshot(&untracked);
+    assert!(git_at(&untracked.root)
+        .args(["rm", "--cached", "--quiet", lockfile])
+        .status()
+        .expect("untrack required lockfile while retaining it on disk")
+        .success());
+    let output = untracked.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(
+        !output.status.success(),
+        "untracked required lockfile unexpectedly passed"
     );
-    let output = lock_drift.run(&["--bump", "patch", "--date", RELEASE_DATE]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("exactly one signal-fish-server"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "Required release lockfile {lockfile} is not tracked or does not embed the unsourced signal-fish-server path package"
+        )),
+        "unexpected untracked {lockfile} diagnostic:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_release_files_unchanged(&untracked, &before);
+}
+
+#[test]
+fn prepare_release_discovers_future_tracked_standalone_lockfiles() {
+    let fixture = Fixture::new("1.2.3");
+    let package = fixture.root.join("tools/replay-client");
+    fs::create_dir_all(&package).expect("create future standalone package");
+    write(
+        &package.join("Cargo.toml"),
+        "[package]\nname = \"replay-client\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nsignal-fish-server = { path = \"../..\" }\n",
+    );
+    write(
+        &package.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"signal-fish-server\"\nversion = \"1.2.3\"\n",
+    );
+    assert!(git_at(&fixture.root)
+        .args(["add", "tools/replay-client"])
+        .status()
+        .expect("track future standalone package")
+        .success());
+    assert!(git_at(&fixture.root)
+        .args(["commit", "--quiet", "-m", "add future standalone package"])
+        .status()
+        .expect("commit future standalone package")
+        .success());
+
+    let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+
+    assert!(
+        output.status.success(),
+        "future standalone lockfile was not prepared:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(read(package.join("Cargo.lock"))
+        .contains("name = \"signal-fish-server\"\nversion = \"1.2.4\""));
+}
+
+#[test]
+fn release_lockfile_discovery_and_rewrite_distinguish_path_registry_and_lookalikes() {
+    let fixture = Fixture::new("1.2.3");
+    for directory in ["registry", "mixed", "nested"] {
+        fs::create_dir_all(fixture.root.join(directory)).expect("create lockfile case");
+        write(
+            &fixture.root.join(directory).join("Cargo.toml"),
+            "[package]\nname = \"case\"\nversion = \"0.1.0\"\n",
+        );
+    }
+    let registry_block = " [[package]] \n source=\"registry+https://github.com/rust-lang/crates.io-index\"\n name=\"signal-fish-server\"\n version=\"9.9.9\"\n checksum = \"abc\"\n";
+    let path_block = "  [[package]] # local table\n  name = \"signal-fish-server\" # local package\n\tversion= \"1.2.3\" # local version\n";
+    write(
+        &fixture.root.join("registry/Cargo.lock"),
+        &format!("version = 4\n\n{registry_block}"),
+    );
+    write(
+        &fixture.root.join("mixed/Cargo.lock"),
+        &format!("version = 4\n\n{registry_block}\n{path_block}"),
+    );
+    write(
+        &fixture.root.join("nested/stale-Cargo.lock"),
+        &format!("version = 4\n\n{path_block}"),
+    );
+    assert!(git_at(&fixture.root)
+        .args(["add", "registry", "mixed", "nested"])
+        .status()
+        .expect("track lockfile cases")
+        .success());
+    assert!(git_at(&fixture.root)
+        .args(["commit", "--quiet", "-m", "add lockfile identity cases"])
+        .status()
+        .expect("commit lockfile cases")
+        .success());
+
+    let list_script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/list-release-lockfiles.sh");
+    let listed = Command::new("bash")
+        .arg(list_script)
+        .current_dir(&fixture.root)
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("list release lockfiles");
+    assert!(listed.status.success());
+    let listed: Vec<_> = listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    assert!(listed.iter().any(|path| path == "mixed/Cargo.lock"));
+    assert!(!listed.iter().any(|path| path == "registry/Cargo.lock"));
+    assert!(!listed.iter().any(|path| path == "nested/stale-Cargo.lock"));
+
+    let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(
+        output.status.success(),
+        "mixed release preparation failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mixed = read(fixture.root.join("mixed/Cargo.lock"));
+    assert!(
+        mixed.contains(registry_block),
+        "registry block changed:\n{mixed}"
+    );
+    assert!(mixed.contains(
+        "  name = \"signal-fish-server\" # local package\n\tversion= \"1.2.4\" # local version"
+    ));
+    assert!(read(fixture.root.join("registry/Cargo.lock")).contains(registry_block));
+}
+
+#[test]
+fn prepare_release_rolls_back_every_file_when_postflight_fails() {
+    let fixture = Fixture::new("1.2.3");
+    let before = release_file_snapshot(&fixture);
+    let fake_cargo = fixture.root.join("fail-postflight-cargo.sh");
+    let counter = fixture.root.join("cargo-call-count");
+    write(&counter, "0\n");
+    write(
+        &fake_cargo,
+        &format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\ncount=$(cat '{}')\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > '{}'\n[ \"$count\" -le 3 ]\n",
+            counter.display(),
+            counter.display()
+        ),
+    );
+    let mut permissions = fs::metadata(&fake_cargo)
+        .expect("fake Cargo metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_cargo, permissions).expect("make fake Cargo executable");
+
+    let output =
+        fixture.run_with_cargo_bin(&["--bump", "patch", "--date", RELEASE_DATE], &fake_cargo);
+
+    assert!(
+        !output.status.success(),
+        "postflight failure unexpectedly passed"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("restored every release file"));
+    assert_release_files_unchanged(&fixture, &before);
 }
 
 #[test]
@@ -414,4 +671,415 @@ fn prepared_release_passes_the_real_document_checker() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn release_lockfile_awk_is_portable_and_gawk_lint_clean_in_every_mode() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/release-lockfile-packages.awk");
+    let lockfile = root.join("Cargo.lock");
+    let temp = tempfile::tempdir().expect("create AWK lint output directory");
+    let awk_version = Command::new("awk").arg("--version").output();
+    let is_gawk = awk_version.is_ok_and(|output| {
+        String::from_utf8_lossy(&output.stdout).contains("GNU Awk")
+            || String::from_utf8_lossy(&output.stderr).contains("GNU Awk")
+    });
+
+    for mode in ["list", "state", "rewrite"] {
+        let mut command = Command::new("awk");
+        if is_gawk {
+            command.arg("--lint");
+        }
+        command.args(["-v", &format!("mode={mode}")]);
+        if mode == "state" {
+            command.args(["-v", "expected_version=0.5.2"]);
+        } else if mode == "rewrite" {
+            command.args([
+                "-v",
+                "next_version=0.5.3",
+                "-v",
+                &format!("count_file={}", temp.path().join("count").display()),
+            ]);
+        }
+        let output = command
+            .arg("-f")
+            .arg(&script)
+            .arg("--")
+            .arg(&lockfile)
+            .output()
+            .unwrap_or_else(|error| panic!("run AWK lint in {mode} mode: {error}"));
+        assert!(output.status.success(), "AWK {mode} mode failed");
+        assert!(
+            output.stderr.is_empty(),
+            "AWK {mode} mode emitted lint diagnostics:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let empty_lockfile = temp.path().join("empty.lock");
+    write(&empty_lockfile, "");
+    for mode in ["state", "rewrite"] {
+        for inputs in [
+            [&lockfile, &lockfile],
+            [&lockfile, &empty_lockfile],
+            [&empty_lockfile, &lockfile],
+        ] {
+            let output = Command::new("awk")
+                .args(["-v", &format!("mode={mode}")])
+                .args(["-v", "expected_version=0.5.2"])
+                .args([
+                    "-v",
+                    &format!("count_file={}", temp.path().join("count").display()),
+                ])
+                .arg("-f")
+                .arg(&script)
+                .arg("--")
+                .args(inputs)
+                .output()
+                .unwrap_or_else(|error| panic!("run multi-input AWK in {mode} mode: {error}"));
+            assert!(!output.status.success(), "AWK {mode} pooled {inputs:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("accepts exactly one input file"),
+                "AWK {mode} emitted an unexpected multi-input diagnostic for {inputs:?}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn release_metadata_preflight_rejects_a_future_stale_graph_missing_the_root_entry() {
+    let fixture = Fixture::new("1.2.3");
+    fs::create_dir_all(fixture.root.join("tools/future/src"))
+        .expect("create future package source directory");
+    write(
+        &fixture.root.join("tools/future/Cargo.toml"),
+        "[package]\nname = \"future\"\nversion = \"0.1.0\"\n",
+    );
+    write(&fixture.root.join("tools/future/src/lib.rs"), "");
+
+    for manifest in [
+        "Cargo.toml",
+        "clients/native/Cargo.toml",
+        "fuzz/Cargo.toml",
+        "tools/future/Cargo.toml",
+    ] {
+        let generated = Command::new("cargo")
+            .args(["generate-lockfile", "--manifest-path", manifest])
+            .current_dir(&fixture.root)
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .expect("generate realistic fixture lockfile");
+        assert!(generated.status.success(), "generate {manifest}");
+    }
+
+    let future_manifest = read(fixture.root.join("tools/future/Cargo.toml"))
+        + "\n[dependencies]\nsignal-fish-server = { path = \"../..\" }\n";
+    write(
+        &fixture.root.join("tools/future/Cargo.toml"),
+        &future_manifest,
+    );
+    assert!(git_at(&fixture.root)
+        .args([
+            "add",
+            "Cargo.lock",
+            "clients/native/Cargo.lock",
+            "fuzz/Cargo.lock",
+            "tools/future",
+        ])
+        .status()
+        .expect("stage stale graph fixture")
+        .success());
+    assert!(git_at(&fixture.root)
+        .args([
+            "commit",
+            "--quiet",
+            "-m",
+            "add dependency without refreshing lock"
+        ])
+        .status()
+        .expect("commit stale graph fixture")
+        .success());
+
+    let before = release_file_snapshot(&fixture);
+    let output = fixture.run_with_actual_cargo(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(
+        !output.status.success(),
+        "stale future graph unexpectedly passed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("lock file")
+            && (stderr.contains("needs to be updated")
+                || stderr.contains("cannot update the lock file"))
+            && stderr.contains("--locked"),
+        "unexpected stale graph diagnostic:\n{}",
+        stderr
+    );
+    assert_release_files_unchanged(&fixture, &before);
+}
+
+#[test]
+fn release_rollback_uses_a_bsd_and_gnu_mktemp_template() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = read(root.join("scripts/prepare-release.sh"));
+    assert!(script.contains("mktemp -d \"${TMPDIR:-/tmp}/signal-fish-release-rollback.XXXXXX\""));
+}
+
+#[test]
+fn prepared_release_resolver_handles_every_remote_state() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = tempfile::tempdir().expect("create resolver test directory");
+    let fake_git = temp.path().join("git");
+    write(
+        &fake_git,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+authenticated=false
+if [ "${1:-}" = "-c" ]; then
+    [[ "${2:-}" == http.https://github.com/.extraheader=AUTHORIZATION:* ]]
+    authenticated=true
+    shift 2
+fi
+printf '%s\n' "$*" >> "$GIT_LOG"
+case "${1:-}" in
+    ls-remote)
+        [ "$authenticated" = true ]
+        if [[ "$*" == *"--tags"* ]]; then
+            status=${TAG_STATUS:-2}
+            [ "$status" -ne 0 ] || printf '%s\t%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/tags/v0.5.2
+        else
+            status=${BRANCH_STATUS:-2}
+            [ "$status" -ne 0 ] || printf '%s\t%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/release/v0.5.2
+        fi
+        [ "$status" -eq 0 ] || echo "remote probe failed" >&2
+        exit "$status"
+        ;;
+    fetch)
+        [ "$authenticated" = true ]
+        ;;
+    rev-parse)
+        [ "$*" = "rev-parse FETCH_HEAD" ]
+        printf '%s\n' "${FETCHED_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
+        ;;
+    diff)
+        exit "${TREE_STATUS:-0}"
+        ;;
+    *)
+        echo "unexpected fake git invocation: $*" >&2
+        exit 99
+        ;;
+esac
+"#,
+    );
+    let mut permissions = fs::metadata(&fake_git)
+        .expect("read fake git metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").expect("PATH must be set")
+    );
+    let resolver = root.join("scripts/resolve-prepared-release.sh");
+
+    for (description, tag_status, branch_status, tree_status, fetched_sha, success, expected) in [
+        (
+            "absent branch",
+            "2",
+            "2",
+            "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            true,
+            "branch_exists=false",
+        ),
+        (
+            "matching branch",
+            "2",
+            "0",
+            "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            true,
+            "branch_exists=true",
+        ),
+        (
+            "branch changed during verification",
+            "2",
+            "0",
+            "0",
+            "cccccccccccccccccccccccccccccccccccccccc",
+            false,
+            "changed while it was being verified",
+        ),
+        (
+            "conflicting tree",
+            "2",
+            "0",
+            "1",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            false,
+            "different tree",
+        ),
+        (
+            "tag exists",
+            "0",
+            "2",
+            "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            false,
+            "already exists",
+        ),
+        (
+            "branch API failure",
+            "2",
+            "128",
+            "0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            false,
+            "Failed to check",
+        ),
+        (
+            "tree comparison failure",
+            "2",
+            "0",
+            "3",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            false,
+            "Failed to compare",
+        ),
+    ] {
+        let github_output = temp.path().join(format!("{description}.output"));
+        let git_log = temp.path().join(format!("{description}.git.log"));
+        let output = Command::new("bash")
+            .arg(&resolver)
+            .current_dir(root)
+            .env("PATH", &path)
+            .env("GH_TOKEN", "test-token")
+            .env("GITHUB_OUTPUT", &github_output)
+            .env("TAG_STATUS", tag_status)
+            .env("BRANCH_STATUS", branch_status)
+            .env("TREE_STATUS", tree_status)
+            .env("FETCHED_SHA", fetched_sha)
+            .env("GIT_LOG", &git_log)
+            .output()
+            .unwrap_or_else(|error| panic!("run {description} resolver case: {error}"));
+        assert_eq!(output.status.success(), success, "{description}");
+        let evidence = if success {
+            read(&github_output)
+        } else {
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        };
+        assert!(
+            evidence.contains(expected),
+            "{description} did not report {expected:?}:\n{evidence}"
+        );
+        if description == "matching branch" {
+            assert!(evidence.contains("branch_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+            let log = read(&git_log);
+            assert!(log.contains("fetch --no-tags origin refs/heads/release/v0.5.2"));
+            assert!(log.contains("rev-parse FETCH_HEAD"));
+            assert!(log.contains("diff --quiet FETCH_HEAD --"));
+        }
+    }
+}
+
+#[test]
+fn release_pr_helper_reuses_creates_and_fails_closed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = tempfile::tempdir().expect("create PR helper test directory");
+    let fake_gh = temp.path().join("gh");
+    write(
+        &fake_gh,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GH_LOG"
+case "${1:-} ${2:-}" in
+    "api --method")
+        [ "${PR_LIST_STATUS:-0}" -eq 0 ] || exit "$PR_LIST_STATUS"
+        if [[ "$*" == *"head.sha"* ]]; then
+            number=${PR_NUMBER:-${CREATED_NUMBER:-}}
+            [ -z "$number" ] || printf '%s\t%s\n' "$number" "${PR_HEAD_SHA:-}"
+        else
+            printf '%s\n' "${PR_NUMBER:-}"
+        fi
+        ;;
+    "pr create")
+        echo "https://example.invalid/pull/1"
+        ;;
+    *) exit 99 ;;
+esac
+"#,
+    );
+    let mut permissions = fs::metadata(&fake_gh)
+        .expect("read fake gh metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_gh, permissions).expect("make fake gh executable");
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").expect("PATH must be set")
+    );
+    let helper = root.join("scripts/ensure-release-pr.sh");
+    let body = temp.path().join("body.md");
+    write(&body, "release body\n");
+
+    for (description, number, created, head_sha, list_status, success, creates) in [
+        (
+            "existing PR",
+            "42",
+            "",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0",
+            true,
+            false,
+        ),
+        (
+            "missing PR",
+            "",
+            "43",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0",
+            true,
+            true,
+        ),
+        (
+            "mismatched head",
+            "42",
+            "",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0",
+            false,
+            false,
+        ),
+        ("PR API failure", "", "", "", "1", false, false),
+    ] {
+        let log = temp.path().join(format!("{description}.log"));
+        let output = Command::new("bash")
+            .arg(&helper)
+            .args(["main", "release/v0.5.2", "0.5.2", "v0.5.2"])
+            .arg(&body)
+            .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .env("PATH", &path)
+            .env("GH_TOKEN", "test-token")
+            .env("GITHUB_REPOSITORY", "owner/repo")
+            .env("GH_LOG", &log)
+            .env("PR_NUMBER", number)
+            .env("CREATED_NUMBER", created)
+            .env("PR_HEAD_SHA", head_sha)
+            .env("PR_LIST_STATUS", list_status)
+            .output()
+            .unwrap_or_else(|error| panic!("run {description} helper case: {error}"));
+        assert_eq!(output.status.success(), success, "{description}");
+        let log = read(&log);
+        assert!(
+            log.contains(
+                "api --method GET repos/owner/repo/pulls -f state=open -f base=main \
+                 -f head=owner:release/v0.5.2"
+            ),
+            "{description}: {log}"
+        );
+        assert_eq!(log.contains("pr create"), creates, "{description}");
+    }
 }

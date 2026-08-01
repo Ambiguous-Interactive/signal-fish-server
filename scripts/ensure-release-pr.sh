@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 6 ]; then
+    echo "Usage: $0 <default-branch> <release-branch> <version> <tag> <body-file> <expected-head-sha>" >&2
+    exit 2
+fi
+: "${GH_TOKEN:?GH_TOKEN is required}"
+: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+
+default_branch=$1
+branch=$2
+version=$3
+tag=$4
+body_file=$5
+expected_head_sha=$6
+repo_owner=${GITHUB_REPOSITORY%%/*}
+
+# The REST head filter is owner-qualified, so a fork using the same branch name
+# cannot be mistaken for this repository's release branch.
+existing_pr=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+    -f state=open \
+    -f base="$default_branch" \
+    -f head="${repo_owner}:${branch}" \
+    --jq '.[0].number // empty')
+if [ -n "$existing_pr" ]; then
+    echo "Reusing open release PR #${existing_pr}."
+else
+    gh pr create \
+        --repo "$GITHUB_REPOSITORY" \
+        --base "$default_branch" \
+        --head "$branch" \
+        --title "release: ${version}" \
+        --body-file "$body_file"
+fi
+
+pr_state=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+    -f state=open \
+    -f base="$default_branch" \
+    -f head="${repo_owner}:${branch}" \
+    --jq 'if length == 0 then empty else .[0] | [.number, .head.sha] | @tsv end')
+if [ -z "$pr_state" ]; then
+    echo "ERROR: No open release PR found after ensuring ${branch}." >&2
+    exit 1
+fi
+actual_head_sha=${pr_state#*$'\t'}
+if [ "$actual_head_sha" != "$expected_head_sha" ]; then
+    echo "ERROR: Release PR head changed while preparing ${branch}; expected ${expected_head_sha}, got ${actual_head_sha}." >&2
+    exit 1
+fi
+
+echo "Release ${tag} is represented by ${branch}."

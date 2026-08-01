@@ -40,12 +40,14 @@
 
 mod common;
 
-use common::{read_file, repo_root};
+use common::{bash_command, read_file, repo_root};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The workspace crate that committed nested lockfiles pin via a path dep.
 const ROOT_CRATE: &str = "signal-fish-server";
+const MISSING_ROOT_VERSION: &str =
+    "contains an unsourced signal-fish-server package entry without a parseable version";
 
 /// Committed nested lockfiles that must always be covered. Discovery is dynamic,
 /// but these are asserted present so broken discovery can never pass vacuously
@@ -68,26 +70,15 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
             .display()
             .to_string();
         let text = read_file(lock);
-        match locked_root_crate_version(&text) {
-            // Lockfiles that do not reference the workspace crate are irrelevant
-            // to this guard (none today, but stay future-proof).
-            None => continue,
-            Some(found) if found == expected => checked.push(rel),
-            Some(found) => {
-                checked.push(rel.clone());
-                problems.push(format!(
-                    "  - {rel}  pins {ROOT_CRATE} {found}, but root Cargo.toml is {expected}\n    \
-                     fix: cargo update -p {ROOT_CRATE} --manifest-path {rel}"
-                ));
-            }
-        }
+        let versions = locked_root_crate_versions(&text);
+        record_lockfile_check(&rel, &expected, &versions, &mut checked, &mut problems);
     }
 
     assert!(
         problems.is_empty(),
-        "Stale committed lockfile(s) detected — these pin an outdated {ROOT_CRATE} version and \
-         will fail `--locked` CI builds (e.g. the interop workflows) with a cryptic \
-         \"lock file needs to be updated\" error:\n{}\n\n\
+        "Invalid or stale committed lockfile(s) detected — these do not encode exactly one \
+         valid {ROOT_CRATE} path-package version matching root Cargo.toml and can fail \
+         `--locked` CI builds (e.g. the interop workflows):\n{}\n\n\
          The root Cargo.toml version is the single source of truth; regenerate the lockfile(s) \
          above and commit them.",
         problems.join("\n")
@@ -104,6 +95,61 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
              REQUIRED_NESTED_LOCKS in tests/workspace_lockfile_consistency.rs)"
         );
     }
+}
+
+fn record_lockfile_check(
+    rel: &str,
+    expected: &str,
+    versions: &[Result<String, &'static str>],
+    checked: &mut Vec<String>,
+    problems: &mut Vec<String>,
+) {
+    if versions.is_empty() {
+        return;
+    }
+    checked.push(rel.to_string());
+    match versions {
+        [Ok(found)] if found == expected => {}
+        [Ok(found)] => {
+            let manifest = manifest_for_lockfile(rel);
+            problems.push(format!(
+                "  - {rel}  pins {ROOT_CRATE} {found}, but root Cargo.toml is {expected}\n    \
+                 fix: run `cargo update -p {ROOT_CRATE}` using manifest path {manifest:?}"
+            ));
+        }
+        [Err(problem)] => problems.push(format!("  - {rel} {problem}")),
+        _ => problems.push(format!(
+            "  - {rel} contains {} unsourced {ROOT_CRATE} package entries; expected exactly one",
+            versions.len()
+        )),
+    }
+}
+
+fn manifest_for_lockfile(lockfile: &str) -> String {
+    let normalized = lockfile.replace('\\', "/");
+    match normalized.strip_suffix("/Cargo.lock") {
+        Some(directory) => format!("{directory}/Cargo.toml"),
+        None => "Cargo.toml".to_string(),
+    }
+}
+
+#[test]
+fn lockfile_diagnostics_point_to_cargo_manifests() {
+    for (lockfile, expected) in [
+        ("Cargo.lock", "Cargo.toml"),
+        ("clients/native/Cargo.lock", "clients/native/Cargo.toml"),
+        ("fuzz\\Cargo.lock", "fuzz/Cargo.toml"),
+        (
+            "tools/replay client/Cargo.lock",
+            "tools/replay client/Cargo.toml",
+        ),
+    ] {
+        assert_eq!(manifest_for_lockfile(lockfile), expected, "{lockfile}");
+    }
+    assert_eq!(
+        format!("{:?}", "tools/replay client's/Cargo.toml"),
+        "\"tools/replay client's/Cargo.toml\""
+    );
 }
 
 /// Parse `[package].version` from the root `Cargo.toml`.
@@ -136,12 +182,23 @@ fn root_crate_version(root: &Path) -> String {
 /// Extract the value of a `version = "X"` (or `'X'`) assignment, ignoring
 /// surrounding whitespace. Returns `None` for any other line.
 fn parse_version_assignment(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("version")?.trim_start();
+    parse_string_assignment(line, "version")
+}
+
+fn parse_string_assignment(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?.trim_start();
     let rest = rest.strip_prefix('=')?.trim();
-    let value = rest
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))?;
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|quote| matches!(quote, '"' | '\''))?;
+    let rest = &rest[quote.len_utf8()..];
+    let closing = rest.find(quote)?;
+    let value = &rest[..closing];
+    let suffix = rest[closing + quote.len_utf8()..].trim();
+    if !suffix.is_empty() && !suffix.starts_with('#') {
+        return None;
+    }
     Some(value.to_string())
 }
 
@@ -149,27 +206,193 @@ fn parse_version_assignment(line: &str) -> Option<String> {
 ///
 /// Cargo writes each `[[package]]` block as `name` then `version` on the next
 /// line; we still scan forward to the first `version = "..."` within the block
-/// (bounded by the next `[[package]]` / blank line) so a future cargo lockfile
-/// field-ordering change cannot silently break the parse.
-fn locked_root_crate_version(lock_text: &str) -> Option<String> {
-    let needle = format!("name = \"{ROOT_CRATE}\"");
-    let mut lines = lock_text.lines();
-    while let Some(line) = lines.next() {
-        if line.trim() != needle {
-            continue;
-        }
-        for block_line in lines.by_ref() {
-            let trimmed = block_line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("[[") {
-                break; // end of this package block without a version
+/// (bounded by the next array-table header) so a future cargo lockfile
+/// field-ordering change cannot silently break the parse. A matching unsourced
+/// block without a parseable version is retained as an error so malformed
+/// lockfiles cannot be mistaken for irrelevant graphs.
+fn locked_root_crate_versions(lock_text: &str) -> Vec<Result<String, &'static str>> {
+    lock_text
+        .split("[[package]]")
+        .skip(1)
+        .filter_map(|block| {
+            let mut is_root = false;
+            let mut has_source = false;
+            let mut version = None;
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("[[") {
+                    break;
+                }
+                is_root |= parse_string_assignment(trimmed, "name").as_deref() == Some(ROOT_CRATE);
+                has_source |= parse_string_assignment(trimmed, "source").is_some();
+                if version.is_none() {
+                    version = parse_version_assignment(trimmed);
+                }
             }
-            if let Some(version) = parse_version_assignment(trimmed) {
-                return Some(version);
-            }
-        }
-        return None;
+            (is_root && !has_source).then(|| version.ok_or(MISSING_ROOT_VERSION))
+        })
+        .collect()
+}
+
+#[test]
+fn lockfile_parser_distinguishes_path_and_registry_packages() {
+    let path = "[[package]] # local table\nname = \"signal-fish-server\" # local package\nversion = \"1.2.3\" # local version\n";
+    let path_version_first = "[[package]]\nversion = \"1.2.3\"\nname = \"signal-fish-server\"\n";
+    let missing_version = "[[package]]\nname = \"signal-fish-server\"\n";
+    let sourced_missing_version = "[[package]]\nname = \"signal-fish-server\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+    let unrelated_missing_version = "[[package]]\nname = \"different-package\"\n";
+    let registry = "[[package]]\nname = \"signal-fish-server\"\nversion = \"9.9.9\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\" # registry package\nchecksum = \"abc\"\n";
+
+    for (description, contents, expected) in [
+        ("path only", path.to_string(), vec![Ok("1.2.3".to_string())]),
+        (
+            "path with version before name",
+            path_version_first.to_string(),
+            vec![Ok("1.2.3".to_string())],
+        ),
+        (
+            "path missing version",
+            missing_version.to_string(),
+            vec![Err(MISSING_ROOT_VERSION)],
+        ),
+        (
+            "sourced root package missing version",
+            sourced_missing_version.to_string(),
+            Vec::new(),
+        ),
+        (
+            "unrelated package missing version",
+            unrelated_missing_version.to_string(),
+            Vec::new(),
+        ),
+        ("registry only", registry.to_string(), Vec::new()),
+        (
+            "mixed registry and path",
+            format!("{registry}\n{path}"),
+            vec![Ok("1.2.3".to_string())],
+        ),
+    ] {
+        assert_eq!(
+            locked_root_crate_versions(&contents),
+            expected,
+            "{description}"
+        );
     }
-    None
+}
+
+#[test]
+fn malformed_root_package_is_counted_and_reported_with_its_lockfile() {
+    let versions = locked_root_crate_versions(
+        "[[package]]\nname = \"signal-fish-server\"\nchecksum = \"truncated\"\n",
+    );
+    let mut checked = Vec::new();
+    let mut problems = Vec::new();
+    record_lockfile_check(
+        "clients/native/Cargo.lock",
+        "1.2.3",
+        &versions,
+        &mut checked,
+        &mut problems,
+    );
+
+    assert_eq!(checked, ["clients/native/Cargo.lock"]);
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].contains("clients/native/Cargo.lock"));
+    assert!(problems[0].contains(MISSING_ROOT_VERSION));
+}
+
+#[test]
+fn fuzz_root_path_dependency_pins_the_current_root_version() {
+    let root = repo_root();
+    let expected = root_crate_version(&root);
+    let output = bash_command()
+        .arg("scripts/read-toml-string.sh")
+        .args([
+            "fuzz/Cargo.toml",
+            "version",
+            "dependencies.signal-fish-server",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("read fuzz root dependency version");
+    assert!(
+        output.status.success(),
+        "fuzz/Cargo.toml must pin its local {ROOT_CRATE} dependency because cargo-deny rejects \
+         path-only dependencies as wildcards:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+}
+
+#[test]
+fn tracked_non_fuzz_root_path_dependencies_do_not_pin_the_root_version() {
+    let root = repo_root();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "-z", "--", ":(glob)**/Cargo.toml"])
+        .output()
+        .expect("discover tracked Cargo manifests");
+    assert!(output.status.success(), "git manifest discovery failed");
+
+    let mut checked = 0;
+    let mut problems = Vec::new();
+    for relative in String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty() && *path != "fuzz/Cargo.toml")
+    {
+        checked += 1;
+        let manifest = root.join(relative);
+        let metadata = Command::new("cargo")
+            .args([
+                "metadata",
+                "--locked",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .output()
+            .unwrap_or_else(|error| panic!("run cargo metadata for {relative}: {error}"));
+        assert!(
+            metadata.status.success(),
+            "cargo metadata failed for {relative}:\n{}",
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+        if metadata_has_versioned_root_path_dependency(&metadata.stdout) {
+            problems.push(relative.to_string());
+        }
+    }
+    assert!(checked > 0, "git found no non-fuzz Cargo.toml files");
+    assert!(
+        problems.is_empty(),
+        "Only fuzz/Cargo.toml may pin the local {ROOT_CRATE} path dependency because its \
+         cargo-deny lane rejects wildcards. Other tracked manifests must omit redundant \
+         version constraints so every semantic release bump remains valid. Remove `version` \
+         from:\n  - {}",
+        problems.join("\n  - ")
+    );
+}
+
+fn metadata_has_versioned_root_path_dependency(metadata: &[u8]) -> bool {
+    let metadata: serde_json::Value =
+        serde_json::from_slice(metadata).expect("cargo metadata must be valid JSON");
+    metadata["packages"]
+        .as_array()
+        .expect("cargo metadata packages must be an array")
+        .iter()
+        .flat_map(|package| {
+            package["dependencies"]
+                .as_array()
+                .expect("cargo metadata dependencies must be an array")
+        })
+        .any(|dependency| {
+            dependency["name"] == ROOT_CRATE
+                && dependency["source"].is_null()
+                && dependency["path"].is_string()
+                && dependency["req"] != "*"
+        })
 }
 
 /// Committed `Cargo.lock` paths (absolute), discovered via `git ls-files` — the
@@ -184,7 +407,7 @@ fn tracked_cargo_locks(root: &Path) -> Vec<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["ls-files", "-z", "--", "*Cargo.lock", "Cargo.lock"])
+        .args(["ls-files", "-z", "--", ":(glob)**/Cargo.lock"])
         .output()
         .unwrap_or_else(|e| {
             panic!("`git ls-files` failed ({e}); this guard requires a git checkout")

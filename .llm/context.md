@@ -10,7 +10,7 @@
 - **Repository:** `signal-fish-server` — extracted from the matchbox-signaling-server with
   production-ready signaling stripped down to a single self-contained binary
 - **Crate name:** Binary: `signal-fish-server` | Library: `signal_fish_server`
-- **Version:** 0.5.1
+- **Version:** 0.5.2
 - **Code name:** Signal Fish
 - **Not Matchbox:** This project is built by Ambiguous Interactive, not the upstream Matchbox team.
   The upstream `matchbox` crate/project (by Johan Helsing) is a dependency we build upon,
