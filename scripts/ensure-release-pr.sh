@@ -14,13 +14,14 @@ version=$3
 tag=$4
 body_file=$5
 expected_head_sha=$6
+repo_owner=${GITHUB_REPOSITORY%%/*}
 
-existing_pr=$(gh pr list \
-    --repo "$GITHUB_REPOSITORY" \
-    --state open \
-    --base "$default_branch" \
-    --head "$branch" \
-    --json number \
+# The REST head filter is owner-qualified, so a fork using the same branch name
+# cannot be mistaken for this repository's release branch.
+existing_pr=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+    -f state=open \
+    -f base="$default_branch" \
+    -f head="${repo_owner}:${branch}" \
     --jq '.[0].number // empty')
 if [ -n "$existing_pr" ]; then
     echo "Reusing open release PR #${existing_pr}."
@@ -33,13 +34,11 @@ else
         --body-file "$body_file"
 fi
 
-pr_state=$(gh pr list \
-    --repo "$GITHUB_REPOSITORY" \
-    --state open \
-    --base "$default_branch" \
-    --head "$branch" \
-    --json number,headRefOid \
-    --jq 'if length == 0 then empty else .[0] | [.number, .headRefOid] | @tsv end')
+pr_state=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+    -f state=open \
+    -f base="$default_branch" \
+    -f head="${repo_owner}:${branch}" \
+    --jq 'if length == 0 then empty else .[0] | [.number, .head.sha] | @tsv end')
 if [ -z "$pr_state" ]; then
     echo "ERROR: No open release PR found after ensuring ${branch}." >&2
     exit 1

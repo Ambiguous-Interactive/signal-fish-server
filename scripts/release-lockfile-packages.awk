@@ -4,8 +4,20 @@
 #   list    - print each input filename followed by NUL when it has an unsourced entry
 #   state   - print <unsourced entries>:<entries matching expected_version>
 #   rewrite - copy the lockfile to stdout, replacing only the unsourced entry version
+# `state` and `rewrite` have a deliberate single-input contract because their
+# output formats do not carry filenames; fail closed instead of pooling counters.
 
 BEGIN {
+    input_files = 0
+    for (argument_index = 1; argument_index < ARGC; argument_index++) {
+        if (ARGV[argument_index] != "" && ARGV[argument_index] != "--") input_files++
+    }
+    input_error = mode != "list" && input_files != 1
+    if (input_error) {
+        print "ERROR: " mode " mode accepts exactly one input file." > "/dev/stderr"
+        exit 2
+    }
+
     current_file = ""
     entries = 0
     matching = 0
@@ -61,7 +73,6 @@ function finish_file() {
 FNR == 1 {
     if (current_file != "") finish_file()
     current_file = FILENAME
-    reset_package()
 }
 
 /^[[:space:]]*\[\[package\]\][[:space:]]*(#.*)?$/ {
@@ -88,6 +99,7 @@ in_package {
 mode == "rewrite" { print }
 
 END {
+    if (input_error) exit 2
     if (current_file != "") finish_file()
     if (mode == "state") print entries ":" matching
     if (mode == "rewrite") {

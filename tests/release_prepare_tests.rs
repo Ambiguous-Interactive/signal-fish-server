@@ -688,6 +688,35 @@ fn release_lockfile_awk_is_portable_and_gawk_lint_clean_in_every_mode() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    let empty_lockfile = temp.path().join("empty.lock");
+    write(&empty_lockfile, "");
+    for mode in ["state", "rewrite"] {
+        for inputs in [
+            [&lockfile, &lockfile],
+            [&lockfile, &empty_lockfile],
+            [&empty_lockfile, &lockfile],
+        ] {
+            let output = Command::new("awk")
+                .args(["-v", &format!("mode={mode}")])
+                .args(["-v", "expected_version=0.5.2"])
+                .args([
+                    "-v",
+                    &format!("count_file={}", temp.path().join("count").display()),
+                ])
+                .arg("-f")
+                .arg(&script)
+                .args(inputs)
+                .output()
+                .unwrap_or_else(|error| panic!("run multi-input AWK in {mode} mode: {error}"));
+            assert!(!output.status.success(), "AWK {mode} pooled {inputs:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("accepts exactly one input file"),
+                "AWK {mode} emitted an unexpected multi-input diagnostic for {inputs:?}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }
 
 #[test]
@@ -873,9 +902,9 @@ fn release_pr_helper_reuses_creates_and_fails_closed() {
 set -euo pipefail
 printf '%s\n' "$*" >> "$GH_LOG"
 case "${1:-} ${2:-}" in
-    "pr list")
+    "api --method")
         [ "${PR_LIST_STATUS:-0}" -eq 0 ] || exit "$PR_LIST_STATUS"
-        if [[ "$*" == *"headRefOid"* ]]; then
+        if [[ "$*" == *"head.sha"* ]]; then
             number=${PR_NUMBER:-${CREATED_NUMBER:-}}
             [ -z "$number" ] || printf '%s\t%s\n' "$number" "${PR_HEAD_SHA:-}"
         else
@@ -951,7 +980,13 @@ esac
             .unwrap_or_else(|error| panic!("run {description} helper case: {error}"));
         assert_eq!(output.status.success(), success, "{description}");
         let log = read(&log);
-        assert!(log.contains("pr list"), "{description}");
+        assert!(
+            log.contains(
+                "api --method GET repos/owner/repo/pulls -f state=open -f base=main \
+                 -f head=owner:release/v0.5.2"
+            ),
+            "{description}: {log}"
+        );
         assert_eq!(log.contains("pr create"), creates, "{description}");
     }
 }
