@@ -166,24 +166,24 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          release_files=(
-            .llm/context.md
-            CHANGELOG.md
-            Cargo.toml
-            docs/library-usage.md
-            fuzz/Cargo.toml
-          )
-          while IFS= read -r -d '' lockfile; do
-            release_files+=("$lockfile")
-          done < <(bash scripts/list-release-lockfiles.sh)
-          git add "${release_files[@]}"
-          git commit -m "release: ${VERSION}"
 
           if [ "$BRANCH_EXISTS" = "true" ]; then
             echo "Reusing exact existing release branch ${BRANCH}."
             expected_head_sha=$VERIFIED_BRANCH_SHA
           else
+            git checkout -b "$BRANCH"
+            release_files=(
+              .llm/context.md
+              CHANGELOG.md
+              Cargo.toml
+              docs/library-usage.md
+              fuzz/Cargo.toml
+            )
+            while IFS= read -r -d '' lockfile; do
+              release_files+=("$lockfile")
+            done < <(bash scripts/list-release-lockfiles.sh)
+            git add "${release_files[@]}"
+            git commit -m "release: ${VERSION}"
             auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
             git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
               push origin "HEAD:refs/heads/${BRANCH}"
