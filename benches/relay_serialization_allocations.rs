@@ -92,6 +92,9 @@ fn assert_allocation_ceiling(scenario: Scenario, room_size: usize, sample: &Samp
             _ => panic!("room-{room_size} has no checked-in allocation baseline"),
         };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
+    // Every 1,024-relay cell has one deterministic sample-scoped operation
+    // (the `.0010` visible in the report), so keep that fixed allowance
+    // separate from the integral per-relay hot-path ceiling.
     let maximum_operations = maximum_operations_per_relay * RELAYS_PER_SAMPLE + 1;
     let maximum_reallocations = maximum_reallocations_per_relay * RELAYS_PER_SAMPLE;
     let maximum_bytes = maximum_bytes_per_relay * RELAYS_PER_SAMPLE;

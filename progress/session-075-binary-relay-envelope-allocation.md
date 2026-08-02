@@ -88,7 +88,11 @@ evidence and exact wire ledgers; machine-sensitive timing remains observational.
   Cursor Bugbot reported no issue, and Copilot identified one error-taxonomy
   gap in fallback writer growth. The follow-up distinguishes capacity overflow
   (`InvalidInput`) from allocator failure (`OutOfMemory`) and pins that contract
-  directly; final hosted and reviewer evidence remain pending publication.
+  directly. A clean exact-head re-review exposed three suppressed maintenance
+  suggestions; the final local head also classifies initial reserve overflow,
+  documents the single sample-scoped allocation allowance, and makes the CI
+  contract assertion whitespace-insensitive. Final hosted and reviewer
+  evidence remain pending publication.
 
 ## Follow-up
 

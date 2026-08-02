@@ -1882,10 +1882,13 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
 fn test_ci_enforces_relay_allocation_ceilings() {
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let job = extract_workflow_job_block(&workflow, "relay-allocations")
+        .expect("ci.yml must define the relay-allocations job");
+    let normalized_job = job.split_whitespace().collect::<Vec<_>>().join(" ");
 
     assert!(
-        workflow.contains(
-            "cargo bench --locked --bench relay_serialization_allocations\n          --features allocation-tracking"
+        normalized_job.contains(
+            "cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking"
         ),
         "ci.yml must execute the deterministic production-seam allocation benchmark with its \
          required feature and locked graph"

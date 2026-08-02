@@ -894,6 +894,7 @@ fn encode_named_binary_frame<T: Serialize>(
 
     let capacity = payload_len
         .checked_add(ENVELOPE_HEADROOM)
+        .filter(|capacity| *capacity <= isize::MAX as usize)
         .ok_or_else(|| "binary frame capacity overflow".to_string())?;
     let mut bytes = Vec::new();
     bytes
@@ -1530,9 +1531,11 @@ mod tests {
 
     #[test]
     fn binary_frame_capacity_overflow_is_reported() {
-        let error = encode_named_binary_frame(&0_u8, usize::MAX)
-            .expect_err("capacity arithmetic overflow must fail before allocation");
-        assert!(error.contains("capacity overflow"));
+        for payload_len in [isize::MAX as usize, usize::MAX] {
+            let error = encode_named_binary_frame(&0_u8, payload_len)
+                .expect_err("capacity overflow must fail before allocation");
+            assert!(error.contains("capacity overflow"));
+        }
 
         let mut bytes = Vec::new();
         let error = FallibleVecWriter(&mut bytes)
