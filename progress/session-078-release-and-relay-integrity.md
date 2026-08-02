@@ -90,5 +90,16 @@ boundary check during parent review. The second hostile review reported zero
 findings after rerunning the focused release, retry, allocation, actionlint,
 formatting, and Clippy checks.
 
-Hosted CI, GitHub review, and the final v0.5.2 GitHub Release retry remain in
-progress.
+Hosted validation completed on PR #245 implementation head `31cb0d5`: all 19
+workflow runs reached terminal state, with 18 successes and the expected
+Dependabot auto-merge skip. The first head exposed one spelling false positive
+in release prose; the corrected head passed Spellcheck and every Rust, safety,
+fuzz, interop, formal, documentation, and workflow-policy lane. Cursor Bugbot
+reported zero findings on that exact head, no review threads remained, and
+Copilot's two requested passes were unavailable only because its account quota
+was exhausted.
+
+The final v0.5.2 GitHub Release retry remains gated on merging the corrected
+workflow to the default branch. It is intentionally not attempted from the PR
+branch because the resolver requires the workflow definition on `main` and the
+session target is a fully green PR rather than an unreviewed merge.
