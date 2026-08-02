@@ -57,6 +57,9 @@ pub enum Event {
         peer_id: PlayerId,
         you_initiate: bool,
     },
+    /// A harness-controlled P2P gate opened and released this many planned
+    /// pair directives. Production runs omit the gate and this event.
+    P2pGateReleased { pending_pairs: usize },
     /// An outbound `Signal` envelope was relayed toward `to`.
     SignalSent { to: PlayerId, kind: SignalKind },
     /// An inbound `Signal` envelope arrived from `from`.
@@ -82,6 +85,12 @@ pub enum Event {
     },
     /// Both channels (`reliable` + `unreliable`) are open toward `peer`.
     P2pPairConnected { peer: PlayerId },
+    /// Candidate types selected for the active ICE path.
+    SelectedCandidatePair {
+        peer: PlayerId,
+        local_candidate_type: String,
+        remote_candidate_type: String,
+    },
     /// Every planned pair is open and local ICE gathering is complete, but
     /// `--exchange-release-file` still holds the exact application exchange.
     ExchangeReady,
@@ -226,6 +235,14 @@ mod tests {
                     peer: PlayerId::nil(),
                 },
                 "p2p_pair_connected",
+            ),
+            (
+                Event::SelectedCandidatePair {
+                    peer: PlayerId::nil(),
+                    local_candidate_type: "relay".to_string(),
+                    remote_candidate_type: "relay".to_string(),
+                },
+                "selected_candidate_pair",
             ),
             (
                 Event::TransportStatusSent {

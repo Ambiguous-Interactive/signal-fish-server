@@ -222,8 +222,13 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
 
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-    let engine = Engine::new(cli.cripple_ice, cli.disable_mdns, engine_tx)
-        .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
+    let engine = Engine::new(
+        cli.cripple_ice,
+        cli.disable_mdns,
+        cli.ice_transport_policy.is_relay_only(),
+        engine_tx,
+    )
+    .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
     present.insert(my_id);
     let members_seen = present.clone();
@@ -263,6 +268,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         transport_status: None,
         p2p_deadline: None,
         p2p_retry_at: None,
+        p2p_released: cli.p2p_release_file.is_none(),
+        p2p_release_poll_at: cli.p2p_release_file.as_ref().map(|_| Instant::now()),
+        pending_pair_directives: BTreeMap::new(),
         // Late joiners arm the relay probe on entry (see RELAY_SEND_SETTLE):
         // the GameStarting trigger pre-dates the join and never re-fires.
         relay_send_at: (cli.relay_payload.is_some() && lobby_state == LobbyState::Finalized)
@@ -522,9 +530,10 @@ fn is_terminal_peer_connection_state(state: &RTCPeerConnectionState) -> bool {
 
 fn should_buffer_signal_for_unpaired_peer(
     expected_peers: &BTreeSet<PlayerId>,
+    held_by_p2p_gate: bool,
     peer: PlayerId,
 ) -> bool {
-    !expected_peers.contains(&peer)
+    held_by_p2p_gate || !expected_peers.contains(&peer)
 }
 
 fn requires_authoritative_finalization_plan(negotiated_version: u16) -> bool {
@@ -695,6 +704,13 @@ struct Orchestrator<'a> {
     p2p_deadline: Option<Instant>,
     /// When to rebuild any still-incomplete planned pair.
     p2p_retry_at: Option<Instant>,
+    /// Harness-only gate that keeps WebSocket traffic live before any peer
+    /// connection is created.
+    p2p_released: bool,
+    /// Next poll for `--p2p-release-file` while pairing is held.
+    p2p_release_poll_at: Option<Instant>,
+    /// Planned peers accumulated while the harness pairing gate is held.
+    pending_pair_directives: BTreeMap<PlayerId, bool>,
     /// When to send the `--relay-payload` GameData (trigger + settle; the
     /// trigger is GameStarting, or room entry for a Finalized-room late join).
     relay_send_at: Option<Instant>,
@@ -854,6 +870,9 @@ impl Orchestrator<'_> {
         if let Some(at) = self.p2p_retry_at {
             wake = wake.min(at);
         }
+        if let Some(at) = self.p2p_release_poll_at {
+            wake = wake.min(at);
+        }
         if let Some(at) = self.linger_until {
             wake = wake.min(at);
         }
@@ -907,6 +926,8 @@ impl Orchestrator<'_> {
         if !self.relay_sent && self.relay_send_at.is_some_and(|at| now >= at) {
             self.send_relay_payload().await?;
         }
+
+        self.process_p2p_gate(now).await?;
 
         if self.p2p_retry_at.is_some_and(|at| now >= at) {
             self.retry_incomplete_pairs(now).await?;
@@ -999,6 +1020,35 @@ impl Orchestrator<'_> {
             "--exchange-release-file",
         )
         .await
+    }
+
+    async fn p2p_release_pending(&self) -> Result<bool, FatalError> {
+        Self::release_file_pending(self.cli.p2p_release_file.as_deref(), "--p2p-release-file").await
+    }
+
+    async fn process_p2p_gate(&mut self, now: Instant) -> Result<(), FatalError> {
+        if self.p2p_released
+            || self
+                .p2p_release_poll_at
+                .is_some_and(|poll_at| now < poll_at)
+        {
+            return Ok(());
+        }
+        if self.p2p_release_pending().await? {
+            self.p2p_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
+            return Ok(());
+        }
+
+        self.p2p_released = true;
+        self.p2p_release_poll_at = None;
+        let pending = std::mem::take(&mut self.pending_pair_directives);
+        emit(&Event::P2pGateReleased {
+            pending_pairs: pending.len(),
+        });
+        for (peer, initiate) in pending {
+            self.establish_pair(peer, initiate).await?;
+        }
+        Ok(())
     }
 
     async fn release_file_pending(
@@ -1236,7 +1286,13 @@ impl Orchestrator<'_> {
                         self.pair_roles.insert(peer.player_id, peer.initiate);
                     }
                     if plan.transport == Transport::WebRtc && added.remove(&peer.player_id) {
-                        self.establish_pair(peer.player_id, peer.initiate).await?;
+                        if self.p2p_released {
+                            self.establish_pair(peer.player_id, peer.initiate).await?;
+                        } else {
+                            self.expected_peers.insert(peer.player_id);
+                            self.pending_pair_directives
+                                .insert(peer.player_id, peer.initiate);
+                        }
                     }
                 }
                 if self.expected_peers.is_empty() || self.all_expected_pairs_connected() {
@@ -1259,7 +1315,12 @@ impl Orchestrator<'_> {
                 });
                 // Same pairing path as a plan peer (late join, Appendix E).
                 self.pair_roles.insert(peer_id, you_initiate);
-                self.establish_pair(peer_id, you_initiate).await?;
+                if self.p2p_released {
+                    self.establish_pair(peer_id, you_initiate).await?;
+                } else {
+                    self.expected_peers.insert(peer_id);
+                    self.pending_pair_directives.insert(peer_id, you_initiate);
+                }
             }
             ServerMessage::Signal { from, signal } => {
                 self.handle_signal(from, signal).await?;
@@ -1591,6 +1652,7 @@ impl Orchestrator<'_> {
         self.sent_labels.remove(&peer);
         self.received_labels.remove(&peer);
         self.pending_signals.remove(&peer);
+        self.pending_pair_directives.remove(&peer);
         self.engine.remove_peer(peer).await.map_err(|error| {
             FatalError::connection(format!(
                 "close incomplete peer connection {peer}: {error:#}"
@@ -1662,7 +1724,11 @@ impl Orchestrator<'_> {
             return self.apply_signal(from, signal).await;
         }
         if !self.engine.is_paired(from) {
-            if should_buffer_signal_for_unpaired_peer(&self.expected_peers, from) {
+            if should_buffer_signal_for_unpaired_peer(
+                &self.expected_peers,
+                self.pending_pair_directives.contains_key(&from),
+                from,
+            ) {
                 self.pending_signals
                     .entry(from)
                     .or_default()
@@ -1745,6 +1811,17 @@ impl Orchestrator<'_> {
     /// Both channels toward `peer` are open: emit the pair event, run the
     /// optional exchange, and check the all-pairs resolution condition.
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
+        if let Some((local_candidate_type, remote_candidate_type)) =
+            self.engine.selected_candidate_types(peer).await
+        {
+            emit(&Event::SelectedCandidatePair {
+                peer,
+                local_candidate_type,
+                remote_candidate_type,
+            });
+        } else {
+            tracing::warn!(%peer, "connected pair has no selected ICE candidate pair");
+        }
         if note_current_pair_connected(
             &mut self.connected_pairs,
             &mut self.pair_connected_reported,
@@ -2271,10 +2348,17 @@ mod tests {
         let peer = PlayerId::from_u128(2);
         assert!(should_buffer_signal_for_unpaired_peer(
             &BTreeSet::new(),
+            false,
             peer
         ));
         assert!(!should_buffer_signal_for_unpaired_peer(
             &BTreeSet::from([peer]),
+            false,
+            peer
+        ));
+        assert!(should_buffer_signal_for_unpaired_peer(
+            &BTreeSet::from([peer]),
+            true,
             peer
         ));
     }

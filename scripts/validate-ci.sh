@@ -161,10 +161,10 @@ validate_awk_files() {
         awk_files_found=$((awk_files_found + 1))
 
         # Test 1: Verify AWK can parse the file (syntax check)
-        if ! awk -f "$awk_file" < /dev/null > /dev/null 2>&1; then
+        if ! awk -f "$awk_file" /dev/null > /dev/null 2>&1; then
             fail "AWK syntax error in $awk_file"
             # Show the error
-            awk -f "$awk_file" < /dev/null 2>&1 || true
+            awk -f "$awk_file" /dev/null 2>&1 || true
             awk_errors=$((awk_errors + 1))
         fi
 

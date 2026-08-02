@@ -13,11 +13,10 @@
 //!   `SIGNAL_FISH__PORT` and every inherited `SIGNAL_FISH*` variable is
 //!   scrubbed (env overrides merge last in the server's loader). The config
 //!   keeps everything local: in-memory storage, WebSocket auth off, the
-//!   per-scenario `session.default_topology`, generous rate limits, and —
-//!   crucially for CI — `turn.enabled = false` with `turn.stun_urls = []`,
-//!   which the server's validation permits and which yields WebRTC plans with
-//!   an EMPTY `ice_servers` list: host (loopback) ICE candidates suffice and
-//!   no test ever touches an external STUN server.
+//!   per-scenario `session.default_topology`, and generous rate limits. Normal
+//!   scenarios disable TURN and use no STUN URLs; the dedicated TURN suite
+//!   injects one local coturn URL and exercises the production shared-secret
+//!   credential path.
 //! - **Ports**: reserved by binding `0.0.0.0:0` and released to the child;
 //!   the reserve-release-spawn race is absorbed by up to 3 attempts with
 //!   fresh ports.
@@ -45,6 +44,42 @@ const HEALTH_DEADLINE: Duration = Duration::from_secs(15);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HEALTH_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const SPAWN_ATTEMPTS: usize = 3;
+const DIAGNOSTIC_DIR_ENV: &str = "SIGNAL_FISH_INTEROP_ARTIFACT_DIR";
+
+fn redact_diagnostics(mut content: String) -> String {
+    for name in [
+        "SIGNAL_FISH_TURN_INTEROP_SECRET",
+        "SIGNAL_FISH_TURN_INTEROP_BAD_SECRET",
+    ] {
+        if let Ok(secret) = std::env::var(name) {
+            if !secret.is_empty() {
+                content = content.replace(&secret, "[REDACTED]");
+            }
+        }
+    }
+    content
+}
+
+fn persist_diagnostic(name: &str, content: String) {
+    let Some(directory) = std::env::var_os(DIAGNOSTIC_DIR_ENV).map(PathBuf::from) else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&directory)
+        .and_then(|()| std::fs::write(directory.join(name), redact_diagnostics(content)))
+    {
+        eprintln!("failed to persist interoperability diagnostic {name}: {error}");
+    }
+}
+
+fn diagnostic_id(spec: &ClientSpec<'_>) -> String {
+    let port = spec
+        .server_url
+        .split(':')
+        .nth(2)
+        .and_then(|part| part.split('/').next())
+        .unwrap_or("unknown-port");
+    format!("{port}-{}", spec.name)
+}
 
 /// Generous per-event ceiling: a CI scheduling budget, not an expected wait.
 pub const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -131,6 +166,22 @@ impl ServerProcess {
             read("stderr", &self.stderr_path)
         )
     }
+
+    /// Stop and reap the server before its temporary diagnostic directory is
+    /// released. Drop remains the panic-path emergency kill.
+    pub async fn shutdown(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Err(error) = child.start_kill() {
+            eprintln!("failed to stop server process: {error}");
+        }
+        match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => eprintln!("failed to reap server process: {error}"),
+            Err(_) => eprintln!("server process did not exit within diagnostic shutdown window"),
+        }
+    }
 }
 
 impl Drop for ServerProcess {
@@ -139,6 +190,13 @@ impl Drop for ServerProcess {
             if let Err(error) = child.start_kill() {
                 eprintln!("failed to kill server process on drop: {error}");
             }
+        }
+        for (label, path) in [("stdout", &self.stdout_path), ("stderr", &self.stderr_path)] {
+            persist_diagnostic(
+                &format!("server-{}-{label}.log", self.port),
+                std::fs::read_to_string(path)
+                    .unwrap_or_else(|error| format!("<failed to read server {label}: {error}>")),
+            );
         }
     }
 }
@@ -156,10 +214,26 @@ fn reserve_port() -> u16 {
 /// topology, retrying with a NEW port on failure (absorbs the
 /// reserve-release-spawn race).
 pub async fn spawn_server(default_topology: &str) -> ServerProcess {
+    spawn_server_with_config(default_topology, None).await
+}
+
+/// Spawn the server with production TURN credential minting enabled.
+pub async fn spawn_server_with_turn(
+    default_topology: &str,
+    turn_url: &str,
+    static_auth_secret: &str,
+) -> ServerProcess {
+    spawn_server_with_config(default_topology, Some((turn_url, static_auth_secret))).await
+}
+
+async fn spawn_server_with_config(
+    default_topology: &str,
+    turn: Option<(&str, &str)>,
+) -> ServerProcess {
     let mut failures = Vec::new();
     for attempt in 1..=SPAWN_ATTEMPTS {
         let port = reserve_port();
-        match try_spawn_server(port, default_topology).await {
+        match try_spawn_server(port, default_topology, turn).await {
             Ok(server) => return server,
             Err(failure) => failures.push(format!("attempt {attempt} (port {port}): {failure}")),
         }
@@ -172,9 +246,30 @@ pub async fn spawn_server(default_topology: &str) -> ServerProcess {
 
 /// One spawn attempt: write the temp config, launch the child with a scrubbed
 /// environment, and wait for `/v2/health`.
-async fn try_spawn_server(port: u16, default_topology: &str) -> Result<ServerProcess, String> {
+async fn try_spawn_server(
+    port: u16,
+    default_topology: &str,
+    turn: Option<(&str, &str)>,
+) -> Result<ServerProcess, String> {
     let workdir = tempfile::tempdir().expect("create temp workdir");
     let config_path = workdir.path().join("server-config.json");
+    let turn_config = turn.map_or_else(
+        || {
+            json!({
+                "enabled": false,
+                "stun_urls": []
+            })
+        },
+        |(url, secret)| {
+            json!({
+                "enabled": true,
+                "static_auth_secret": secret,
+                "urls": [url],
+                "stun_urls": [],
+                "credential_ttl_secs": 300
+            })
+        },
+    );
     let config = json!({
         "port": port,
         "server": {
@@ -193,14 +288,11 @@ async fn try_spawn_server(port: u16, default_topology: &str) -> Result<ServerPro
             "default_topology": default_topology,
             "enable_webrtc": true
         },
-        // No TURN, and an EMPTY public-STUN list: WebRTC plans carry zero ICE
-        // servers, so candidate gathering is host-interface-only (loopback) and
-        // CI never performs external network access. The server's TurnConfig
-        // validation explicitly permits an empty stun_urls list while disabled.
-        "turn": {
-            "enabled": false,
-            "stun_urls": []
-        },
+        // Normal scenarios have no TURN or public STUN and therefore gather
+        // host candidates only. The dedicated TURN scenario supplies exactly
+        // one local coturn URL through `turn_config`; neither mode consults a
+        // public ICE service.
+        "turn": turn_config,
         // Generous rate limits: three clients trickle ICE simultaneously.
         "rate_limit": {
             "max_room_creations": 100,
@@ -325,6 +417,7 @@ pub struct ClientProcess {
     /// Every parsed stdout event, in emission order (grows as events are read).
     pub events: Vec<Value>,
     stderr_path: PathBuf,
+    diagnostic_id: String,
 }
 
 impl Drop for ClientProcess {
@@ -334,6 +427,24 @@ impl Drop for ClientProcess {
                 eprintln!("failed to kill client {} on drop: {error}", self.name);
             }
         }
+        persist_diagnostic(
+            &format!("client-{}-stderr.log", self.diagnostic_id),
+            std::fs::read_to_string(&self.stderr_path)
+                .unwrap_or_else(|error| format!("<failed to read client stderr: {error}>")),
+        );
+        let mut events = self
+            .events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !events.is_empty() {
+            events.push('\n');
+        }
+        persist_diagnostic(
+            &format!("client-{}-events.jsonl", self.diagnostic_id),
+            events,
+        );
     }
 }
 
@@ -402,6 +513,7 @@ pub fn spawn_client(spec: &ClientSpec<'_>, workdir: &Path) -> ClientProcess {
         lines: BufReader::new(stdout).lines(),
         events: Vec::new(),
         stderr_path,
+        diagnostic_id: diagnostic_id(spec),
     }
 }
 
@@ -463,10 +575,17 @@ pub fn spawn_browser_client(spec: &ClientSpec<'_>, workdir: &Path) -> ClientProc
         lines: BufReader::new(stdout).lines(),
         events: Vec::new(),
         stderr_path,
+        diagnostic_id: diagnostic_id(spec),
     }
 }
 
 impl ClientProcess {
+    /// Full captured stderr for scenario-specific diagnostic assertions.
+    pub fn stderr_text(&self) -> String {
+        std::fs::read_to_string(&self.stderr_path)
+            .unwrap_or_else(|error| format!("<failed to read stderr: {error}>"))
+    }
+
     /// OS pid of the still-running client process (panics once reaped).
     pub fn pid(&self) -> u32 {
         self.child
@@ -582,8 +701,7 @@ impl ClientProcess {
             .iter()
             .map(|event| event.to_string())
             .collect();
-        let stderr = std::fs::read_to_string(&self.stderr_path)
-            .unwrap_or_else(|error| format!("<failed to read stderr: {error}>"));
+        let stderr = self.stderr_text();
         format!(
             "last {} events:\n{}\n--- client {} stderr ---\n{}",
             recent.len(),

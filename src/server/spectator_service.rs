@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -415,6 +415,57 @@ impl SpectatorService {
         self.spectator_rooms.contains_key(player_id)
     }
 
+    /// Resolve the room occupied by a spectator connection, if any.
+    pub(crate) fn spectator_room(&self, player_id: &PlayerId) -> Option<RoomId> {
+        self.spectator_rooms
+            .get(player_id)
+            .map(|entry| *entry.value())
+    }
+
+    /// Converge local spectator roles whose authoritative room was removed by
+    /// inactive-room cleanup. Storage errors retain the role for a later tick;
+    /// definitive absence clears it and tells a live client the room closed.
+    pub(crate) async fn prune_missing_rooms(&self, drain: watch::Receiver<bool>) -> usize {
+        let mut candidates = HashMap::<RoomId, Vec<PlayerId>>::new();
+        for entry in self.spectator_rooms.iter() {
+            candidates
+                .entry(*entry.value())
+                .or_default()
+                .push(*entry.key());
+        }
+        let mut missing = Vec::<(RoomId, PlayerId)>::new();
+        for (room_id, player_ids) in candidates {
+            match self.database.get_room_by_id(&room_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    missing.extend(player_ids.into_iter().map(|player_id| (room_id, player_id)));
+                }
+                Err(err) => {
+                    warn!(%room_id, error = %err, "Failed to check spectator room during prune");
+                }
+            }
+        }
+
+        let detachments = missing.into_iter().map(|(room_id, player_id)| {
+            let drain = drain.clone();
+            async move {
+                self.detach_expected(
+                    &player_id,
+                    SpectatorStateChangeReason::RoomClosed,
+                    Some(room_id),
+                    drain,
+                    None,
+                )
+                .await
+            }
+        });
+        futures_util::future::join_all(detachments)
+            .await
+            .into_iter()
+            .filter(|detached| *detached)
+            .count()
+    }
+
     /// Retry durable detach for spectator roles whose physical connection has
     /// already gone. A disconnect-time storage error deliberately leaves the
     /// local role indexed so this maintenance sweep can converge persistence
@@ -443,6 +494,19 @@ impl SpectatorService {
         player_id: &PlayerId,
         reason: SpectatorStateChangeReason,
     ) -> bool {
+        let (drain_tx, drain_rx) = watch::channel(false);
+        self.detach_expected(player_id, reason, None, drain_rx, Some(drain_tx))
+            .await
+    }
+
+    async fn detach_expected(
+        &self,
+        player_id: &PlayerId,
+        reason: SpectatorStateChangeReason,
+        expected_room: Option<RoomId>,
+        drain: watch::Receiver<bool>,
+        drain_owner: Option<watch::Sender<bool>>,
+    ) -> bool {
         let lifecycle = self.connection_manager.client_lifecycle(player_id);
         let lifecycle_guard = match lifecycle.as_ref() {
             Some(lifecycle) => Some(Arc::clone(lifecycle).lock_owned().await),
@@ -458,15 +522,17 @@ impl SpectatorService {
                 return false;
             }
         }
+        if expected_room.is_some_and(|room_id| self.spectator_room(player_id) != Some(room_id)) {
+            return false;
+        }
 
-        let (drain_tx, drain_rx) = watch::channel(false);
         self.spawn_detach(
             *player_id,
             reason,
             true,
-            drain_rx,
+            drain,
             lifecycle_guard,
-            Some(drain_tx),
+            drain_owner,
         )
         .await
     }
@@ -549,7 +615,30 @@ impl SpectatorService {
             Ok(Some(room)) => room,
             Ok(None) => {
                 warn!(%player_id, %room_id, "Spectator room disappeared before detach");
-                return false;
+                self.connection_manager
+                    .advance_delivery_generation(player_id)
+                    .await;
+                self.spectator_rooms.remove(player_id);
+                drop(room_event_guard);
+                if send_notifications {
+                    let predicate_drain = drain.clone();
+                    let should_send = || !*predicate_drain.borrow();
+                    let _ = self
+                        .message_coordinator
+                        .send_to_player_if(
+                            player_id,
+                            Arc::new(ServerMessage::SpectatorLeft {
+                                room_id: Some(room_id),
+                                room_code: None,
+                                reason: Some(reason),
+                                current_spectators: Vec::new(),
+                            }),
+                            &should_send,
+                            drain,
+                        )
+                        .await;
+                }
+                return true;
             }
             Err(err) => {
                 warn!(%player_id, %room_id, error = %err, "Failed to snapshot room before spectator detach");
@@ -681,7 +770,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
-    use tokio::sync::{Mutex, Notify};
+    use tokio::sync::{Mutex, Notify, Semaphore};
 
     struct RecordingCoordinator {
         sent: Mutex<Vec<(PlayerId, ServerMessage)>>,
@@ -693,6 +782,10 @@ mod tests {
         spectator_broadcasts: AtomicUsize,
         first_spectator_broadcast_started: Notify,
         release_first_spectator_broadcast: Notify,
+        delay_room_closed_sends: AtomicBool,
+        room_closed_sends_started: AtomicUsize,
+        room_closed_send_started: Notify,
+        release_room_closed_sends: Semaphore,
     }
 
     impl RecordingCoordinator {
@@ -707,6 +800,10 @@ mod tests {
                 spectator_broadcasts: AtomicUsize::new(0),
                 first_spectator_broadcast_started: Notify::new(),
                 release_first_spectator_broadcast: Notify::new(),
+                delay_room_closed_sends: AtomicBool::new(false),
+                room_closed_sends_started: AtomicUsize::new(0),
+                room_closed_send_started: Notify::new(),
+                release_room_closed_sends: Semaphore::new(0),
             }
         }
 
@@ -746,6 +843,23 @@ mod tests {
             player_id: &PlayerId,
             message: Arc<ServerMessage>,
         ) -> Result<()> {
+            if matches!(
+                message.as_ref(),
+                ServerMessage::SpectatorLeft {
+                    reason: Some(SpectatorStateChangeReason::RoomClosed),
+                    ..
+                }
+            ) && self.delay_room_closed_sends.load(Ordering::Acquire)
+            {
+                self.room_closed_sends_started
+                    .fetch_add(1, Ordering::AcqRel);
+                self.room_closed_send_started.notify_waiters();
+                self.release_room_closed_sends
+                    .acquire()
+                    .await
+                    .expect("test semaphore remains open")
+                    .forget();
+            }
             self.sent
                 .lock()
                 .await
@@ -1571,5 +1685,192 @@ mod tests {
             .await
             .expect("cleared role and delivery generation allow a fresh join");
         assert!(service.is_spectating(&spectator_id));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_prune_missing_room_clears_spectator_role_issue_241() {
+        let (service, room, _creator_id, coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_016).await;
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Expired Room Spectator".to_string(),
+            )
+            .await
+            .expect("spectator join succeeds");
+        coordinator.sent.lock().await.clear();
+        assert!(database
+            .delete_room(&room.id)
+            .await
+            .expect("inactive cleanup surrogate should delete room"));
+
+        let (_drain_tx, drain) = watch::channel(false);
+        assert_eq!(service.prune_missing_rooms(drain).await, 1);
+        assert!(!service.is_spectating(&spectator_id));
+        assert!(coordinator
+            .messages_for(&spectator_id)
+            .await
+            .into_iter()
+            .any(|message| matches!(
+                message,
+                ServerMessage::SpectatorLeft {
+                    room_id: Some(closed_room),
+                    room_code: None,
+                    reason: Some(SpectatorStateChangeReason::RoomClosed),
+                    ref current_spectators,
+                } if closed_room == room.id && current_spectators.is_empty()
+            )));
+
+        let error = service
+            .join(
+                &spectator_id,
+                "missing-game".to_string(),
+                "MISSING".to_string(),
+                "Can Try Again".to_string(),
+            )
+            .await
+            .expect_err("new admission reaches storage instead of stale-role rejection");
+        assert_eq!(error.code, Some(ErrorCode::RoomNotFound));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_prune_deduplicates_same_room_existence_checks_issue_241() {
+        let (service, room, _creator_id, _coordinator, database) = setup_service().await;
+        for _ in 0..64 {
+            service.spectator_rooms.insert(PlayerId::new_v4(), room.id);
+        }
+        database.reset_get_room_by_id_calls_for_test();
+        let (_drain_tx, drain) = watch::channel(false);
+
+        assert_eq!(service.prune_missing_rooms(drain).await, 0);
+        assert_eq!(database.get_room_by_id_calls_for_test(), 1);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_missing_room_notices_across_rooms_wait_concurrently_issue_241() {
+        const SPECTATOR_COUNT: usize = 8;
+        let (service, _room, _creator_id, coordinator, _database) = setup_service().await;
+        for _ in 0..SPECTATOR_COUNT {
+            service
+                .spectator_rooms
+                .insert(PlayerId::new_v4(), RoomId::new_v4());
+        }
+        coordinator
+            .delay_room_closed_sends
+            .store(true, Ordering::Release);
+        let service_for_prune = service.clone();
+        let (_drain_tx, drain) = watch::channel(false);
+        let prune = tokio::spawn(async move { service_for_prune.prune_missing_rooms(drain).await });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let started = coordinator.room_closed_send_started.notified();
+                if coordinator
+                    .room_closed_sends_started
+                    .load(Ordering::Acquire)
+                    >= SPECTATOR_COUNT
+                {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await
+        .expect("every missing-room notice must reach its wait concurrently");
+        coordinator
+            .release_room_closed_sends
+            .add_permits(SPECTATOR_COUNT);
+
+        assert_eq!(prune.await.expect("prune task completes"), SPECTATOR_COUNT);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_stale_prune_snapshot_cannot_detach_rejoined_room_issue_241() {
+        let (service, old_room, _creator_id, _coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_017).await;
+        service
+            .join(
+                &spectator_id,
+                old_room.game_name.clone(),
+                old_room.code.clone(),
+                "Moving Watcher".to_string(),
+            )
+            .await
+            .expect("initial spectator join succeeds");
+        assert!(database
+            .delete_room(&old_room.id)
+            .await
+            .expect("old room deletion succeeds"));
+        database.pause_next_get_room_by_id_for_test();
+        let service_for_prune = service.clone();
+        let (_drain_tx, drain) = watch::channel(false);
+        let prune = tokio::spawn(async move { service_for_prune.prune_missing_rooms(drain).await });
+        database.wait_for_paused_get_room_by_id_for_test().await;
+
+        service
+            .leave(&spectator_id)
+            .await
+            .expect("missing old room still permits local role convergence");
+
+        let new_room = database
+            .create_room(
+                "rejoined-game".to_string(),
+                None,
+                8,
+                true,
+                PlayerId::new_v4(),
+                "udp".to_string(),
+                "region-b".to_string(),
+                None,
+            )
+            .await
+            .expect("replacement room creation succeeds");
+        service
+            .join(
+                &spectator_id,
+                new_room.game_name.clone(),
+                new_room.code.clone(),
+                "Moved Watcher".to_string(),
+            )
+            .await
+            .expect("spectator rejoins replacement room");
+        database.release_paused_get_room_by_id_for_test();
+
+        assert_eq!(prune.await.expect("prune task completes"), 0);
+        assert_eq!(service.spectator_room(&spectator_id), Some(new_room.id));
+        let stored = database
+            .get_room_by_id(&new_room.id)
+            .await
+            .expect("replacement room lookup succeeds")
+            .expect("replacement room remains");
+        assert!(stored.spectators.contains_key(&spectator_id));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_prune_suppresses_room_closed_notice_after_drain_issue_241() {
+        let (service, room, _creator_id, coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_018).await;
+        service.spectator_rooms.insert(spectator_id, room.id);
+        coordinator.sent.lock().await.clear();
+        assert!(database
+            .delete_room(&room.id)
+            .await
+            .expect("inactive cleanup surrogate should delete room"));
+        let (drain_tx, drain) = watch::channel(false);
+        drain_tx.send(true).expect("drain receiver remains live");
+
+        assert_eq!(service.prune_missing_rooms(drain).await, 1);
+        assert!(!service.is_spectating(&spectator_id));
+        assert!(coordinator.messages_for(&spectator_id).await.is_empty());
     }
 }

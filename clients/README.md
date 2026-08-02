@@ -30,14 +30,18 @@ interop cells live in the native crate's test harness behind the `browser-intero
 
 ```bash
 bash scripts/run-webrtc-interop.sh    # native client: unit + native<->native interop suite
+bash scripts/run-turn-interop.sh      # native clients through pinned local coturn, relay-only
 bash scripts/run-browser-interop.sh   # browser client: lint/build + browser<->native interop cells
 bash scripts/run-fortress-interop.sh  # two Fortress games through this checkout's server
 bash scripts/run-fortress-wasm-interop.sh  # two independent Godot WASM peers in Chromium
 ```
 
 The first builds the server binary, lints the native client, and runs its unit + multi-process WebRTC interop
-suite (mesh, host-star, crippled-ICE fallback, late-join, mixed v2/v3). The second additionally builds the
-browser client and runs the browser cells (mixed mesh, browser↔browser, host star with a browser client,
+suite (mesh, host-star, crippled-ICE fallback, late-join, mixed v2/v3). The second requires a provisioned,
+digest-pinned coturn image and cached Cargo dependencies, then runs the relay-only positive and
+mismatched-secret fallback controls entirely offline (see the [TURN deployment guide](../docs/deployment-turn.md#repository-turn-only-interoperability-proof)).
+The third additionally builds the browser client and runs the browser cells
+(mixed mesh, browser↔browser, host star with a browser client,
 crippled-ICE browser fallback, the mDNS `.local` trap, pure-v2 browser, mid-handshake close handling, and
 SIGTERM/SIGKILL Chromium teardown reaping). Everything runs over loopback; the
 only network fetch is the cached Chromium headless-shell download at install time.

@@ -97,6 +97,18 @@ pub struct Cli {
     #[arg(long)]
     pub cripple_ice: bool,
 
+    /// ICE candidate policy for each peer connection. `relay` is a test and
+    /// deployment diagnostic mode that permits TURN-relayed candidates only;
+    /// `all` retains the normal direct-first behavior.
+    #[arg(long, value_enum, default_value_t = IceTransportPolicyArg::All)]
+    pub ice_transport_policy: IceTransportPolicyArg,
+
+    /// TEST HARNESS ONLY: defer creation of every planned peer connection
+    /// until this path exists. WebSocket processing and relay traffic continue
+    /// while held.
+    #[arg(long)]
+    pub p2p_release_file: Option<PathBuf>,
+
     /// TEST HARNESS ONLY: disable multicast-DNS host-candidate obfuscation.
     /// Packet-loss tests use raw loopback host candidates so the injected
     /// unicast loss cannot deadlock ICE gathering on mDNS discovery traffic.
@@ -180,6 +192,20 @@ pub enum RuntimeFlavor {
     /// A single current-thread runtime: every task shares one executor
     /// thread, so a blocking stall (--tick-stall-ms) starves the whole client.
     Current,
+}
+
+/// CLI mirror of WebRTC's ICE transport policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum IceTransportPolicyArg {
+    All,
+    Relay,
+}
+
+impl IceTransportPolicyArg {
+    /// Whether only TURN relay candidates may be used.
+    pub fn is_relay_only(self) -> bool {
+        self == Self::Relay
+    }
 }
 
 impl RuntimeFlavor {
@@ -296,6 +322,8 @@ mod tests {
         assert_eq!(cli.p2p_retry_count, 0, "pair retry is opt-in");
         assert_eq!(cli.drop_ice_from, None);
         assert!(!cli.disable_mdns);
+        assert_eq!(cli.ice_transport_policy, IceTransportPolicyArg::All);
+        assert_eq!(cli.p2p_release_file, None);
         assert_eq!(cli.success_release_file, None);
         assert_eq!(cli.exchange_release_file, None);
         assert_eq!(
@@ -394,6 +422,35 @@ mod tests {
             "--disable-mdns",
         ]);
         assert!(cli.disable_mdns);
+    }
+
+    #[test]
+    fn relay_only_ice_transport_policy_parses() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--ice-transport-policy",
+            "relay",
+        ]);
+        assert!(cli.ice_transport_policy.is_relay_only());
+    }
+
+    #[test]
+    fn p2p_release_file_parses() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--p2p-release-file",
+            "/tmp/signal-fish-p2p-release",
+        ]);
+        assert_eq!(
+            cli.p2p_release_file.as_deref(),
+            Some(std::path::Path::new("/tmp/signal-fish-p2p-release"))
+        );
     }
 
     #[test]

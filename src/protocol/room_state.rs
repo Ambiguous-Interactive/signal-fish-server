@@ -152,8 +152,8 @@ use super::types::{
 // - `lobby_started_at`: When lobby state was entered
 // - `game_finalized_at`: When game was finalized
 //
-// Activity is updated on: player joins/leaves, GameData messages, ready toggles,
-// and authority requests.
+// Activity is updated on: player and spectator joins/leaves, throttled transport
+// activity, GameData messages, ready toggles, and authority requests.
 //
 // ## Full Documentation
 //
@@ -266,7 +266,7 @@ impl Room {
     ) -> bool {
         let now = chrono::Utc::now();
 
-        if self.players.is_empty() {
+        if !self.has_occupants() {
             // Empty room - time from the LAST activity (which `remove_player_from_room`
             // refreshes on the final departure), not `created_at`. A long-lived room
             // that just emptied must get the full `empty_timeout` window from when it
@@ -276,9 +276,14 @@ impl Room {
             // consistent, since the former already keys off `last_activity`.
             now.signed_duration_since(self.last_activity) > empty_timeout
         } else {
-            // Room has players - check against last activity
+            // Occupied room - check against last activity
             now.signed_duration_since(self.last_activity) > inactive_timeout
         }
+    }
+
+    /// Whether a player or spectator still occupies this room.
+    pub fn has_occupants(&self) -> bool {
+        !self.players.is_empty() || !self.spectators.is_empty()
     }
 
     #[allow(dead_code)]
@@ -454,6 +459,7 @@ impl Room {
     pub fn add_spectator(&mut self, spectator: SpectatorInfo) -> bool {
         if self.can_spectate() {
             self.spectators.insert(spectator.id, spectator);
+            self.update_activity();
             true
         } else {
             false
@@ -463,7 +469,11 @@ impl Room {
     /// Remove a spectator from the room
     #[allow(dead_code)]
     pub fn remove_spectator(&mut self, spectator_id: &PlayerId) -> Option<SpectatorInfo> {
-        self.spectators.remove(spectator_id)
+        let removed = self.spectators.remove(spectator_id);
+        if removed.is_some() {
+            self.update_activity();
+        }
+        removed
     }
 
     /// Get list of all spectators
@@ -543,6 +553,28 @@ mod tests {
         assert!(
             !room.is_expired(empty, inactive),
             "an active room with fresh activity must not be reaped mid-game"
+        );
+    }
+
+    #[test]
+    fn is_expired_spectator_only_room_uses_inactive_timeout() {
+        let empty = chrono::Duration::seconds(300);
+        let inactive = chrono::Duration::seconds(3600);
+        let mut room = empty_room();
+        let spectator_id = Uuid::new_v4();
+        room.spectators.insert(
+            spectator_id,
+            SpectatorInfo {
+                id: spectator_id,
+                name: "Watcher".to_string(),
+                connected_at: chrono::Utc::now(),
+            },
+        );
+        room.last_activity = chrono::Utc::now() - chrono::Duration::minutes(10);
+
+        assert!(
+            !room.is_expired(empty, inactive),
+            "a spectator-only room is occupied and must use inactive_timeout"
         );
     }
 }
