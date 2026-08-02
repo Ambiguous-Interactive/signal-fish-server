@@ -9,9 +9,10 @@ See also:
 
 ## TL;DR
 
-- Nightly is **only** for CI-only analysis tools (cargo-udeps, Miri, AddressSanitizer)
+- Nightly is **only** for CI-only analysis tools (cargo-udeps, Miri,
+  AddressSanitizer, cargo-fuzz)
 - **Never** use nightly for production builds, Docker images, or release artifacts
-- Pin to a specific date (`nightly-2026-02-01`) for reproducibility — never use rolling `nightly`
+- Pin to a specific date (`nightly-2026-08-01`) for reproducibility — never use rolling `nightly`
 - Update the nightly pin when it is >6 months old or when upgraded dependencies need a newer nightly
 - Nightly version is **independent** of stable MSRV — update based on tool needs, not MSRV changes
 
@@ -40,9 +41,10 @@ See also:
 
 | Tool | Purpose | Workflow File | Nightly Version |
 |------|---------|--------------|----------------|
-| cargo-udeps | Unused dependency detection | `.github/workflows/unused-deps.yml` | nightly-2026-02-01 |
-| Miri | Undefined behavior detection | `.github/workflows/ci-safety.yml` | nightly-2026-02-01 |
-| AddressSanitizer | Memory error detection | `.github/workflows/ci-safety.yml` | nightly-2026-02-01 |
+| cargo-udeps | Unused dependency detection | `.github/workflows/unused-deps.yml` | nightly-2026-08-01 |
+| Miri | Undefined behavior detection | `.github/workflows/ci-safety.yml` | nightly-2026-08-01 |
+| AddressSanitizer | Memory error detection | `.github/workflows/ci-safety.yml` | nightly-2026-08-01 |
+| cargo-fuzz | Coverage-guided protocol fuzzing | `.github/workflows/fuzz.yml` | nightly-2026-08-01 |
 
 ---
 
@@ -50,7 +52,7 @@ See also:
 
 ### Pinning Strategy
 
-- Pin to a specific nightly date (e.g., `nightly-2026-02-01`)
+- Pin to a specific nightly date (e.g., `nightly-2026-08-01`)
 - Do NOT use rolling `nightly` (always latest)
 - Pinning provides reproducibility and stability
 
@@ -99,7 +101,7 @@ the pinned nightly date. The nightly toolchain is too old for the new version of
 toolchain: nightly-2025-02-21
 
 # ✅ CORRECT: Nightly date matches the dependency's release timeframe
-toolchain: nightly-2026-02-01
+toolchain: nightly-2026-08-01
 ```
 
 **Dependency upgrade checklist (nightly-sensitive deps):**
@@ -109,7 +111,8 @@ toolchain: nightly-2026-02-01
 - [ ] Run `cargo +nightly-YYYY-MM-DD check` locally before pushing
 - [ ] Update all workflow files that reference the nightly date
 
-The test `test_pinned_nightly_staleness_warning` catches nightlies older than 12 months.
+The test `test_pinned_nightly_staleness_warning` catches nightlies older than
+180 days, matching the six-month workflow-hygiene threshold.
 For earlier detection, verify nightly compatibility when upgrading nightly-sensitive dependencies.
 
 ---
@@ -120,18 +123,19 @@ For earlier detection, verify nightly compatibility when upgrading nightly-sensi
 
 ```text
 Production Code (Stable MSRV)
-  → rust-version = "1.88.0" in Cargo.toml
+  → rust-version = "1.89.0" in Cargo.toml
   → Used for: Building binaries, Docker images, production artifacts
 
 CI Analysis Tools (Nightly)
-  → nightly-2026-02-01 in workflow files  ← Independent of MSRV
-  → Used for: cargo-udeps, cargo-miri (analysis only, no artifacts)
+  → nightly-2026-08-01 in workflow files  ← Independent of MSRV
+  → Used for: cargo-udeps, Miri, AddressSanitizer, cargo-fuzz
+  → Produces diagnostics and crash artifacts, never production artifacts
 ```
 
 **Common Confusion (Avoid):**
 
 - "Nightly must be newer than MSRV" (incorrect)
-- "If MSRV is 1.88, nightly must be from after 1.88 release" (incorrect)
+- "If MSRV is 1.89, nightly must be from after 1.89 release" (incorrect)
 - "Nightly is for CI tools only; MSRV is for production code" (correct)
 - "Update nightly based on staleness/tool needs, not MSRV changes" (correct)
 
@@ -162,8 +166,8 @@ Every nightly usage **must** be documented in the workflow file:
 # cargo-udeps requires nightly Rust because it uses unstable compiler features
 # to analyze dependency usage at a deeper level than stable tools can provide.
 #
-# Nightly Version: nightly-2026-02-01
-# Last Updated: 2026-02-22
+# Nightly Version: nightly-2026-08-01
+# Last Updated: 2026-08-02
 #
 # Update Criteria (when to update this nightly version):
 #   - If the nightly version is >6 months old
@@ -182,7 +186,7 @@ Every nightly usage **must** be documented in the workflow file:
 ## Agent Workflow: Nightly Version Updates
 
 1. Verify nightly is still needed: check if the tool still requires nightly
-2. Choose a recent nightly: within last 30 days (e.g., `nightly-2026-02-01`)
+2. Choose a recent nightly: within last 30 days (e.g., `nightly-2026-08-01`)
 3. Update **all occurrences** in the workflow file
 4. Update documentation (change "Last Updated: YYYY-MM-DD" comment)
 5. Ensure workflow file has comprehensive comments explaining why nightly is needed

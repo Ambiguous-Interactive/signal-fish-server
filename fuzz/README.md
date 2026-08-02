@@ -28,24 +28,32 @@ package.
 | ------ | ------- | ------------------ |
 | `decode_protocol` | `ClientMessage` / `ServerMessage` decode (serde_json + rmp-serde), then re-serialize | `assert_decoders_return` |
 | `validate_inputs` | `validate_{game_name,room_code,player_name}_with_config` over arbitrary UTF-8 | name/room-code validation property tests |
+| `fuzz_session_machine` | Structured room/session operation sequences against the in-process server | model-based state-machine tests |
+| `fuzz_reconnect_tokens` | Structured reconnect-token issue/claim/reuse/expiry sequences | reconnection property and integration tests |
 
-The invariant is the same as the stable suite's: **every decode/validate
-returns `Ok`/`Err` and never panics, aborts, or overflows the stack.** libFuzzer
-reports any crash as a finding.
+Every target must avoid panics, aborts, and stack overflows. The protocol and
+validation targets must also return `Ok`/`Err` for arbitrary input; the two
+state-machine targets assert their modeled room/session and reconnect-token
+invariants. libFuzzer reports any crash or failed assertion as a finding.
 
 ## Running
 
-Requires the nightly toolchain and `cargo-fuzz` (both provided in the dev
-container; install with `rustup toolchain install nightly` and
+Requires the pinned `nightly-2026-08-01` toolchain and `cargo-fuzz` (both
+provided in the dev container; install with
+`rustup toolchain install nightly-2026-08-01` and
 `cargo install cargo-fuzz`).
 
 ```bash
+# cargo-fuzz may itself be MUSL-linked, so always override its inferred target
+# with the pinned compiler's GNU host triple.
+FUZZ_TARGET="$(rustc +nightly-2026-08-01 -vV | sed -n 's/^host: //p')"
+
 # Build all targets (instrumented):
-cargo +nightly fuzz build
+cargo +nightly-2026-08-01 fuzz build --target "$FUZZ_TARGET"
 
 # Fuzz one target for 60s (CI smoke uses -max_total_time):
-cargo +nightly fuzz run decode_protocol -- -max_total_time=60
-cargo +nightly fuzz run validate_inputs -- -max_total_time=60
+cargo +nightly-2026-08-01 fuzz run decode_protocol --target "$FUZZ_TARGET" -- -max_total_time=60
+cargo +nightly-2026-08-01 fuzz run validate_inputs --target "$FUZZ_TARGET" -- -max_total_time=60
 ```
 
 ## Seeding the corpus
@@ -69,8 +77,9 @@ done
 A crash artifact lands in `artifacts/<target>/`. Reproduce and minimize:
 
 ```bash
-cargo +nightly fuzz run decode_protocol "artifacts/decode_protocol/crash-<hash>"
-cargo +nightly fuzz tmin decode_protocol "artifacts/decode_protocol/crash-<hash>"
+FUZZ_TARGET="$(rustc +nightly-2026-08-01 -vV | sed -n 's/^host: //p')"
+cargo +nightly-2026-08-01 fuzz run decode_protocol --target "$FUZZ_TARGET" "artifacts/decode_protocol/crash-<hash>"
+cargo +nightly-2026-08-01 fuzz tmin decode_protocol --target "$FUZZ_TARGET" "artifacts/decode_protocol/crash-<hash>"
 ```
 
 Any reproducible finding should be added as a regression case to the **stable**

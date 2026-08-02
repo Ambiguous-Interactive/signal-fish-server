@@ -122,7 +122,6 @@ rustls = { version = "0.23", default-features = true, optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
 # Test-only tokio feature additions (feature-unified with the main dependency
 # for test builds only): `process` drives the spawned server binary in
 # tests/v3_multiprocess_e2e.rs; `test-util` enables the paused-clock runtime
@@ -135,7 +134,6 @@ tokio = { version = "1.52", features = ["process", "test-util"] }
 tempfile = "3.27"
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
-futures = "0.3"
 regex = "1.12"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 reqwest = { version = "0.13", default-features = false, features = [

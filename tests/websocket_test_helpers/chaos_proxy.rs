@@ -802,6 +802,9 @@ async fn pump(
 }
 
 /// Write `data` completely to `to`, ending early (`Err`) on kill or error.
+// `fetch_update` is deprecated only on the analysis nightly in favor of
+// nightly-only `try_update`; retain the stable API for the supported MSRV.
+#[allow(deprecated)]
 async fn write_fully(
     to: &TcpStream,
     data: &[u8],

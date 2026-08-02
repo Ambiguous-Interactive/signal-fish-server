@@ -626,6 +626,9 @@ impl ServerMetrics {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
+    // `fetch_update` is deprecated only on the analysis nightly in favor of
+    // nightly-only `try_update`; retain the stable API for the supported MSRV.
+    #[allow(deprecated)]
     pub fn decrement_active_connections(&self) {
         // Use fetch_update for atomic check-then-decrement to prevent underflow
         let _ =
@@ -1035,6 +1038,9 @@ impl ServerMetrics {
             .store(value, Ordering::Relaxed);
     }
 
+    // See `decrement_active_connections`: `try_update` is not available on the
+    // stable MSRV, so this analysis-nightly deprecation is intentionally local.
+    #[allow(deprecated)]
     pub fn decrement_reconnection_sessions_active(&self) {
         // Use fetch_update for atomic check-then-decrement to prevent underflow
         // when two threads race to decrement the same counter

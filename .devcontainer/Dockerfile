@@ -7,6 +7,7 @@ FROM mcr.microsoft.com/devcontainers/rust:2-bookworm
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG TARGETARCH
+ARG RUST_NIGHTLY=nightly-2026-08-01
 ARG ACTIONLINT_VERSION=1.7.12
 ARG ACTIONLINT_AMD64_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 ARG ACTIONLINT_ARM64_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
@@ -139,7 +140,7 @@ RUN rustup component add \
 # Nightly toolchain — required only to RUN the coverage-guided fuzz crate
 # (fuzz/, libFuzzer needs -Zsanitizer). Kept minimal and out of the pinned
 # stable build path; see ADR-0003 and fuzz/README.md.
-RUN rustup toolchain install nightly --profile minimal --component rust-src
+RUN rustup toolchain install "$RUST_NIGHTLY" --profile minimal --component rust-src
 
 # Increase Cargo resilience for transient network failures during no-cache image builds.
 ENV CARGO_NET_RETRY=10

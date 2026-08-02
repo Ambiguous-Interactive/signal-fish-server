@@ -698,13 +698,12 @@ The repository includes an advanced safety analysis workflow
 to detect undefined behavior and memory errors that standard tests
 cannot catch.
 
-### Staged / Non-Required Status
+### Failure and Branch-Protection Status
 
-Both jobs use `continue-on-error: true` and are **not** branch-protection
-required checks. They produce actionable diagnostics uploaded as artifacts
-but do not block merges. This staged approach lets us observe failure
-patterns and toolchain stability before gating PRs on these heavyweight
-analyses.
+Miri is staged with `continue-on-error: true`; AddressSanitizer propagates
+failures to the workflow. Neither job is currently a branch-protection required
+check. Both upload actionable diagnostic artifacts so Miri can build an
+operational history while sanitizer regressions still make the workflow red.
 
 ### Jobs
 
@@ -721,7 +720,7 @@ analyses.
 
 ### Nightly Toolchain
 
-Both jobs require nightly Rust (pinned to `nightly-2026-02-01` for
+Both jobs require nightly Rust (pinned to `nightly-2026-08-01` for
 reproducibility). The nightly pin follows the same strategy as
 `unused-deps.yml` — see the workflow header comment for update criteria.
 
@@ -733,7 +732,8 @@ that Miri cannot interpret.
 
 ### Viewing Results
 
-Even when jobs pass (due to `continue-on-error`), output artifacts are always uploaded:
+Output artifacts are uploaded even when Miri reports findings under its staged
+`continue-on-error` policy, and when AddressSanitizer succeeds:
 
 - `miri-output` — Miri analysis output
 - `asan-output` — AddressSanitizer analysis output
@@ -748,20 +748,22 @@ These checks will be promoted to required branch-protection checks when:
 - No nightly toolchain incidents during that window
 - Median runtime stays within the timeout budget
 
-Until promotion, failures are informational and should be triaged weekly.
+Until promotion, Miri findings are informational and should be triaged weekly.
+AddressSanitizer failures already make the workflow fail even though the check
+is not yet required by branch protection.
 
 ### Tests That Enforce This
 
 | Test | What It Validates |
 |------|-------------------|
 | `test_ci_safety_workflow_has_required_jobs` | Both `miri` and `asan` jobs exist |
-| `test_ci_safety_workflow_jobs_are_staged` | All jobs have `continue-on-error: true` |
+| `test_ci_safety_workflow_failure_policy_is_explicit` | Miri is staged and AddressSanitizer is gating |
 | `test_ci_safety_workflow_uses_pinned_nightly` | Pinned nightly toolchain is used |
 | `test_ci_safety_workflow_has_required_triggers` | All four trigger types are present |
 | `test_ci_safety_workflow_uploads_artifacts` | Output artifacts are uploaded |
 | `test_ci_safety_jobs_not_in_required_check_names` | Jobs are NOT in required check names |
 | `test_ci_safety_workflow_artifact_uploads_always_run` | Upload steps use `if: always()` |
-| `test_nightly_version_consistency_across_workflows` | Nightly pins match across workflows |
+| `test_analysis_nightly_version_consistency` | Analysis workflows and the devcontainer share one nightly pin |
 
 ## Architecture Decisions
 

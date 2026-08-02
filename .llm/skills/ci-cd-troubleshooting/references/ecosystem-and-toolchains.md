@@ -116,7 +116,7 @@ error[E0658]: use of unstable library feature 'foo'
 # CORRECT: Recent nightly (within last 30 days)
 - uses: dtolnay/rust-toolchain@v1
   with:
-    toolchain: nightly-2026-02-01  # recent, acceptable
+    toolchain: nightly-2026-08-01  # recent, acceptable
 ```
 
 For stable MSRV issues, see [MSRV Management](../../msrv-management/SKILL.md).

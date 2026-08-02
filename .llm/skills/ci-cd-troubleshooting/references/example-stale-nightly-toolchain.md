@@ -22,7 +22,7 @@ Pinned nightly was not refreshed as dependency and compiler expectations evolved
 ## Resolution
 
 Update pinned nightly to a current validated baseline, for example:
-`nightly-2026-02-01`.
+`nightly-2026-08-01`.
 
 ---
 

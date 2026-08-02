@@ -904,7 +904,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
         line_no=${match%%:*}
         line_body=${match#*:}
         error "$WORKFLOW_NAME:$line_no: Uses moving Rust toolchain alias in workflow: $line_body"
-        error "  Use a pinned toolchain (e.g., 1.88.0 or nightly-2026-02-01), or omit toolchain to use rust-toolchain.toml."
+        error "  Use a pinned toolchain (e.g., 1.88.0 or nightly-2026-08-01), or omit toolchain to use rust-toolchain.toml."
         TOOLCHAIN_ALIAS_VIOLATIONS=$((TOOLCHAIN_ALIAS_VIOLATIONS + 1))
     done < <(grep -nE '^[[:space:]]*toolchain:[[:space:]]*["'"'"']?(stable|beta|nightly)["'"'"']?[[:space:]]*$' "$workflow" || true)
 done
