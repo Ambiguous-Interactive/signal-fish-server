@@ -49,19 +49,20 @@ fi
 RUNNING_IN_CONTAINER=false
 SELF_CONTAINER=""
 NETWORK_SUBNET=""
+USE_PRIVATE_NETWORK_ADDRESS=false
 if [ -n "${SF_TURN_INTEROP_HOST:-}" ]; then
     TURN_HOST="${SF_TURN_INTEROP_HOST}"
-elif [ -f /.dockerenv ]; then
-    RUNNING_IN_CONTAINER=true
-    SELF_CONTAINER="$(hostname)"
+else
+    USE_PRIVATE_NETWORK_ADDRESS=true
     NETWORK_OCTET="$((20 + $$ % 200))"
     NETWORK_SUBNET="10.254.${NETWORK_OCTET}.0/24"
     TURN_HOST="10.254.${NETWORK_OCTET}.2"
-else
-    TURN_HOST="127.0.0.1"
+    if [ -f /.dockerenv ]; then
+        RUNNING_IN_CONTAINER=true
+        SELF_CONTAINER="$(hostname)"
+    fi
 fi
-if [ "${RUNNING_IN_CONTAINER}" != true ] \
-    && ! is_ipv4_address "${TURN_HOST}"; then
+if ! is_ipv4_address "${TURN_HOST}"; then
     echo "ERROR: SF_TURN_INTEROP_HOST must resolve to an IPv4 address." >&2
     exit 1
 fi
@@ -213,12 +214,14 @@ docker_run_args=(
     --network "${COTURN_NETWORK}"
 )
 coturn_network_args=()
-if [ "${RUNNING_IN_CONTAINER}" = true ]; then
+if [ "${USE_PRIVATE_NETWORK_ADDRESS}" = true ]; then
     docker_run_args+=(--ip "${TURN_HOST}")
-    if ! timeout 10 docker network connect --ip "10.254.${NETWORK_OCTET}.3" \
-        "${COTURN_NETWORK}" "${SELF_CONTAINER}"; then
-        echo "ERROR: could not attach this container to the isolated TURN network." >&2
-        exit 1
+    if [ "${RUNNING_IN_CONTAINER}" = true ]; then
+        if ! timeout 10 docker network connect --ip "10.254.${NETWORK_OCTET}.3" \
+            "${COTURN_NETWORK}" "${SELF_CONTAINER}"; then
+            echo "ERROR: could not attach this container to the isolated TURN network." >&2
+            exit 1
+        fi
     fi
 else
     docker_run_args+=(

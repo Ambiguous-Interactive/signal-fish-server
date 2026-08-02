@@ -129,9 +129,9 @@ bash scripts/run-turn-interop.sh
 ```
 
 The runner refuses to pull or fetch and starts the cached coturn image on an
-internal Docker network. A devcontainer joins that private network and exposes
-no ports; a direct host run publishes the listening/relay range on loopback
-only. It configures the real signaling server with the
+internal Docker network. Both direct Linux hosts and devcontainers use the
+container's private address without host publication; a devcontainer also
+joins that network. It configures the real signaling server with the
 same static secret and forces both native reference clients to use WebRTC's
 relay-only ICE policy. The positive control holds peer-connection creation
 until the exact bidirectional WebSocket floor exchange completes, then asserts
@@ -145,9 +145,9 @@ The default ports are `3478` and UDP `49160-49169`. Concurrent local runs can
 select a separate range and diagnostic directory with
 `SF_TURN_INTEROP_ARTIFACT_DIR`, `SF_TURN_INTEROP_LISTEN_PORT`,
 `SF_TURN_INTEROP_RELAY_MIN_PORT`, and
-`SF_TURN_INTEROP_RELAY_MAX_PORT`. The host-mode publish bind remains loopback
-by default; unusual Docker hosts can set `SF_TURN_INTEROP_BIND_HOST`
-separately from the client-facing `SF_TURN_INTEROP_HOST`. Failure artifacts
+`SF_TURN_INTEROP_RELAY_MAX_PORT`. Unusual Docker hosts can explicitly set
+`SF_TURN_INTEROP_HOST`; that override publishes through a
+`SF_TURN_INTEROP_BIND_HOST` that remains loopback by default. Failure artifacts
 retain redacted coturn, server, client-stderr, client-event, and test-runner
 logs.
 

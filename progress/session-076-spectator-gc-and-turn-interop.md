@@ -32,8 +32,8 @@ emits the selected local/remote candidate types after a pair opens. A dedicated
 ignored E2E suite is activated by `scripts/run-turn-interop.sh`, which starts
 `coturn/coturn:4.12.0-alpine` at manifest digest
 `sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a`
-on a Docker-internal network in devcontainers and loopback-only published ports
-on direct hosts.
+on a Docker-internal network without host publication on direct Linux hosts or
+in devcontainers.
 
 The positive control runs two real native clients through the real server's
 production TURN credential-minting config, proves both selected candidates are
@@ -58,9 +58,10 @@ final scan rejects static secrets or credential-shaped values.
 - The new spectator GC regression failed before the production fix because
   `cleanup_empty_rooms` deleted the occupied room.
 - The first coturn run exposed Docker-outside-of-Docker loopback isolation. The
-  final design attaches the devcontainer and coturn to a private internal
-  network without host publication; direct-host execution publishes only to a
-  validated bind address that defaults to loopback.
+  final design gives coturn a private internal address without host publication;
+  a devcontainer joins that same network, while a direct Linux host reaches the
+  private bridge address directly. Explicit host overrides remain validated and
+  publish only to a bind address that defaults to loopback.
 - A current-tree rerun exposed an opaque responder timeout after the relay-floor
   proof. The responder was discarding an early offer from its planned peer while
   its own P2P gate was still closed. Gate-held planned signals are now buffered;
