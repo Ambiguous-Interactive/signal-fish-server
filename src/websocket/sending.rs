@@ -899,7 +899,7 @@ fn encode_named_binary_frame<T: Serialize>(
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(capacity)
-        .map_err(|_| "failed to reserve binary frame capacity".to_string())?;
+        .map_err(|error| format!("failed to reserve binary frame capacity: {error}"))?;
     write_named(&mut FallibleVecWriter(&mut bytes), frame).map_err(|err| err.to_string())?;
     Ok(bytes)
 }

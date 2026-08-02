@@ -91,8 +91,10 @@ evidence and exact wire ledgers; machine-sensitive timing remains observational.
   directly. A clean exact-head re-review exposed three suppressed maintenance
   suggestions; the final local head also classifies initial reserve overflow,
   documents the single sample-scoped allocation allowance, and makes the CI
-  contract assertion whitespace-insensitive. Final hosted and reviewer
-  evidence remain pending publication.
+  contract assertion whitespace-insensitive. A subsequent clean exact-head
+  review's only suppressed note was also incorporated by retaining the
+  allocator's reserve-error text. Final hosted and reviewer evidence remain
+  pending publication.
 
 ## Follow-up
 

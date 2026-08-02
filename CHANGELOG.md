@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Allocated bytes fall by 26–39% for direct binary traffic and 8–9% for mixed
   traffic; emitted wire bytes remain identical, and capacity-overflow errors
   remain distinct from allocator failures during initial reservation and
-  fallback buffer growth.
+  fallback buffer growth while preserving allocator diagnostic context.
 
 ## [0.5.2] - 2026-07-31
 
