@@ -90,14 +90,29 @@ boundary check during parent review. The second hostile review reported zero
 findings after rerunning the focused release, retry, allocation, actionlint,
 formatting, and Clippy checks.
 
-Hosted validation completed on PR #245 implementation head `31cb0d5`: all 19
-workflow runs reached terminal state, with 18 successes and the expected
-Dependabot auto-merge skip. The first head exposed one spelling false positive
-in release prose; the corrected head passed Spellcheck and every Rust, safety,
-fuzz, interop, formal, documentation, and workflow-policy lane. Cursor Bugbot
-reported zero findings on that exact head, no review threads remained, and
-Copilot's two requested passes were unavailable only because its account quota
-was exhausted.
+Hosted aggregate validation completed on PR #245 implementation head
+`31cb0d5`: all 19 workflow runs reached terminal state, with 18 successes and
+the expected Dependabot auto-merge skip. The first head exposed one spelling
+false positive in release prose. Cursor Bugbot reported zero findings, no
+review threads remained, and Copilot's requested passes were unavailable only
+because its account quota was exhausted.
+
+Postflight job-level inspection then found that the informational Miri job was
+red even though its `continue-on-error` Advanced Safety workflow was green. In
+the full interpreter suite,
+`initial_room_transitions_wait_for_capacity_before_taking_routing_locks`
+occasionally consumed its real one-second slow-consumer timeout while the test
+queue was intentionally full, returning `SlowConsumer` instead of `Delivered`.
+The same test passed in isolation, proving that host scheduling rather than the
+production delivery path controlled the result. The test now owns a paused
+Tokio clock, as the adjacent deadline-boundary tests already do, so its 10 ms
+pending probe advances exactly 10 ms of virtual time.
+
+The corrected test passed five consecutive focused runs under pinned
+`nightly-2026-08-01` Miri and the complete CI-equivalent Miri library suite:
+474 passed, 198 ignored, zero failed. Formatting, strict Clippy, and the full
+locked all-feature test suite also passed after the correction. Hosted
+verification of the corrected PR head remains in progress.
 
 The final v0.5.2 GitHub Release retry remains gated on merging the corrected
 workflow to the default branch. It is intentionally not attempted from the PR
