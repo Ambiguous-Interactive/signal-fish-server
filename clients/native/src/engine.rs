@@ -43,6 +43,7 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
@@ -137,6 +138,7 @@ pub struct Engine {
     events: mpsc::UnboundedSender<EngineEvent>,
     peers: HashMap<PlayerId, PeerLink>,
     next_generation: u64,
+    relay_only: bool,
 }
 
 impl Engine {
@@ -146,6 +148,7 @@ impl Engine {
     pub fn new(
         crippled: bool,
         disable_mdns: bool,
+        relay_only: bool,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
@@ -174,6 +177,7 @@ impl Engine {
             events,
             peers: HashMap::new(),
             next_generation: 0,
+            relay_only,
         })
     }
 
@@ -235,6 +239,11 @@ impl Engine {
 
         let config = RTCConfiguration {
             ice_servers: convert_ice_servers(ice_servers),
+            ice_transport_policy: if self.relay_only {
+                RTCIceTransportPolicy::Relay
+            } else {
+                RTCIceTransportPolicy::All
+            },
             ..RTCConfiguration::default()
         };
         let pc = Arc::new(
@@ -419,6 +428,14 @@ impl Engine {
             .cloned()
     }
 
+    /// Candidate types of the selected ICE path for a connected peer.
+    pub async fn selected_candidate_types(&self, peer: PlayerId) -> Option<(String, String)> {
+        let pc = self.peers.get(&peer)?.pc.clone();
+        let dtls = pc.sctp().transport();
+        let pair = dtls.ice_transport().get_selected_candidate_pair().await?;
+        Some((pair.local.typ.to_string(), pair.remote.typ.to_string()))
+    }
+
     /// Wire the peer-connection level callbacks for `peer`.
     ///
     /// Callbacks only forward through the event channel (sends to a dropped
@@ -570,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn pairing_is_idempotent_and_initiator_offers() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(false, false, tx).expect("engine builds");
+        let mut engine = Engine::new(false, false, false, tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xb);
 
         let offer = tokio::time::timeout(
@@ -654,7 +671,7 @@ mod tests {
     #[test]
     fn note_channel_open_fires_pair_connected_exactly_once() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(false, false, tx).expect("engine builds");
+        let mut engine = Engine::new(false, false, false, tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xc);
         // Unknown peer: never connected.
         assert!(!engine.note_channel_open(peer, RELIABLE_LABEL));

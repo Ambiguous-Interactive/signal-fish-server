@@ -1,0 +1,81 @@
+# Session 076 — Spectator GC coherence and TURN-only interoperability
+
+## Scope
+
+Advance the next highest gameplay-impact work after P29: first eliminate a
+production spectator lifecycle defect discovered during the audit, then close
+issue #239's deterministic TURN-only interoperability gap in the same session
+PR.
+
+## Spectator lifecycle failure and fix
+
+A failure-first database test proved both GC paths could delete a room whose
+player map was empty but whose spectator map still held a connected client.
+The durable room disappeared while `SpectatorService` retained the local role,
+so voluntary detach failed and later admissions rejected the stranded client.
+The defect is tracked as issue #241.
+
+Room occupancy is now defined uniformly as players or spectators. Spectator
+join/remove refreshes `last_activity`, spectator-only rooms use the inactive
+timeout, and the existing throttled connection-activity seam resolves either a
+seated room or spectator room. Inactive-room reconciliation deduplicates room
+lookups, binds each detach to the room observed by the sweep, clears stale roles,
+and suppresses its terminal notice once shutdown drain begins. Tests cover both
+GC paths, join/detach refresh, text, binary, application-Ping, and transport-Pong
+activity, a spectator-only active-room/control cleanup pair, post-detach cleanup,
+same-room scaling, the leave/rejoin race, and drain-boundary behavior.
+
+## TURN-only operability proof
+
+The native reference client now accepts `--ice-transport-policy relay` and
+emits the selected local/remote candidate types after a pair opens. A dedicated
+ignored E2E suite is activated by `scripts/run-turn-interop.sh`, which starts
+`coturn/coturn:4.12.0-alpine` at manifest digest
+`sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a`
+on a Docker-internal network in devcontainers and loopback-only published ports
+on direct hosts.
+
+The positive control runs two real native clients through the real server's
+production TURN credential-minting config, proves both selected candidates are
+`relay`, checks the exact reliable/unreliable sent and received ledgers, and
+checks exact WebSocket relay-floor payloads before a harness release file permits
+peer-connection creation. The negative control gives the server a mismatched
+secret, proves both clients received coturn allocation `401`, proves no selected
+pair exists, observes `TransportStatus{webrtc,false}` plus fallback, and
+completes over the same WebSocket floor. The lane performs explicit dependency
+provisioning before an offline execution phase, uses no public STUN/TURN service,
+and is explicitly not a production-infrastructure validation.
+
+The runner is bounded and fail-closed: it uses a cached digest-pinned image with
+`--pull=never`, validates address/port overrides, owns a per-port lock, reaps the
+server/coturn processes and Docker network, and writes a fresh exact diagnostic
+manifest. Coturn, server, client stderr/events, and test logs are sanitized; a
+credential-pattern sentinel exercises the sanitizer before the run and the
+final scan rejects static secrets or credential-shaped values.
+
+## Failure-first and local evidence
+
+- The new spectator GC regression failed before the production fix because
+  `cleanup_empty_rooms` deleted the occupied room.
+- The first coturn run exposed Docker-outside-of-Docker loopback isolation. The
+  final design attaches the devcontainer and coturn to a private internal
+  network without host publication; direct-host execution publishes only to a
+  validated bind address that defaults to loopback.
+- A current-tree rerun exposed an opaque responder timeout after the relay-floor
+  proof. The responder was discarding an early offer from its planned peer while
+  its own P2P gate was still closed. Gate-held planned signals are now buffered;
+  the harness observes an explicit release event from both peers, disables
+  irrelevant mDNS for relay-only operation, and rejects any pair-retry signal.
+- The final offline local coturn run passed both the relay-only positive and
+  mismatched-secret fallback controls. Its manifest identifies two successful
+  server scenarios, four client stderr logs, and four client event logs while
+  retaining any absorbed server-start retry diagnostics; cleanup left no coturn
+  container, Docker network, or lock.
+- All eleven issue-241 tests pass, including the integrated spectator-only
+  traffic/GC control. Strict root validation and hosted CI are recorded below
+  once complete.
+
+## Publication
+
+Pending the session's full validation, adversarial review, hosted CI, and
+reviewer loop.

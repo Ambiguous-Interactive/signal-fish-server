@@ -32,7 +32,7 @@ pub struct ServerConfig {
     /// Time after creation when empty rooms expire (seconds)
     #[serde(default = "default_empty_room_timeout")]
     pub empty_room_timeout: u64,
-    /// Time after last activity when rooms with players expire (seconds)
+    /// Time after last activity when rooms with players or spectators expire (seconds)
     #[serde(default = "default_inactive_room_timeout")]
     pub inactive_room_timeout: u64,
     /// Time window for reconnection after disconnection (seconds)

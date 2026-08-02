@@ -63,7 +63,11 @@ impl EnhancedGameServer {
             // so the throttled cadence can never starve the reaper. If this ever
             // shows up in profiling, promote `last_activity` to an atomic so it can
             // be bumped under the shared read lock.
-            if let Some(room_id) = self.connection_manager.get_client_room(player_id) {
+            let occupied_room = self
+                .connection_manager
+                .get_client_room(player_id)
+                .or_else(|| self.spectator_service.spectator_room(player_id));
+            if let Some(room_id) = occupied_room {
                 if let Err(e) = self.database.update_room_activity(&room_id).await {
                     tracing::warn!(%player_id, %room_id, "Failed to update room activity: {}", e);
                 }
@@ -82,8 +86,10 @@ mod tests {
         TransportSecurityConfig, TurnConfig,
     };
     use crate::database::DatabaseConfig;
-    use crate::protocol::ServerMessage;
+    use crate::protocol::{ClientMessage, GameDataEncoding, ServerMessage};
     use crate::server::{EnhancedGameServer, ServerConfig};
+    use bytes::Bytes;
+    use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration as StdDuration;
@@ -205,5 +211,243 @@ mod tests {
                 panic!("transport Pong must not generate an application response, got {message:?}")
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_spectator_activity_routes_refresh_room_through_throttle_issue_241() {
+        #[derive(Clone, Copy, Debug)]
+        enum ActivityRoute {
+            Text,
+            Binary,
+            ApplicationPing,
+            TransportPong,
+        }
+
+        for (index, route) in [
+            ActivityRoute::Text,
+            ActivityRoute::Binary,
+            ActivityRoute::ApplicationPing,
+            ActivityRoute::TransportPong,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let server = EnhancedGameServer::new(
+                ServerConfig {
+                    heartbeat_throttle: StdDuration::from_secs(60),
+                    max_connections_per_ip: 32,
+                    ..ServerConfig::default()
+                },
+                ProtocolConfig::default(),
+                RelayTypeConfig::default(),
+                SessionConfig::default(),
+                TurnConfig::default(),
+                DatabaseConfig::InMemory,
+                MetricsConfig::default(),
+                CoordinationConfig::default(),
+                TransportSecurityConfig::default(),
+                Vec::new(),
+            )
+            .await
+            .expect("failed to construct test server");
+            let creator_id = crate::protocol::PlayerId::new_v4();
+            let room = server
+                .database
+                .create_room(
+                    format!("spectator-heartbeat-{index}"),
+                    Some(format!("SPH{index:03}")),
+                    2,
+                    true,
+                    creator_id,
+                    "relay".to_string(),
+                    "us-east-1".to_string(),
+                    None,
+                )
+                .await
+                .expect("create spectator room");
+            let (sender, _receiver) = mpsc::channel(8);
+            let spectator_id = server
+                .connection_manager
+                .register_client(
+                    sender,
+                    crate::coordination::ConnectionCloseSignal::detached(),
+                    format!("127.0.0.1:{}", 45_100 + index)
+                        .parse()
+                        .expect("test address"),
+                    server.instance_id,
+                )
+                .await
+                .expect("client registration");
+            server
+                .spectator_service
+                .join(
+                    &spectator_id,
+                    room.game_name.clone(),
+                    room.code.clone(),
+                    "Watcher".to_string(),
+                )
+                .await
+                .expect("spectator joins");
+            let before = server
+                .database
+                .get_room_by_id(&room.id)
+                .await
+                .expect("room lookup")
+                .expect("room exists")
+                .last_activity;
+
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            match route {
+                ActivityRoute::Text => {
+                    server
+                        .handle_client_message(&spectator_id, ClientMessage::PlayerReady)
+                        .await;
+                }
+                ActivityRoute::Binary => {
+                    server
+                        .handle_game_data_binary(
+                            &spectator_id,
+                            GameDataEncoding::MessagePack,
+                            Bytes::from_static(b"binary-liveness"),
+                        )
+                        .await;
+                }
+                ActivityRoute::ApplicationPing => {
+                    server
+                        .handle_client_message(&spectator_id, ClientMessage::Ping)
+                        .await;
+                }
+                ActivityRoute::TransportPong => {
+                    server.record_transport_activity(&spectator_id).await;
+                }
+            }
+
+            let after = server
+                .database
+                .get_room_by_id(&room.id)
+                .await
+                .expect("room lookup")
+                .expect("room exists")
+                .last_activity;
+            assert!(
+                after > before,
+                "{route:?} must refresh spectator room activity"
+            );
+
+            server.record_transport_activity(&spectator_id).await;
+            let throttled = server
+                .database
+                .get_room_by_id(&room.id)
+                .await
+                .expect("room lookup")
+                .expect("room exists")
+                .last_activity;
+            assert_eq!(
+                throttled, after,
+                "{route:?} must establish the nonzero throttle baseline"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spectator_only_active_traffic_survives_inactive_gc_issue_241() {
+        let server = EnhancedGameServer::new(
+            ServerConfig {
+                heartbeat_throttle: StdDuration::ZERO,
+                max_connections_per_ip: 32,
+                ..ServerConfig::default()
+            },
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+
+        let mut room_ids = Vec::new();
+        let mut spectator_ids = Vec::new();
+        for index in 0..2 {
+            let creator_id = crate::protocol::PlayerId::new_v4();
+            let room = server
+                .database
+                .create_room(
+                    format!("spectator-only-gc-{index}"),
+                    Some(format!("SGC{index:03}")),
+                    2,
+                    true,
+                    creator_id,
+                    "relay".to_string(),
+                    "us-east-1".to_string(),
+                    None,
+                )
+                .await
+                .expect("create spectator-only room");
+            let (sender, _receiver) = mpsc::channel(8);
+            let spectator_id = server
+                .connection_manager
+                .register_client(
+                    sender,
+                    crate::coordination::ConnectionCloseSignal::detached(),
+                    format!("127.0.0.1:{}", 45_200 + index)
+                        .parse()
+                        .expect("test address"),
+                    server.instance_id,
+                )
+                .await
+                .expect("client registration");
+            server
+                .spectator_service
+                .join(
+                    &spectator_id,
+                    room.game_name.clone(),
+                    room.code.clone(),
+                    "Watcher".to_string(),
+                )
+                .await
+                .expect("spectator joins");
+            server
+                .database
+                .remove_player_from_room(&room.id, &creator_id)
+                .await
+                .expect("creator removal succeeds");
+            room_ids.push(room.id);
+            spectator_ids.push(spectator_id);
+        }
+
+        let inactive_timeout = StdDuration::from_millis(10);
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        server
+            .handle_client_message(&spectator_ids[0], ClientMessage::Ping)
+            .await;
+
+        let outcome = server
+            .database
+            .cleanup_expired_rooms(
+                chrono::Duration::zero(),
+                chrono::Duration::from_std(inactive_timeout).expect("valid timeout"),
+                &HashSet::new(),
+            )
+            .await
+            .expect("inactive cleanup succeeds");
+
+        assert_eq!(outcome.inactive_rooms_cleaned, 1);
+        assert!(server
+            .database
+            .get_room_by_id(&room_ids[0])
+            .await
+            .expect("active room lookup succeeds")
+            .is_some());
+        assert!(server
+            .database
+            .get_room_by_id(&room_ids[1])
+            .await
+            .expect("control room lookup succeeds")
+            .is_none());
     }
 }

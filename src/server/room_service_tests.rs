@@ -2547,7 +2547,7 @@ async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn spectator_disconnect_storage_error_releases_socket_and_retries_durable_detach() {
+async fn test_spectator_disconnect_retry_restores_empty_room_gc_issue_241() {
     let database = Arc::new(InMemoryDatabase::new());
     database
         .initialize()
@@ -2632,6 +2632,21 @@ async fn spectator_disconnect_storage_error_releases_socket_and_retries_durable_
         &mut creator_rx,
         "retried detach publishes the peer-visible terminal roster",
         |message| matches!(message, ServerMessage::SpectatorDisconnected { spectator_id, .. } if *spectator_id == spectator),
+    );
+
+    database
+        .remove_player_from_room(&room.id, &creator)
+        .await
+        .expect("remove final seated player")
+        .expect("creator existed");
+    let deleted = database
+        .cleanup_empty_rooms(chrono::Duration::zero(), &HashSet::new())
+        .await
+        .expect("empty cleanup after disconnected spectator");
+    assert_eq!(
+        deleted,
+        vec![room.id],
+        "#241: the last spectator's disconnect must restore empty-room GC eligibility"
     );
 }
 

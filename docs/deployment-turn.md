@@ -114,6 +114,47 @@ Operationally this means:
 - **No coturn user database is needed** for this scheme — the shared secret is
   the entire trust relationship.
 
+## Repository TURN-only interoperability proof
+
+The repository includes a dedicated operability test for the production
+credential-minting path. Its execution phase supports Linux hosts/containers
+with Docker and GNU coreutils. Provision the digest-pinned image and locked
+Cargo dependencies first; the proof itself then runs offline:
+
+```bash
+docker pull coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a
+cargo fetch --locked
+cargo fetch --locked --manifest-path clients/native/Cargo.toml
+bash scripts/run-turn-interop.sh
+```
+
+The runner refuses to pull or fetch and starts the cached coturn image on an
+internal Docker network. A devcontainer joins that private network and exposes
+no ports; a direct host run publishes the listening/relay range on loopback
+only. It configures the real signaling server with the
+same static secret and forces both native reference clients to use WebRTC's
+relay-only ICE policy. The positive control holds peer-connection creation
+until the exact bidirectional WebSocket floor exchange completes, then asserts
+that both selected candidates are TURN relays and checks the exact reliable
+and unreliable data-channel payload ledger. A mismatched-secret control must
+observe TURN's `401` allocation-authentication response for both peers, fail
+the TURN path, and complete through that WebSocket fallback. No public
+STUN/TURN service is consulted.
+
+The default ports are `3478` and UDP `49160-49169`. Concurrent local runs can
+select a separate range and diagnostic directory with
+`SF_TURN_INTEROP_ARTIFACT_DIR`, `SF_TURN_INTEROP_LISTEN_PORT`,
+`SF_TURN_INTEROP_RELAY_MIN_PORT`, and
+`SF_TURN_INTEROP_RELAY_MAX_PORT`. The host-mode publish bind remains loopback
+by default; unusual Docker hosts can set `SF_TURN_INTEROP_BIND_HOST`
+separately from the client-facing `SF_TURN_INTEROP_HOST`. Failure artifacts
+retain redacted coturn, server, client-stderr, client-event, and test-runner
+logs.
+
+This is an in-repository protocol and operability proof only. It does not
+operate, monitor, capacity-test, or validate an external production coturn
+deployment; those responsibilities remain with the operator.
+
 ## Rotating the shared secret
 
 coturn accepts **multiple valid secrets at once** — `--static-auth-secret` can be

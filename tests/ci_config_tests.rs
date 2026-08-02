@@ -22919,6 +22919,114 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
 }
 
 #[test]
+fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/turn-interop.yml"));
+    let runner = read_file(&root.join("scripts/run-turn-interop.sh"));
+    let test = read_file(&root.join("clients/native/tests/turn_interop_e2e.rs"));
+
+    for required_path in [
+        "src/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "clients/native/**",
+        "scripts/run-turn-interop.sh",
+        "scripts/read-toml-string.sh",
+        ".github/workflows/turn-interop.yml",
+    ] {
+        assert_eq!(
+            workflow.matches(&format!("- \"{required_path}\"")).count(),
+            2,
+            "turn-interop.yml must trigger on `{required_path}` for push and pull_request"
+        );
+    }
+
+    for required in [
+        "permissions:\n  contents: read",
+        "timeout-minutes: 25",
+        "timeout-minutes: 4",
+        "timeout --signal=TERM --kill-after=30s 15m bash scripts/run-turn-interop.sh",
+        "if: ${{ always() && !success() }}",
+        "actions/upload-artifact@v7.0.1",
+        "retention-days: 14",
+        "if-no-files-found: error",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "TURN workflow is missing required bounded diagnostic contract `{required}`"
+        );
+    }
+
+    for required in [
+        "coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a",
+        "network_create_args=(--internal)",
+        "--pull=never",
+        "BIND_HOST=\"${SF_TURN_INTEROP_BIND_HOST:-127.0.0.1}\"",
+        "--publish \"${BIND_HOST}:${LISTEN_PORT}:${LISTEN_PORT}/udp\"",
+        "--publish \"${BIND_HOST}:${RELAY_MIN_PORT}-${RELAY_MAX_PORT}",
+        "--use-auth-secret",
+        "--allow-loopback-peers",
+        "SIGNAL_FISH_TURN_INTEROP_URL=\"${TURN_URL}\"",
+        "SIGNAL_FISH_INTEROP_ARTIFACT_DIR=\"${ARTIFACT_DIR}\"",
+        "cargo test --locked --offline --test turn_interop_e2e",
+        "sanitize_file",
+        "redaction-probe",
+        "has_unredacted_credentials",
+        "diagnostics.manifest",
+        "server-*.log",
+        "client-*.jsonl",
+        "--log-file=stdout",
+        "COTURN_RUNNER_PID=$!",
+        "docker rm --force \"${COTURN_CONTAINER}\"",
+        "docker network rm \"${COTURN_NETWORK}\"",
+    ] {
+        assert!(
+            runner.contains(required),
+            "TURN runner is missing required local/pinned/cleanup contract `{required}`"
+        );
+    }
+
+    for required in [
+        "--ice-transport-policy",
+        "selected_candidate_pair",
+        "local_candidate_type\"), \"relay",
+        "remote_candidate_type\"), \"relay",
+        "[\"channel_message_sent\", \"channel_message\"]",
+        "events_named(events, event_name)",
+        "str_field(&payload, \"from\")",
+        "str_field(&payload, \"channel\")",
+        "payload.get(\"seq\")",
+        "--p2p-release-file",
+        "std::fs::write(&release_path",
+        "p2p_gate_released",
+        "pending_pairs",
+        "events_named(&client.events, \"p2p_pair_connected\").is_empty()",
+        "Allocate error response (error 401:",
+        "negative control must not pass through a network outage",
+        "game_data_received",
+        "mismatched_turn_secret_fails_p2p_and_uses_websocket_fallback",
+        "fallback_engaged",
+    ] {
+        assert!(
+            test.contains(required),
+            "TURN E2E proof is missing acceptance marker `{required}`"
+        );
+    }
+    assert!(
+        runner.contains("TURN_URL=\"turn:${TURN_HOST}:${LISTEN_PORT}?transport=udp\"")
+            && !runner.contains("stun:"),
+        "TURN proof must use only its loopback/local Docker endpoint, never public STUN/TURN"
+    );
+    assert!(
+        !runner
+            .lines()
+            .any(|line| line.trim_start().starts_with("docker pull")),
+        "TURN execution phase must never contact the image registry"
+    );
+}
+
+#[test]
 fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let root = repo_root();
     let manifest = read_file(&root.join("clients/fortress-wasm/Cargo.toml"));

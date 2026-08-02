@@ -310,6 +310,14 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     fail_get_room_by_id: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    get_room_by_id_calls: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    pause_get_room_by_id: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    get_room_by_id_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_get_room_by_id: tokio::sync::Notify,
+    #[cfg(test)]
     fail_remove_player_from_room: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
@@ -333,6 +341,14 @@ impl InMemoryDatabase {
             fail_get_room_players: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            get_room_by_id_calls: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            pause_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            get_room_by_id_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_get_room_by_id: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_remove_player_from_room: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -358,6 +374,34 @@ impl InMemoryDatabase {
     pub(crate) fn fail_get_room_by_id_for_test(&self, fail: bool) {
         self.fail_get_room_by_id
             .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_get_room_by_id_calls_for_test(&self) {
+        self.get_room_by_id_calls
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_room_by_id_calls_for_test(&self) -> u32 {
+        self.get_room_by_id_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_get_room_by_id_for_test(&self) {
+        self.pause_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_paused_get_room_by_id_for_test(&self) {
+        self.get_room_by_id_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_paused_get_room_by_id_for_test(&self) {
+        self.release_get_room_by_id.notify_one();
     }
 
     #[cfg(test)]
@@ -529,11 +573,22 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>> {
         #[cfg(test)]
-        if self
-            .fail_get_room_by_id
-            .load(std::sync::atomic::Ordering::Relaxed)
         {
-            anyhow::bail!("injected get_room_by_id failure for test");
+            self.get_room_by_id_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self
+                .pause_get_room_by_id
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                self.get_room_by_id_reached.notify_one();
+                self.release_get_room_by_id.notified().await;
+            }
+            if self
+                .fail_get_room_by_id
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("injected get_room_by_id failure for test");
+            }
         }
 
         let rooms = self.rooms.read().await;
@@ -782,9 +837,7 @@ impl GameDatabase for InMemoryDatabase {
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
-            if room.players.is_empty()
-                && room.last_activity <= cutoff
-                && !protected.contains(room_id)
+            if !room.has_occupants() && room.last_activity <= cutoff && !protected.contains(room_id)
             {
                 to_remove.push((*room_id, room.game_name.clone(), room.code.clone()));
             }
@@ -812,7 +865,7 @@ impl GameDatabase for InMemoryDatabase {
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
             if room.is_expired(empty_timeout, inactive_timeout) && !protected.contains(room_id) {
-                let was_empty = room.players.is_empty();
+                let was_empty = !room.has_occupants();
                 to_remove.push((
                     *room_id,
                     room.game_name.clone(),
@@ -1249,6 +1302,14 @@ mod tests {
         }
     }
 
+    fn spectator(name: &str) -> SpectatorInfo {
+        SpectatorInfo {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            connected_at: chrono::Utc::now(),
+        }
+    }
+
     /// Backdate a room's timestamps so it looks stale to the GC without waiting
     /// wall-clock time. Reaches the in-memory map directly (same module).
     async fn age_room(db: &InMemoryDatabase, room_id: &RoomId, age: chrono::Duration) {
@@ -1315,6 +1376,168 @@ mod tests {
             is_fresh(after.last_activity),
             "a departure must refresh last_activity (starts the empty-room clock)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_spectator_mutation_refreshes_room_activity_issue_241() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "activity_game", "ACT003")
+            .await
+            .expect("room creation should succeed");
+        let spectator = spectator("Watcher");
+
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        assert!(db
+            .add_spectator_to_room(&room.id, spectator.clone())
+            .await
+            .expect("spectator join should not error"));
+        let joined = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup should not error")
+            .expect("room exists");
+        assert!(
+            is_fresh(joined.last_activity),
+            "spectator join must refresh room activity"
+        );
+
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        db.remove_spectator_from_room(&room.id, &spectator.id)
+            .await
+            .expect("spectator detach should not error")
+            .expect("spectator should be removed");
+        let detached = db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup should not error")
+            .expect("room exists");
+        assert!(
+            is_fresh(detached.last_activity),
+            "spectator detach must refresh the empty-room clock"
+        );
+    }
+
+    /// A connected spectator is a live room occupant. Neither GC sweep may
+    /// delete the room merely because its seated-player set is empty; once the
+    /// spectator leaves, the normal empty-room clock applies again.
+    #[tokio::test]
+    async fn test_room_cleanup_with_spectator_preserves_then_reaps_after_detach_issue_241() {
+        #[derive(Clone, Copy)]
+        enum Sweep {
+            Empty,
+            Expired,
+        }
+
+        for sweep in [Sweep::Empty, Sweep::Expired] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "spectator_gc", "SPGC01")
+                .await
+                .expect("room creation should succeed");
+            let creator = *room.players.keys().next().expect("creator present");
+            let spectator = spectator("Watcher");
+            assert!(db
+                .add_spectator_to_room(&room.id, spectator.clone())
+                .await
+                .expect("spectator join should not error"));
+            db.remove_player_from_room(&room.id, &creator)
+                .await
+                .expect("player departure should not error");
+            let occupied_age = match sweep {
+                Sweep::Empty => chrono::Duration::hours(2),
+                Sweep::Expired => chrono::Duration::minutes(10),
+            };
+            age_room(&db, &room.id, occupied_age).await;
+
+            match sweep {
+                Sweep::Empty => {
+                    let deleted = db
+                        .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                        .await
+                        .expect("empty cleanup should not error");
+                    assert!(deleted.is_empty(), "spectator-occupied room was deleted");
+                }
+                Sweep::Expired => {
+                    let outcome = db
+                        .cleanup_expired_rooms(
+                            chrono::Duration::seconds(300),
+                            chrono::Duration::seconds(3600),
+                            &HashSet::new(),
+                        )
+                        .await
+                        .expect("expired cleanup should not error");
+                    assert!(
+                        outcome.is_empty(),
+                        "spectator-occupied room was classified as expired"
+                    );
+                }
+            }
+
+            assert!(
+                db.get_room_by_id(&room.id)
+                    .await
+                    .expect("room lookup should not error")
+                    .is_some(),
+                "connected spectator must keep the room durable"
+            );
+
+            db.remove_spectator_from_room(&room.id, &spectator.id)
+                .await
+                .expect("spectator detach should not error")
+                .expect("spectator should be removed");
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            match sweep {
+                Sweep::Empty => {
+                    let deleted = db
+                        .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                        .await
+                        .expect("post-detach empty cleanup should not error");
+                    assert_eq!(deleted, vec![room.id]);
+                }
+                Sweep::Expired => {
+                    let outcome = db
+                        .cleanup_expired_rooms(
+                            chrono::Duration::seconds(300),
+                            chrono::Duration::seconds(3600),
+                            &HashSet::new(),
+                        )
+                        .await
+                        .expect("post-detach expired cleanup should not error");
+                    assert_eq!(outcome.empty_rooms_cleaned, 1);
+                    assert_eq!(outcome.inactive_rooms_cleaned, 0);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_expired_cleanup_reaps_inactive_spectator_room_issue_241() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "spectator_gc", "SPGC02")
+            .await
+            .expect("room creation should succeed");
+        let spectator = spectator("Inactive Watcher");
+        assert!(db
+            .add_spectator_to_room(&room.id, spectator)
+            .await
+            .expect("spectator join should not error"));
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+
+        let outcome = db
+            .cleanup_expired_rooms(
+                chrono::Duration::seconds(300),
+                chrono::Duration::seconds(3600),
+                &HashSet::new(),
+            )
+            .await
+            .expect("expired cleanup should not error");
+
+        assert_eq!(outcome.empty_rooms_cleaned, 0);
+        assert_eq!(outcome.inactive_rooms_cleaned, 1);
+        assert!(db
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup should not error")
+            .is_none());
     }
 
     /// Both GC sweeps must spare a stale empty room whose id is `protected`

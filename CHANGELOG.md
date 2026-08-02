@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a deterministic TURN-only WebRTC interoperability gate (issue #239).
+  Two native clients must select relay candidates through a digest-pinned local
+  coturn, exchange exact reliable and unreliable data, and retain a live
+  WebSocket relay floor; a mismatched-secret control must fail WebRTC and use
+  that fallback for the asserted coturn authentication-rejection reason. After
+  explicit dependency provisioning, the proof runs offline and does not
+  validate production TURN infrastructure.
+
 ### Changed
 
 - Reduce binary relay serialization allocation operations by pre-sizing the
@@ -17,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traffic; emitted wire bytes remain identical, and capacity-overflow errors
   remain distinct from allocator failures during initial reservation and
   fallback buffer growth while preserving allocator diagnostic context.
+
+### Fixed
+
+- Keep spectator-occupied rooms alive during garbage collection (issue #241).
+  Spectator-only rooms now use the inactive-room timeout, spectator join,
+  detach, and live connection traffic refresh room activity, and the normal
+  empty-room timeout begins only after the final spectator leaves. Inactive
+  cleanup also reconciles any removed room with the process-local spectator
+  role during maintenance so the client can join again.
 
 ## [0.5.2] - 2026-07-31
 

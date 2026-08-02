@@ -61,6 +61,8 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--cripple-ice` | off | Deterministically break ICE: reject every interface during gathering AND drop all outbound/inbound `IceCandidate` signals (SDP offer/answer still flows). Forces the relay fallback |
 | `--disable-mdns` | off | Test harness only: expose raw host candidates instead of mDNS names so unicast packet-loss experiments do not fault their discovery control plane. Normal candidate privacy is unchanged when omitted |
 | `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
+| `--ice-transport-policy <POLICY>` | `all` | ICE candidate policy: `all` permits every gathered candidate type; `relay` requires a TURN-relayed path. The repository's local coturn gate uses `relay` to prove production-minted TURN credentials rather than a direct host path |
+| `--p2p-release-file <PATH>` | — | Test harness only: keep processing WebSocket traffic but defer peer-connection creation until PATH exists. The TURN gate uses this to prove the relay floor before ICE establishment begins |
 | `--p2p-timeout-secs <S>` | `15` | Window for WebRTC pair establishment before the overall transport status resolves |
 | `--p2p-retry-count <N>` | `0` | Bounded coordinated rebuilds for a planned pair whose data channels do not open. Both endpoints must support the reference client's `PairRetry` signal extension; homogeneous recovery tests opt in, while general interoperability stays matchbox-only |
 | `--run-for-secs <S>` | `30` | Soft cap: exit 1 if the flag-driven success criteria are still unmet |
@@ -122,6 +124,7 @@ process continues to its normal bounded exit.
 | `game_starting` | `is_authority` | Lobby finalized (this client's own authority flag); never re-broadcast to late joiners |
 | `session_plan` | `topology`, `transport`, `host`, `peers[{player_id, initiate}]`, `ice_servers_count`, `fallback` | The full authoritative per-recipient v3 directive; Relay/Relay carries no peers |
 | `new_peer` | `peer_id`, `you_initiate` | Compatible incremental pairing directive (the universal server uses full plans) |
+| `p2p_gate_released` | `pending_pairs` | Native-only harness proof that the release-file barrier opened and released the expected planned pairs |
 | `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`pair_retry`/`other`) |
 | `signal_received` | `from`, `kind` | Inbound `Signal` arrived (emitted even when `--cripple-ice` then drops it) |
 | `ice_candidate_dropped` | `from` | Native-only `--drop-ice-from` discarded this peer's inbound candidate after `signal_received` made the signaling hop observable. The older shared `--cripple-ice` contract remains unchanged and does not emit this event |
@@ -130,6 +133,7 @@ process continues to its normal bounded exit.
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
+| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay` |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out (Appendix G) |
 | `peer_transport_status` | `peer`, `transport`, `connected` | A same-room peer's reported state changed (server fan-out) |
@@ -211,6 +215,7 @@ client processes (loopback only; the interop server config disables TURN with ze
 | mDNS `.local` obfuscation trap | n/a | ✅ `mesh_n3_browser_mdns_obfuscation` |
 | Mid-handshake close → one `error` + prompt exit 3 | n/a | ✅ `browser_cli_mid_handshake_close_single_error_exit_3` |
 | SIGTERM/SIGKILL Chromium teardown (orphan reaper) | n/a | ✅ `browser_cli_signal_teardown_reaps_chromium` |
+| TURN-only pair + mismatched-secret fallback controls | ✅ `turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live`; `mismatched_turn_secret_fails_p2p_and_uses_websocket_fallback` | — |
 
 The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop_e2e.rs) behind the
 `browser-interop` cargo feature (this crate's default suite never compiles them; they additionally need
@@ -219,7 +224,10 @@ The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop
 CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
 `.github/workflows/webrtc-interop.yml`, and the browser cells via
 [`scripts/run-browser-interop.sh`](../../scripts/run-browser-interop.sh) in
-`.github/workflows/browser-interop.yml`.
+`.github/workflows/browser-interop.yml`. The isolated TURN-only controls run via
+[`scripts/run-turn-interop.sh`](../../scripts/run-turn-interop.sh) in
+`.github/workflows/turn-interop.yml`; they start a digest-pinned local coturn
+container and never depend on a public STUN/TURN service.
 
 ## Troubleshooting
 

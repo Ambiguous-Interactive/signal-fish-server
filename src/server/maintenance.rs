@@ -415,6 +415,21 @@ impl EnhancedGameServer {
                 }
             }
 
+            // Inactive cleanup may deliberately close an occupied room. Its
+            // count-only result cannot identify those rooms, so reconcile the
+            // spectator role index against storage on every tick.
+            let pruned_spectator_roles = self
+                .spectator_service
+                .prune_missing_rooms(self.shutdown_drain_receiver())
+                .await;
+            if pruned_spectator_roles > 0 {
+                tracing::debug!(
+                    count = pruned_spectator_roles,
+                    instance_id = %self.instance_id,
+                    "Pruned spectator roles for removed rooms"
+                );
+            }
+
             // Drop stored v3 session decisions for rooms that no longer exist.
             // `cleanup_expired_rooms` reports only counts (no per-room ids), so
             // this sweep is the guaranteed reclaim for every removal path.
