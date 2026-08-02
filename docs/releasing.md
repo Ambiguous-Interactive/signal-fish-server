@@ -52,7 +52,7 @@ Publication proceeds in this order:
 4. create or validate the immutable annotated tag;
 5. build and verify the versioned multi-architecture GHCR manifest;
 6. verify the source checkout is still clean and publish the crate idempotently;
-7. create or complete the GitHub Release and record the image digest;
+7. create or validate the public GitHub Release and record the image digest;
 8. attach the SBOM and available platform binaries.
 
 If a run stops after creating one artifact, rerun the same version. The retry
@@ -61,6 +61,12 @@ tags are never moved; missing aliases are repaired from the verified digest.
 Resolver, container, publication, and binary jobs load policy helpers from the
 dispatched workflow revision in a checkout separate from the immutable tagged
 source, so a workflow-only recovery fix can safely complete an older release.
+The GitHub Release step reuses the already-verified tag without passing
+`target_commitish`, never patches an existing Release's identity or notes, and
+requires the expected public name, non-draft/non-prerelease state, exact notes,
+source revision, and GHCR digest before replacing any SBOM asset. Binary
+recovery repeats the public identity and provenance check immediately before
+its asset-only `gh release upload --clobber` operation.
 Registry responses and downloaded `.crate` files remain under `RUNNER_TEMP`,
 and the final untracked-aware cleanliness gate prevents publication probes from
 silently changing the package contents. Never bypass that boundary with

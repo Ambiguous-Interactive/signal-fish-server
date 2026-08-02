@@ -56,13 +56,17 @@ case "$status" in
             echo "ERROR: signal-fish-server ${VERSION} already exists on crates.io from revision '${published_revision}', expected '${SOURCE_REVISION}'." >&2
             exit 1
         fi
+        # Cargo omits `git.dirty` for clean packages and serializes it only
+        # when the source is dirty. Accept an explicit false for compatibility,
+        # but reject true and every non-boolean value.
         published_dirty=$(printf '%s' "$vcs_info" | jq -r \
-            'if (.git | type) != "object" or (.git | has("dirty") | not) then "missing"
+            'if (.git | type) != "object" then "missing-git"
+             elif (.git | has("dirty") | not) then "clean-omitted"
              elif (.git.dirty | type) != "boolean" then "invalid-type"
              else (.git.dirty | tostring) end' \
             2>/dev/null || true)
-        if [ "$published_dirty" != "false" ]; then
-            echo "ERROR: signal-fish-server ${VERSION} has invalid cargo VCS cleanliness metadata '${published_dirty:-unreadable}'; expected dirty=false." >&2
+        if [ "$published_dirty" != "clean-omitted" ] && [ "$published_dirty" != "false" ]; then
+            echo "ERROR: signal-fish-server ${VERSION} has invalid cargo VCS cleanliness metadata '${published_dirty:-unreadable}'; expected clean Cargo metadata (dirty absent or false)." >&2
             exit 1
         fi
         echo "Crate ${VERSION} already exists from ${SOURCE_REVISION}; retry is safe."

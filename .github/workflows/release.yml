@@ -407,6 +407,8 @@ jobs:
     needs: [resolve-release, publication-readiness, publish-container]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      release_notes_sha256: ${{ steps.changelog.outputs.notes_sha256 }}
 
     steps:
       - name: Checkout publication tooling
@@ -417,6 +419,7 @@ jobs:
           path: publication-tools
           sparse-checkout: |
             scripts/check-clean-release-worktree.sh
+            scripts/check-github-release.sh
             scripts/read-toml-string.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
@@ -532,6 +535,8 @@ jobs:
             echo ""
             echo "Source revision: \`${{ needs.resolve-release.outputs.source_revision }}\`"
           } > release_notes.md
+          notes_sha256=$(sha256sum release_notes.md | awk '{print $1}')
+          echo "notes_sha256=$notes_sha256" >> "$GITHUB_OUTPUT"
 
       - name: Validate an existing GitHub Release
         id: existing-release
@@ -539,25 +544,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve-release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>/dev/null); then
-            actual_tag=$(printf '%s' "$release" | jq -r '.tag_name // empty')
-            if [ "$actual_tag" != "$TAG" ]; then
-              echo "ERROR: Existing GitHub Release tag '$actual_tag' disagrees with '$TAG'." >&2
-              exit 1
-            fi
-            echo "Existing GitHub Release for $TAG will be completed idempotently."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            status=$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>&1 \
-              | sed -n 's/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*/\1/p' | head -n 1 || true)
-            if [ "$status" != "404" ]; then
-              echo "ERROR: Could not verify whether GitHub Release $TAG exists (HTTP ${status:-unknown})." >&2
-              exit 1
-            fi
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          RELEASE_NAME: ${{ needs.resolve-release.outputs.tag }}
+          RELEASE_SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
+          RELEASE_IMAGE_DIGEST: ${{ needs.publish-container.outputs.digest }}
+          RELEASE_NOTES_FILE: source/release_notes.md
+        run: bash publication-tools/scripts/check-github-release.sh
 
       - name: Create GitHub Release
         if: steps.existing-release.outputs.exists != 'true'
@@ -576,6 +567,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify GitHub Release metadata before asset uploads
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+          RELEASE_NAME: ${{ needs.resolve-release.outputs.tag }}
+          RELEASE_SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
+          RELEASE_IMAGE_DIGEST: ${{ needs.publish-container.outputs.digest }}
+          RELEASE_NOTES_FILE: source/release_notes.md
+          RELEASE_OUTPUT_FILE: /dev/null
+          RELEASE_REQUIRE_EXISTING: true
+        run: bash publication-tools/scripts/check-github-release.sh
+
       - name: Attach SBOM to release
         if: steps.sbom.outcome == 'success'
         shell: bash
@@ -583,21 +587,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve-release.outputs.tag }}
         run: gh release upload "$TAG" source/sbom.cdx.json --clobber
-
-      - name: Verify GitHub Release identity
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.resolve-release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
-          actual_tag=$(printf '%s' "$release" | jq -r '.tag_name // empty')
-          is_draft=$(printf '%s' "$release" | jq -r '.draft')
-          if [ "$actual_tag" != "$TAG" ] || [ "$is_draft" != "false" ]; then
-            echo "ERROR: GitHub Release identity is inconsistent (tag=$actual_tag, draft=$is_draft)." >&2
-            exit 1
-          fi
 
   # ---------------------------------------------------------------------------
   # Cross-platform standalone binaries
@@ -612,10 +601,9 @@ jobs:
   #     It starts after the immutable tag exists, in PARALLEL with container and
   #     crate publication.
   #   - `attach-binaries` (below): a single job that downloads every artifact
-  #     and performs ONE `action-gh-release` upload. Funnelling all assets
-  #     through one release API call avoids the race where N parallel matrix
-  #     jobs PATCH/upload to the same Release concurrently (intermittent 422s /
-  #     clobbering).
+  #     and performs ONE asset-only `gh release upload`. Funnelling all assets
+  #     through one upload avoids the race where N parallel matrix jobs upload
+  #     to the same Release concurrently (intermittent 422s / clobbering).
   #
   # Binaries are built with DEFAULT features (no `tls`) to match the published
   # container image and to keep cross-compilation free of C-crypto toolchain
@@ -780,7 +768,7 @@ jobs:
   # ---------------------------------------------------------------------------
   attach-binaries:
     name: Attach binaries to release
-    needs: [resolve-release, publish, build-binaries]
+    needs: [resolve-release, publish-container, publish, build-binaries]
     if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -812,6 +800,20 @@ jobs:
       - name: Checkout repository
         if: steps.binary-artifacts.outputs.count != '0'
         uses: actions/checkout@v7.0.1
+
+      - name: Validate GitHub Release before binary asset uploads
+        if: steps.binary-artifacts.outputs.count != '0'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+          RELEASE_NAME: ${{ needs.resolve-release.outputs.tag }}
+          RELEASE_SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
+          RELEASE_IMAGE_DIGEST: ${{ needs.publish-container.outputs.digest }}
+          RELEASE_NOTES_SHA256: ${{ needs.publish.outputs.release_notes_sha256 }}
+          RELEASE_OUTPUT_FILE: /dev/null
+          RELEASE_REQUIRE_EXISTING: true
+        run: bash scripts/check-github-release.sh
 
       - name: Download all binary artifacts
         if: steps.binary-artifacts.outputs.count != '0'

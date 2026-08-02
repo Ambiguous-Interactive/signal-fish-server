@@ -136,8 +136,11 @@ Key design decisions:
   redundant for an existing tag and can make a historical retry require
   workflow-write permission when release workflows have since changed on the
   default branch; the workflow-scoped token cannot receive that permission.
-  A validated existing Release is never modified during a retry, and SBOM/binary
-  recovery uses asset-only uploads with replacement enabled.
+  A validated existing Release is never modified during a retry. Before any
+  asset replacement, the workflow fails closed unless the Release is public,
+  has the expected name and notes, and records the exact source revision and
+  image digest. SBOM/binary recovery then uses asset-only uploads with
+  replacement enabled.
 
 | Test | What It Validates |
 |------|-------------------|

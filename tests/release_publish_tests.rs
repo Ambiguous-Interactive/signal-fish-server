@@ -443,17 +443,17 @@ fn crates_io_probe_is_idempotent_and_never_dirties_the_checkout() {
             published_dirty: "true",
             succeeds: false,
             expected_output: "",
-            diagnostic: "expected dirty=false",
+            diagnostic: "expected clean Cargo metadata",
         },
         Case {
-            name: "missing source cleanliness metadata",
+            name: "clean cargo metadata omits dirty flag",
             status: "200",
             response_checksum: "actual",
             published_revision: expected_revision,
             published_dirty: "missing",
-            succeeds: false,
-            expected_output: "",
-            diagnostic: "expected dirty=false",
+            succeeds: true,
+            expected_output: "exists=true",
+            diagnostic: "",
         },
         Case {
             name: "wrong type source cleanliness metadata",
@@ -612,6 +612,247 @@ fn crates_io_probe_is_idempotent_and_never_dirties_the_checkout() {
             "{} dirtied the release checkout",
             case.name
         );
+    }
+}
+
+#[test]
+fn github_release_probe_validates_public_identity_before_asset_mutation() {
+    struct Case {
+        name: &'static str,
+        status: &'static str,
+        mutation: &'static str,
+        succeeds: bool,
+        expected_output: &'static str,
+        diagnostic: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "absent release",
+            status: "404",
+            mutation: "none",
+            succeeds: true,
+            expected_output: "exists=false",
+            diagnostic: "",
+        },
+        Case {
+            name: "matching public release",
+            status: "200",
+            mutation: "none",
+            succeeds: true,
+            expected_output: "exists=true",
+            diagnostic: "",
+        },
+        Case {
+            name: "matching public release by notes digest",
+            status: "200",
+            mutation: "hash",
+            succeeds: true,
+            expected_output: "exists=true",
+            diagnostic: "",
+        },
+        Case {
+            name: "required release is absent",
+            status: "404",
+            mutation: "require-existing",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "does not exist before asset upload",
+        },
+        Case {
+            name: "tag mismatch",
+            status: "200",
+            mutation: "tag",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "tag_name",
+        },
+        Case {
+            name: "name mismatch",
+            status: "200",
+            mutation: "name",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "name",
+        },
+        Case {
+            name: "draft release",
+            status: "200",
+            mutation: "draft",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "draft",
+        },
+        Case {
+            name: "prerelease",
+            status: "200",
+            mutation: "prerelease",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "prerelease",
+        },
+        Case {
+            name: "missing source provenance",
+            status: "200",
+            mutation: "source",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "source revision note",
+        },
+        Case {
+            name: "missing image provenance",
+            status: "200",
+            mutation: "digest",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "image digest note",
+        },
+        Case {
+            name: "stale notes with provenance tokens",
+            status: "200",
+            mutation: "body",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "release notes body",
+        },
+        Case {
+            name: "trailing newline drift",
+            status: "200",
+            mutation: "trailing-newline",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "release notes body",
+        },
+        Case {
+            name: "malformed response",
+            status: "200",
+            mutation: "malformed",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "malformed metadata",
+        },
+        Case {
+            name: "api outage",
+            status: "503",
+            mutation: "none",
+            succeeds: false,
+            expected_output: "",
+            diagnostic: "HTTP 503",
+        },
+    ];
+
+    let source_revision = "0123456789abcdef0123456789abcdef01234567";
+    let image_digest = format!("sha256:{}", "a".repeat(64));
+    let expected_body = format!(
+        "Release notes\n\nMulti-architecture manifest digest: `{image_digest}`\n\nSource revision: `{source_revision}`\n"
+    );
+
+    for case in cases {
+        let root = unique_temp_dir(&format!("github-release-{}", case.name.replace(' ', "-")));
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).expect("create mock bin");
+        let notes = root.path().join("release-notes.md");
+        write_file(&notes, &expected_body);
+
+        let mut response = serde_json::json!({
+            "tag_name": "v1.2.3",
+            "name": "v1.2.3",
+            "draft": false,
+            "prerelease": false,
+            "body": expected_body,
+        });
+        match case.mutation {
+            "none" | "hash" | "require-existing" | "malformed" => {}
+            "tag" => response["tag_name"] = serde_json::json!("v1.2.2"),
+            "name" => response["name"] = serde_json::json!("wrong release"),
+            "draft" => response["draft"] = serde_json::json!(true),
+            "prerelease" => response["prerelease"] = serde_json::json!(true),
+            "source" => response["body"] = serde_json::json!(format!(
+                "Release notes\n\nMulti-architecture manifest digest: `{image_digest}`\n"
+            )),
+            "digest" => response["body"] = serde_json::json!(format!(
+                "Release notes\n\nSource revision: `{source_revision}`\n"
+            )),
+            "body" => response["body"] = serde_json::json!(format!(
+                "Stale notes\n\nMulti-architecture manifest digest: `{image_digest}`\n\nSource revision: `{source_revision}`\n"
+            )),
+            "trailing-newline" => {
+                response["body"] = serde_json::json!(format!("{expected_body}\n"));
+            }
+            mutation => panic!("unknown release mutation {mutation}"),
+        }
+        let response_file = root.path().join("response.json");
+        if case.mutation == "malformed" {
+            write_file(&response_file, "not-json");
+        } else {
+            write_file(&response_file, &response.to_string());
+        }
+
+        let gh = bin.join("gh");
+        write_file(
+            &gh,
+            "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\"--include\"* ]]; then\n  printf 'HTTP/2 %s\\n' \"$MOCK_STATUS\"\n  exit 1\nfi\nif [ \"$MOCK_STATUS\" = 200 ]; then\n  cat \"$MOCK_RESPONSE\"\n  exit 0\nfi\nexit 1\n",
+        );
+        let mut permissions = fs::metadata(&gh).expect("gh metadata").permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+        }
+        fs::set_permissions(&gh, permissions).expect("make mock gh executable");
+
+        let output_file = root.path().join("outputs");
+        let expected_notes_sha256 = git_style_sha256(&notes);
+        let mut command = Command::new("bash");
+        command
+            .arg(repo_root().join("scripts/check-github-release.sh"))
+            .env("GH_CLI", &gh)
+            .env("MOCK_STATUS", case.status)
+            .env("MOCK_RESPONSE", &response_file)
+            .env(
+                "GITHUB_REPOSITORY",
+                "Ambiguous-Interactive/signal-fish-server",
+            )
+            .env("TAG", "v1.2.3")
+            .env("RELEASE_NAME", "v1.2.3")
+            .env("RELEASE_SOURCE_REVISION", source_revision)
+            .env("RELEASE_IMAGE_DIGEST", &image_digest)
+            .env("RELEASE_OUTPUT_FILE", &output_file);
+        if case.mutation == "hash" {
+            command.env("RELEASE_NOTES_SHA256", expected_notes_sha256);
+        } else {
+            command.env("RELEASE_NOTES_FILE", &notes);
+        }
+        if case.mutation == "require-existing" {
+            command.env("RELEASE_REQUIRE_EXISTING", "true");
+        }
+        let output = command.output().expect("run GitHub Release probe");
+        assert_eq!(
+            output.status.success(),
+            case.succeeds,
+            "{}:\nstdout:\n{}\nstderr:\n{}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if case.succeeds {
+            assert_eq!(
+                fs::read_to_string(&output_file)
+                    .expect("probe output")
+                    .trim(),
+                case.expected_output,
+                "{}",
+                case.name
+            );
+        } else {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(case.diagnostic),
+                "{} missing diagnostic `{}`: {}",
+                case.name,
+                case.diagnostic,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
 

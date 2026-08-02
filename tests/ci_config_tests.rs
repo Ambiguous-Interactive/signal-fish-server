@@ -4732,10 +4732,10 @@ fn test_release_binary_attach_job_preserves_partial_success_gate() {
         .expect("attach-binaries must define an explicit job-level if condition");
 
     assert!(
-        attach_job.contains("needs: [resolve-release, publish, build-binaries]"),
-        "attach-binaries must depend on release identity, `publish`, and `build-binaries` so \
-         the Release exists and all binary matrix legs have finished before the \
-         single release upload starts.\nJob block:\n{attach_job}"
+        attach_job.contains("needs: [resolve-release, publish-container, publish, build-binaries]"),
+        "attach-binaries must depend on release identity, the verified container digest, \
+         `publish`, and `build-binaries` so the Release can be revalidated and all binary matrix \
+         legs have finished before the single asset upload starts.\nJob block:\n{attach_job}"
     );
     assert!(
         attach_if.contains("!cancelled()")
@@ -4958,6 +4958,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
     let verifier = read_live_file(&root.join("scripts/verify-release-image.sh"));
     let resolver = read_live_file(&root.join("scripts/resolve-release-source.sh"));
     let crate_check = read_live_file(&root.join("scripts/check-crates-io-release.sh"));
+    let release_check = read_live_file(&root.join("scripts/check-github-release.sh"));
     let publish =
         extract_workflow_job_block(&release, "publish").expect("release.yml must define publish");
     let create_release = extract_named_workflow_step(&publish, "Create GitHub Release")
@@ -4965,8 +4966,20 @@ fn test_release_identity_fails_closed_across_artifacts() {
     let validate_release =
         extract_named_workflow_step(&publish, "Validate an existing GitHub Release")
             .expect("publish must define the existing GitHub Release gate");
+    let verify_release = extract_named_workflow_step(
+        &publish,
+        "Verify GitHub Release metadata before asset uploads",
+    )
+    .expect("publish must verify Release metadata before asset uploads");
     let attach_sbom = extract_named_workflow_step(&publish, "Attach SBOM to release")
         .expect("publish must define the SBOM attachment step");
+    let attach_binaries = extract_workflow_job_block(&release, "attach-binaries")
+        .expect("release.yml must define attach-binaries");
+    let validate_binary_release = extract_named_workflow_step(
+        &attach_binaries,
+        "Validate GitHub Release before binary asset uploads",
+    )
+    .expect("attach-binaries must validate Release metadata before uploading assets");
 
     let required_by_file = [
         (
@@ -4976,7 +4989,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
                 "scripts/resolve-release-source.sh",
                 "git cat-file -t \"refs/tags/${TAG}\"",
                 "refusing to move it",
-                "Verify GitHub Release identity",
+                "Verify GitHub Release metadata before asset uploads",
             ],
         ),
         (
@@ -4995,6 +5008,21 @@ fn test_release_identity_fails_closed_across_artifacts() {
             "check-crates-io-release.sh",
             &crate_check,
             vec![".cargo_vcs_info.json", "published_revision", "RUNNER_TEMP"],
+        ),
+        (
+            "check-github-release.sh",
+            &release_check,
+            vec![
+                "tag_name",
+                "prerelease",
+                "source revision note",
+                "image digest note",
+                "release notes body",
+                "RELEASE_NOTES_SHA256",
+                "RELEASE_REQUIRE_EXISTING",
+                "exists=false",
+                "exists=true",
+            ],
         ),
         (
             "docker-publish.yml",
@@ -5051,13 +5079,15 @@ fn test_release_identity_fails_closed_across_artifacts() {
     );
     for required in [
         "id: existing-release",
-        "echo \"exists=true\" >> \"$GITHUB_OUTPUT\"",
-        "echo \"exists=false\" >> \"$GITHUB_OUTPUT\"",
+        "RELEASE_SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}",
+        "RELEASE_IMAGE_DIGEST: ${{ needs.publish-container.outputs.digest }}",
+        "RELEASE_NOTES_FILE: source/release_notes.md",
+        "run: bash publication-tools/scripts/check-github-release.sh",
     ] {
         assert!(
             validate_release.contains(required),
-            "The existing-release gate must publish `{required}` so retries never PATCH an old \
-             release target.\nStep:\n{validate_release}"
+            "The existing-release gate must contain `{required}` so retries validate public \
+             identity and provenance without PATCHing an old Release.\nStep:\n{validate_release}"
         );
     }
     assert!(
@@ -5071,6 +5101,35 @@ fn test_release_identity_fails_closed_across_artifacts() {
         "SBOM retries must use the asset-only upload API rather than PATCHing Release identity.\n\
          Step:\n{attach_sbom}"
     );
+    assert!(
+        verify_release.contains("run: bash publication-tools/scripts/check-github-release.sh")
+            && verify_release.contains("RELEASE_OUTPUT_FILE: /dev/null")
+            && verify_release.contains("RELEASE_REQUIRE_EXISTING: true"),
+        "The created or existing Release must be revalidated immediately before the SBOM can be \
+         mutated.\nStep:\n{verify_release}"
+    );
+    let verify_position = publish
+        .find("- name: Verify GitHub Release metadata before asset uploads")
+        .expect("publish validation position");
+    let sbom_position = publish
+        .find("- name: Attach SBOM to release")
+        .expect("publish SBOM position");
+    assert!(
+        verify_position < sbom_position,
+        "Release metadata validation must run before the first asset mutation."
+    );
+    for required in [
+        "RELEASE_SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}",
+        "RELEASE_IMAGE_DIGEST: ${{ needs.publish-container.outputs.digest }}",
+        "RELEASE_NOTES_SHA256: ${{ needs.publish.outputs.release_notes_sha256 }}",
+        "RELEASE_REQUIRE_EXISTING: true",
+        "run: bash scripts/check-github-release.sh",
+    ] {
+        assert!(
+            validate_binary_release.contains(required),
+            "Binary asset recovery must revalidate `{required}` before uploading.\nStep:\n{validate_binary_release}"
+        );
+    }
 }
 
 #[test]
