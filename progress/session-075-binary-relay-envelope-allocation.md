@@ -84,7 +84,11 @@ evidence and exact wire ledgers; machine-sensitive timing remains observational.
 - Two adversarial passes found and resolved fallible-allocation, measurement,
   byte/reallocation coverage, boundary-test, documentation, and required-check
   contract gaps. The final confirmation pass reported zero remaining diff
-  issues; hosted CI and GitHub reviewer evidence remain pending publication.
+  issues. On the first hosted head the new allocation job passed exactly,
+  Cursor Bugbot reported no issue, and Copilot identified one error-taxonomy
+  gap in fallback writer growth. The follow-up distinguishes capacity overflow
+  (`InvalidInput`) from allocator failure (`OutOfMemory`) and pins that contract
+  directly; final hosted and reviewer evidence remain pending publication.
 
 ## Follow-up
 

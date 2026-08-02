@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Direct protocol-v3 binary relays now use 5–6 allocation operations instead
   of 10–11, while 8- and 16-player mixed-format relays use 28 instead of 37.
   Allocated bytes fall by 26–39% for direct binary traffic and 8–9% for mixed
-  traffic; emitted wire bytes remain identical.
+  traffic; emitted wire bytes remain identical, and capacity-overflow errors
+  remain distinct from allocator failures during fallback buffer growth.
 
 ## [0.5.2] - 2026-07-31
 

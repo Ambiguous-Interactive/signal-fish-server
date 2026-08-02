@@ -909,6 +909,28 @@ fn encode_named_binary_frame<T: Serialize>(
 /// insufficient.
 struct FallibleVecWriter<'a>(&'a mut Vec<u8>);
 
+impl FallibleVecWriter<'_> {
+    fn reserve_for_write(&mut self, additional_len: usize) -> std::io::Result<()> {
+        let required_len = self
+            .0
+            .len()
+            .checked_add(additional_len)
+            .filter(|required_len| *required_len <= isize::MAX as usize)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "binary frame capacity overflow",
+                )
+            })?;
+        if required_len > self.0.capacity() {
+            self.0
+                .try_reserve_exact(additional_len)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::OutOfMemory, error))?;
+        }
+        Ok(())
+    }
+}
+
 impl Write for FallibleVecWriter<'_> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         self.write_all(buffer)?;
@@ -916,9 +938,7 @@ impl Write for FallibleVecWriter<'_> {
     }
 
     fn write_all(&mut self, buffer: &[u8]) -> std::io::Result<()> {
-        self.0
-            .try_reserve(buffer.len())
-            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        self.reserve_for_write(buffer.len())?;
         self.0.extend_from_slice(buffer);
         Ok(())
     }
@@ -1513,6 +1533,13 @@ mod tests {
         let error = encode_named_binary_frame(&0_u8, usize::MAX)
             .expect_err("capacity arithmetic overflow must fail before allocation");
         assert!(error.contains("capacity overflow"));
+
+        let mut bytes = Vec::new();
+        let error = FallibleVecWriter(&mut bytes)
+            .reserve_for_write(usize::MAX)
+            .expect_err("writer length overflow must not be reported as allocation failure");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("capacity overflow"));
     }
 
     #[test]
