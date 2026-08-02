@@ -2,6 +2,7 @@ use crate::coordination::outbound_queue::{DataDeliveryMetadata, OutboundReceiver
 use crate::protocol::{ErrorCode, GameDataEncoding, PlayerId, ServerMessage};
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::{Message, WebSocket};
+use bytes::Bytes;
 use futures_util::SinkExt;
 use rmp_serde::{encode::write_named, from_slice};
 use serde::Serialize;
@@ -268,7 +269,7 @@ fn materialize_game_data_frame_uncached(
                 match encode_binary_game_data(*from_player, *encoding, payload, seq, epoch) {
                     Ok(frame_bytes) => {
                         return Ok(MaterializedFrame {
-                            frame: Message::Binary(frame_bytes.into()),
+                            frame: Message::Binary(frame_bytes),
                             work: SerializationWork {
                                 message_pack_encodes: u64::from(
                                     seq.is_some() || *encoding == GameDataEncoding::MessagePack,
@@ -836,7 +837,7 @@ struct V3BinaryGameDataFrame<'a> {
     epoch: u32,
 }
 
-/// Encodes a binary game-data frame exactly as production puts it on the wire.
+/// Materializes the binary bytes exactly as production puts them on the wire.
 ///
 /// This is the single source of truth for the binary send path. Keep this
 /// private to the websocket module so the wire frame layout can be tested
@@ -845,14 +846,15 @@ struct V3BinaryGameDataFrame<'a> {
 /// `seq`/`epoch` must already be gated per recipient: both present for v3, both
 /// absent for v2. V3 always uses the MessagePack metadata envelope while keeping
 /// `payload` opaque. V2 retains its historical representation byte-for-byte:
-/// the legacy MessagePack envelope or raw JSON/rkyv passthrough.
+/// the legacy MessagePack envelope or raw JSON/rkyv passthrough. Raw passthrough
+/// clones the shared `Bytes` handle, not the payload buffer.
 pub(super) fn encode_binary_game_data(
     from_player: PlayerId,
     encoding: GameDataEncoding,
-    payload: &[u8],
+    payload: &Bytes,
     seq: Option<u64>,
     epoch: Option<u32>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Bytes, String> {
     match (seq, epoch) {
         (Some(seq), Some(epoch)) => {
             if seq == 0 || epoch == 0 {
@@ -865,7 +867,7 @@ pub(super) fn encode_binary_game_data(
                 seq,
                 epoch,
             };
-            encode_named_binary_frame(&frame, payload.len())
+            encode_named_binary_frame(&frame, payload.len()).map(Bytes::from)
         }
         (None, None) => match encoding {
             GameDataEncoding::MessagePack => encode_named_binary_frame(
@@ -875,8 +877,9 @@ pub(super) fn encode_binary_game_data(
                     payload,
                 },
                 payload.len(),
-            ),
-            GameDataEncoding::Json | GameDataEncoding::Rkyv => Ok(payload.to_vec()),
+            )
+            .map(Bytes::from),
+            GameDataEncoding::Json | GameDataEncoding::Rkyv => Ok(payload.clone()),
         },
         _ => Err("binary delivery seq and epoch must be present or absent together".to_string()),
     }
@@ -1076,11 +1079,13 @@ mod tests {
             }
         );
 
-        let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+        let payload: Bytes = rmp_serde::to_vec_named(&data)
+            .expect("MessagePack fixture")
+            .into();
         let binary = ServerMessage::GameDataBinary {
             from_player: player_a(),
             encoding: GameDataEncoding::MessagePack,
-            payload: payload.clone().into(),
+            payload: payload.clone(),
             seq: Some(42),
             epoch: Some(3),
         };
@@ -1105,7 +1110,6 @@ mod tests {
                         stamp.map(|value| value.1),
                     )
                     .expect("expected direct binary")
-                    .into()
                 )
             );
             assert_eq!(
@@ -1151,7 +1155,7 @@ mod tests {
                 &ServerMessage::GameDataBinary {
                     from_player: player_a(),
                     encoding: GameDataEncoding::MessagePack,
-                    payload: payload.into(),
+                    payload,
                     seq: Some(42),
                     epoch: None,
                 },
@@ -1370,14 +1374,14 @@ mod tests {
 
     #[test]
     fn binary_game_data_encoder_emits_bare_message_pack_frame() {
-        let payload: &[u8] = &[0x01, 0x02, 0x03, 0x04];
+        let payload = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]);
         // Pre-v3 form (`seq`/`epoch` both None): bytes are FROZEN — they must
         // never drift, v3 or not (pre-v3 recipients keep receiving exactly this
         // frame).
         let wire = encode_binary_game_data(
             player_a(),
             GameDataEncoding::MessagePack,
-            payload,
+            &payload,
             None,
             None,
         )
@@ -1403,7 +1407,7 @@ mod tests {
         let frame = LegacyBinaryGameDataFrame {
             from_player: player_a(),
             encoding: GameDataEncoding::MessagePack,
-            payload,
+            payload: &payload,
         };
         assert_eq!(
             serde_json::to_value(frame).expect("json value"),
@@ -1420,7 +1424,7 @@ mod tests {
     /// MessagePack remains byte-identical to its previously stamped form.
     #[test]
     fn binary_game_data_encoder_envelopes_every_v3_encoding() {
-        let payload: &[u8] = &[0x01, 0x02, 0x03, 0x04];
+        let payload = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]);
         let cases = [
             (
                 GameDataEncoding::Json,
@@ -1437,7 +1441,7 @@ mod tests {
         ];
 
         for (encoding, expected_hex) in cases {
-            let wire = encode_binary_game_data(player_a(), encoding, payload, Some(7), Some(3))
+            let wire = encode_binary_game_data(player_a(), encoding, &payload, Some(7), Some(3))
                 .expect("production binary encode with stamp");
             assert_eq!(
                 hex(&wire),
@@ -1462,7 +1466,7 @@ mod tests {
         let frame = V3BinaryGameDataFrame {
             from_player: player_a(),
             encoding: GameDataEncoding::MessagePack,
-            payload,
+            payload: &payload,
             seq: 7,
             epoch: 3,
         };
@@ -1482,7 +1486,7 @@ mod tests {
     #[test]
     fn binary_game_data_encoder_matches_named_encoding_at_bin_boundaries() {
         for payload_len in [0, 255, 256, 65_535, 65_536] {
-            let payload = vec![0xa5; payload_len];
+            let payload = Bytes::from(vec![0xa5; payload_len]);
             let legacy = LegacyBinaryGameDataFrame {
                 from_player: player_a(),
                 encoding: GameDataEncoding::MessagePack,
@@ -1496,8 +1500,11 @@ mod tests {
                     None,
                     None,
                 )
-                .expect("preallocated legacy binary encode"),
-                rmp_serde::to_vec_named(&legacy).expect("reference legacy binary encode"),
+                .expect("preallocated legacy binary encode")
+                .as_ref(),
+                rmp_serde::to_vec_named(&legacy)
+                    .expect("reference legacy binary encode")
+                    .as_slice(),
                 "legacy payload length {payload_len} changed named MessagePack bytes"
             );
 
@@ -1521,8 +1528,11 @@ mod tests {
                         Some(u64::MAX),
                         Some(u32::MAX),
                     )
-                    .expect("preallocated v3 binary encode"),
-                    rmp_serde::to_vec_named(&v3).expect("reference v3 binary encode"),
+                    .expect("preallocated v3 binary encode")
+                    .as_ref(),
+                    rmp_serde::to_vec_named(&v3)
+                        .expect("reference v3 binary encode")
+                        .as_slice(),
                     "v3 {encoding:?} payload length {payload_len} changed named MessagePack bytes"
                 );
             }
@@ -1556,20 +1566,27 @@ mod tests {
 
     #[test]
     fn v2_raw_binary_encodings_return_payload_unchanged() {
-        let payload: &[u8] = br#"{"move":"up"}"#;
+        let payload = Bytes::from_static(br#"{"move":"up"}"#);
 
         for encoding in [GameDataEncoding::Json, GameDataEncoding::Rkyv] {
             assert_eq!(
-                encode_binary_game_data(player_a(), encoding, payload, None, None)
+                encode_binary_game_data(player_a(), encoding, &payload, None, None)
                     .expect("v2 raw passthrough"),
-                payload.to_vec()
+                payload
+            );
+            let projected = encode_binary_game_data(player_a(), encoding, &payload, None, None)
+                .expect("v2 raw passthrough");
+            assert_eq!(
+                projected.as_ptr(),
+                payload.as_ptr(),
+                "v2 raw passthrough must reuse the shared payload allocation"
             );
         }
     }
 
     #[test]
     fn binary_delivery_stamp_must_be_complete_and_nonzero() {
-        let payload = b"opaque";
+        let payload = Bytes::from_static(b"opaque");
         for (seq, epoch) in [
             (Some(1), None),
             (None, Some(1)),
@@ -1577,7 +1594,7 @@ mod tests {
             (Some(1), Some(0)),
         ] {
             assert!(
-                encode_binary_game_data(player_a(), GameDataEncoding::Json, payload, seq, epoch,)
+                encode_binary_game_data(player_a(), GameDataEncoding::Json, &payload, seq, epoch,)
                     .is_err(),
                 "invalid stamp {seq:?}/{epoch:?} was accepted"
             );

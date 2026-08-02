@@ -1014,7 +1014,6 @@ checksum = "a88cf1f829d945f548cf8fec32c61b1f202b6d93b45848602fc02af4b12ad218"
 dependencies = [
  "futures-channel",
  "futures-core",
- "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -1083,7 +1082,6 @@ version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
 dependencies = [
- "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -2793,7 +2791,6 @@ dependencies = [
  "criterion",
  "dashmap",
  "fastrand",
- "futures",
  "futures-util",
  "getrandom 0.4.3",
  "hdrhistogram",
@@ -2826,7 +2823,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-test",
  "tokio-tungstenite",
  "tower-http 0.7.0",
  "tracing",
@@ -3133,17 +3129,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

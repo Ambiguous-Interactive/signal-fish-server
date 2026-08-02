@@ -29,8 +29,8 @@
 #   unstable compiler internals and runtime instrumentation that are not
 #   available on the stable channel.
 #
-#   Nightly Version: nightly-2026-02-01
-#   Last Updated: 2026-02-22
+#   Nightly Version: nightly-2026-08-01
+#   Last Updated: 2026-08-02
 #
 #   Update Criteria (when to update this nightly version):
 #     - If the nightly version is >6 months old
@@ -121,7 +121,7 @@ jobs:
       - name: Install Rust nightly toolchain with Miri
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: nightly-2026-02-01
+          toolchain: nightly-2026-08-01
           components: miri, rust-src
 
       - name: Cache Rust dependencies
@@ -135,7 +135,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Setup Miri
-        run: cargo +nightly-2026-02-01 miri setup
+        run: cargo +nightly-2026-08-01 miri setup
 
       - name: Run Miri on library tests
         # Isolation is disabled so the interpreter services wall-clock
@@ -154,7 +154,7 @@ jobs:
           echo "Note: Integration tests are excluded because they use networking,"
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
           echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
-          cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast 2>&1 | tee miri-output.txt
+          cargo +nightly-2026-08-01 miri test --locked --lib --no-fail-fast 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
       - name: Diagnose Miri failures
@@ -220,7 +220,7 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: nightly-2026-02-01
+          toolchain: nightly-2026-08-01
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
@@ -275,7 +275,7 @@ jobs:
           echo "stack buffer overflow, and memory leaks."
           echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly-2026-02-01 test --locked --target x86_64-unknown-linux-gnu \
+            cargo +nightly-2026-08-01 test --locked --target x86_64-unknown-linux-gnu \
             --all-features --no-fail-fast 2>&1 | tee asan-output.txt
           echo "AddressSanitizer analysis complete."
 

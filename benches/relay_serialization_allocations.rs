@@ -80,6 +80,9 @@ fn print_sample(scenario: Scenario, room_size: usize, sample: &Sample) {
 fn assert_allocation_ceiling(scenario: Scenario, room_size: usize, sample: &Sample) {
     let (maximum_operations_per_relay, maximum_reallocations_per_relay, maximum_bytes_per_relay) =
         match (scenario, room_size) {
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 2) => (3, 0, 425),
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 8) => (4, 0, 1_345),
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 16) => (4, 0, 1_665),
             (Scenario::V3JsonText, 2) => (8, 3, 2_587),
             (Scenario::V3JsonText, 8) => (9, 3, 3_507),
             (Scenario::V3JsonText, 16) => (9, 3, 3_827),

@@ -14,10 +14,10 @@
 //!
 //! Invariants, checked after EVERY op (any violation panics = a finding):
 //! - no panic anywhere in the handler paths (implicit);
-//! - the #131 delivery conservation law over `ServerMetrics`: every attempt
-//!   is exactly one of enqueued / channel-closed / dropped (all deliveries
-//!   are awaited inline by the handlers, so the ledger is settled at every
-//!   op boundary);
+//! - the #131 delivery conservation law over `ServerMetrics`: every resolved
+//!   attempt is enqueued, channel-closed, or intentionally canceled, while
+//!   slow-consumer drops provide the upper bound (the assertion uses bounded
+//!   polling so a transient snapshot can self-stabilize at an op boundary);
 //! - routing consistency: no player is ever a member of two rooms at once
 //!   (checked over every room this input has ever created).
 //!
@@ -39,7 +39,9 @@ use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 /// Synthetic client pool size (ops address clients by index modulo this).
@@ -206,24 +208,48 @@ impl Harness {
         }
     }
 
-    /// The #131 conservation law: every delivery attempt resolved as exactly
-    /// one of enqueued / channel-closed / dropped. All handler deliveries are
-    /// awaited inline, so the ledger is settled between ops.
-    fn assert_conservation(&self) {
+    /// The #131 conservation law over the exported server-wide counters.
+    ///
+    /// Conditional attempts may be intentionally canceled before enqueue.
+    /// The drop counter also includes messages abandoned after enqueue when a
+    /// connection closes, so it supplies an upper bound rather than a fourth
+    /// mutually exclusive outcome. A snapshot can transiently be unbalanced at
+    /// an op boundary, so mirror the stable suite's bounded self-stabilization
+    /// poll without claiming every background task has fully quiesced.
+    async fn assert_conservation(&self) {
+        const QUIESCENCE_DEADLINE: Duration = Duration::from_secs(10);
+        const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
         let metrics = self.server.metrics();
-        let attempts = metrics.websocket_delivery_attempts.load(Ordering::Relaxed);
-        let enqueued = metrics
-            .websocket_deliveries_enqueued
-            .load(Ordering::Relaxed);
-        let channel_closed = metrics
-            .websocket_deliveries_channel_closed
-            .load(Ordering::Relaxed);
-        let dropped = metrics.websocket_messages_dropped.load(Ordering::Relaxed);
-        assert_eq!(
-            attempts,
-            enqueued + channel_closed + dropped,
-            "delivery conservation violated: attempts={attempts} != \
-             enqueued={enqueued} + channel_closed={channel_closed} + dropped={dropped}"
+        let deadline = Instant::now() + QUIESCENCE_DEADLINE;
+        let (mut attempts, mut enqueued, mut channel_closed, mut canceled, mut dropped);
+        loop {
+            attempts = metrics.websocket_delivery_attempts.load(Ordering::Relaxed);
+            enqueued = metrics
+                .websocket_deliveries_enqueued
+                .load(Ordering::Relaxed);
+            channel_closed = metrics
+                .websocket_deliveries_channel_closed
+                .load(Ordering::Relaxed);
+            canceled = metrics
+                .websocket_deliveries_canceled
+                .load(Ordering::Relaxed);
+            dropped = metrics.websocket_messages_dropped.load(Ordering::Relaxed);
+
+            let resolved = enqueued + channel_closed + canceled;
+            if resolved <= attempts && attempts <= resolved + dropped {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        panic!(
+            "delivery conservation violated (stable past the {QUIESCENCE_DEADLINE:?} quiescence \
+             deadline): expected enqueued + channel_closed + canceled <= attempts <= enqueued + \
+             channel_closed + canceled + dropped, got attempts={attempts} enqueued={enqueued} \
+             channel_closed={channel_closed} canceled={canceled} dropped={dropped}"
         );
     }
 
@@ -398,7 +424,7 @@ async fn run(plan: Plan) {
 
     for op in plan.ops.into_iter().take(MAX_OPS) {
         harness.apply(op).await;
-        harness.assert_conservation();
+        harness.assert_conservation().await;
         harness.assert_single_room_membership().await;
     }
 }

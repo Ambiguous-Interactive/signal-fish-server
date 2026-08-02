@@ -3,9 +3,9 @@
 # The NIGHTLY counterpart to the stable in-suite proptest fuzzer
 # (tests/protocol_fuzz_hardening.rs, run on every `cargo test`). This job builds
 # the out-of-workspace fuzz crate (fuzz/) on the nightly toolchain and smoke-runs
-# each target for a bounded time, seeded from the canonical wire samples. A
-# crash (panic/abort/overflow on the decode or validation surface) fails the job
-# and uploads the reproducing artifact.
+# each target for a bounded time, with protocol decoding seeded from canonical
+# wire samples. A crash or failed state-machine assertion fails the job and
+# uploads the reproducing artifact.
 #
 # Kept off the stable toolchain and out of the workspace so it never perturbs the
 # pinned-stable build (ADR-0003); see fuzz/README.md.
@@ -27,8 +27,9 @@ on:
     paths:
       - "fuzz/**"
       - ".github/workflows/fuzz.yml"
-      - "src/protocol/**"
-      - "src/websocket/token_binding.rs"
+      - "Cargo.toml"
+      - "build.rs"
+      - "src/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -45,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [decode_protocol, validate_inputs]
+        target: [decode_protocol, validate_inputs, fuzz_session_machine, fuzz_reconnect_tokens]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -56,7 +57,8 @@ jobs:
       #   are not available on the pinned stable MSRV. Production artifacts are never
       #   built with nightly (ADR-0003); this nightly is CI-only, for the fuzz crate.
       #
-      #   Nightly Version: nightly-2026-02-01 (kept in sync with unused-deps.yml)
+      #   Nightly Version: nightly-2026-08-01 (kept in sync with unused-deps.yml)
+      #   Last Updated: 2026-08-02
       #
       #   Update Criteria (when to bump this pin):
       #     - If the nightly version is >6 months old
@@ -68,7 +70,7 @@ jobs:
       - name: Install nightly Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: nightly-2026-02-01
+          toolchain: nightly-2026-08-01
           # Explicitly add the gnu std target for this nightly. The runner is a
           # gnu host (so gnu std is already present via the host toolchain), but
           # pin it here so the `--target x86_64-unknown-linux-gnu` build below is
@@ -76,7 +78,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Verify locked fuzz dependency graph
-        run: cargo +nightly-2026-02-01 metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
+        run: cargo +nightly-2026-08-01 metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2.9.1
@@ -116,7 +118,7 @@ jobs:
         # remove. cargo-fuzz rejects `--locked`; the locked metadata preflight
         # above therefore guards the committed graph before this build starts.
         run: |
-          cargo +nightly-2026-02-01 fuzz run ${{ matrix.target }} \
+          cargo +nightly-2026-08-01 fuzz run ${{ matrix.target }} \
             --target x86_64-unknown-linux-gnu -- \
             -max_total_time="${MAX_TOTAL_TIME}" -max_len=65536
 

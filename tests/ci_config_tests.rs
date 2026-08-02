@@ -15918,6 +15918,17 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
 
     let fuzz_path = root.join(".github/workflows/fuzz.yml");
     let fuzz = read_live_file(&fuzz_path);
+    let pull_request_paths: BTreeSet<String> = extract_workflow_event_paths(&fuzz, "pull_request")
+        .into_iter()
+        .collect();
+    for required_path in ["Cargo.toml", "build.rs", "src/**"] {
+        assert!(
+            pull_request_paths.contains(required_path),
+            "fuzz.yml pull_request paths must include {required_path} because the declared \
+             state-machine targets compile and exercise the root package. Narrow filters \
+             silently skip behavioral fuzz coverage when production surfaces change."
+        );
+    }
     let fuzz_documents =
         Yaml::load_from_str(&fuzz).expect("fuzz.yml live configuration must parse as YAML");
     let fuzz_job = fuzz_documents
@@ -15925,6 +15936,90 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
         .and_then(|document| document.as_mapping_get("jobs"))
         .and_then(|jobs| jobs.as_mapping_get("fuzz"))
         .unwrap_or_else(|| panic!("fuzz.yml must define jobs.fuzz"));
+    let matrix_target_sequence = fuzz_job
+        .as_mapping_get("strategy")
+        .and_then(|strategy| strategy.as_mapping_get("matrix"))
+        .and_then(|matrix| matrix.as_mapping_get("target"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("fuzz.yml must define jobs.fuzz.strategy.matrix.target"));
+    let matrix_target_list: Vec<String> = matrix_target_sequence
+        .iter()
+        .map(|target| {
+            target
+                .as_str()
+                .unwrap_or_else(|| panic!("every fuzz matrix target must be a string"))
+                .to_string()
+        })
+        .collect();
+    let matrix_targets: BTreeSet<String> = matrix_target_list.iter().cloned().collect();
+    assert_eq!(
+        matrix_target_list.len(),
+        matrix_targets.len(),
+        "fuzz.yml must list every fuzz matrix target exactly once"
+    );
+    let fuzz_manifest = read_file(&root.join("fuzz/Cargo.toml"));
+    let mut in_bin = false;
+    let mut current_bin_has_name = false;
+    let mut manifest_bin_count = 0usize;
+    let mut manifest_targets = BTreeSet::new();
+    for raw_line in fuzz_manifest.lines() {
+        let line = raw_line.split('#').next().unwrap_or_default().trim();
+        if line == "[[bin]]" {
+            assert!(
+                !in_bin || current_bin_has_name,
+                "every fuzz [[bin]] block must declare exactly one non-empty name"
+            );
+            in_bin = true;
+            current_bin_has_name = false;
+            manifest_bin_count += 1;
+            continue;
+        }
+        if line.starts_with('[') {
+            assert!(
+                !in_bin || current_bin_has_name,
+                "every fuzz [[bin]] block must declare exactly one non-empty name"
+            );
+            in_bin = false;
+            continue;
+        }
+        if !in_bin {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "name" {
+            assert!(
+                !current_bin_has_name,
+                "every fuzz [[bin]] block must declare exactly one name"
+            );
+            let name = value.trim().trim_matches(['"', '\'']);
+            assert!(!name.is_empty(), "every fuzz [[bin]] must declare a name");
+            assert!(
+                manifest_targets.insert(name.to_string()),
+                "fuzz/Cargo.toml must not declare duplicate [[bin]] name '{name}'"
+            );
+            current_bin_has_name = true;
+        }
+    }
+    assert!(
+        !in_bin || current_bin_has_name,
+        "every fuzz [[bin]] block must declare exactly one non-empty name"
+    );
+    assert!(
+        !manifest_targets.is_empty(),
+        "fuzz/Cargo.toml must declare [[bin]] fuzz targets"
+    );
+    assert_eq!(
+        manifest_bin_count,
+        manifest_targets.len(),
+        "every fuzz [[bin]] block must contribute one unique matrix target"
+    );
+    assert_eq!(
+        matrix_targets, manifest_targets,
+        "fuzz.yml must smoke-run every fuzz/Cargo.toml [[bin]] target. A compile-only stable \
+         check cannot replace nightly libFuzzer execution."
+    );
     let fuzz_steps = fuzz_job
         .as_mapping_get("steps")
         .and_then(Yaml::as_sequence)
@@ -15943,7 +16038,7 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
         .unwrap_or_else(|| panic!("the locked fuzz dependency preflight must define `run`"));
     assert!(
         locked_preflight
-            == "cargo +nightly-2026-02-01 metadata --manifest-path fuzz/Cargo.toml --locked \
+            == "cargo +nightly-2026-08-01 metadata --manifest-path fuzz/Cargo.toml --locked \
                 --format-version 1 >/dev/null",
         "fuzz.yml must run a locked metadata preflight before cargo-fuzz. cargo-fuzz itself \
          does not accept `--locked`, so the preflight is the reproducibility gate."
@@ -16986,7 +17081,7 @@ fn test_run_step_full_suite_classifier() {
         // Runners that execute every test target → DO trigger trybuild.
         ("cargo nextest run --profile ci --locked --all-features", true),
         ("cargo test --locked --all-features --no-fail-fast", true),
-        ("cargo +nightly-2026-02-01 test --locked --all-features", true),
+        ("cargo +nightly-2026-08-01 test --locked --all-features", true),
         (
             "cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info",
             true,
@@ -16994,12 +17089,12 @@ fn test_run_step_full_suite_classifier() {
         // Line-continuation: a narrowing flag on the continued line must still count.
         ("cargo test --locked --all-features \\\n  --lib --no-fail-fast", false),
         (
-            "RUSTFLAGS=-Zx \\\n  cargo +nightly-2026-02-01 test --locked \\\n  --all-features 2>&1 | tee out.txt",
+            "RUSTFLAGS=-Zx \\\n  cargo +nightly-2026-08-01 test --locked \\\n  --all-features 2>&1 | tee out.txt",
             true,
         ),
         // Restricted runs that do NOT execute the integration tests → no trybuild.
         ("cargo test --locked --lib", false),
-        ("cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast", false),
+        ("cargo +nightly-2026-08-01 miri test --locked --lib --no-fail-fast", false),
         ("cargo test --locked --doc --all-features", false),
         ("cargo test --locked --test browser_interop_e2e", false),
         ("cargo test --locked --all-features --no-run", false),
@@ -17008,10 +17103,13 @@ fn test_run_step_full_suite_classifier() {
         // Non-test subcommands.
         ("cargo build --lib --locked --all-features", false),
         ("cargo clippy --locked --all-targets --all-features -- -D warnings", false),
-        ("cargo +nightly-2026-02-01 udeps --locked --all-targets", false),
+        (
+            "cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features",
+            false,
+        ),
         ("cargo machete", false),
         ("cargo fmt --check", false),
-        ("cargo +nightly-2026-02-01 fuzz run protocol_target", false),
+        ("cargo +nightly-2026-08-01 fuzz run protocol_target", false),
         ("bash scripts/run-webrtc-interop.sh", false),
         // Per-segment flag isolation: a flag from one command must not bleed into another.
         ("cargo build && cargo test --all-features", true),
@@ -17036,9 +17134,9 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
 
     for required in [
         "Run Miri on library tests",
-        "cargo +nightly-2026-02-01 miri test --locked --lib --no-fail-fast",
+        "cargo +nightly-2026-08-01 miri test --locked --lib --no-fail-fast",
         "Run tests with AddressSanitizer",
-        "cargo +nightly-2026-02-01 test --locked --target x86_64-unknown-linux-gnu",
+        "cargo +nightly-2026-08-01 test --locked --target x86_64-unknown-linux-gnu",
         "--all-features --no-fail-fast 2>&1 | tee asan-output.txt",
     ] {
         assert!(
@@ -17202,69 +17300,71 @@ fn test_ci_safety_failure_diagnostics_include_markers() {
 }
 
 #[test]
-fn test_nightly_version_consistency_across_workflows() {
-    // Validates that all workflows using a pinned nightly toolchain use
-    // the same nightly version. If someone updates one workflow's nightly
-    // pin without updating others, they silently diverge, causing
-    // inconsistent CI results and confusion about which nightly to update.
+fn test_analysis_nightly_version_consistency() {
+    // The analysis workflows and devcontainer intentionally share one pin.
+    // Inspect every live occurrence so a partially updated workflow cannot
+    // pass merely because its first date still matches the baseline.
 
     let root = repo_root();
-    let workflows_dir = root.join(".github/workflows");
-
-    // Workflows known to use pinned nightly toolchains
-    let nightly_workflows = ["ci-safety.yml", "unused-deps.yml"];
+    let nightly_files = [
+        ".github/workflows/ci-safety.yml",
+        ".github/workflows/fuzz.yml",
+        ".github/workflows/unused-deps.yml",
+        ".devcontainer/Dockerfile",
+    ];
+    let nightly_pattern =
+        Regex::new(r"nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}").expect("valid nightly regex");
 
     let mut nightly_versions: Vec<(String, String)> = Vec::new();
-    // Count the workflows that actually exist so we can assert below that each
-    // one yielded a pin. Without this, a parser regression or a moved nightly
-    // pin would empty `nightly_versions`, and the `len() > 1` drift check would
-    // pass vacuously — silently disabling the very guard it implements.
-    let mut existing_nightly_workflows = 0usize;
-
-    for workflow_file in &nightly_workflows {
-        let workflow_path = workflows_dir.join(workflow_file);
-        if !workflow_path.exists() {
-            continue;
-        }
-        existing_nightly_workflows += 1;
-        let content = read_file(&workflow_path);
-
-        // Extract all pinned nightly versions (e.g., "nightly-2026-01-15")
-        for line in content.lines() {
-            let trimmed = line.trim();
-            // Match lines like "toolchain: nightly-YYYY-MM-DD" or
-            // "cargo +nightly-YYYY-MM-DD ..."
-            if let Some(pos) = trimmed.find("nightly-20") {
-                let version_start = pos;
-                // Extract the nightly-YYYY-MM-DD portion
-                let rest = &trimmed[version_start..];
-                let version_end = rest
-                    .find(|c: char| c != '-' && !c.is_ascii_alphanumeric())
-                    .unwrap_or(rest.len());
-                let version = &rest[..version_end];
-
-                // Only record if it looks like a valid pinned nightly
-                if version.len() >= "nightly-2026-01-15".len() {
-                    nightly_versions.push((workflow_file.to_string(), version.to_string()));
-                    break; // One version per workflow is enough
-                }
+    for relative_path in nightly_files {
+        let path = root.join(relative_path);
+        let content = strip_comment_lines(&read_file(&path));
+        let versions: BTreeSet<String> = nightly_pattern
+            .find_iter(&content)
+            .map(|found| found.as_str().to_string())
+            .collect();
+        assert_eq!(
+            versions.len(),
+            1,
+            "{relative_path} must contain exactly one operational date-pinned nightly, \
+             repeated consistently at every install/command site.\nObserved: {versions:?}"
+        );
+        let version = versions
+            .into_iter()
+            .next()
+            .expect("one pinned nightly was asserted");
+        for operational_line in content.lines().filter(|line| {
+            line.contains("toolchain: nightly")
+                || line.contains("cargo +nightly")
+                || line.contains("ARG RUST_NIGHTLY=")
+                || line.contains("rustup toolchain install")
+        }) {
+            if relative_path == ".devcontainer/Dockerfile"
+                && operational_line.contains("rustup toolchain install")
+            {
+                assert!(
+                    operational_line.contains("\"$RUST_NIGHTLY\""),
+                    "{relative_path} must install the date-pinned $RUST_NIGHTLY argument, not a \
+                     rolling or duplicated literal: {operational_line}"
+                );
+            } else {
+                assert!(
+                    operational_line.contains(&version),
+                    "{relative_path} has an unpinned or partially updated nightly operation: \
+                     {operational_line}\nExpected pin: {version}"
+                );
             }
         }
+        if relative_path == ".devcontainer/Dockerfile" {
+            assert!(
+                content.lines().any(|line| {
+                    line.contains("rustup toolchain install") && line.contains("\"$RUST_NIGHTLY\"")
+                }),
+                ".devcontainer/Dockerfile must install its date-pinned RUST_NIGHTLY argument"
+            );
+        }
+        nightly_versions.push((relative_path.to_string(), version));
     }
-
-    // Every workflow that exists and is declared to pin a nightly must have
-    // actually produced a pin; otherwise the extraction silently regressed.
-    assert_eq!(
-        nightly_versions.len(),
-        existing_nightly_workflows,
-        "Expected a pinned nightly from each of the {existing_nightly_workflows} known \
-         nightly workflow(s), but extracted {}.\n\
-         Parsed pins: {:?}\n\
-         This means the nightly-pin extractor regressed or a workflow stopped \
-         pinning nightly — the drift check below would otherwise pass vacuously.",
-        nightly_versions.len(),
-        nightly_versions
-    );
 
     // All extracted versions should be the same
     if nightly_versions.len() > 1 {
@@ -17281,13 +17381,26 @@ fn test_nightly_version_consistency_across_workflows() {
             panic!(
                 "Nightly toolchain versions are inconsistent across workflows:\n\n\
                  Baseline: {} uses {first_version}\n{}\n\n\
-                 All workflows using pinned nightly must use the same version.\n\
-                 To fix: Update all nightly pins to the same version.\n\
-                 See the Nightly Toolchain Strategy in each workflow's header.",
+                 All analysis workflows and the devcontainer must use the same version.\n\
+                 To fix: update every operational pin together.\n\
+                 The separate Fortress WASM toolchain is compatibility-pinned and excluded.",
                 nightly_versions[0].0,
                 mismatches.join("\n")
             );
         }
+    }
+
+    let unused_deps = read_live_file(&root.join(".github/workflows/unused-deps.yml"));
+    for required in [
+        "cargo-udeps-0.1.61-nightly-2026-08-01",
+        "cargo +nightly-2026-08-01 install cargo-udeps --version 0.1.61 --locked",
+        "cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features",
+    ] {
+        assert!(
+            unused_deps.contains(required),
+            "unused-deps.yml must install cargo-udeps 0.1.61 with the analysis nightly and key \
+             its binary cache by the same version; missing '{required}'"
+        );
     }
 }
 
@@ -20321,53 +20434,42 @@ fn test_pinned_nightly_staleness_warning() {
         return; // ci-safety.yml is optional
     }
 
-    let content = read_file(&workflow_path);
+    let content = strip_comment_lines(&read_file(&workflow_path));
+    let nightly_pattern =
+        Regex::new(r"nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}").expect("valid nightly regex");
+    let operational_versions: BTreeSet<String> = nightly_pattern
+        .find_iter(&content)
+        .map(|found| found.as_str().to_string())
+        .collect();
+    assert_eq!(
+        operational_versions.len(),
+        1,
+        "ci-safety.yml must use exactly one operational date-pinned nightly; comments do not \
+         satisfy the freshness policy. Observed: {operational_versions:?}"
+    );
+    let nightly_version = operational_versions
+        .into_iter()
+        .next()
+        .expect("one operational nightly was asserted");
 
-    // Extract the first nightly-YYYY-MM-DD pattern
-    let nightly_re_prefix = "nightly-20";
-    let nightly_version: Option<String> = content.lines().find_map(|line| {
-        let trimmed = line.trim();
-        trimmed.find(nightly_re_prefix).map(|pos| {
-            let rest = &trimmed[pos..];
-            // Take chars while they match the nightly-YYYY-MM-DD pattern
-            let end = rest
-                .find(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                .unwrap_or(rest.len());
-            rest[..end].to_string()
-        })
-    });
-
-    let nightly_version = nightly_version
-        .expect("ci-safety.yml must contain a pinned nightly date (e.g., nightly-2026-02-01)");
-
-    // Extract YYYY and MM
+    // Compare the actual date to UTC today. The former frozen reference month
+    // let this test remain green while the workflow-hygiene gate correctly
+    // reported the same pin as 182 days old.
     let date_part = nightly_version
         .strip_prefix("nightly-")
         .expect("nightly version must start with 'nightly-'");
-    let parts: Vec<&str> = date_part.split('-').collect();
+    let nightly_date = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d")
+        .unwrap_or_else(|error| panic!("Invalid nightly date '{date_part}': {error}"));
+    let today = chrono::Utc::now().date_naive();
+    let age_days = today.signed_duration_since(nightly_date).num_days();
     assert!(
-        parts.len() >= 2,
-        "Nightly date '{date_part}' must have at least YYYY-MM format"
+        age_days >= 0,
+        "Pinned nightly '{nightly_version}' is {age_days} days in the future relative to {today}."
     );
-
-    let year: u32 = parts[0]
-        .parse()
-        .unwrap_or_else(|_| panic!("Invalid year in nightly version: {}", parts[0]));
-    let month: u32 = parts[1]
-        .parse()
-        .unwrap_or_else(|_| panic!("Invalid month in nightly version: {}", parts[1]));
-
-    // Approximate staleness check: compare to build date
-    // This uses a rough heuristic - the test will need updating when the year changes
-    let nightly_months = year * 12 + month;
-    // Use 2026-02 as reference (current date)
-    let reference_months: u32 = 2026 * 12 + 2;
-    let age_months = reference_months.saturating_sub(nightly_months);
-
     assert!(
-        age_months <= 12,
-        "Pinned nightly '{nightly_version}' is approximately {age_months} months old.\n\
-         Consider testing a newer nightly and updating the pin.\n\
+        age_days <= 180,
+        "Pinned nightly '{nightly_version}' is {age_days} days old.\n\
+         Test a current date-pinned nightly and update every analysis-tool pin.\n\
          See ci-safety.yml header for update criteria."
     );
 }
@@ -20543,7 +20645,7 @@ fn test_workflow_toolchain_fields_do_not_use_moving_aliases() {
                 violations.push(format!(
                     "{filename}:{}: toolchain: {value}\n  \
                      Moving toolchain aliases are not allowed.\n  \
-                     Use a pinned toolchain (e.g., 1.88.0 or nightly-2026-02-01),\n  \
+                     Use a pinned toolchain (e.g., 1.88.0 or nightly-2026-08-01),\n  \
                      or omit toolchain to use rust-toolchain.toml.",
                     line_num + 1
                 ));

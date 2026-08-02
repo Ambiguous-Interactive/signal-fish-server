@@ -28,13 +28,17 @@ const SENDER_ID: PlayerId = PlayerId::from_u128(0x2220);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
+    V2JsonBinary,
+    V2RkyvBinary,
     V3JsonText,
     V3MessagePackBinary,
     MixedMessagePackSource,
 }
 
 impl Scenario {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 5] = [
+        Self::V2JsonBinary,
+        Self::V2RkyvBinary,
         Self::V3JsonText,
         Self::V3MessagePackBinary,
         Self::MixedMessagePackSource,
@@ -42,6 +46,8 @@ impl Scenario {
 
     pub const fn name(self) -> &'static str {
         match self {
+            Self::V2JsonBinary => "v2_json_binary",
+            Self::V2RkyvBinary => "v2_rkyv_binary",
             Self::V3JsonText => "v3_json_text",
             Self::V3MessagePackBinary => "v3_message_pack_binary",
             Self::MixedMessagePackSource => "mixed_message_pack_source",
@@ -277,6 +283,13 @@ impl Fixture {
         assert!(ledger.wire_bytes > 0, "wire ledger recorded no bytes");
 
         match self.scenario {
+            Scenario::V2JsonBinary | Scenario::V2RkyvBinary => {
+                assert_eq!(ledger.text_frames, 0);
+                assert_eq!(ledger.binary_frames, expected);
+                assert_eq!(ledger.json_encodes, 0);
+                assert_eq!(ledger.message_pack_encodes, 0);
+                assert_eq!(ledger.message_pack_decodes, 0);
+            }
             Scenario::V3JsonText => {
                 assert_eq!(ledger.text_frames, expected);
                 assert_eq!(ledger.binary_frames, 0);
@@ -330,6 +343,14 @@ impl Fixture {
 
 fn recipient_profile(scenario: Scenario, recipient_index: usize) -> RecipientProfile {
     match scenario {
+        Scenario::V2JsonBinary => RecipientProfile {
+            protocol_version: 2,
+            format: GameDataEncoding::Json,
+        },
+        Scenario::V2RkyvBinary => RecipientProfile {
+            protocol_version: 2,
+            format: GameDataEncoding::Rkyv,
+        },
         Scenario::V3JsonText => RecipientProfile {
             protocol_version: 3,
             format: GameDataEncoding::Json,
@@ -411,6 +432,22 @@ fn relay_message(scenario: Scenario, seq: u64) -> Arc<ServerMessage> {
         "tick": seq,
     });
     match scenario {
+        Scenario::V2JsonBinary | Scenario::V2RkyvBinary => {
+            let encoding = match scenario {
+                Scenario::V2JsonBinary => GameDataEncoding::Json,
+                Scenario::V2RkyvBinary => GameDataEncoding::Rkyv,
+                _ => unreachable!("matched v2 raw binary scenario"),
+            };
+            let payload =
+                serde_json::to_vec(&data).expect("representative payload must encode as raw bytes");
+            Arc::new(ServerMessage::GameDataBinary {
+                from_player: SENDER_ID,
+                encoding,
+                payload: payload.into(),
+                seq: Some(seq),
+                epoch: Some(1),
+            })
+        }
         Scenario::V3JsonText => Arc::new(ServerMessage::GameData {
             from_player: SENDER_ID,
             data,

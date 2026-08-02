@@ -19,6 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory-allocation work for frozen-v2 JSON and Rkyv binary relays
+  (issue #207). The server now removes one allocation operation in two-player
+  rooms, two in 8-/16-player rooms, and one payload-sized copy per relay:
+  measured
+  operations fall from 4 to 3 for two-player rooms and from 6 to 4 for 8-/
+  16-player rooms, while allocated bytes fall by 38–70%. Exact wire bytes,
+  delivery accounting, queue drainage, and the v3/MessagePack paths are
+  unchanged.
+- Refresh the pinned nightly analysis toolchain and its local documentation
+  (issue #243). Miri, AddressSanitizer, cargo-udeps, and cargo-fuzz now use
+  `nightly-2026-08-01`; cargo-udeps 0.1.61 validates all targets and features,
+  the fuzz workflow smoke-runs all four declared targets, and policy tests
+  prevent partial pin or fuzz-matrix updates.
 - Reduce binary relay serialization allocation operations by pre-sizing the
   MessagePack envelope from the known opaque payload length (issue #207).
   Direct protocol-v3 binary relays now use 5–6 allocation operations instead
