@@ -1,5 +1,6 @@
 mod websocket_test_helpers;
 
+use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -14,7 +15,12 @@ use signal_fish_server::protocol::{
     ReplayStatus, RoomJoinedPayload, SenderWatermark, ServerMessage, SpectatorJoinedPayload,
     DELIVERY_REPORT_MAX_GAPS,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
+use websocket_test_helpers::chaos_proxy::{
+    drop_pending_client_after_published_rst, ChaosProxy, Direction,
+};
 use websocket_test_helpers::conformance::{
     assert_delivery_class_snapshot_conserves, ConformanceAuditor, ReceiverDisconnectCause,
     ReceiverProtocolMode, RecordedBinaryGameData,
@@ -28,6 +34,80 @@ struct RepeatingTextFrames {
     text: String,
     frames_emitted: usize,
     yield_next_poll: bool,
+}
+
+const CHAOS_EVENT_DEADLINE: Duration = Duration::from_secs(20);
+
+async fn spawn_chaos_echo_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind chaos regression echo listener");
+    let addr = listener
+        .local_addr()
+        .expect("read chaos regression echo address");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _peer)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (mut read_half, mut write_half) = socket.split();
+                let _copied_until_close = tokio::io::copy(&mut read_half, &mut write_half).await;
+            });
+        }
+    });
+    addr
+}
+
+async fn connect_to_chaos(proxy: &ChaosProxy) -> TcpStream {
+    tokio::time::timeout(CHAOS_EVENT_DEADLINE, TcpStream::connect(proxy.addr()))
+        .await
+        .expect("connect through chaos proxy timed out")
+        .expect("connect through chaos proxy failed")
+}
+
+async fn wait_for_partial_destination_write(proxy: &ChaosProxy, total: u64) -> u64 {
+    let result = tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+        loop {
+            let written = proxy.destination_write_bytes(Direction::ServerToClient);
+            if written > 0 && written < total {
+                return written;
+            }
+            assert!(
+                written <= total,
+                "destination-write diagnostic exceeded exact payload: {written} > {total}"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    result.unwrap_or_else(|_elapsed| {
+        panic!(
+            "proxy never exposed a partial fragmented-write frontier: destination_write_bytes={}, total={total}, terminations={:?}",
+            proxy.destination_write_bytes(Direction::ServerToClient),
+            proxy.terminations()
+        )
+    })
+}
+
+async fn wait_for_kill_termination(proxy: &ChaosProxy) {
+    let result = tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+        loop {
+            if proxy
+                .terminations()
+                .iter()
+                .any(|termination| termination.cause.contains("proxy killed"))
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    result.unwrap_or_else(|_elapsed| {
+        panic!(
+            "proxy never recorded a kill-caused pump termination: terminations={:?}, control_errors={:?}",
+            proxy.terminations(),
+            proxy.control_errors()
+        )
+    });
 }
 
 impl RepeatingTextFrames {
@@ -181,6 +261,160 @@ async fn no_server_message_panics_on_text_server_message() {
         "test unexpected message",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chaos_pause_freezes_direction_write_frontier_with_multiple_connections() {
+    const PAYLOAD_LEN: usize = 128 * 1024;
+
+    let upstream = spawn_chaos_echo_upstream().await;
+    let proxy = ChaosProxy::spawn(upstream).await;
+    proxy.fragment_writes(Direction::ServerToClient, true);
+    proxy.throttle(Direction::ServerToClient, Some(64 * 1024));
+
+    let client_a = connect_to_chaos(&proxy).await;
+    let client_b = connect_to_chaos(&proxy).await;
+    let (mut read_a, mut write_a) = client_a.into_split();
+    let (mut read_b, mut write_b) = client_b.into_split();
+
+    let writer_a = tokio::spawn(async move {
+        write_a.write_all(&vec![0xA5; PAYLOAD_LEN]).await?;
+        Ok::<_, std::io::Error>(write_a)
+    });
+    let writer_b = tokio::spawn(async move {
+        write_b.write_all(&vec![0x5A; PAYLOAD_LEN]).await?;
+        Ok::<_, std::io::Error>(write_b)
+    });
+
+    let total = (2 * PAYLOAD_LEN) as u64;
+    let observed_partial = wait_for_partial_destination_write(&proxy, total).await;
+    proxy.pause(Direction::ServerToClient);
+    let paused_at = proxy.destination_write_bytes(Direction::ServerToClient);
+    assert!(
+        paused_at >= observed_partial && paused_at < total,
+        "pause must linearize at a partial frontier: observed={observed_partial}, paused={paused_at}, total={total}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        proxy.destination_write_bytes(Direction::ServerToClient),
+        paused_at,
+        "no connection may advance the shared direction after pause returns"
+    );
+
+    proxy.resume(Direction::ServerToClient);
+    let mut received_a = vec![0u8; PAYLOAD_LEN];
+    let mut received_b = vec![0u8; PAYLOAD_LEN];
+    tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+        let (read_a_result, read_b_result) = tokio::join!(
+            read_a.read_exact(&mut received_a),
+            read_b.read_exact(&mut received_b)
+        );
+        read_a_result.expect("read first fragmented echo");
+        read_b_result.expect("read second fragmented echo");
+        let _write_a = writer_a
+            .await
+            .expect("first writer task panicked")
+            .expect("write first payload");
+        let _write_b = writer_b
+            .await
+            .expect("second writer task panicked")
+            .expect("write second payload");
+    })
+    .await
+    .expect("fragmented echoes did not finish after resume");
+
+    assert!(received_a.iter().all(|byte| *byte == 0xA5));
+    assert!(received_b.iter().all(|byte| *byte == 0x5A));
+    assert_eq!(
+        proxy.destination_write_bytes(Direction::ServerToClient),
+        total
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chaos_kill_freezes_active_fragmented_write_frontier() {
+    const PAYLOAD_LEN: usize = 256 * 1024;
+
+    let upstream = spawn_chaos_echo_upstream().await;
+    let proxy = ChaosProxy::spawn(upstream).await;
+    proxy.fragment_writes(Direction::ServerToClient, true);
+    proxy.throttle(Direction::ServerToClient, Some(64 * 1024));
+
+    let client = connect_to_chaos(&proxy).await;
+    let (mut read, mut write) = client.into_split();
+    let writer = tokio::spawn(async move {
+        write.write_all(&vec![0xC3; PAYLOAD_LEN]).await?;
+        Ok::<_, std::io::Error>(write)
+    });
+
+    let total = PAYLOAD_LEN as u64;
+    let observed_partial = wait_for_partial_destination_write(&proxy, total).await;
+    assert!(
+        proxy.terminations().is_empty(),
+        "both pumps must still be live at the observed partial frontier: {:?}",
+        proxy.terminations()
+    );
+    proxy.kill_mid_frame();
+    let killed_at = proxy.destination_write_bytes(Direction::ServerToClient);
+    assert!(
+        killed_at >= observed_partial && killed_at < total,
+        "kill must linearize at a partial frontier: observed={observed_partial}, killed={killed_at}, total={total}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        proxy.destination_write_bytes(Direction::ServerToClient),
+        killed_at,
+        "no write may advance after kill returns"
+    );
+
+    tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+        let mut sniff = [0u8; 1024];
+        loop {
+            match read.read(&mut sniff).await {
+                Ok(0) | Err(_) => return,
+                Ok(_buffered_prefix) => {}
+            }
+        }
+    })
+    .await
+    .expect("kill never terminated the peer-side socket");
+    wait_for_kill_termination(&proxy).await;
+
+    writer.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chaos_pending_client_drop_preserves_published_rst() {
+    let (termination, control_errors) = tokio::time::timeout(
+        CHAOS_EVENT_DEADLINE,
+        drop_pending_client_after_published_rst(),
+    )
+    .await
+    .expect("pending-client RST probe never terminated peer-side")
+    .expect("pending-client RST probe setup failed");
+    assert!(
+        control_errors.is_empty(),
+        "pending-client RST setup must succeed on every platform: {control_errors:?}"
+    );
+
+    #[cfg(target_os = "linux")]
+    match &termination {
+        Err(error) => assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset,
+            "pending-client guard must preserve the published RST, got {error:?}"
+        ),
+        Ok(received) => {
+            panic!("expected ECONNRESET from pending-client guard, read {received} bytes")
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    match termination {
+        Ok(0) | Err(_) => {}
+        Ok(received) => {
+            panic!("expected EOF or error from pending-client guard, read {received} bytes")
+        }
+    }
 }
 
 fn text_frame(message: ServerMessage) -> Message {

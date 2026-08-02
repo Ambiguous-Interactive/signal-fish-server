@@ -14618,6 +14618,26 @@ fn test_validate_ci_script_exists() {
     );
 }
 
+#[test]
+fn test_validate_ci_awk_syntax_check_supplies_an_input_filename() {
+    let root = repo_root();
+    let validate_ci = root.join("scripts/validate-ci.sh");
+    let content = read_live_file(&validate_ci);
+
+    assert!(
+        content.contains("awk -f \"$awk_file\" /dev/null"),
+        "AWK syntax checks must pass /dev/null as an explicit input filename. \
+         Redirecting stdin leaves ARGC empty and executes valid BEGIN input-contract \
+         checks as though the script were misused.\nFile: {}",
+        validate_ci.display()
+    );
+    assert!(
+        !content.contains("awk -f \"$awk_file\" < /dev/null"),
+        "AWK syntax checks must not mistake runtime BEGIN validation for a parse error.\nFile: {}",
+        validate_ci.display()
+    );
+}
+
 // ============================================================================
 // CI/CD Regression Prevention Tests
 // ============================================================================

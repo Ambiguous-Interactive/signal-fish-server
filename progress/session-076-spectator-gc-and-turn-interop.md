@@ -72,11 +72,33 @@ final scan rejects static secrets or credential-shaped values.
   server scenarios, four client stderr logs, and four client event logs while
   retaining any absorbed server-start retry diagnostics; cleanup left no coturn
   container, Docker network, or lock.
+- The first hosted Ubuntu nextest attempt exposed a real race in the shared
+  chaos-proxy test helper: `pause()` could return after the pump read a chunk but
+  before its write loop, allowing the paused direction to forward that chunk.
+  A writer-preferring per-direction I/O barrier now linearizes pause/resume and
+  terminal faults with every socket read and destination write; a post-read or
+  mid-fragment pause parks the exact unwritten suffix until resume. Deterministic
+  tests observe the destination-write frontier across multiple connections and
+  during a mid-fragment kill instead of retrying the original test into silence.
+- The final local policy gauntlet exposed that `validate-ci.sh` fed AWK syntax
+  checks through anonymous stdin. That executed a valid script's `BEGIN`
+  single-input contract with no filename and mislabeled the runtime rejection as
+  a syntax error. Syntax checks now pass an explicit empty file, with a policy
+  regression preventing the broken invocation shape.
+- The same audit reported the date-pinned nightly at 182 days old. Its separate
+  Miri/sanitizer/fuzz/unused-dependency upgrade and hosted revalidation are
+  tracked in issue #243 rather than expanding this gameplay PR's scope.
 - All eleven issue-241 tests pass, including the integrated spectator-only
-  traffic/GC control. Strict root validation and hosted CI are recorded below
-  once complete.
+  traffic/GC control. The existing embedded pause case passes in every
+  integration binary, while the active frontier and pending-client regressions
+  pass once in the canonical helper binary. Strict root formatting, clippy, and
+  the complete locked all-features test suite pass on the final local tree.
 
-## Publication
+## Publication contract
 
-Pending the session's full validation, adversarial review, hosted CI, and
-reviewer loop.
+The session remains one PR. Every final push must repeat the available
+Cursor/Copilot/human reviewer requests, resolve every non-trivial thread, and
+finish with the complete applicable hosted workflow set green. The PR review
+and check state is the authoritative publication record; this log records the
+failure-first evidence and exact local validation inputs without duplicating
+mutable GitHub status.

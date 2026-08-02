@@ -36,7 +36,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
@@ -58,6 +58,7 @@ pub struct PumpTermination {
 }
 
 const MAX_RETAINED_TERMINATIONS: usize = 64;
+const MAX_RETAINED_CONTROL_ERRORS: usize = 16;
 
 /// How the proxy was told to sever its connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +74,10 @@ enum KillMode {
 /// Per-direction fault switches shared by every connection's pump.
 struct DirectionControls {
     paused: watch::Sender<bool>,
+    /// Linearizes exclusive pause/kill transitions with socket I/O while
+    /// allowing unrelated connections to perform normal I/O concurrently.
+    io_barrier: IoBarrier,
+    destination_write_bytes: AtomicU64,
     /// Bytes per second; 0 means unlimited.
     throttle_bytes_per_sec: AtomicU64,
     fragment_writes: AtomicBool,
@@ -82,9 +87,101 @@ impl DirectionControls {
     fn new() -> Self {
         Self {
             paused: watch::Sender::new(false),
+            io_barrier: IoBarrier::new(),
+            destination_write_bytes: AtomicU64::new(0),
             throttle_bytes_per_sec: AtomicU64::new(0),
             fragment_writes: AtomicBool::new(false),
         }
+    }
+
+    fn set_paused(&self, paused: bool) {
+        let _barrier = self.io_barrier.write();
+        self.paused.send_replace(paused);
+    }
+}
+
+/// A synchronous, writer-preferring barrier around nonblocking socket calls.
+///
+/// `std::sync::RwLock` does not specify a fairness policy, so continuous pump
+/// traffic could theoretically starve a fault transition. Once a writer is
+/// waiting here, new readers park until that transition has completed. The
+/// mutex protects only counters; no socket syscall or async wait holds it.
+struct IoBarrier {
+    state: Mutex<IoBarrierState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct IoBarrierState {
+    active_readers: usize,
+    waiting_writers: usize,
+    writer_active: bool,
+}
+
+struct IoReadGuard<'a> {
+    barrier: &'a IoBarrier,
+}
+
+struct IoWriteGuard<'a> {
+    barrier: &'a IoBarrier,
+}
+
+impl IoBarrier {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(IoBarrierState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, IoBarrierState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn read(&self) -> IoReadGuard<'_> {
+        let mut state = self.lock_state();
+        while state.writer_active || state.waiting_writers > 0 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.active_readers += 1;
+        IoReadGuard { barrier: self }
+    }
+
+    fn write(&self) -> IoWriteGuard<'_> {
+        let mut state = self.lock_state();
+        state.waiting_writers += 1;
+        while state.writer_active || state.active_readers > 0 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.waiting_writers -= 1;
+        state.writer_active = true;
+        IoWriteGuard { barrier: self }
+    }
+}
+
+impl Drop for IoReadGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.barrier.lock_state();
+        state.active_readers -= 1;
+        if state.active_readers == 0 {
+            self.barrier.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for IoWriteGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.barrier.lock_state();
+        state.writer_active = false;
+        self.barrier.changed.notify_all();
     }
 }
 
@@ -101,15 +198,110 @@ struct ProxyControl {
     kill: watch::Sender<KillMode>,
     connections: Mutex<Vec<ConnectionSockets>>,
     terminations: Mutex<Vec<PumpTermination>>,
+    control_errors: Mutex<Vec<String>>,
 }
 
 impl ProxyControl {
+    fn new() -> Self {
+        Self {
+            client_to_server: DirectionControls::new(),
+            server_to_client: DirectionControls::new(),
+            kill: watch::Sender::new(KillMode::None),
+            connections: Mutex::new(Vec::new()),
+            terminations: Mutex::new(Vec::new()),
+            control_errors: Mutex::new(Vec::new()),
+        }
+    }
+
     fn direction(&self, direction: Direction) -> &DirectionControls {
         match direction {
             Direction::ClientToServer => &self.client_to_server,
             Direction::ServerToClient => &self.server_to_client,
         }
     }
+
+    fn set_kill(&self, mode: KillMode) {
+        let _client_to_server = self.client_to_server.io_barrier.write();
+        let _server_to_client = self.server_to_client.io_barrier.write();
+        self.kill.send_if_modified(|current| {
+            if *current == KillMode::None || mode == KillMode::Rst {
+                *current = mode;
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+/// Owns an accepted client until its upstream socket is ready. If the accept
+/// task is aborted after a terminal fault is published, Drop still applies the
+/// RST mode before releasing the otherwise-unregistered socket.
+struct PendingClient {
+    control: Arc<ProxyControl>,
+    stream: Option<TcpStream>,
+}
+
+impl PendingClient {
+    fn new(control: Arc<ProxyControl>, stream: TcpStream) -> Self {
+        Self {
+            control,
+            stream: Some(stream),
+        }
+    }
+
+    fn stream(&self) -> &TcpStream {
+        self.stream
+            .as_ref()
+            .expect("pending client already consumed")
+    }
+
+    fn into_stream(mut self) -> TcpStream {
+        self.stream.take().expect("pending client already consumed")
+    }
+}
+
+impl Drop for PendingClient {
+    fn drop(&mut self) {
+        let Some(stream) = self.stream.as_ref() else {
+            return;
+        };
+        apply_late_connection_kill(&self.control, *self.control.kill.borrow(), [stream]);
+    }
+}
+
+/// Exercise the cancellation-safe pending-client RST path from the single
+/// canonical helper test binary without registering another test in every
+/// integration binary that embeds this module.
+pub(crate) async fn drop_pending_client_after_published_rst(
+) -> std::io::Result<(std::io::Result<usize>, Vec<String>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let (peer, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+    let peer = peer?;
+    let accepted = accepted?.0;
+    let control = Arc::new(ProxyControl::new());
+    let pending = PendingClient::new(Arc::clone(&control), accepted);
+
+    control.set_kill(KillMode::Rst);
+    drop(pending);
+    let control_errors = control
+        .control_errors
+        .lock()
+        .expect("chaos proxy control-error registry poisoned")
+        .clone();
+
+    let mut sniff = [0u8; 1];
+    let termination = loop {
+        if let Err(error) = peer.readable().await {
+            break Err(error);
+        }
+        match peer.try_read(&mut sniff) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            result => break result,
+        }
+    };
+    Ok((termination, control_errors))
 }
 
 /// See the module docs. Dropping the proxy kills its connections (FIN) and
@@ -144,35 +336,47 @@ impl ChaosProxy {
             .expect("bind chaos proxy listener");
         let addr = listener.local_addr().expect("read chaos proxy address");
 
-        let control = Arc::new(ProxyControl {
-            client_to_server: DirectionControls::new(),
-            server_to_client: DirectionControls::new(),
-            kill: watch::Sender::new(KillMode::None),
-            connections: Mutex::new(Vec::new()),
-            terminations: Mutex::new(Vec::new()),
-        });
+        let control = Arc::new(ProxyControl::new());
 
         let accept_control = Arc::clone(&control);
         let accept_task = tokio::spawn(async move {
+            let mut kill_rx = accept_control.kill.subscribe();
             loop {
                 let Ok((client, _peer)) = listener.accept().await else {
                     // Listener error: stop accepting; existing pumps live on.
                     return;
                 };
                 // Match production accepted sockets (issue #197).
-                let _ = client.set_nodelay(true);
+                let pending_client = PendingClient::new(Arc::clone(&accept_control), client);
+                let _ = pending_client.stream().set_nodelay(true);
                 // A killed proxy stays killed: never pump a late connection.
-                if *accept_control.kill.borrow() != KillMode::None {
-                    drop(client);
+                let current_kill = *kill_rx.borrow();
+                if current_kill != KillMode::None {
+                    drop(pending_client);
                     continue;
                 }
-                let Ok(server) = connect_upstream(upstream, recv_buffer_bytes).await else {
+                let server = tokio::select! {
+                    biased;
+                    changed = kill_rx.changed() => {
+                        let mode = if changed.is_ok() {
+                            *kill_rx.borrow()
+                        } else {
+                            KillMode::Fin
+                        };
+                        debug_assert_ne!(mode, KillMode::None);
+                        drop(pending_client);
+                        continue;
+                    }
+                    result = connect_upstream(upstream, recv_buffer_bytes) => result,
+                };
+                let Ok(server) = server else {
                     // Upstream refused: drop the client so it observes EOF
                     // instead of a silent stall.
-                    drop(client);
+                    drop(pending_client);
                     continue;
                 };
-                spawn_connection(&accept_control, client, server);
+                let client = pending_client.into_stream();
+                register_or_drop_connection(&accept_control, client, server);
             }
         });
 
@@ -191,12 +395,12 @@ impl ChaosProxy {
     /// Park `direction`: no bytes are forwarded (they accumulate in kernel
     /// buffers) until [`resume`](Self::resume).
     pub fn pause(&self, direction: Direction) {
-        self.control.direction(direction).paused.send_replace(true);
+        self.control.direction(direction).set_paused(true);
     }
 
     /// Un-park `direction`.
     pub fn resume(&self, direction: Direction) {
-        self.control.direction(direction).paused.send_replace(false);
+        self.control.direction(direction).set_paused(false);
     }
 
     /// Pace `direction` to `bytes_per_sec` (`None` lifts the throttle).
@@ -215,6 +419,18 @@ impl ChaosProxy {
             .store(enabled, Ordering::Relaxed);
     }
 
+    /// Saturating count of bytes accepted by destination socket writes in
+    /// `direction` since spawn.
+    ///
+    /// This diagnostic lets fault tests prove that an exclusive pause or kill
+    /// transition stopped every connection at the same observable frontier.
+    pub fn destination_write_bytes(&self, direction: Direction) -> u64 {
+        self.control
+            .direction(direction)
+            .destination_write_bytes
+            .load(Ordering::Relaxed)
+    }
+
     /// Snapshot the 64 most recent completed-pump diagnostics, oldest first.
     pub fn terminations(&self) -> Vec<PumpTermination> {
         self.control
@@ -224,40 +440,96 @@ impl ChaosProxy {
             .clone()
     }
 
+    /// Snapshot the 16 most recent control-path errors, oldest first.
+    pub fn control_errors(&self) -> Vec<String> {
+        self.control
+            .control_errors
+            .lock()
+            .expect("chaos proxy control-error registry poisoned")
+            .clone()
+    }
+
     /// Abort every proxied connection with a TCP RST: `SO_LINGER = 0` is set
     /// on both sockets of every live connection, then the pumps drop them.
     pub fn rst_all(&self) {
+        let client_to_server = self.control.client_to_server.io_barrier.write();
+        let server_to_client = self.control.server_to_client.io_barrier.write();
         let connections = self
             .control
             .connections
             .lock()
             .expect("chaos proxy connection registry poisoned");
+        let mut first_error = None;
         for connection in connections.iter() {
             for socket in [&connection.client, &connection.upstream] {
                 if let Some(socket) = socket.upgrade() {
-                    // `set_linger` is deprecated in tokio because a POSITIVE
-                    // linger blocks the closing thread for the timeout; the
-                    // ZERO linger used here never blocks — it converts the
-                    // close into an immediate RST, which is exactly the fault
-                    // this helper injects. The suggested replacement
-                    // (socket2::SockRef) would add a direct dependency for
-                    // identical behavior.
-                    #[allow(deprecated)]
-                    socket
-                        .set_linger(Some(Duration::ZERO))
-                        .expect("set SO_LINGER=0 for RST close");
+                    if let Err(error) = set_rst_linger(&socket) {
+                        first_error.get_or_insert(error);
+                    }
                 }
             }
         }
         drop(connections);
         self.control.kill.send_replace(KillMode::Rst);
+        drop(server_to_client);
+        drop(client_to_server);
+        if let Some(error) = first_error {
+            panic!("set SO_LINGER=0 for RST close: {error}");
+        }
     }
 
     /// Drop every proxied connection immediately without flushing whatever
     /// chunk a pump is currently forwarding (FIN-close, torn mid-frame).
     pub fn kill_mid_frame(&self) {
-        self.control.kill.send_replace(KillMode::Fin);
+        self.control.set_kill(KillMode::Fin);
     }
+}
+
+fn set_rst_linger(socket: &TcpStream) -> std::io::Result<()> {
+    // `set_linger` is deprecated in tokio because a POSITIVE linger blocks the
+    // closing thread for the timeout; the ZERO linger used here never blocks —
+    // it converts the close into an immediate RST, which is exactly the fault
+    // this helper injects. `socket2::SockRef` would add a direct dependency for
+    // identical behavior.
+    #[allow(deprecated)]
+    socket.set_linger(Some(Duration::ZERO))
+}
+
+fn apply_late_connection_kill<'a>(
+    control: &ProxyControl,
+    mode: KillMode,
+    sockets: impl IntoIterator<Item = &'a TcpStream>,
+) {
+    if mode != KillMode::Rst {
+        return;
+    }
+    for socket in sockets {
+        if let Err(error) = set_rst_linger(socket) {
+            record_control_error(
+                control,
+                format!("late-connection RST setup failed: {error}"),
+            );
+        }
+    }
+}
+
+/// Revalidate the terminal mode while holding both direction barriers. This
+/// closes the accept/connect race with `rst_all`, `kill_mid_frame`, and Drop:
+/// either the sockets are registered before the fault snapshots them, or the
+/// late pair is reset/dropped without ever spawning pumps.
+fn register_or_drop_connection(control: &Arc<ProxyControl>, client: TcpStream, server: TcpStream) {
+    let client_to_server = control.client_to_server.io_barrier.write();
+    let server_to_client = control.server_to_client.io_barrier.write();
+    let mode = *control.kill.borrow();
+    if mode == KillMode::None {
+        spawn_connection(control, client, server);
+    } else {
+        apply_late_connection_kill(control, mode, [&client, &server]);
+        drop(server);
+        drop(client);
+    }
+    drop(server_to_client);
+    drop(client_to_server);
 }
 
 async fn connect_upstream(
@@ -283,7 +555,7 @@ impl Drop for ChaosProxy {
     fn drop(&mut self) {
         // Stop accepting and end every pump so the proxy's file descriptors
         // are released promptly (the churn suites assert fd baselines).
-        self.control.kill.send_replace(KillMode::Fin);
+        self.control.set_kill(KillMode::Fin);
         self.accept_task.abort();
     }
 }
@@ -344,6 +616,10 @@ fn record_pump_termination(
     result: Result<String, tokio::task::JoinError>,
 ) {
     let cause = result.unwrap_or_else(|error| format!("pump task failed: {error}"));
+    record_control_termination(control, direction, cause);
+}
+
+fn record_control_termination(control: &ProxyControl, direction: Direction, cause: String) {
     let mut terminations = control
         .terminations
         .lock()
@@ -352,6 +628,17 @@ fn record_pump_termination(
         terminations.remove(0);
     }
     terminations.push(PumpTermination { direction, cause });
+}
+
+fn record_control_error(control: &ProxyControl, error: String) {
+    let mut errors = control
+        .control_errors
+        .lock()
+        .expect("chaos proxy control-error registry poisoned");
+    if errors.len() == MAX_RETAINED_CONTROL_ERRORS {
+        errors.remove(0);
+    }
+    errors.push(error);
 }
 
 /// When a throttled pump may release its next chunk.
@@ -404,6 +691,10 @@ async fn pump(
     let mut release_at: Option<tokio::time::Instant> = None;
 
     loop {
+        if *kill_rx.borrow() != KillMode::None {
+            return "proxy killed before next I/O operation".to_string();
+        }
+
         // Park while paused; a kill preempts the park.
         while *pause_rx.borrow_and_update() {
             tokio::select! {
@@ -451,6 +742,15 @@ async fn pump(
                 if readable.is_err() {
                     return "source readiness failed".to_string();
                 }
+                let _barrier = controls.io_barrier.read();
+                if *kill_rx.borrow() != KillMode::None {
+                    return "proxy killed before source read".to_string();
+                }
+                // `pause()` may have won the barrier after readiness resolved.
+                // Leave those bytes in the source socket until resume.
+                if *pause_rx.borrow() {
+                    continue;
+                }
                 match from.try_read(&mut buffer[..read_limit]) {
                     Ok(0) => return "source reached EOF".to_string(),
                     Ok(received) => received,
@@ -493,7 +793,8 @@ async fn pump(
         let fragment = controls.fragment_writes.load(Ordering::Relaxed);
         let chunk_size = if fragment { 1 } else { received };
         for piece in buffer[..received].chunks(chunk_size) {
-            if let Err(cause) = write_fully(&to, piece, &mut kill_rx).await {
+            if let Err(cause) = write_fully(&to, piece, controls, &mut pause_rx, &mut kill_rx).await
+            {
                 return cause;
             }
         }
@@ -504,22 +805,67 @@ async fn pump(
 async fn write_fully(
     to: &TcpStream,
     data: &[u8],
+    controls: &DirectionControls,
+    pause_rx: &mut watch::Receiver<bool>,
     kill_rx: &mut watch::Receiver<KillMode>,
 ) -> Result<(), String> {
     let mut written = 0;
     while written < data.len() {
+        if *kill_rx.borrow() != KillMode::None {
+            return Err("proxy killed before write".to_string());
+        }
+
+        // A pause can arrive after the source read or during a fragmented
+        // write. Preserve the unwritten suffix and park until resume.
+        while *pause_rx.borrow_and_update() {
+            tokio::select! {
+                _ = kill_rx.changed() => {
+                    if *kill_rx.borrow() != KillMode::None {
+                        return Err("proxy killed while paused before write".to_string());
+                    }
+                }
+                changed = pause_rx.changed() => {
+                    if changed.is_err() {
+                        return Err("pause control closed before write".to_string());
+                    }
+                }
+            }
+        }
+
         tokio::select! {
+            biased;
             _ = kill_rx.changed() => {
                 if *kill_rx.borrow() != KillMode::None {
                     return Err("proxy killed while writing".to_string());
+                }
+            }
+            changed = pause_rx.changed() => {
+                if changed.is_err() {
+                    return Err("pause control closed while writing".to_string());
                 }
             }
             writable = to.writable() => {
                 if writable.is_err() {
                     return Err("destination readiness failed".to_string());
                 }
+                let _barrier = controls.io_barrier.read();
+                if *kill_rx.borrow() != KillMode::None {
+                    return Err("proxy killed before destination write".to_string());
+                }
+                // `pause()` may have won the barrier after writability
+                // resolved. Re-loop into the park without losing the suffix.
+                if *pause_rx.borrow() {
+                    continue;
+                }
                 match to.try_write(&data[written..]) {
-                    Ok(sent) => written += sent,
+                    Ok(sent) => {
+                        written += sent;
+                        let _previous = controls.destination_write_bytes.fetch_update(
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                            |total| Some(total.saturating_add(sent as u64)),
+                        );
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(error) => return Err(format!("destination write failed: {error}")),
                 }
