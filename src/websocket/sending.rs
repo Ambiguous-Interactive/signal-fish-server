@@ -301,8 +301,8 @@ fn materialize_game_data_frame_uncached(
                 }
             };
             let fallback = BorrowedGameDataEnvelope::new(*from_player, data.as_ref(), seq, epoch);
-            let frame = serialize_json_frame(&fallback)
-                .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
+            let frame = serialize_json_fallback_frame(&fallback, payload.len())
+                .map_err(GameDataMaterializationError::Serialization)?;
             Ok(MaterializedFrame {
                 frame,
                 work: SerializationWork {
@@ -736,6 +736,35 @@ fn serialize_json_frame<T: Serialize>(message: &T) -> Result<Message, serde_json
     serialize_json_text(message).map(|json| Message::Text(json.into()))
 }
 
+/// Serialize a decoded binary fallback without repeatedly growing the JSON
+/// output buffer. MessagePack is normally denser than JSON, so its opaque
+/// payload length is a useful lower bound; fixed headroom covers the relay
+/// envelope and common representation expansion. Unusually compact inputs can
+/// still grow through the fallible writer without changing wire bytes.
+fn serialize_json_fallback_frame<T: Serialize>(
+    message: &T,
+    payload_len: usize,
+) -> Result<Message, String> {
+    const JSON_FALLBACK_HEADROOM: usize = 256;
+
+    let capacity = payload_len
+        .checked_add(JSON_FALLBACK_HEADROOM)
+        .filter(|capacity| *capacity <= isize::MAX as usize)
+        .ok_or_else(|| "JSON fallback frame capacity overflow".to_string())?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|error| format!("failed to reserve JSON fallback frame capacity: {error}"))?;
+    serde_json::to_writer(
+        &mut FallibleVecWriter::new(&mut bytes, "JSON fallback"),
+        message,
+    )
+    .map_err(|error| error.to_string())?;
+    String::from_utf8(bytes)
+        .map(|json| Message::Text(json.into()))
+        .map_err(|error| format!("JSON serializer emitted invalid UTF-8: {error}"))
+}
+
 /// Borrowed wire shadow of a `ServerMessage::GameData` frame WITHOUT the v3
 /// `seq` stamp, used to serialize a stamped shared-`Arc` relay message for a
 /// pre-v3 recipient without cloning the payload.
@@ -903,7 +932,8 @@ fn encode_named_binary_frame<T: Serialize>(
     bytes
         .try_reserve_exact(capacity)
         .map_err(|error| format!("failed to reserve binary frame capacity: {error}"))?;
-    write_named(&mut FallibleVecWriter(&mut bytes), frame).map_err(|err| err.to_string())?;
+    write_named(&mut FallibleVecWriter::new(&mut bytes, "binary"), frame)
+        .map_err(|err| err.to_string())?;
     Ok(bytes)
 }
 
@@ -911,25 +941,37 @@ fn encode_named_binary_frame<T: Serialize>(
 /// pre-sized output vector. Writing directly to `Vec<u8>` would use its
 /// infallible `Write` implementation if fixed envelope headroom ever became
 /// insufficient.
-struct FallibleVecWriter<'a>(&'a mut Vec<u8>);
+struct FallibleVecWriter<'a> {
+    bytes: &'a mut Vec<u8>,
+    frame_kind: &'static str,
+}
 
 impl FallibleVecWriter<'_> {
+    fn new<'a>(bytes: &'a mut Vec<u8>, frame_kind: &'static str) -> FallibleVecWriter<'a> {
+        FallibleVecWriter { bytes, frame_kind }
+    }
+
     fn reserve_for_write(&mut self, additional_len: usize) -> std::io::Result<()> {
         let required_len = self
-            .0
+            .bytes
             .len()
             .checked_add(additional_len)
             .filter(|required_len| *required_len <= isize::MAX as usize)
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "binary frame capacity overflow",
+                    format!("{} frame capacity overflow", self.frame_kind),
                 )
             })?;
-        if required_len > self.0.capacity() {
-            self.0
+        if required_len > self.bytes.capacity() {
+            self.bytes
                 .try_reserve_exact(additional_len)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::OutOfMemory, error))?;
+                .map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::OutOfMemory,
+                        format!("failed to grow {} frame buffer: {error}", self.frame_kind),
+                    )
+                })?;
         }
         Ok(())
     }
@@ -943,7 +985,7 @@ impl Write for FallibleVecWriter<'_> {
 
     fn write_all(&mut self, buffer: &[u8]) -> std::io::Result<()> {
         self.reserve_for_write(buffer.len())?;
-        self.0.extend_from_slice(buffer);
+        self.bytes.extend_from_slice(buffer);
         Ok(())
     }
 
@@ -1540,6 +1582,34 @@ mod tests {
     }
 
     #[test]
+    fn json_fallback_preallocation_preserves_wire_bytes_across_growth_paths() {
+        let data = serde_json::json!({
+            "escaped": "\"\\\n".repeat(300),
+            "values": [0, 1, 127, 128, 255, 256, u32::MAX],
+        });
+        let fallback = BorrowedGameDataEnvelope::new(player_a(), &data, Some(7), Some(3));
+        let expected = serialize_json_frame(&fallback).expect("reference JSON fallback encode");
+
+        for estimated_payload_len in [0, 1, 127, 128, 255, 256, 1_024, 4_096] {
+            assert_eq!(
+                serialize_json_fallback_frame(&fallback, estimated_payload_len)
+                    .expect("preallocated JSON fallback encode"),
+                expected,
+                "estimated payload length {estimated_payload_len} changed JSON fallback bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn json_fallback_capacity_overflow_is_reported() {
+        for payload_len in [isize::MAX as usize, usize::MAX] {
+            let error = serialize_json_fallback_frame(&0_u8, payload_len)
+                .expect_err("capacity overflow must fail before allocation");
+            assert!(error.contains("capacity overflow"));
+        }
+    }
+
+    #[test]
     fn binary_frame_capacity_overflow_is_reported() {
         for payload_len in [isize::MAX as usize, usize::MAX] {
             let error = encode_named_binary_frame(&0_u8, payload_len)
@@ -1548,7 +1618,7 @@ mod tests {
         }
 
         let mut bytes = Vec::new();
-        let error = FallibleVecWriter(&mut bytes)
+        let error = FallibleVecWriter::new(&mut bytes, "binary")
             .reserve_for_write(usize::MAX)
             .expect_err("writer length overflow must not be reported as allocation failure");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);

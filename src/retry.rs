@@ -135,7 +135,7 @@ impl RetryExecutor {
         E: From<RetryableError> + std::fmt::Debug,
     {
         let mut attempt = 1;
-        let mut delay = self.config.initial_delay;
+        let mut delay = bounded_initial_delay(&self.config);
 
         loop {
             if let Some(metrics) = &self.metrics {
@@ -195,19 +195,7 @@ impl RetryExecutor {
 
                     sleep(delay).await;
 
-                    // Calculate next delay with exponential backoff and jitter
-                    let next_delay = Duration::from_millis(
-                        (delay.as_millis() as f64 * self.config.backoff_multiplier) as u64,
-                    );
-
-                    delay = std::cmp::min(next_delay, self.config.max_delay);
-
-                    // Add jitter
-                    if self.config.jitter_factor > 0.0 {
-                        let jitter = (delay.as_millis() as f64 * self.config.jitter_factor) as u64;
-                        let jitter_amount = fastrand::u64(0..=jitter);
-                        delay = Duration::from_millis(delay.as_millis() as u64 + jitter_amount);
-                    }
+                    delay = bounded_next_delay(&self.config, delay, fastrand::f64());
 
                     attempt += 1;
                 }
@@ -230,7 +218,7 @@ impl RetryExecutor {
         E: std::fmt::Debug,
     {
         let mut attempt = 1;
-        let mut delay = self.config.initial_delay;
+        let mut delay = bounded_initial_delay(&self.config);
 
         loop {
             if let Some(metrics) = &self.metrics {
@@ -290,18 +278,7 @@ impl RetryExecutor {
 
                     sleep(delay).await;
 
-                    // Calculate next delay
-                    let next_delay = Duration::from_millis(
-                        (delay.as_millis() as f64 * self.config.backoff_multiplier) as u64,
-                    );
-                    delay = std::cmp::min(next_delay, self.config.max_delay);
-
-                    // Add jitter
-                    if self.config.jitter_factor > 0.0 {
-                        let jitter = (delay.as_millis() as f64 * self.config.jitter_factor) as u64;
-                        let jitter_amount = fastrand::u64(0..=jitter);
-                        delay = Duration::from_millis(delay.as_millis() as u64 + jitter_amount);
-                    }
+                    delay = bounded_next_delay(&self.config, delay, fastrand::f64());
 
                     attempt += 1;
                 }
@@ -342,6 +319,51 @@ impl RetryExecutor {
         }
 
         false
+    }
+}
+
+/// Calculate one backoff step while treating `max_delay` as a strict bound on
+/// the complete sleep, including jitter. Invalid public configuration factors
+/// degrade to a bounded zero/cap value instead of panicking or overflowing.
+fn bounded_next_delay(
+    config: &RetryConfig,
+    current_delay: Duration,
+    jitter_fraction: f64,
+) -> Duration {
+    let base = scale_duration_capped(current_delay, config.backoff_multiplier, config.max_delay);
+    let jitter_factor = if config.jitter_factor.is_finite() {
+        config.jitter_factor.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let available = config.max_delay.saturating_sub(base);
+    let jitter_limit = scale_duration_capped(base, jitter_factor, available);
+    let fraction = if jitter_fraction.is_finite() {
+        jitter_fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let jitter = scale_duration_capped(jitter_limit, fraction, jitter_limit);
+    base.saturating_add(jitter).min(config.max_delay)
+}
+
+fn bounded_initial_delay(config: &RetryConfig) -> Duration {
+    std::cmp::min(config.initial_delay, config.max_delay)
+}
+
+fn scale_duration_capped(duration: Duration, factor: f64, cap: Duration) -> Duration {
+    if cap.is_zero() || factor.is_nan() || factor <= 0.0 {
+        return Duration::ZERO;
+    }
+    if factor.is_infinite() {
+        return cap;
+    }
+
+    let scaled_secs = duration.as_secs_f64() * factor;
+    if !scaled_secs.is_finite() || scaled_secs >= cap.as_secs_f64() {
+        cap
+    } else {
+        Duration::try_from_secs_f64(scaled_secs).unwrap_or(cap)
     }
 }
 
@@ -525,6 +547,114 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn retry_delay_caps_the_complete_jittered_sleep() {
+        let cases = [
+            (
+                "backoff reaches cap before jitter",
+                RetryConfig {
+                    max_delay: Duration::from_secs(5),
+                    backoff_multiplier: 2.0,
+                    jitter_factor: 0.2,
+                    ..RetryConfig::persistent()
+                },
+                Duration::from_secs(4),
+                1.0,
+                Duration::from_secs(5),
+            ),
+            (
+                "jitter consumes only remaining headroom",
+                RetryConfig {
+                    max_delay: Duration::from_secs(1),
+                    backoff_multiplier: 1.0,
+                    jitter_factor: 1.0,
+                    ..RetryConfig::default()
+                },
+                Duration::from_millis(750),
+                1.0,
+                Duration::from_secs(1),
+            ),
+            (
+                "jitter factor applies before remaining headroom cap",
+                RetryConfig {
+                    max_delay: Duration::from_secs(5),
+                    backoff_multiplier: 1.0,
+                    jitter_factor: 0.2,
+                    ..RetryConfig::default()
+                },
+                Duration::from_secs(4),
+                1.0,
+                Duration::from_millis(4_800),
+            ),
+            (
+                "ordinary jitter remains additive",
+                RetryConfig {
+                    max_delay: Duration::from_secs(1),
+                    backoff_multiplier: 2.0,
+                    jitter_factor: 0.5,
+                    ..RetryConfig::default()
+                },
+                Duration::from_millis(100),
+                1.0,
+                Duration::from_millis(300),
+            ),
+            (
+                "sub-millisecond precision is preserved",
+                RetryConfig {
+                    max_delay: Duration::from_secs(1),
+                    backoff_multiplier: 2.0,
+                    jitter_factor: 0.0,
+                    ..RetryConfig::default()
+                },
+                Duration::from_micros(250),
+                0.0,
+                Duration::from_micros(500),
+            ),
+            (
+                "fractional backoff may decrease a delay at the cap",
+                RetryConfig {
+                    max_delay: Duration::from_secs(5),
+                    backoff_multiplier: 0.5,
+                    jitter_factor: 0.0,
+                    ..RetryConfig::default()
+                },
+                Duration::from_secs(5),
+                0.0,
+                Duration::from_millis(2_500),
+            ),
+            (
+                "duration overflow saturates at cap",
+                RetryConfig {
+                    max_delay: Duration::from_secs(5),
+                    backoff_multiplier: f64::MAX,
+                    jitter_factor: 1.0,
+                    ..RetryConfig::default()
+                },
+                Duration::MAX,
+                1.0,
+                Duration::from_secs(5),
+            ),
+        ];
+
+        for (context, config, current, fraction, expected) in cases {
+            assert_eq!(
+                bounded_next_delay(&config, current, fraction),
+                expected,
+                "{context}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_initial_delay_respects_the_configured_maximum() {
+        let config = RetryConfig {
+            initial_delay: Duration::from_secs(6),
+            max_delay: Duration::from_secs(5),
+            ..RetryConfig::persistent()
+        };
+        assert_eq!(bounded_initial_delay(&config), Duration::from_secs(5));
     }
 
     #[test]

@@ -55,6 +55,59 @@ impl Scenario {
     }
 }
 
+pub fn assert_expected_output_digest(scenario: Scenario, room_size: usize, ledger: &Ledger) {
+    let expected = match (scenario, room_size) {
+        (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 2) => {
+            "6ed4ed0eb9160a5355d0715e16f015fc221dfe9051f854a87c62bb2c0fa95c6f"
+        }
+        (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 8) => {
+            "93019166377ed5d8626c6686eed0d2a6d28217d242693ff410271ca6dc4261fa"
+        }
+        (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 16) => {
+            "21d58310cb589e36b24318278b7cd268788c593f825347bccd7dfff84cf53cdc"
+        }
+        (Scenario::V3JsonText, 2) => {
+            "62d00507ecc1a67fc1ed211ced5a98baab6e5f4201b17530c96e59a1ac2404ea"
+        }
+        (Scenario::V3JsonText, 8) => {
+            "7b9cfb3ca7b90be7977093b3ef4d88db29987b07e776415e18cb6fce8a9b1f28"
+        }
+        (Scenario::V3JsonText, 16) => {
+            "0b5c7c01bdc82181ba8396b82ce7b33f19c079ef4946aa7b75198c9977df52d9"
+        }
+        (Scenario::V3MessagePackBinary, 2) => {
+            "bc4bbff551e662c7d5392af2ffdd3bb5bbff93c5d5d3e59b2ae37bf2c39da65f"
+        }
+        (Scenario::V3MessagePackBinary, 8) => {
+            "985df9bddb2264627da2a9fed3dafcdc62f8c5b620e889906b92a13ebad9364d"
+        }
+        (Scenario::V3MessagePackBinary, 16) => {
+            "713b6cc49acf584f3ba10188262aca9e49dc075c9680cf4eb07cc7ec5292487a"
+        }
+        (Scenario::MixedMessagePackSource, 2) => {
+            "8ee28a2f5fa4828a9f56cb88ca5c672b1ac82739c298875affc68265da280bf5"
+        }
+        (Scenario::MixedMessagePackSource, 8) => {
+            "27eb27a2ca4a7975f67e50a2ad7c9892510c01fcf656322fb79ca98e36e30648"
+        }
+        (Scenario::MixedMessagePackSource, 16) => {
+            "1c461f688ee193d43e61695e07536caad92f8e46254787641ac59dc7db012658"
+        }
+        _ => panic!("room-{room_size} has no checked-in wire digest"),
+    };
+    let actual: String = ledger
+        .output_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        actual,
+        expected,
+        "{} room-{room_size} exact relay wire digest changed",
+        scenario.name()
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RecipientProfile {
     protocol_version: u16,
@@ -143,20 +196,36 @@ impl Fixture {
         };
 
         let warm_message = relay_message(scenario, RELAYS_PER_SAMPLE as u64 + 1);
-        let warmed = fixture.run_messages(std::slice::from_ref(&warm_message));
+        let warmed = fixture.run_messages(std::slice::from_ref(&warm_message), true);
         fixture.assert_non_vacuous(&warmed, 1);
         fixture
     }
 
     pub fn run_sample(&mut self) -> Ledger {
         let messages = std::mem::take(&mut self.messages);
-        let ledger = self.run_messages(&messages);
+        let ledger = self.run_messages(&messages, true);
         self.messages = messages;
         self.assert_non_vacuous(&ledger, RELAYS_PER_SAMPLE);
         ledger
     }
 
-    fn run_messages(&mut self, messages: &[Arc<ServerMessage>]) -> Ledger {
+    /// Run the production seam without hashing every emitted byte.
+    ///
+    /// The allocation harness uses [`Self::run_sample`] so exact wire output
+    /// remains validated. Criterion uses this variant because production does
+    /// not SHA-256 relay frames and timing that work obscures the code under
+    /// measurement, especially in larger rooms.
+    #[allow(dead_code)] // Shared support is compiled separately for the allocation benchmark.
+    pub fn run_timed_sample(&mut self) -> Ledger {
+        let messages = std::mem::take(&mut self.messages);
+        let ledger = self.run_messages(&messages, false);
+        self.messages = messages;
+        self.assert_non_vacuous(&ledger, RELAYS_PER_SAMPLE);
+        debug_assert_eq!(ledger.output_sha256, [0; 32]);
+        ledger
+    }
+
+    fn run_messages(&mut self, messages: &[Arc<ServerMessage>], hash_output: bool) -> Ledger {
         let attempts_before = self
             .metrics
             .websocket_delivery_attempts
@@ -226,16 +295,24 @@ impl Fixture {
                         Message::Text(text) => {
                             ledger.text_frames += 1;
                             ledger.wire_bytes += text.len() as u64;
-                            digest.update([0]);
-                            digest.update((text.len() as u64).to_le_bytes());
-                            digest.update(text.as_bytes());
+                            if hash_output {
+                                digest.update([0]);
+                                digest.update((text.len() as u64).to_le_bytes());
+                                digest.update(text.as_bytes());
+                            } else {
+                                std::hint::black_box(&text);
+                            }
                         }
                         Message::Binary(bytes) => {
                             ledger.binary_frames += 1;
                             ledger.wire_bytes += bytes.len() as u64;
-                            digest.update([1]);
-                            digest.update((bytes.len() as u64).to_le_bytes());
-                            digest.update(&bytes);
+                            if hash_output {
+                                digest.update([1]);
+                                digest.update((bytes.len() as u64).to_le_bytes());
+                                digest.update(&bytes);
+                            } else {
+                                std::hint::black_box(&bytes);
+                            }
                         }
                         other => panic!("game-data projector emitted non-data frame: {other:?}"),
                     }
@@ -249,7 +326,9 @@ impl Fixture {
                     "serialization fixture left queued frames behind"
                 );
             }
-            ledger.output_sha256 = digest.finalize().into();
+            if hash_output {
+                ledger.output_sha256 = digest.finalize().into();
+            }
             ledger
         });
         ledger.attempts = self

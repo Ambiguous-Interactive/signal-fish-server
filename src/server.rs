@@ -1007,6 +1007,17 @@ fn relay_projection_cohort(
     Some(match message {
         ServerMessage::GameData { .. } if supports_v3 => RelayProjectionCohort::TextV3,
         ServerMessage::GameData { .. } => RelayProjectionCohort::TextV2,
+        // Frozen-v2 JSON and Rkyv binary frames already own shared `Bytes` and
+        // project by cloning that handle. There is no serialization/decode
+        // work to reuse, so a relay-wide frame cache would only add an
+        // allocation in rooms with multiple compatible recipients.
+        ServerMessage::GameDataBinary { encoding, .. }
+            if !supports_v3
+                && *encoding == recipient_format
+                && matches!(encoding, GameDataEncoding::Json | GameDataEncoding::Rkyv) =>
+        {
+            return None;
+        }
         ServerMessage::GameDataBinary { encoding, .. }
             if *encoding == recipient_format && supports_v3 =>
         {
@@ -2839,6 +2850,26 @@ mod relay_projection_cache_tests {
             relay_projection_cohort(&binary, true, GameDataEncoding::Json),
             Some(BinaryFallbackV3)
         );
+
+        for encoding in [GameDataEncoding::Json, GameDataEncoding::Rkyv] {
+            let raw_v2 = ServerMessage::GameDataBinary {
+                from_player: Uuid::nil(),
+                encoding,
+                payload: vec![0x01].into(),
+                seq: Some(1),
+                epoch: Some(1),
+            };
+            assert_eq!(
+                relay_projection_cohort(&raw_v2, false, encoding),
+                None,
+                "v2 {encoding:?} raw passthrough has no reusable projection work"
+            );
+            assert_eq!(
+                relay_projection_cohort(&raw_v2, true, encoding),
+                Some(BinaryDirectV3),
+                "v3 {encoding:?} still needs its stamped MessagePack envelope cached"
+            );
+        }
     }
 
     fn legacy_delivery_handle(

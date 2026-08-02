@@ -534,6 +534,7 @@ jobs:
           } > release_notes.md
 
       - name: Validate an existing GitHub Release
+        id: existing-release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -547,6 +548,7 @@ jobs:
               exit 1
             fi
             echo "Existing GitHub Release for $TAG will be completed idempotently."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             status=$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>&1 \
               | sed -n 's/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*/\1/p' | head -n 1 || true)
@@ -554,14 +556,20 @@ jobs:
               echo "ERROR: Could not verify whether GitHub Release $TAG exists (HTTP ${status:-unknown})." >&2
               exit 1
             fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub Release
+        if: steps.existing-release.outputs.exists != 'true'
         uses: softprops/action-gh-release@v3.0.2
         with:
+          # ensure-tag already created or verified this immutable annotated tag.
+          # Do not pass target_commitish here: GitHub only needs it when the tag
+          # does not exist, and a historical retry whose source changed workflow
+          # files relative to today's default branch would otherwise require a
+          # workflows:write token that GITHUB_TOKEN cannot receive.
           tag_name: ${{ needs.resolve-release.outputs.tag }}
           name: ${{ needs.resolve-release.outputs.tag }}
-          target_commitish: ${{ needs.resolve-release.outputs.source_revision }}
           body_path: source/release_notes.md
           draft: false
           prerelease: false
@@ -570,12 +578,11 @@ jobs:
 
       - name: Attach SBOM to release
         if: steps.sbom.outcome == 'success'
-        uses: softprops/action-gh-release@v3.0.2
-        with:
-          tag_name: ${{ needs.resolve-release.outputs.tag }}
-          files: source/sbom.cdx.json
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: gh release upload "$TAG" source/sbom.cdx.json --clobber
 
       - name: Verify GitHub Release identity
         shell: bash
@@ -816,20 +823,17 @@ jobs:
 
       - name: Attach binaries to release
         if: steps.binary-artifacts.outputs.count != '0'
-        uses: softprops/action-gh-release@v3.0.2
-        with:
-          tag_name: ${{ needs.resolve-release.outputs.tag }}
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sha256
-          # MUST be false: action-gh-release evaluates fail_on_unmatched_files
-          # PER glob, so `true` would fail the whole attach (stripping every
-          # binary) whenever an entire format class is absent — e.g. if both
-          # Windows legs (the only *.zip producers, sharing windows-latest) fail
-          # together. That directly contradicts the fail-fast:false /
-          # partial-success intent above. Per-artifact presence is already
-          # enforced upstream by `if-no-files-found: error` on each upload.
-          fail_on_unmatched_files: false
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find dist -type f \( \
+            -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \
+          \) -print0)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "ERROR: Binary artifacts were reported but no archives or checksums were downloaded." >&2
+            exit 1
+          fi
+          gh release upload "$TAG" "${assets[@]}" --clobber

@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce relay allocation work for the universal WebSocket fallback (issue
+  #207). MessagePack-to-JSON projection now pre-sizes its output and eliminates
+  all 3/6 growth reallocations in 2-/8-/16-player mixed-format rooms, reducing
+  allocation operations from 18/28/28 to 15/22/22 and allocated bytes by
+  17–20%. Repeated frozen-v2 JSON and Rkyv relays also skip a no-op frame cache,
+  reducing 8-/16-player operations from 4 to 3 and bytes by 51%/41%. Exact wire
+  bytes and delivery accounting are unchanged; the runtime benchmark now keeps
+  whole-frame SHA-256 validation outside its timed loop.
 - Reduce memory-allocation work for frozen-v2 JSON and Rkyv binary relays
   (issue #207). The server now removes one allocation operation in two-player
   rooms, two in 8-/16-player rooms, and one payload-sized copy per relay:
@@ -43,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep retry sleeps within the configured maximum after jitter is applied
+  (issue #205). Persistent in-memory lock contention can no longer turn the
+  default 5-second maximum into a 6-second sleep; sub-millisecond precision is
+  preserved and extreme duration/factor combinations saturate safely.
+- Make GitHub Release retries work after the default branch's workflow files
+  advance. The release job now publishes the already-verified immutable tag
+  without redundantly passing its historical source as `target_commitish`,
+  skips identity mutation when the Release already exists, and retries SBOM or
+  binary attachments through asset-only uploads. This avoids a workflow-write
+  permission that `GITHUB_TOKEN` cannot receive.
 - Keep spectator-occupied rooms alive during garbage collection (issue #241).
   Spectator-only rooms now use the inactive-room timeout, spectator join,
   detach, and live connection traffic refresh room activity, and the normal

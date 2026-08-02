@@ -9,7 +9,9 @@
 #[path = "support/relay_serialization.rs"]
 mod relay_serialization;
 
-use relay_serialization::{Fixture, Ledger, Scenario, RELAYS_PER_SAMPLE, ROOM_SIZES};
+use relay_serialization::{
+    assert_expected_output_digest, Fixture, Ledger, Scenario, RELAYS_PER_SAMPLE, ROOM_SIZES,
+};
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
 
@@ -81,17 +83,17 @@ fn assert_allocation_ceiling(scenario: Scenario, room_size: usize, sample: &Samp
     let (maximum_operations_per_relay, maximum_reallocations_per_relay, maximum_bytes_per_relay) =
         match (scenario, room_size) {
             (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 2) => (3, 0, 425),
-            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 8) => (4, 0, 1_345),
-            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 16) => (4, 0, 1_665),
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 8) => (3, 0, 665),
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 16) => (3, 0, 985),
             (Scenario::V3JsonText, 2) => (8, 3, 2_587),
             (Scenario::V3JsonText, 8) => (9, 3, 3_507),
             (Scenario::V3JsonText, 16) => (9, 3, 3_827),
             (Scenario::V3MessagePackBinary, 2) => (5, 0, 1_581),
             (Scenario::V3MessagePackBinary, 8) => (6, 0, 2_501),
             (Scenario::V3MessagePackBinary, 16) => (6, 0, 2_821),
-            (Scenario::MixedMessagePackSource, 2) => (18, 3, 4_450),
-            (Scenario::MixedMessagePackSource, 8) => (28, 6, 9_845),
-            (Scenario::MixedMessagePackSource, 16) => (28, 6, 10_165),
+            (Scenario::MixedMessagePackSource, 2) => (15, 0, 3_572),
+            (Scenario::MixedMessagePackSource, 8) => (22, 0, 8_090),
+            (Scenario::MixedMessagePackSource, 16) => (22, 0, 8_410),
             _ => panic!("room-{room_size} has no checked-in allocation baseline"),
         };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
@@ -135,6 +137,7 @@ fn main() {
         for room_size in ROOM_SIZES {
             let mut fixture = Fixture::new(room_size, scenario);
             let sample = repeated_sample(&mut fixture);
+            assert_expected_output_digest(scenario, room_size, &sample.ledger);
             assert_allocation_ceiling(scenario, room_size, &sample);
             print_sample(scenario, room_size, &sample);
         }

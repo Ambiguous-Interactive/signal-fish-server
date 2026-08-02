@@ -8,7 +8,9 @@
 mod relay_serialization;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use relay_serialization::{Fixture, Scenario, RELAYS_PER_SAMPLE, ROOM_SIZES};
+use relay_serialization::{
+    assert_expected_output_digest, Fixture, Scenario, RELAYS_PER_SAMPLE, ROOM_SIZES,
+};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -19,7 +21,12 @@ fn relay_serialization_runtime(criterion: &mut Criterion) {
     for scenario in Scenario::ALL {
         for room_size in ROOM_SIZES {
             let mut fixture = Fixture::new(room_size, scenario);
-            let expected = fixture.run_sample();
+            // Exact wire hashing is validated before measurement. Timed
+            // iterations retain the production projection and cheap ledger,
+            // but omit SHA-256 work the server never performs.
+            let validated = fixture.run_sample();
+            assert_expected_output_digest(scenario, room_size, &validated);
+            let expected = fixture.run_timed_sample();
             group.throughput(Throughput::Elements(
                 (RELAYS_PER_SAMPLE * (room_size - 1)) as u64,
             ));
@@ -28,7 +35,7 @@ fn relay_serialization_runtime(criterion: &mut Criterion) {
                 &room_size,
                 |bencher, _| {
                     bencher.iter(|| {
-                        let observed = fixture.run_sample();
+                        let observed = fixture.run_timed_sample();
                         assert_eq!(
                             observed, expected,
                             "timed production projection changed its non-vacuity ledger"
