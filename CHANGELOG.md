@@ -64,7 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recognizes Cargo's canonical clean VCS metadata, where the `dirty` field is
   omitted, while still rejecting dirty or source-mismatched packages. Existing
   Releases must also retain the expected public state, exact notes, source
-  revision, and image digest before any SBOM or binary asset is replaced.
+  revision, and image digest before any SBOM or binary asset is replaced. Asset
+  uploads also name the repository explicitly, so split-checkout publication
+  jobs never depend on an ambient Git worktree for repository discovery.
 - Keep spectator-occupied rooms alive during garbage collection (issue #241).
   Spectator-only rooms now use the inactive-room timeout, spectator join,
   detach, and live connection traffic refresh room activity, and the normal

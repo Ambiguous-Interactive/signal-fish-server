@@ -48,3 +48,11 @@ adversarial review rounds exercised registry metadata, public Release identity,
 exact-byte notes integrity, retry ordering, and binary recovery; the final pass
 reported zero findings. Hosted PR validation, the final default-branch retry,
 and public Release asset verification remain in progress.
+
+The first retry after PR #246, Release run 30770844614, passed the corrected
+registry probe, all six binary builds, immutable GHCR digest reuse, public
+Release creation, and exact metadata validation. It then failed before the
+first asset mutation because `gh release upload` ran from the parent of the
+split checkouts and attempted repository discovery through an absent `.git`
+directory. The follow-up passes `--repo "$GITHUB_REPOSITORY"` to both SBOM and
+binary asset-only uploads and locks that independence into workflow policy.
