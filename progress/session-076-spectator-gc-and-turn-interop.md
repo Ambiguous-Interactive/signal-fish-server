@@ -85,6 +85,12 @@ final scan rejects static secrets or credential-shaped values.
   single-input contract with no filename and mislabeled the runtime rejection as
   a syntax error. Syntax checks now pass an explicit empty file, with a policy
   regression preventing the broken invocation shape.
+- Final-head hosted Miri exposed a wall-clock assumption in the spectator GC
+  control: its 10 ms freshness window could expire while the interpreter moved
+  from the active ping to cleanup, so both rooms were reaped. The test now
+  backdates both in-memory room clocks by two hours, refreshes the active room
+  through the real ping path, and cleans at a one-hour cutoff. The focused test
+  passes under the pinned Miri toolchain without retries.
 - The same audit reported the date-pinned nightly at 182 days old. Its separate
   Miri/sanitizer/fuzz/unused-dependency upgrade and hosted revalidation are
   tracked in issue #243 rather than expanding this gameplay PR's scope.

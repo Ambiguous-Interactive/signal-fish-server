@@ -448,6 +448,17 @@ impl InMemoryDatabase {
         self.get_room_players_calls
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    #[cfg(test)]
+    pub(crate) async fn backdate_room_activity_for_test(
+        &self,
+        room_id: &RoomId,
+        age: chrono::Duration,
+    ) {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms.get_mut(room_id).expect("room exists");
+        room.last_activity = chrono::Utc::now() - age;
+    }
 }
 
 impl Default for InMemoryDatabase {

@@ -85,7 +85,7 @@ mod tests {
         CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
         TransportSecurityConfig, TurnConfig,
     };
-    use crate::database::DatabaseConfig;
+    use crate::database::{DatabaseConfig, InMemoryDatabase};
     use crate::protocol::{ClientMessage, GameDataEncoding, ServerMessage};
     use crate::server::{EnhancedGameServer, ServerConfig};
     use bytes::Bytes;
@@ -420,8 +420,17 @@ mod tests {
             spectator_ids.push(spectator_id);
         }
 
-        let inactive_timeout = StdDuration::from_millis(10);
-        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .expect("test server uses the in-memory database");
+        for room_id in &room_ids {
+            database
+                .backdate_room_activity_for_test(room_id, chrono::Duration::hours(2))
+                .await;
+        }
+
         server
             .handle_client_message(&spectator_ids[0], ClientMessage::Ping)
             .await;
@@ -430,7 +439,7 @@ mod tests {
             .database
             .cleanup_expired_rooms(
                 chrono::Duration::zero(),
-                chrono::Duration::from_std(inactive_timeout).expect("valid timeout"),
+                chrono::Duration::hours(1),
                 &HashSet::new(),
             )
             .await
