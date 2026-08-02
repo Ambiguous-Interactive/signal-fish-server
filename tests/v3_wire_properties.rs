@@ -8,8 +8,8 @@
 //! - `Signal` (client->server and server->client) must round-trip ARBITRARY
 //!   opaque JSON payloads through both wire encodings the server speaks:
 //!   JSON text frames (`serde_json`) and MessagePack binary frames
-//!   (`rmp_serde::to_vec_named`, the production encoder in
-//!   `src/websocket/sending.rs`). The server never inspects `signal`
+//!   (`rmp_serde::to_vec_named`, equivalent to production's named MessagePack
+//!   relay encoding). The server never inspects `signal`
 //!   (ADR-0002), so payload fidelity is the entire contract.
 //!
 //!   FINDING (pinned, not papered over): with the default serde_json feature
@@ -183,8 +183,8 @@ fn json_roundtrip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) 
     serde_json::from_str(&encoded).expect("JSON round-trip decodes")
 }
 
-/// MessagePack round trip via `to_vec_named`, the production binary encoder
-/// (`src/websocket/sending.rs`); `from_slice` is the production decoder.
+/// MessagePack round trip via named encoding, equivalent to the production
+/// relay encoder; `from_slice` is the production decoder.
 fn msgpack_roundtrip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) -> T {
     let encoded = rmp_serde::to_vec_named(value).expect("MessagePack-encodes");
     rmp_serde::from_slice(&encoded).expect("MessagePack round-trip decodes")

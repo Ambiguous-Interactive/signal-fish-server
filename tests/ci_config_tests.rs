@@ -1152,6 +1152,7 @@ fn validate_workflow_has_required_jobs(
 //   - CI / Nextest (ubuntu-latest)
 //   - CI / Nextest (windows-latest)
 //   - CI / Nextest (macos-latest)
+//   - CI / Relay Allocation Ceilings
 //   - CI / Dependency Audit
 //   - CI / MSRV Verification
 //   - CI / Docker Build
@@ -1186,6 +1187,11 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
         "nextest",
         "Nextest (${{ matrix.os }})",
         "Cross-OS test execution via cargo-nextest",
+    ),
+    (
+        "relay-allocations",
+        "Relay Allocation Ceilings",
+        "Deterministic production-seam allocation ceilings",
     ),
     (
         "deny",
@@ -1302,6 +1308,7 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
     "CI / Nextest (ubuntu-latest)",
     "CI / Nextest (windows-latest)",
     "CI / Nextest (macos-latest)",
+    "CI / Relay Allocation Ceilings",
     "CI / Dependency Audit",
     "CI / Audit (cargo-audit)",
     "CI / MSRV Verification",
@@ -1857,7 +1864,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // Every expensive compile/test job must wait on the gate. `needs:` is declared
     // in the first few lines of a job block, so a bounded window after the header
     // is sufficient and avoids brittle full-block parsing.
-    for job in ["lint", "nextest", "msrv", "coverage"] {
+    for job in ["lint", "nextest", "relay-allocations", "msrv", "coverage"] {
         let header = format!("\n  {job}:");
         let start = workflow
             .find(&header)
@@ -1869,6 +1876,23 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
              start until the fail-fast gate passes."
         );
     }
+}
+
+#[test]
+fn test_ci_enforces_relay_allocation_ceilings() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let job = extract_workflow_job_block(&workflow, "relay-allocations")
+        .expect("ci.yml must define the relay-allocations job");
+    let normalized_job = job.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        normalized_job.contains(
+            "cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking"
+        ),
+        "ci.yml must execute the deterministic production-seam allocation benchmark with its \
+         required feature and locked graph"
+    );
 }
 
 #[test]
@@ -20885,6 +20909,7 @@ const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
     "lint",
     "nextest",
+    "relay-allocations",
     "msrv",
     "docker",
     "coverage",

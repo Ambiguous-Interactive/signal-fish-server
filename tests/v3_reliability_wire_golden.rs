@@ -12,8 +12,9 @@
 //!
 //! - JSON: structural equality against a `json!` value AND a raw-string
 //!   assertion to catch field-name / casing / ordering drift.
-//! - MessagePack via `rmp_serde::to_vec_named` (the production binary path):
-//!   exact bytes via a hex helper.
+//! - Named MessagePack via `rmp_serde::to_vec_named` (equivalent to the
+//!   production relay envelope's `rmp_serde::encode::write_named`): exact
+//!   bytes via a hex helper.
 //!
 //! The physical v3 binary metadata envelope (which is NOT this enum's envelope)
 //! is frozen for every payload encoding by unit tests in
@@ -100,8 +101,8 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Assert that `value` serializes via `rmp_serde::to_vec_named` (production
-/// binary path) to exactly the hex-encoded `expected_hex` bytes.
+/// Assert that `value` serializes via named MessagePack to exactly the
+/// hex-encoded `expected_hex` bytes.
 fn assert_msgpack<T: Serialize>(value: &T, expected_hex: &str) {
     let bytes = rmp_serde::to_vec_named(value).expect("msgpack bytes");
     let actual_hex = hex(&bytes);

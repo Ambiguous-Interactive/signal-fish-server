@@ -11,6 +11,7 @@
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
+#   - relay-allocations: Deterministic production-seam allocation ceilings
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Security audits, license checks, and dependency validation
 #   - audit: Second-opinion vulnerability scan via cargo-audit (RustSec)
@@ -51,7 +52,8 @@ jobs:
   # Fast-fail gate. A single cheap "does it format and compile" pass that the
   # expensive compile/test jobs in this workflow depend on via `needs:
   # quick-check`. A file that does not parse or type-check fails here in seconds,
-  # so the eight gated lanes (lint x3, nextest x3, msrv, coverage) never start —
+  # so the nine gated lanes (lint x3, nextest x3, relay allocations, msrv,
+  # coverage) never start —
   # collapsing what was a redundant per-lane recompile-and-fail into one fast
   # failure. This exists because an unclosed delimiter in a committed test file
   # once failed every one of those lanes independently. (Compile jobs in sibling
@@ -104,6 +106,38 @@ jobs:
       # committed, so dependency drift fails here instead of rewriting it.
       - name: Check fuzz crate compiles
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+
+  relay-allocations:
+    name: Relay Allocation Ceilings
+    needs: quick-check
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Enforce deterministic relay allocation ceilings
+        run: >-
+          cargo bench --locked --bench relay_serialization_allocations
+          --features allocation-tracking
 
   lint:
     name: Lint (${{ matrix.os }})

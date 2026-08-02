@@ -135,6 +135,8 @@ This infrastructure prevents **entire categories** of CI/CD issues:
 - Tests check workflows use concurrency groups
 - Tests check workflows have timeouts
 - Tests validate minimal permissions principle
+- A required Linux allocation gate enforces operation, reallocation, and byte
+  ceilings for relay serialization across 2-, 8-, and 16-player rooms
 
 ## Test Coverage Statistics
 
