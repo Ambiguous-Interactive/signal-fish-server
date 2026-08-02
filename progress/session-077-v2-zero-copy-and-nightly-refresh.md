@@ -60,6 +60,34 @@ complete run identified two genuinely unused direct dev-dependencies
 
 ## Validation and publication
 
-In progress. Final evidence will include the complete local gauntlet,
-adversarial review results, exact commit, hosted analysis step outcomes, all
-applicable workflow conclusions, and reviewer state.
+PR #244 carries three coherent implementation/fix commits through reviewed
+implementation head `b189b45d5733d339b230daa0444c9c80fee75df3`.
+
+Local validation completed successfully:
+
+- `cargo fmt --check`, strict all-target/all-feature Clippy, and the complete
+  locked all-feature test suite;
+- all 15 allocation-ceiling cells, with five exact repeats per cell;
+- all four fuzz targets on `aarch64-unknown-linux-gnu`, including saved-crash
+  replay and a fresh session-machine corpus;
+- exact pinned Miri (470 passed, 198 ignored) and cargo-udeps with zero findings;
+- cargo-deny plus CI, workflow, toolchain, documentation, LLM-policy, and both
+  hook preflight suites; and
+- three independent adversarial-review rounds followed by a zero-finding final
+  review.
+
+Hosted validation on that exact head completed with 19 successful workflows
+and the expected Dependabot auto-merge skip. Main CI's 16 jobs all passed,
+including MSRV, three-platform lint/Nextest, coverage, Docker, dependency
+audits, and the relay allocation ceilings. Verification Nightly's seven
+substantive jobs passed. Advanced Safety's actual Miri and AddressSanitizer test
+steps passed. Every declared fuzz target passed independently. The cold-cache
+cargo-udeps 0.1.61 install and its non-gating analysis step both concluded
+success, rather than relying on the enclosing job conclusion.
+
+The first hosted pass caught one MD044 error in this record; marking the
+`rust-src` component as code fixed it, and the exact local Markdown suite plus
+the rerun passed. Cursor Bugbot reviewed the latest head with zero findings and
+there are no review threads. GitHub Copilot was requested after every push but
+reported the reviewer's quota limit both times; the only available human is the
+PR author, whom GitHub correctly refuses as a self-review request.
