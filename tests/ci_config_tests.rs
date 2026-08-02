@@ -4689,7 +4689,8 @@ fn test_release_workflow_attaches_binaries_with_checksums() {
     for required in [
         "mapfile -d '' assets",
         "find dist -type f",
-        "gh release upload \"$TAG\" \"${assets[@]}\" --clobber",
+        "gh release upload \"$TAG\" \"${assets[@]}\" --clobber \\",
+        "--repo \"$GITHUB_REPOSITORY\"",
     ] {
         assert!(
             upload.contains(required),
@@ -5097,8 +5098,10 @@ fn test_release_identity_fails_closed_across_artifacts() {
     );
     assert!(
         attach_sbom.contains("gh release upload \"$TAG\" source/sbom.cdx.json --clobber")
+            && attach_sbom.contains("--repo \"$GITHUB_REPOSITORY\"")
             && !attach_sbom.contains("softprops/action-gh-release"),
-        "SBOM retries must use the asset-only upload API rather than PATCHing Release identity.\n\
+        "SBOM retries must use the asset-only upload API with an explicit repository rather than \
+         PATCHing Release identity.\n\
          Step:\n{attach_sbom}"
     );
     assert!(
