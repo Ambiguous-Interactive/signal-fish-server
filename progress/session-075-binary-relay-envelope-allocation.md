@@ -93,8 +93,25 @@ evidence and exact wire ledgers; machine-sensitive timing remains observational.
   documents the single sample-scoped allocation allowance, and makes the CI
   contract assertion whitespace-insensitive. A subsequent clean exact-head
   review's only suppressed note was also incorporated by retaining the
-  allocator's reserve-error text. Final hosted and reviewer evidence remain
-  pending publication.
+  allocator's reserve-error text.
+
+## Publication
+
+PR [#240](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/240)
+reached a fully green implementation head at
+`1d1d9919c8426f63b1a975798e952df5b0280d8c`. All 16 applicable workflows
+succeeded; the Dependabot-only workflow skipped as expected. The `CI` workflow
+passed all 16 jobs, including `Relay Allocation Ceilings`, three-platform lint
+and nextest, MSRV, coverage, both dependency audits, Docker, panic policy,
+SBOM, and document consistency. Advanced Safety passed Miri and ASan;
+Verification Nightly and every browser, WebRTC, Fortress, and Fortress WASM
+interop workflow also passed.
+
+Cursor Bugbot reported no issues on the exact head. Copilot reviewed all 11
+changed files and reported no new or suppressed comments after its surfaced
+reserve-classification thread and four suppressed hardening suggestions were
+implemented. The sole inline thread is resolved. Recent repository history
+exposed no distinct human reviewer beyond the pull-request author.
 
 ## Follow-up
 
