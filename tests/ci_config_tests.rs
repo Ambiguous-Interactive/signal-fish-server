@@ -4682,11 +4682,21 @@ fn test_release_workflow_attaches_binaries_with_checksums() {
     let root = repo_root();
     let live = read_live_file(&root.join(".github/workflows/release.yml"));
 
-    assert!(
-        live.contains("softprops/action-gh-release"),
-        "release.yml must upload built binaries to the GitHub Release \
-         (softprops/action-gh-release)."
-    );
+    let attach = extract_workflow_job_block(&live, "attach-binaries")
+        .expect("release.yml must define attach-binaries");
+    let upload = extract_named_workflow_step(&attach, "Attach binaries to release")
+        .expect("attach-binaries must define one correlated upload step");
+    for required in [
+        "mapfile -d '' assets",
+        "find dist -type f",
+        "gh release upload \"$TAG\" \"${assets[@]}\" --clobber",
+    ] {
+        assert!(
+            upload.contains(required),
+            "release.yml must upload the discovered binary/checksum set with `{required}` without \
+             PATCHing release identity.\nStep:\n{upload}"
+        );
+    }
     // A checksum must actually be COMPUTED for each archive...
     assert!(
         live.contains("sha256sum") || live.contains("shasum -a 256"),
@@ -4703,16 +4713,12 @@ fn test_release_workflow_attaches_binaries_with_checksums() {
         live.contains(".tar.gz") && live.contains(".zip"),
         "release.yml must produce and upload both `.tar.gz` (unix) and `.zip` (windows) archives."
     );
-    // The attach step must NOT use `fail_on_unmatched_files: true`: that flag is
-    // evaluated per-glob, so a single absent format class (e.g. both Windows
-    // legs failing -> no *.zip) would fail the whole upload and strip EVERY
-    // binary off the release — defeating the fail-fast:false partial-success
-    // design. Per-artifact presence is guarded by `if-no-files-found: error`.
     assert!(
-        !live.contains("fail_on_unmatched_files: true"),
-        "release.yml attach step must not set `fail_on_unmatched_files: true`; a correlated \
-         leg failure would then strip all binaries off the release instead of attaching the \
-         ones that built."
+        upload.contains("-name '*.tar.gz'")
+            && upload.contains("-name '*.zip'")
+            && upload.contains("-name '*.sha256'"),
+        "release.yml must discover every available archive/checksum class in one partial-success \
+         upload instead of requiring every glob class to exist.\nStep:\n{upload}"
     );
 }
 
@@ -4802,7 +4808,7 @@ fn test_release_workflow_skips_binary_attach_when_no_artifacts_exist() {
     }
 
     assert!(
-        attach_job.contains("tag_name: ${{ needs.resolve-release.outputs.tag }}"),
+        attach_job.contains("TAG: ${{ needs.resolve-release.outputs.tag }}"),
         "attach-binaries must consume the canonical tag from resolve-release instead of \
          re-deriving it from event-specific state.\nJob block:\n{attach_job}"
     );
@@ -4952,6 +4958,15 @@ fn test_release_identity_fails_closed_across_artifacts() {
     let verifier = read_live_file(&root.join("scripts/verify-release-image.sh"));
     let resolver = read_live_file(&root.join("scripts/resolve-release-source.sh"));
     let crate_check = read_live_file(&root.join("scripts/check-crates-io-release.sh"));
+    let publish =
+        extract_workflow_job_block(&release, "publish").expect("release.yml must define publish");
+    let create_release = extract_named_workflow_step(&publish, "Create GitHub Release")
+        .expect("publish must define the GitHub Release creation step");
+    let validate_release =
+        extract_named_workflow_step(&publish, "Validate an existing GitHub Release")
+            .expect("publish must define the existing GitHub Release gate");
+    let attach_sbom = extract_named_workflow_step(&publish, "Attach SBOM to release")
+        .expect("publish must define the SBOM attachment step");
 
     let required_by_file = [
         (
@@ -4961,7 +4976,6 @@ fn test_release_identity_fails_closed_across_artifacts() {
                 "scripts/resolve-release-source.sh",
                 "git cat-file -t \"refs/tags/${TAG}\"",
                 "refusing to move it",
-                "target_commitish: ${{ needs.resolve-release.outputs.source_revision }}",
                 "Verify GitHub Release identity",
             ],
         ),
@@ -5022,6 +5036,41 @@ fn test_release_identity_fails_closed_across_artifacts() {
             );
         }
     }
+
+    assert!(
+        create_release.contains("tag_name: ${{ needs.resolve-release.outputs.tag }}"),
+        "GitHub Release creation must use the tag whose annotated identity was verified before \
+         publication.\nStep:\n{create_release}"
+    );
+    assert!(
+        !create_release.contains("target_commitish:"),
+        "GitHub Release creation must not pass target_commitish after ensure-tag has created or \
+         verified the immutable annotated tag. Re-supplying a historical commit makes GitHub \
+         treat workflow-file drift from the default branch as a workflow mutation and reject \
+         GITHUB_TOKEN retries even though the tag already exists.\nStep:\n{create_release}"
+    );
+    for required in [
+        "id: existing-release",
+        "echo \"exists=true\" >> \"$GITHUB_OUTPUT\"",
+        "echo \"exists=false\" >> \"$GITHUB_OUTPUT\"",
+    ] {
+        assert!(
+            validate_release.contains(required),
+            "The existing-release gate must publish `{required}` so retries never PATCH an old \
+             release target.\nStep:\n{validate_release}"
+        );
+    }
+    assert!(
+        create_release.contains("if: steps.existing-release.outputs.exists != 'true'"),
+        "Release creation must be skipped after a validated existing Release is found.\n\
+         Step:\n{create_release}"
+    );
+    assert!(
+        attach_sbom.contains("gh release upload \"$TAG\" source/sbom.cdx.json --clobber")
+            && !attach_sbom.contains("softprops/action-gh-release"),
+        "SBOM retries must use the asset-only upload API rather than PATCHing Release identity.\n\
+         Step:\n{attach_sbom}"
+    );
 }
 
 #[test]
@@ -17741,11 +17790,12 @@ fn test_release_workflow_attaches_sbom_to_release() {
         release_yml.display()
     );
 
-    // The attach step must reference sbom.cdx.json
+    // The attach step must use an asset-only upload so an idempotent historical
+    // retry never PATCHes the Release's stored target commit.
     assert!(
-        content.contains("files: source/sbom.cdx.json"),
+        content.contains("gh release upload \"$TAG\" source/sbom.cdx.json --clobber"),
         "release.yml must attach sbom.cdx.json to the GitHub release.\n\
-         Add 'files: source/sbom.cdx.json' to the 'Attach SBOM to release' step.\n\
+         Use an idempotent asset-only upload in the 'Attach SBOM to release' step.\n\
          This allows release consumers to download the SBOM for audit purposes.\n\
          File: {}",
         release_yml.display()

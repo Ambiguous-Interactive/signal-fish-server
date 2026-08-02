@@ -654,8 +654,10 @@ async fn registration_replaces_the_players_room_routing_scope() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn initial_room_transitions_wait_for_capacity_before_taking_routing_locks() {
+    // This test owns the deadline boundary. Full-suite Miri execution can
+    // consume a real one-second timeout while the queue is intentionally full.
     for async_builder in [false, true] {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(

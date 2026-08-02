@@ -130,11 +130,20 @@ Key design decisions:
   job checks the same workflows listed in the `REQUIRED_WORKFLOW_NAMES`
   constant in `tests/ci_config_tests.rs`, keeping the source of truth
   consistent.
+- **Release the verified tag, without retargeting it**: `ensure-tag` creates or
+  verifies the immutable annotated tag before publication. The GitHub Release
+  step therefore supplies only that tag name. Supplying `target_commitish` is
+  redundant for an existing tag and can make a historical retry require
+  workflow-write permission when release workflows have since changed on the
+  default branch; the workflow-scoped token cannot receive that permission.
+  A validated existing Release is never modified during a retry, and SBOM/binary
+  recovery uses asset-only uploads with replacement enabled.
 
 | Test | What It Validates |
 |------|-------------------|
 | `test_release_workflow_conventions` | Name, permissions, timeout, concurrency settings |
 | `test_release_workflow_requires_preflight` | Preflight job exists, publish depends on it, required workflow names referenced |
+| `test_release_identity_fails_closed_across_artifacts` | Immutable source identity is shared across artifacts without retargeting an existing release tag |
 
 #### SBOM (Software Bill of Materials)
 
