@@ -26,7 +26,7 @@ result is sufficient and no uncontaminated pre-change timing pair was recorded.
 ## Analysis nightly baseline
 
 The `nightly-2026-02-01` analysis pin was 182 days old. The replacement
-`nightly-2026-08-01` is available with Miri, rust-src, and x86_64 GNU standard
+`nightly-2026-08-01` is available with Miri, `rust-src`, and x86_64 GNU standard
 libraries and resolves the locked fuzz graph. Miri, AddressSanitizer,
 cargo-fuzz, cargo-udeps, the devcontainer, local fuzz instructions, and current
 toolchain documentation now share that explicit pin.
