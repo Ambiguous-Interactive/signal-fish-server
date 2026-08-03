@@ -83,17 +83,15 @@ impl ProtocolConfig {
 
     /// Negotiate the protocol version for a connection.
     ///
-    /// The result is clamped into `[min_protocol_version, max_protocol_version]`.
-    /// A client that omits its highest supported version (`None`) is treated as a
-    /// pure v2 client and negotiated to `min_protocol_version`. A client that
-    /// advertises a higher version than the server speaks is clamped down to
-    /// `max_protocol_version`; one that advertises below the floor is raised to
-    /// `min_protocol_version`.
+    /// The result never exceeds either the client's maximum or this deployment's
+    /// ceiling. A client that omits its highest supported version (`None`) is
+    /// treated as supporting the deployment floor. Callers must reject a result
+    /// below [`Self::min_protocol_version`] rather than silently upgrading the
+    /// client to a protocol it did not advertise.
     pub fn negotiate_protocol_version(&self, client_max: Option<u16>) -> u16 {
         client_max
             .unwrap_or(self.min_protocol_version)
             .min(self.max_protocol_version)
-            .max(self.min_protocol_version)
     }
 
     /// Validate protocol version bounds.
@@ -394,7 +392,7 @@ mod protocol_version_tests {
     }
 
     #[test]
-    fn negotiate_clamps_into_range() {
+    fn negotiate_caps_at_server_max_without_raising_client_max() {
         let cfg = ProtocolConfig::default(); // [2, 3]
 
         // v3 client + v3 server => 3
@@ -405,8 +403,8 @@ mod protocol_version_tests {
         assert_eq!(cfg.negotiate_protocol_version(Some(9)), 3);
         // v2 client (None) => floor
         assert_eq!(cfg.negotiate_protocol_version(None), 2);
-        // client below floor => raised to min
-        assert_eq!(cfg.negotiate_protocol_version(Some(1)), 2);
+        // client below floor remains below it so the handshake can reject it
+        assert_eq!(cfg.negotiate_protocol_version(Some(1)), 1);
         // exact floor
         assert_eq!(cfg.negotiate_protocol_version(Some(2)), 2);
     }
@@ -490,6 +488,11 @@ mod protocol_version_tests {
         };
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.negotiate_protocol_version(None), 3);
+        assert_eq!(
+            cfg.negotiate_protocol_version(Some(2)),
+            2,
+            "negotiation must never raise a client above its declared maximum"
+        );
     }
 
     #[test]

@@ -183,6 +183,20 @@ export function shouldResolveConnectedPair(
   return previous !== null || allExpectedPairsConnected;
 }
 
+/** Record current connectivity; report the logical pair once per obligation. */
+export function noteCurrentPairConnected(
+  connected: Set<string>,
+  reported: Set<string>,
+  peer: string,
+): boolean {
+  connected.add(peer);
+  if (reported.has(peer)) {
+    return false;
+  }
+  reported.add(peer);
+  return true;
+}
+
 export function isTerminalPeerConnectionState(state: string): boolean {
   return state === 'failed' || state === 'closed';
 }
@@ -208,6 +222,19 @@ export function authoritativePeerDelta(
     added: [...planned].filter((peer) => !current.has(peer)),
     retained: [...planned].filter((peer) => current.has(peer)),
   };
+}
+
+export function connectionTargetsForPlan(
+  delta: Readonly<{ added: readonly string[]; retained: readonly string[] }>,
+  isPaired: (peer: string) => boolean,
+): Set<string> {
+  const targets = new Set(delta.added);
+  for (const peer of delta.retained) {
+    if (!isPaired(peer)) {
+      targets.add(peer);
+    }
+  }
+  return targets;
 }
 
 export function requireFinalizedMembershipPlan(
@@ -344,6 +371,7 @@ class Orchestrator {
   private webrtcPlanSeen = false;
   private readonly expectedPeers = new Set<string>();
   private readonly connectedPairs = new Set<string>();
+  private readonly pairConnectedReported = new Set<string>();
   private lastIceServers: PlanIceServer[] = [];
   private transportStatus: boolean | null = null;
   private p2pDeadline: number | null = null;
@@ -393,16 +421,7 @@ class Orchestrator {
           }
           emit({ event: 'pc_state', peer, state });
           if (isTerminalPeerConnectionState(state)) {
-            this.connectedPairs.delete(peer);
-            this.sentLabels.delete(peer);
-            this.receivedLabels.delete(peer);
-            this.pendingExchangePeers.delete(peer);
-            this.reportedExchangeDiagnostics.delete(peer);
-            this.pendingSignals.delete(peer);
-            this.engine.removePeer(peer);
-            if (this.webrtcPlanSeen) {
-              this.resolveTransportStatus();
-            }
+            this.handlePeerTransportLoss(peer);
           }
         });
       },
@@ -415,6 +434,15 @@ class Orchestrator {
           if (this.engine.noteChannelOpen(peer, label)) {
             this.onPairConnected(peer);
           }
+        });
+      },
+      onChannelClosed: (peer, generation, label) => {
+        this.enqueue(async () => {
+          if (!this.engine.isCurrentGeneration(peer, generation)) {
+            return;
+          }
+          emit({ event: 'channel_closed', peer, label });
+          this.handlePeerTransportLoss(peer);
         });
       },
       onChannelMessage: (peer, generation, label, text) => {
@@ -1013,12 +1041,7 @@ class Orchestrator {
         for (const peer of delta.removed) {
           this.removePairObligation(peer);
         }
-        const added = new Set(delta.added);
-        for (const peer of delta.retained) {
-          if (!this.engine.isPaired(peer)) {
-            added.add(peer);
-          }
-        }
+        const added = connectionTargetsForPlan(delta, (peer) => this.engine.isPaired(peer));
         for (const peer of peers) {
           const peerId = String(peer['player_id']);
           if (transport === 'webrtc' && added.delete(peerId)) {
@@ -1241,6 +1264,7 @@ class Orchestrator {
   private removePairObligation(peer: string): void {
     this.expectedPeers.delete(peer);
     this.connectedPairs.delete(peer);
+    this.pairConnectedReported.delete(peer);
     this.peerStatusFrom.delete(peer);
     this.sentLabels.delete(peer);
     this.receivedLabels.delete(peer);
@@ -1248,6 +1272,20 @@ class Orchestrator {
     this.reportedExchangeDiagnostics.delete(peer);
     this.pendingSignals.delete(peer);
     this.engine.removePeer(peer);
+  }
+
+  /** Tear down an unusable P2P link while retaining its planned obligation. */
+  private handlePeerTransportLoss(peer: string): void {
+    this.connectedPairs.delete(peer);
+    this.sentLabels.delete(peer);
+    this.receivedLabels.delete(peer);
+    this.pendingExchangePeers.delete(peer);
+    this.reportedExchangeDiagnostics.delete(peer);
+    this.pendingSignals.delete(peer);
+    this.engine.removePeer(peer);
+    if (this.webrtcPlanSeen) {
+      this.resolveTransportStatus();
+    }
   }
 
   /**
@@ -1324,8 +1362,9 @@ class Orchestrator {
    * optional exchange, and check the all-pairs resolution condition.
    */
   private onPairConnected(peer: string): void {
-    this.connectedPairs.add(peer);
-    emit({ event: 'p2p_pair_connected', peer });
+    if (noteCurrentPairConnected(this.connectedPairs, this.pairConnectedReported, peer)) {
+      emit({ event: 'p2p_pair_connected', peer });
+    }
     if (this.config.exchange) {
       this.pendingExchangePeers.add(peer);
       this.flushPendingExchangeSends();

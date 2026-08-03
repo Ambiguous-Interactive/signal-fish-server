@@ -1079,6 +1079,29 @@ pub(super) async fn handle_socket(
             return;
         }
     };
+
+    // Auth-disabled endpoints normally use their path version immediately. A
+    // deployment floor above that endpoint cannot be satisfied without lying
+    // about the client's capabilities, so reject before starting socket tasks.
+    if !server.config().auth_enabled
+        && default_protocol_version < server.protocol_config().min_protocol_version
+    {
+        let minimum = server.protocol_config().min_protocol_version;
+        let error = ServerMessage::AuthenticationError {
+            error: format!(
+                "Endpoint protocol version {default_protocol_version} is below the server minimum {minimum}"
+            ),
+            error_code: ErrorCode::UnsupportedProtocolVersion,
+        };
+        let _ = tokio::time::timeout(
+            CLOSE_WRITE_TIMEOUT,
+            send_immediate_server_message(&mut sender, &error),
+        )
+        .await;
+        let _ = tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await;
+        server.unregister_client(&player_id).await;
+        return;
+    }
     // Track authentication state.
     let mut authenticated = !server.config().auth_enabled; // Auto-authenticated if auth disabled
     let mut authenticate_processed = false;
@@ -1847,6 +1870,52 @@ pub(super) async fn handle_socket(
                                         }
                                     };
 
+                                    // Protocol version + capability negotiation (P1).
+                                    // A missing `protocol_version` uses the endpoint
+                                    // default. Explicit client values take precedence,
+                                    // and are never raised above what the client claims.
+                                    let cfg = server_clone.protocol_config();
+                                    let client_max =
+                                        protocol_version.or(Some(default_protocol_version));
+                                    let negotiated_version =
+                                        cfg.negotiate_protocol_version(client_max);
+                                    if negotiated_version < cfg.min_protocol_version {
+                                        let error_message = format!(
+                                            "Client protocol version {negotiated_version} is below the server minimum {}",
+                                            cfg.min_protocol_version
+                                        );
+                                        tracing::warn!(
+                                            %active_player_id,
+                                            client_protocol_version = negotiated_version,
+                                            server_min_protocol_version = cfg.min_protocol_version,
+                                            "Protocol version negotiation failed"
+                                        );
+                                        let _ = enqueue_connection_message(
+                                            &tx_clone,
+                                            &close_signal,
+                                            &server_clone,
+                                            slow_consumer_timeout,
+                                            &active_player_id,
+                                            ServerMessage::AuthenticationError {
+                                                error: error_message,
+                                                error_code: ErrorCode::UnsupportedProtocolVersion,
+                                            },
+                                            "protocol version compatibility error",
+                                        )
+                                        .await;
+                                        // Auth-disabled sockets were provisionally
+                                        // authenticated from the endpoint default.
+                                        // Once an optional Authenticate contradicts
+                                        // that default below the deployment floor,
+                                        // continuing would leave a declared-v2 client
+                                        // usable as v3. Auth-enabled clients may retry
+                                        // their not-yet-authenticated handshake.
+                                        if !server_clone.config().auth_enabled {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+
                                     authenticated = true;
                                     authenticate_processed = true;
                                     server_clone
@@ -1899,16 +1968,6 @@ pub(super) async fn handle_socket(
                                         &active_player_id,
                                         negotiated_format,
                                     );
-
-                                    // Protocol version + capability negotiation (P1).
-                                    // A missing `protocol_version` on the /v3 path is
-                                    // treated as the path default (3); on /v2 it stays
-                                    // v2. Explicit client values always take precedence.
-                                    let cfg = server_clone.protocol_config();
-                                    let client_max =
-                                        protocol_version.or(Some(default_protocol_version));
-                                    let negotiated_version =
-                                        cfg.negotiate_protocol_version(client_max);
 
                                     let (negotiated_transports, negotiated_topologies) =
                                         negotiate_capabilities(

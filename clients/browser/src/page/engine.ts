@@ -30,6 +30,7 @@ export interface EngineCallbacks {
   onLocalCandidate(peer: string, generation: number, candidateJson: string): void;
   onPcState(peer: string, generation: number, state: string): void;
   onChannelOpen(peer: string, generation: number, label: string): void;
+  onChannelClosed(peer: string, generation: number, label: string): void;
   onChannelMessage(peer: string, generation: number, label: string, text: string): void;
 }
 
@@ -303,6 +304,24 @@ export class Engine {
           : new TextDecoder().decode(event.data as ArrayBuffer);
       this.callbacks.onChannelMessage(peer, callbackLink.generation, label, text);
     };
+    // A required data channel can fail while the peer connection itself stays
+    // `connected`. Treat close/error as a terminal pair signal so the
+    // orchestrator reports relay fallback and permits a later plan to rebuild.
+    // Ignore application-defined extra channels: only this reference client's
+    // two protocol-required labels determine pair health.
+    if (label !== RELIABLE_LABEL && label !== UNRELIABLE_LABEL) {
+      return;
+    }
+    let terminalNotified = false;
+    const notifyClosed = () => {
+      const link = this.peers.get(peer);
+      if (!terminalNotified && link === callbackLink && link.channels.get(label) === channel) {
+        terminalNotified = true;
+        this.callbacks.onChannelClosed(peer, callbackLink.generation, label);
+      }
+    };
+    channel.onclose = notifyClosed;
+    channel.onerror = notifyClosed;
   }
 }
 

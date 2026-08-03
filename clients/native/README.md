@@ -130,6 +130,7 @@ process continues to its normal bounded exit.
 | `ice_candidate_dropped` | `from` | Native-only `--drop-ice-from` discarded this peer's inbound candidate after `signal_received` made the signaling hop observable. The older shared `--cripple-ice` contract remains unchanged and does not emit this event |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
 | `channel_open` | `peer`, `label` | One data channel reached open (`label` ∈ `reliable`/`unreliable`) |
+| `channel_closed` | `peer`, `label` | A required data channel closed or became unreadable; the unusable pair is removed and relay fallback remains live |
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |

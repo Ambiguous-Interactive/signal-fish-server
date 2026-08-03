@@ -37,7 +37,7 @@ working client implementing only the floor.
   its delivery contract fails. Raw binary game data remains reliable.
 
 See [Protocol Versions](../concepts/protocol-versions.md) for how the negotiated
-version is chosen and clamped.
+version is capped downward and rejected when it cannot meet the server floor.
 
 ## Mandatory v2 relay-floor flow
 

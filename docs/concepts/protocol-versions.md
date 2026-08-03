@@ -40,11 +40,12 @@ v3 server observes pure v2 behavior.
 | Capability handshake | none | `protocol_version` / transports / topologies negotiated, echoed in extended `ProtocolInfo` |
 | Back-compat | baseline | purely additive; a v2 client never sends or receives a v3 message |
 
-The negotiated version is clamped into the server's configured range:
-`negotiated = clamp(client_max, protocol.min_protocol_version, protocol.max_protocol_version)`. A client that
-advertises a higher version than the deployment speaks is clamped **down** to `protocol.max_protocol_version`; one
-that omits `protocol_version` is negotiated from the endpoint default. Defaults: `protocol.min_protocol_version`
-is `2`, `protocol.max_protocol_version` is `3`.
+The negotiated version is capped at the server's configured ceiling:
+`negotiated = min(client_max, protocol.max_protocol_version)`. A client that advertises a higher version than the
+deployment speaks is clamped **down** to `protocol.max_protocol_version`; the server never raises a client above
+its declared maximum. A result below `protocol.min_protocol_version` is rejected with
+`UNSUPPORTED_PROTOCOL_VERSION`. An omitted `protocol_version` uses the endpoint default. Defaults:
+`protocol.min_protocol_version` is `2`, `protocol.max_protocol_version` is `3`.
 
 ## The two invariants
 

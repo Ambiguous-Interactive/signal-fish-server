@@ -31,7 +31,8 @@ pub enum ClientMessage {
         /// Highest protocol version the client speaks.
         ///
         /// When absent, the endpoint default is used (`/v2/ws` => v2,
-        /// `/v3/ws` => v3), then clamped by server protocol configuration.
+        /// `/v3/ws` => v3), then capped at the server maximum. A result below
+        /// the server minimum is rejected rather than raised.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protocol_version: Option<u16>,
         /// Data-path transports the client supports.

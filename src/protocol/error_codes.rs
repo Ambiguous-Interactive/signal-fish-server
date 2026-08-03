@@ -112,6 +112,11 @@ pub enum ErrorCode {
     // discriminant stability; see the signaling-errors note above.
     /// The requested delivery class/key combination is invalid.
     InvalidDeliveryClass,
+
+    // Authentication errors (1xxx category). Appended at the END for rkyv
+    // discriminant stability; see the signaling-errors note above.
+    /// The client cannot speak this deployment's minimum protocol version.
+    UnsupportedProtocolVersion,
 }
 
 impl ErrorCode {
@@ -300,6 +305,9 @@ impl ErrorCode {
             Self::InvalidDeliveryClass => {
                 "The game-data delivery class is invalid: latest requires a key, while reliable and volatile must not include one."
             }
+            Self::UnsupportedProtocolVersion => {
+                "The client's highest supported protocol version is below this server's configured minimum. Upgrade the client or connect to a compatible deployment."
+            }
         }
     }
 }
@@ -370,6 +378,7 @@ mod tests {
             ErrorCode::ActivityTimeout,
             ErrorCode::ServerDraining,
             ErrorCode::InvalidDeliveryClass,
+            ErrorCode::UnsupportedProtocolVersion,
         ];
 
         for error_code in &error_codes {

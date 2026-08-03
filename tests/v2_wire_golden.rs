@@ -718,6 +718,20 @@ fn golden_server_authority_changed() {
         ),
     );
     assert_msgpack(&msg, "82a474797065b0417574686f726974794368616e676564a46461746182b0617574686f726974795f706c61796572c4100000000000000000000000000000000ab1796f755f6172655f617574686f72697479c3");
+
+    let vacant = ServerMessage::AuthorityChanged {
+        authority_player: None,
+        you_are_authority: false,
+    };
+    assert_json(
+        &vacant,
+        json!({
+            "type": "AuthorityChanged",
+            "data": { "authority_player": null, "you_are_authority": false }
+        }),
+        r#"{"type":"AuthorityChanged","data":{"authority_player":null,"you_are_authority":false}}"#,
+    );
+    assert_msgpack(&vacant, "82a474797065b0417574686f726974794368616e676564a46461746182b0617574686f726974795f706c61796572c0b1796f755f6172655f617574686f72697479c2");
 }
 
 #[test]
@@ -736,6 +750,21 @@ fn golden_server_authority_response() {
         r#"{"type":"AuthorityResponse","data":{"granted":false,"reason":"conflict","error_code":"AUTHORITY_CONFLICT"}}"#,
     );
     assert_msgpack(&msg, "82a474797065b1417574686f72697479526573706f6e7365a46461746183a76772616e746564c2a6726561736f6ea8636f6e666c696374aa6572726f725f636f6465b2415554484f524954595f434f4e464c494354");
+
+    let granted = ServerMessage::AuthorityResponse {
+        granted: true,
+        reason: None,
+        error_code: None,
+    };
+    assert_json(
+        &granted,
+        json!({
+            "type": "AuthorityResponse",
+            "data": { "granted": true, "reason": null }
+        }),
+        r#"{"type":"AuthorityResponse","data":{"granted":true,"reason":null}}"#,
+    );
+    assert_msgpack(&granted, "82a474797065b1417574686f72697479526573706f6e7365a46461746182a76772616e746564c3a6726561736f6ec0");
 }
 
 #[test]
@@ -1242,6 +1271,10 @@ fn golden_enum_error_code_all_variants() {
             ErrorCode::InvalidDeliveryClass,
             r#""INVALID_DELIVERY_CLASS""#,
         ),
+        (
+            ErrorCode::UnsupportedProtocolVersion,
+            r#""UNSUPPORTED_PROTOCOL_VERSION""#,
+        ),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1302,12 +1335,13 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::SlowConsumer
         | ErrorCode::ActivityTimeout
         | ErrorCode::ServerDraining
-        | ErrorCode::InvalidDeliveryClass => (),
+        | ErrorCode::InvalidDeliveryClass
+        | ErrorCode::UnsupportedProtocolVersion => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        52,
+        53,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

@@ -273,14 +273,6 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
     let endpoint_schema = mapping_path(root, &["components", "schemas", "DirectEndpoint"])
         .expect("spec must define DirectEndpoint");
 
-    assert_eq!(
-        mapping_path(schema, &["properties", "direct_endpoint", "allOf"])
-            .and_then(Yaml::as_sequence)
-            .and_then(|items| items.first())
-            .and_then(|item| item.as_mapping_get("$ref"))
-            .and_then(Yaml::as_str),
-        Some("#/components/schemas/DirectEndpoint")
-    );
     let endpoint_required: BTreeSet<_> = endpoint_schema
         .as_mapping_get("required")
         .and_then(Yaml::as_sequence)
@@ -300,34 +292,62 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
         Some(1)
     );
 
-    let direct_branch = schema
-        .as_mapping_get("allOf")
+    let branches = schema
+        .as_mapping_get("oneOf")
         .and_then(Yaml::as_sequence)
-        .expect("SessionPlan.data must declare conditional branches")
+        .expect("SessionPlan.data must declare exact legal branches");
+    let legal_pairs: BTreeSet<_> = branches
+        .iter()
+        .map(|branch| {
+            let topology = mapping_path(branch, &["properties", "topology", "const"])
+                .and_then(Yaml::as_str)
+                .expect("each SessionPlan branch must fix topology");
+            let transport = mapping_path(branch, &["properties", "transport", "const"])
+                .and_then(Yaml::as_str)
+                .expect("each SessionPlan branch must fix transport");
+            (topology, transport)
+        })
+        .collect();
+    assert_eq!(
+        legal_pairs,
+        BTreeSet::from([
+            ("relay", "relay"),
+            ("host", "direct"),
+            ("host", "webrtc"),
+            ("mesh", "webrtc"),
+        ]),
+        "SessionPlan schema must reject every illegal topology/transport cross-product"
+    );
+
+    let direct_branch = branches
         .iter()
         .find(|branch| {
-            mapping_path(branch, &["if", "properties", "transport", "const"]).and_then(Yaml::as_str)
+            mapping_path(branch, &["properties", "transport", "const"]).and_then(Yaml::as_str)
                 == Some("direct")
         })
-        .expect("SessionPlan.data must condition transport=direct");
-    let direct_required: BTreeSet<_> = mapping_path(direct_branch, &["then", "required"])
+        .expect("SessionPlan.data must define host+direct");
+    let direct_required: BTreeSet<_> = direct_branch
+        .as_mapping_get("required")
         .and_then(Yaml::as_sequence)
         .expect("Direct SessionPlan branch must list required fields")
         .iter()
         .map(|field| field.as_str().expect("required field must be a string"))
         .collect();
-    assert_eq!(direct_required, BTreeSet::from(["host", "direct_endpoint"]));
     assert_eq!(
-        mapping_path(direct_branch, &["then", "properties", "topology", "const"])
-            .and_then(Yaml::as_str),
-        Some("host")
+        direct_required,
+        BTreeSet::from([
+            "topology",
+            "transport",
+            "host",
+            "direct_endpoint",
+            "peers",
+            "fallback",
+        ])
     );
     assert_eq!(
-        mapping_path(direct_branch, &["else", "not", "required"])
-            .and_then(Yaml::as_sequence)
-            .and_then(|fields| fields.first())
+        mapping_path(direct_branch, &["properties", "direct_endpoint", "$ref"])
             .and_then(Yaml::as_str),
-        Some("direct_endpoint")
+        Some("#/components/schemas/DirectEndpoint")
     );
 
     let host = Uuid::from_u128(10);
@@ -351,6 +371,111 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
     assert_eq!(serialized["data"]["direct_endpoint"]["host"], "192.0.2.10");
     assert_eq!(serialized["data"]["direct_endpoint"]["port"], 7777);
     assert!(serialized["data"].get("ice_servers").is_none());
+}
+
+#[test]
+fn connection_info_schema_is_an_exact_union_of_rust_wire_shapes() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+    let branches = mapping_path(root, &["components", "schemas", "ConnectionInfo", "oneOf"])
+        .and_then(Yaml::as_sequence)
+        .expect("ConnectionInfo must be an exact oneOf");
+
+    let expected = [
+        ("direct", BTreeSet::from(["type", "host", "port"])),
+        (
+            "unity_relay",
+            BTreeSet::from(["type", "allocation_id", "connection_data", "key"]),
+        ),
+        (
+            "relay",
+            BTreeSet::from(["type", "host", "port", "allocation_id", "token"]),
+        ),
+        ("webrtc", BTreeSet::from(["type", "ice_candidates"])),
+        ("custom", BTreeSet::from(["type", "data"])),
+    ];
+    assert_eq!(branches.len(), expected.len());
+    for (token, required) in expected {
+        let branch = branches
+            .iter()
+            .find(|branch| {
+                mapping_path(branch, &["properties", "type", "const"]).and_then(Yaml::as_str)
+                    == Some(token)
+            })
+            .unwrap_or_else(|| panic!("missing ConnectionInfo branch {token}"));
+        assert_eq!(
+            branch
+                .as_mapping_get("additionalProperties")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{token} must reject fields from other variants"
+        );
+        let actual: BTreeSet<_> = branch
+            .as_mapping_get("required")
+            .and_then(Yaml::as_sequence)
+            .expect("branch must declare required fields")
+            .iter()
+            .map(|field| field.as_str().expect("required field must be a string"))
+            .collect();
+        assert_eq!(actual, required, "required fields drifted for {token}");
+    }
+
+    assert_eq!(
+        mapping_path(
+            branches
+                .iter()
+                .find(|branch| {
+                    mapping_path(branch, &["properties", "type", "const"]).and_then(Yaml::as_str)
+                        == Some("webrtc")
+                })
+                .expect("webrtc branch"),
+            &["properties", "sdp", "nullable"],
+        )
+        .and_then(Yaml::as_bool),
+        Some(true),
+        "Rust accepts omitted WebRTC.sdp and serializes None as an explicit null"
+    );
+}
+
+#[test]
+fn authority_option_fields_are_required_but_nullable_on_the_wire() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    for (schema_name, field) in [
+        ("AuthorityChanged", "authority_player"),
+        ("AuthorityResponse", "reason"),
+    ] {
+        let data = mapping_path(
+            root,
+            &["components", "schemas", schema_name, "properties", "data"],
+        )
+        .unwrap_or_else(|| panic!("missing {schema_name}.data"));
+        let required: BTreeSet<_> = data
+            .as_mapping_get("required")
+            .and_then(Yaml::as_sequence)
+            .expect("authority payload must list required fields")
+            .iter()
+            .map(|value| value.as_str().expect("required field must be a string"))
+            .collect();
+        assert!(
+            required.contains(field),
+            "{schema_name}.{field} is always serialized"
+        );
+        assert_eq!(
+            mapping_path(data, &["properties", field, "nullable"]).and_then(Yaml::as_bool),
+            Some(true),
+            "{schema_name}.{field}=None serializes as null"
+        );
+    }
 }
 
 #[test]

@@ -1186,11 +1186,12 @@ message:
 - `supported_topologies` — session topologies the client supports. Absent means the capability set is relay-only
   even when `/v3/ws` defaulted the protocol version to 3. Tokens: `relay`, `host`, `mesh`.
 
-The server clamps the negotiated version into its configured range:
-`negotiated = clamp(client_max, min_protocol_version, max_protocol_version)`, i.e.
-`min(client_max, max_protocol_version)` raised to at least `min_protocol_version`. A client that advertises a higher
-version than the deployment speaks is clamped **down** to `max_protocol_version`; one that omits the field is
-negotiated from the endpoint default (`/v2/ws` defaults to v2; `/v3/ws` defaults to v3). If the negotiated
+The server caps the negotiated version at its configured ceiling:
+`negotiated = min(client_max, max_protocol_version)`. A client that advertises a higher version than the deployment
+speaks is clamped **down** to `max_protocol_version`; the server never raises a client above its declared maximum.
+If the result is below `min_protocol_version`, authentication fails with
+`UNSUPPORTED_PROTOCOL_VERSION`. An omitted field uses the endpoint default (`/v2/ws` defaults to v2; `/v3/ws`
+defaults to v3). If the negotiated
 version is below 3, the connection is **relay-only** regardless of the advertised `supported_transports` /
 `supported_topologies`. If the negotiated version is 3 but `supported_transports` / `supported_topologies` are
 absent, the connection is v3 relay-only. Defaults:
@@ -1219,7 +1220,7 @@ does not participate in the `Authenticate.supported_transports` data-path negoti
 
 **Endpoints.** `/v2/ws` and `/v3/ws` share the same handler. `/v3/ws` only changes the _default_ protocol version
 to 3 when the client omits `protocol_version`; an explicit `protocol_version` in `Authenticate` always wins (then
-clamped). `/v2/ws` behavior is unchanged.
+capped downward at the server maximum, or rejected below its minimum). `/v2/ws` behavior is unchanged.
 
 **Back-compat invariant.** A non-relay plan requires _every_ member of a room to be v3-capable and to support the
 chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor. Every

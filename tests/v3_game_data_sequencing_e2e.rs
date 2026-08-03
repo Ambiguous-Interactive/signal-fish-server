@@ -1065,8 +1065,8 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
     );
     for player in v2_players {
         assert!(
-            player.get("epoch").is_none(),
-            "a v2 joiner's RoomJoined must omit epoch on every member: {v2_room}"
+            player.get("epoch").is_none() && player.get("seq").is_none(),
+            "a v2 joiner's RoomJoined must omit epoch/seq on every member: {v2_room}"
         );
     }
 
@@ -1078,6 +1078,11 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
         a_sees_v2["data"]["player"]["epoch"].as_u64(),
         Some(1),
         "a v3 member sees a joiner's epoch on PlayerJoined: {a_sees_v2}"
+    );
+    assert_eq!(
+        a_sees_v2["data"]["player"]["seq"].as_u64(),
+        Some(0),
+        "a v3 member sees the joiner's paired seq baseline: {a_sees_v2}"
     );
 
     // A v3 joiner: its RoomJoined snapshot CARRIES each member's epoch (all 1).
@@ -1098,14 +1103,20 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
             Some(1),
             "a v3 joiner's RoomJoined carries each member's epoch: {v3_room}"
         );
+        assert_eq!(
+            player["seq"].as_u64(),
+            Some(0),
+            "a v3 joiner's RoomJoined carries each member's paired seq baseline: {v3_room}"
+        );
     }
 
     // The v2 member now sees the v3 joiner arrive; its PlayerJoined omits epoch.
     let v2_sees_v3 =
         next_message_value_of_type(&mut v2_joiner, "PlayerJoined", "v2 sees the v3 join").await;
     assert!(
-        v2_sees_v3["data"]["player"].get("epoch").is_none(),
-        "a v2 member's PlayerJoined must omit epoch: {v2_sees_v3}"
+        v2_sees_v3["data"]["player"].get("epoch").is_none()
+            && v2_sees_v3["data"]["player"].get("seq").is_none(),
+        "a v2 member's PlayerJoined must omit epoch/seq: {v2_sees_v3}"
     );
 
     // SpectatorJoined is another full sender snapshot and obeys the same
@@ -1129,8 +1140,8 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
         .expect("v2 spectator current_players")
     {
         assert!(
-            player.get("epoch").is_none(),
-            "a v2 spectator snapshot must omit epoch: {v2_spectator_joined}"
+            player.get("epoch").is_none() && player.get("seq").is_none(),
+            "a v2 spectator snapshot must omit epoch/seq: {v2_spectator_joined}"
         );
     }
 
@@ -1153,8 +1164,8 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
         .expect("v3 spectator current_players")
     {
         assert!(
-            player.get("epoch").is_some(),
-            "a v3 spectator snapshot must carry epoch: {v3_spectator_joined}"
+            player.get("epoch").is_some() && player.get("seq").is_some(),
+            "a v3 spectator snapshot must carry paired epoch/seq: {v3_spectator_joined}"
         );
     }
 

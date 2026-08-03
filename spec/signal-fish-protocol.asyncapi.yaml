@@ -87,7 +87,8 @@ servers:
     description: |
       v3 endpoint. Defaults the omitted Authenticate.protocol_version to 3, but a
       client is relay-only unless it also advertises supported_transports /
-      supported_topologies. Server clamps to its configured protocol range.
+      supported_topologies. The server caps downward at its configured maximum
+      and rejects a result below its configured minimum.
 
 channels:
   signaling:
@@ -513,6 +514,7 @@ components:
         - ACTIVITY_TIMEOUT
         - SERVER_DRAINING
         - INVALID_DELIVERY_CLASS
+        - UNSUPPORTED_PROTOCOL_VERSION
 
     ReliableDeliveryCounters:
       type: object
@@ -683,18 +685,53 @@ components:
         relay_type: { type: string }
         connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
     ConnectionInfo:
-      type: object
       description: >-
         Legacy self-declared peer metadata (tagged by an inner `type` field:
         direct | unity_relay | relay | webrtc | custom). Visible in room member
         snapshots and GameStarting; not v3 capability negotiation. A validated
         direct value is also used to elect an executable Direct host.
-      required: [type]
-      properties:
-        type:
-          type: string
-          enum: [direct, unity_relay, relay, webrtc, custom]
-      additionalProperties: true
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, host, port]
+          properties:
+            type: { const: direct }
+            host: { type: string }
+            port: { type: integer, minimum: 0, maximum: 65535 }
+        - type: object
+          additionalProperties: false
+          required: [type, allocation_id, connection_data, key]
+          properties:
+            type: { const: unity_relay }
+            allocation_id: { type: string }
+            connection_data: { type: string }
+            key: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [type, host, port, allocation_id, token]
+          properties:
+            type: { const: relay }
+            host: { type: string }
+            port: { type: integer, minimum: 0, maximum: 65535 }
+            transport: { $ref: '#/components/schemas/RelayTransport' }
+            allocation_id: { type: string }
+            token: { type: string }
+            client_id: { type: integer, minimum: 0, maximum: 65535 }
+        - type: object
+          additionalProperties: false
+          required: [type, ice_candidates]
+          properties:
+            type: { const: webrtc }
+            sdp: { type: string, nullable: true }
+            ice_candidates:
+              type: array
+              items: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [type, data]
+          properties:
+            type: { const: custom }
+            data: {}
     DirectEndpoint:
       type: object
       additionalProperties: false
@@ -1204,9 +1241,11 @@ components:
         type: { const: AuthorityChanged }
         data:
           type: object
-          required: [you_are_authority]
+          required: [authority_player, you_are_authority]
           properties:
-            authority_player: { $ref: '#/components/schemas/PlayerId' }
+            authority_player:
+              allOf: [{ $ref: '#/components/schemas/PlayerId' }]
+              nullable: true
             you_are_authority: { type: boolean }
       required: [type, data]
     AuthorityResponse:
@@ -1215,10 +1254,10 @@ components:
         type: { const: AuthorityResponse }
         data:
           type: object
-          required: [granted]
+          required: [granted, reason]
           properties:
             granted: { type: boolean }
-            reason: { type: string }
+            reason: { type: string, nullable: true }
             error_code: { $ref: '#/components/schemas/ErrorCode' }
       required: [type, data]
     LobbyStateChanged:
@@ -1288,48 +1327,65 @@ components:
       properties:
         type: { const: SessionPlan }
         data:
-          type: object
-          required: [topology, transport, peers, fallback]
-          properties:
-            topology: { $ref: '#/components/schemas/Topology' }
-            transport: { $ref: '#/components/schemas/Transport' }
-            host:
-              allOf: [{ $ref: '#/components/schemas/PlayerId' }]
-              description: Present only for host topology.
-            direct_endpoint:
-              allOf: [{ $ref: '#/components/schemas/DirectEndpoint' }]
-              description: Present exactly when transport is direct.
-            peers:
-              type: array
-              items: { $ref: '#/components/schemas/SessionPeer' }
-            ice_servers:
-              type: array
-              items: { $ref: '#/components/schemas/IceServer' }
-            fallback:
-              const: relay
-              description: Universal fallback transport; always relay (the floor).
-          allOf:
-            - if:
-                required: [topology]
-                properties:
-                  topology: { const: relay }
-              then:
-                properties:
-                  transport: { const: relay }
-                  peers: { maxItems: 0 }
-                  ice_servers: { maxItems: 0 }
-                not: { required: [host] }
-            - if:
-                required: [transport]
-                properties:
-                  transport: { const: direct }
-              then:
-                required: [host, direct_endpoint]
-                properties:
-                  topology: { const: host }
-                  ice_servers: { maxItems: 0 }
-              else:
-                not: { required: [direct_endpoint] }
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [topology, transport, peers, fallback]
+              properties:
+                topology: { const: relay }
+                transport: { const: relay }
+                peers:
+                  type: array
+                  maxItems: 0
+                  items: { $ref: '#/components/schemas/SessionPeer' }
+                ice_servers:
+                  type: array
+                  maxItems: 0
+                  items: { $ref: '#/components/schemas/IceServer' }
+                fallback: { const: relay }
+            - type: object
+              additionalProperties: false
+              required: [topology, transport, host, direct_endpoint, peers, fallback]
+              properties:
+                topology: { const: host }
+                transport: { const: direct }
+                host: { $ref: '#/components/schemas/PlayerId' }
+                direct_endpoint: { $ref: '#/components/schemas/DirectEndpoint' }
+                peers:
+                  type: array
+                  items: { $ref: '#/components/schemas/SessionPeer' }
+                ice_servers:
+                  type: array
+                  maxItems: 0
+                  items: { $ref: '#/components/schemas/IceServer' }
+                fallback: { const: relay }
+            - type: object
+              additionalProperties: false
+              required: [topology, transport, host, peers, fallback]
+              properties:
+                topology: { const: host }
+                transport: { const: webrtc }
+                host: { $ref: '#/components/schemas/PlayerId' }
+                peers:
+                  type: array
+                  items: { $ref: '#/components/schemas/SessionPeer' }
+                ice_servers:
+                  type: array
+                  items: { $ref: '#/components/schemas/IceServer' }
+                fallback: { const: relay }
+            - type: object
+              additionalProperties: false
+              required: [topology, transport, peers, fallback]
+              properties:
+                topology: { const: mesh }
+                transport: { const: webrtc }
+                peers:
+                  type: array
+                  items: { $ref: '#/components/schemas/SessionPeer' }
+                ice_servers:
+                  type: array
+                  items: { $ref: '#/components/schemas/IceServer' }
+                fallback: { const: relay }
       required: [type, data]
     Pong:
       type: object
