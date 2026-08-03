@@ -67,4 +67,11 @@ file discovery plus 809 ms Rust panic scanning); no hook implementation changed
 in this session. Adversarial review additionally moved missing-stamp,
 terminal-unroute, and reconnect-baseline races onto the new borrowed production
 seam, added production-ingress byte ceilings, and corrected CSV recipient
-reporting. Hosted PR review is recorded after publication.
+reporting.
+
+PR #248 passed hosted validation and merged at reviewed head
+`f98ca3dadc224751539ea976cf6665d5533e3984` as merge commit
+`2900b53e09a3595b6e8c43eb2976be50a8656ba5`. Cursor Bugbot reported no
+issues on the exact head and GitHub exposed no review threads. Copilot was
+requested twice but reported that the requester's review quota was exhausted;
+it supplied no actionable feedback. P37 is complete.

@@ -4,7 +4,10 @@ use crate::coordination::{
     RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 use crate::metrics::ServerMetrics;
-use crate::protocol::{LobbyState, PlayerId, RoomId, ServerMessage, SpectatorJoinedPayload};
+use crate::protocol::{
+    DeliveryClass, GameDataEncoding, LobbyState, PlayerId, RoomId, ServerMessage,
+    SpectatorJoinedPayload,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use tokio::sync::{mpsc, watch, Notify};
@@ -475,6 +478,198 @@ async fn missing_sender_stamp_cancels_broadcast_before_any_delivery_attempt() {
         0,
         "cancellation happens before recipient delivery accounting"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapshot() {
+    for borrowed_builder in [false, true] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(5),
+            Arc::clone(&metrics),
+        ));
+        let room_id = RoomId::new_v4();
+        let sender_id = PlayerId::new_v4();
+        let recipient_id = PlayerId::new_v4();
+        let healthy_id = PlayerId::new_v4();
+        let late_joiner_id = PlayerId::new_v4();
+        let mut classified_receivers = Vec::new();
+        for player_id in [recipient_id, healthy_id] {
+            let (sender, mut receiver) = crate::coordination::outbound_queue::channel(1, 1);
+            sender.set_protocol_version(3);
+            sender.set_game_data_format(GameDataEncoding::Json);
+            assert!(sender.delivery_classes_enabled());
+            let mut handle =
+                ClientDeliveryHandle::classified(sender, ConnectionCloseSignal::detached());
+            handle.sender = handle.sender.next_generation();
+            assert_eq!(
+                handle.sender.relay_projection(),
+                Some((true, GameDataEncoding::Json))
+            );
+            let transition = Arc::new(ServerMessage::SpectatorJoined(Box::new(
+                SpectatorJoinedPayload {
+                    room_id,
+                    room_code: "CACHE1".to_string(),
+                    spectator_id: player_id,
+                    game_name: "relay-cache-test".to_string(),
+                    current_players: Vec::new(),
+                    current_spectators: Vec::new(),
+                    lobby_state: LobbyState::Waiting,
+                    reason: None,
+                },
+            )));
+            let transition_outcome = handle
+                .sender
+                .try_send(transition, Some(room_id))
+                .expect("establish the classified recipient's room scope");
+            assert!(transition_outcome.enqueued);
+            let transition = receiver
+                .try_recv()
+                .expect("drain the classified room-scope transition");
+            assert!(matches!(
+                transition.payload,
+                crate::coordination::outbound_queue::OutboundPayload::Message(_)
+            ));
+            if player_id == recipient_id {
+                let prefill_outcome = handle
+                    .sender
+                    .try_send(
+                        Arc::new(ServerMessage::GameData {
+                            from_player: sender_id,
+                            data: serde_json::json!({"seq": 1}),
+                            seq: Some(1),
+                            epoch: Some(1),
+                            class: Some(DeliveryClass::Reliable),
+                            key: None,
+                        }),
+                        Some(room_id),
+                    )
+                    .expect("prefill the selected recipient's classified data queue");
+                assert!(prefill_outcome.enqueued);
+            }
+            coordinator
+                .register_local_client(player_id, Some(room_id), handle)
+                .await
+                .expect("register a classified relay recipient");
+            classified_receivers.push((player_id, receiver));
+        }
+
+        let mut broadcast = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move {
+                if borrowed_builder {
+                    let mut build_message = || {
+                        Some(Arc::new(ServerMessage::GameData {
+                            from_player: sender_id,
+                            data: serde_json::json!({"seq": 2}),
+                            seq: Some(2),
+                            epoch: Some(1),
+                            class: Some(DeliveryClass::Reliable),
+                            key: None,
+                        }))
+                    };
+                    coordinator
+                        .broadcast_to_room_except_with_borrowed_message(
+                            &room_id,
+                            &sender_id,
+                            &mut build_message,
+                        )
+                        .await
+                } else {
+                    coordinator
+                        .broadcast_to_room_except_with_message(
+                            &room_id,
+                            &sender_id,
+                            Box::new(|| {
+                                Some(Arc::new(ServerMessage::GameData {
+                                    from_player: sender_id,
+                                    data: serde_json::json!({"seq": 2}),
+                                    seq: Some(2),
+                                    epoch: Some(1),
+                                    class: Some(DeliveryClass::Reliable),
+                                    key: None,
+                                }))
+                            }),
+                        )
+                        .await
+                }
+            })
+        };
+        wait_for_counter("builder broadcast reached backpressure", 10_000, || {
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        })
+        .await;
+
+        let (late_joiner_tx, mut late_joiner_rx) = mpsc::channel(1);
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            coordinator.register_local_client(
+                late_joiner_id,
+                Some(room_id),
+                ClientDeliveryHandle::new(late_joiner_tx, ConnectionCloseSignal::detached()),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} builder held routing locks across its capacity wait",
+                if borrowed_builder {
+                    "borrowed"
+                } else {
+                    "boxed"
+                }
+            )
+        })
+        .expect("late joiner registration must succeed during capacity wait");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut broadcast)
+                .await
+                .is_err(),
+            "builder broadcast must still be waiting for the original recipient"
+        );
+
+        let (_, recipient_rx) = classified_receivers
+            .iter_mut()
+            .find(|(player_id, _)| *player_id == recipient_id)
+            .expect("backpressured recipient receiver must exist");
+        let prefill = recipient_rx
+            .try_recv()
+            .expect("original recipient prefill must still be queued");
+        assert_eq!(prefill.class(), Some(DeliveryClass::Reliable));
+        assert!(
+            matches!(
+                prefill.payload,
+                crate::coordination::outbound_queue::OutboundPayload::Message(message)
+                    if matches!(message.as_ref(), ServerMessage::GameData { seq: Some(1), .. })
+            ),
+            "original recipient prefill changed while the relay waited"
+        );
+        broadcast
+            .await
+            .expect("builder broadcast task must not panic")
+            .expect("builder broadcast must complete after capacity returns");
+        for (player_id, receiver) in &mut classified_receivers {
+            let relayed = receiver
+                .try_recv()
+                .unwrap_or_else(|error| panic!("recipient {player_id} lost relay: {error:?}"));
+            assert!(matches!(
+                relayed.payload,
+                crate::coordination::outbound_queue::OutboundPayload::Data(data)
+                    if matches!(
+                        data.message(),
+                        ServerMessage::GameData { seq: Some(2), .. }
+                    )
+            ));
+        }
+        let unexpected = late_joiner_rx.try_recv();
+        assert!(
+            matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+            "late joiner must not enter the already-started routing snapshot"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

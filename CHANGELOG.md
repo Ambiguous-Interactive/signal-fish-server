@@ -26,11 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   17–20%. Repeated frozen-v2 JSON and Rkyv relays also skip a no-op frame cache,
   reducing 8-/16-player operations from 4 to 3 and bytes by 51%/41%. The
   ingress-to-queue handoff now borrows its one-shot builder instead of heap
-  boxing it while retaining the original public boxed compatibility seam. The
-  isolated handoff measures 2/3/3 operations and 400/1,320/1,640 allocated
-  bytes at 2/8/16 players; separate JSON and binary production-ingress cells,
-  including message-envelope construction, measure 3/4/4 operations. Exact
-  message variants, delivery accounting, and cancellation behavior are
+  boxing it while retaining the original public boxed compatibility seam, and
+  the healthy path walks the guarded routing snapshot directly instead of
+  copying every recipient into a temporary vector. The isolated handoff now
+  measures 1/2/2 operations and 352/1,032/1,032 allocated bytes at 2/8/16
+  players; separate JSON and binary production-ingress cells, including
+  message-envelope construction, measure 2/3/3 operations and
+  648/1,328/1,328 bytes. Exact message variants, delivery accounting,
+  backpressure concurrency, routing snapshots, and cancellation behavior are
   checked, and no relay-latency improvement is claimed without an independent
   timing measurement.
 - Reduce memory-allocation work for frozen-v2 JSON and Rkyv binary relays

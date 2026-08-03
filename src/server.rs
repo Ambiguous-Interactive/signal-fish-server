@@ -974,6 +974,14 @@ enum RoomBatchReservation {
     Canceled,
 }
 
+#[derive(Default)]
+struct StartedDeliveries {
+    // Healthy queues leave both vectors empty. Only exceptional outcomes own
+    // state past the routing-guarded synchronous start phase.
+    pending: Vec<crate::coordination::BackpressuredDelivery>,
+    slow_consumers: Vec<(PlayerId, DeliverySender)>,
+}
+
 fn room_message_for_recipient(
     message: &Arc<ServerMessage>,
     player_id: &PlayerId,
@@ -1120,17 +1128,27 @@ impl InMemoryMessageCoordinator {
         .then(|| {
             crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(&message))
         });
+        let started = self.start_deliveries(recipients, &message, room_id, shared_relay);
+        self.finish_deliveries(started).await;
+    }
+
+    fn start_deliveries(
+        &self,
+        recipients: impl IntoIterator<Item = (PlayerId, ClientDeliveryHandle)>,
+        message: &Arc<ServerMessage>,
+        room_id: Option<RoomId>,
+        shared_relay: Option<crate::coordination::outbound_queue::DeliveryMessage>,
+    ) -> StartedDeliveries {
         // The negotiated queue policy normally resolves through `try_send`.
         // Start every recipient synchronously and build async machinery only
         // for queues that are actually full. Waiting recipients still enter
         // one join_all below, so waits remain concurrent and each grace
         // deadline begins when that queue first reports `Full`.
-        let mut pending = Vec::new();
-        let mut slow_consumers = Vec::new();
+        let mut started = StartedDeliveries::default();
         for (player_id, handle) in recipients {
             let delivery = shared_relay.clone().unwrap_or_else(|| {
                 crate::coordination::outbound_queue::DeliveryMessage::new(
-                    room_message_for_recipient(&message, &player_id),
+                    room_message_for_recipient(message, &player_id),
                 )
             });
             match crate::coordination::start_message_delivery_in_room(
@@ -1143,26 +1161,28 @@ impl InMemoryMessageCoordinator {
             ) {
                 crate::coordination::DeliveryStart::Complete(outcome) => {
                     if outcome == DeliveryOutcome::SlowConsumer {
-                        slow_consumers.push((player_id, handle.sender));
+                        started.slow_consumers.push((player_id, handle.sender));
                     }
                 }
                 crate::coordination::DeliveryStart::Backpressured(delivery) => {
-                    pending.push(delivery);
+                    started.pending.push(delivery);
                 }
             }
         }
+        started
+    }
 
-        if !pending.is_empty() {
+    async fn finish_deliveries(&self, mut started: StartedDeliveries) {
+        if !started.pending.is_empty() {
             let outcomes =
-                futures_util::future::join_all(pending.into_iter().map(|delivery| async move {
+                futures_util::future::join_all(started.pending.into_iter().map(|delivery| {
                     crate::coordination::finish_backpressured_delivery_in_room(
                         &self.metrics,
                         delivery,
                     )
-                    .await
                 }))
                 .await;
-            slow_consumers.extend(
+            started.slow_consumers.extend(
                 outcomes
                     .into_iter()
                     .filter(|(_, _, outcome)| *outcome == DeliveryOutcome::SlowConsumer)
@@ -1170,13 +1190,13 @@ impl InMemoryMessageCoordinator {
             );
         }
 
-        if !slow_consumers.is_empty() {
+        if !started.slow_consumers.is_empty() {
             // Remove immediately so senders stop paying the timeout for a
             // connection that is already closing; the connection's own
             // unregister flow performs the full cleanup (room membership,
             // reconnection window, peer notifications).
             let mut clients = self.local_clients.write().await;
-            for (player_id, attempted_sender) in &slow_consumers {
+            for (player_id, attempted_sender) in &started.slow_consumers {
                 let still_attempted_connection = clients
                     .get(player_id)
                     .is_some_and(|current| current.sender.same_channel(attempted_sender));
@@ -1185,6 +1205,46 @@ impl InMemoryMessageCoordinator {
                 }
             }
         }
+    }
+
+    /// Start one exact routing snapshot without copying its recipients.
+    ///
+    /// The caller holds both routing read guards throughout this synchronous
+    /// function. Any capacity wait is returned as owned state and must be
+    /// awaited only after those guards are dropped.
+    fn start_routed_deliveries(
+        &self,
+        room_players: &HashMap<RoomId, HashSet<PlayerId>>,
+        clients: &HashMap<PlayerId, ClientDeliveryHandle>,
+        room_id: &RoomId,
+        except_player: Option<&PlayerId>,
+        message: &Arc<ServerMessage>,
+    ) -> StartedDeliveries {
+        let Some(players) = room_players.get(room_id) else {
+            return StartedDeliveries::default();
+        };
+        let shared_relay = relay_projection_work_repeats(
+            players
+                .iter()
+                .filter(|player_id| Some(*player_id) != except_player)
+                .filter_map(|player_id| clients.get(player_id))
+                .filter_map(|handle| handle.sender.relay_projection())
+                .filter_map(|(supports_v3, format)| {
+                    relay_projection_cohort(message, supports_v3, format)
+                }),
+        )
+        .then(|| {
+            crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(message))
+        });
+        let recipients = players
+            .iter()
+            .filter(|player_id| Some(*player_id) != except_player)
+            .filter_map(|player_id| {
+                clients
+                    .get(player_id)
+                    .map(|handle| (*player_id, handle.clone()))
+            });
+        self.start_deliveries(recipients, message, Some(*room_id), shared_relay)
     }
 
     fn collect_routed_recipients(
@@ -2586,14 +2646,19 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
     ) -> anyhow::Result<()> {
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-        let recipients =
-            Self::collect_routed_recipients(&room_players, &clients, room_id, Some(except_player));
-        let message = build_message();
+        let started = build_message().map(|message| {
+            self.start_routed_deliveries(
+                &room_players,
+                &clients,
+                room_id,
+                Some(except_player),
+                &message,
+            )
+        });
         drop(clients);
         drop(room_players);
-        if let Some(message) = message {
-            self.deliver_to_all(recipients, message, Some(*room_id))
-                .await;
+        if let Some(started) = started {
+            self.finish_deliveries(started).await;
         }
         Ok(())
     }
@@ -2604,19 +2669,21 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &'a mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
     ) -> anyhow::Result<()> {
-        // Keep this body direct: an extra async helper would enlarge the
-        // async-trait future allocation on every relay even though it would
-        // not add an allocation operation.
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-        let recipients =
-            Self::collect_routed_recipients(&room_players, &clients, room_id, Some(except_player));
-        let message = build_message();
+        let started = build_message().map(|message| {
+            self.start_routed_deliveries(
+                &room_players,
+                &clients,
+                room_id,
+                Some(except_player),
+                &message,
+            )
+        });
         drop(clients);
         drop(room_players);
-        if let Some(message) = message {
-            self.deliver_to_all(recipients, message, Some(*room_id))
-                .await;
+        if let Some(started) = started {
+            self.finish_deliveries(started).await;
         }
         Ok(())
     }
