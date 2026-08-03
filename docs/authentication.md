@@ -15,7 +15,7 @@ Set `require_websocket_auth` to `true` and add authorized apps:
     "authorized_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "your-secret-here",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "My Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
@@ -27,8 +27,9 @@ Set `require_websocket_auth` to `true` and add authorized apps:
 
 ```
 
-**Important:** Change the default `app_secret` before deploying to production. The example value
-`CHANGE_ME_BEFORE_PRODUCTION` in `config.example.json` is intentionally insecure.
+`app_secret` remains a reserved configuration field, but the current WebSocket
+client handshake does not send or validate it. Do not embed it in a shipped
+client or treat changing it as client credential rotation.
 
 ## Client Authentication
 
@@ -67,6 +68,13 @@ A failed `Authenticate` is reported as a dedicated `AuthenticationError` message
 client instead sends any other message before authenticating, the server replies with a
 generic `Error` carrying `error_code === 'MISSING_APP_ID'` and closes the connection.
 
+> **Current trust boundary:** the WebSocket handshake validates the public
+> `app_id`; clients do not send `app_secret`. Application ownership and quotas
+> therefore prevent accidental cross-application room collisions and provide
+> accounting isolation, but they are not a hostile-client security boundary.
+> Do not embed `app_secret` in shipped clients. A replay-resistant client
+> credential design is tracked in issue #250.
+
 ## Per-App Settings
 
 Each authorized app has its own limits:
@@ -75,7 +83,7 @@ Each authorized app has its own limits:
 
 {
   "app_id": "my-game",
-  "app_secret": "secret-key",
+  "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
   "app_name": "My Game",
   "max_rooms": 100,
   "max_players_per_room": 16,
@@ -85,10 +93,15 @@ Each authorized app has its own limits:
 ```
 
 - `app_id` - Unique identifier for the app
-- `app_secret` - Secret key for authentication
+- `app_secret` - Reserved server-side field; not consumed by the current
+  WebSocket client handshake
 - `app_name` - Human-readable name (for logging/metrics)
-- `max_rooms` - Maximum concurrent rooms for this app
-- `max_players_per_room` - Max players per room for this app
+- `max_rooms` - Maximum concurrent persisted rooms owned by this app, counted
+  across every game name. Empty rooms continue to count until cleanup removes
+  them.
+- `max_players_per_room` - Maximum requested capacity for newly created rooms.
+  Existing rooms admit at most the lower of the room's stored capacity and the
+  app's current limit; lowering the limit does not eject existing players.
 - `rate_limit_per_minute` - Max requests per minute for this app (counted per
   `app_id`, across all of its connections), not per IP
 
@@ -157,6 +170,13 @@ Common auth-related errors:
 - `AUTHENTICATION_TIMEOUT` - Client did not authenticate in time
 - `MAX_ROOMS_PER_GAME_EXCEEDED` - App has reached its max rooms limit
 
+When auth is enabled, a room created by an authenticated client is owned by
+that app. Another app receives the same `ROOM_NOT_FOUND` result for seated,
+spectator, and reconnect admission, so ownership is not disclosed. For legacy
+unowned rooms, the first successful authenticated seated admission claims the
+room; spectator admission never claims it. Rooms created while WebSocket auth
+is disabled remain unowned.
+
 ## Example: Multiple Apps
 
 ```json
@@ -167,7 +187,7 @@ Common auth-related errors:
     "authorized_apps": [
       {
         "app_id": "production-game",
-        "app_secret": "prod-secret-key",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "Production Game",
         "max_rooms": 1000,
         "max_players_per_room": 16,
@@ -175,7 +195,7 @@ Common auth-related errors:
       },
       {
         "app_id": "dev-game",
-        "app_secret": "dev-secret-key",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "Development Game",
         "max_rooms": 10,
         "max_players_per_room": 4,
@@ -189,19 +209,23 @@ Common auth-related errors:
 
 ## Security Best Practices
 
-1. **Never commit secrets** - Use environment variables in production
-2. **Generate strong secrets** - Use a password generator or `openssl rand -base64 32`
-3. **Rotate secrets regularly** - Update secrets periodically
-4. **Use HTTPS in production** - Protect credentials in transit
-5. **Monitor failed auth attempts** - Watch for brute-force attacks
+1. **Do not ship server secrets** - A game client needs only its public
+   `app_id`; never embed `app_secret`, TURN secrets, or metrics tokens.
+2. **Use HTTPS in production** - Protect signaling and public app identity in
+   transit.
+3. **Monitor rejected app IDs** - Treat spikes as configuration drift or
+   probing, while remembering that app IDs are not hostile-client credentials.
+4. **Protect active secrets** - Generate and rotate TURN secrets and metrics
+   bearer tokens through environment or secret-manager injection.
 
 ## Environment Variables
 
-Override app secrets via environment:
+If deployment policy requires supplying the reserved `app_secret` field, keep
+it out of the checked-in file:
 
 ```bash
 # Not recommended - shown for reference only
-SIGNAL_FISH__SECURITY__AUTHORIZED_APPS='[{"app_id":"my-game","app_secret":"env-secret",...}]'
+SIGNAL_FISH__SECURITY__AUTHORIZED_APPS='[{"app_id":"my-game","app_secret":"RESERVED_NOT_USED_BY_CLIENTS",...}]'
 
 ```
 
@@ -278,7 +302,7 @@ cat > /app/config.json <<EOF
     "authorized_apps": [
       {
         "app_id": "${APP_ID}",
-        "app_secret": "${APP_SECRET}",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "${APP_NAME}",
         "max_rooms": ${MAX_ROOMS:-100},
         "max_players_per_room": ${MAX_PLAYERS:-16},

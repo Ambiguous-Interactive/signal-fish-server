@@ -79,11 +79,21 @@ pub trait GameDatabase: Send + Sync {
         _room_id: &RoomId,
         _application_id: Uuid,
     ) -> Result<()> {
-        Ok(())
+        anyhow::bail!("room application ownership persistence is not supported")
     }
 
     async fn clear_room_application_id(&self, _room_id: &RoomId) -> Result<()> {
-        Ok(())
+        anyhow::bail!("room application ownership persistence is not supported")
+    }
+
+    /// Clear an application claim only when its persisted owner still matches.
+    /// A missing room is an idempotent terminal outcome (`Ok(false)`).
+    async fn clear_room_application_id_if_matches(
+        &self,
+        _room_id: &RoomId,
+        _application_id: Uuid,
+    ) -> Result<bool> {
+        anyhow::bail!("conditional room application ownership persistence is not supported")
     }
 
     /// Get room by game name and room code
@@ -167,6 +177,14 @@ pub trait GameDatabase: Send + Sync {
 
     /// Get room count for a specific game (for rate limiting)
     async fn get_game_room_count(&self, game_name: &str) -> Result<usize>;
+
+    /// Get the authoritative live-room count for one application across every
+    /// game name. Backends that cannot provide this query must return an error;
+    /// configured application quotas fail closed rather than using a cache or
+    /// silently bypassing the limit.
+    async fn get_application_room_count(&self, _application_id: &Uuid) -> Result<usize> {
+        anyhow::bail!("application room counting is not supported by this database")
+    }
 
     /// Health check
     async fn health_check(&self) -> bool;
@@ -310,6 +328,20 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     fail_get_room_by_id: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    fail_get_application_room_count: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_clear_room_application_id: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_set_room_application_id: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    get_application_room_count_calls: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    pause_get_application_room_count: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    get_application_room_count_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_get_application_room_count: tokio::sync::Notify,
+    #[cfg(test)]
     get_room_by_id_calls: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     pause_get_room_by_id: std::sync::atomic::AtomicBool,
@@ -341,6 +373,20 @@ impl InMemoryDatabase {
             fail_get_room_players: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_get_application_room_count: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_clear_room_application_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_set_room_application_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            get_application_room_count_calls: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            pause_get_application_room_count: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            get_application_room_count_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_get_application_room_count: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_by_id_calls: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
@@ -374,6 +420,48 @@ impl InMemoryDatabase {
     pub(crate) fn fail_get_room_by_id_for_test(&self, fail: bool) {
         self.fail_get_room_by_id
             .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_get_application_room_count_for_test(&self, fail: bool) {
+        self.fail_get_application_room_count
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_clear_room_application_id_for_test(&self, fail: bool) {
+        self.fail_clear_room_application_id
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_set_room_application_id_for_test(&self, fail: bool) {
+        self.fail_set_room_application_id
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_get_application_room_count_for_test(&self) {
+        self.get_application_room_count_calls
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.pause_get_application_room_count
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_paused_get_application_room_count_for_test(&self) {
+        self.get_application_room_count_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_paused_get_application_room_count_for_test(&self) {
+        self.release_get_application_room_count.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_application_room_count_calls_for_test(&self) -> u32 {
+        self.get_application_room_count_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -931,6 +1019,32 @@ impl GameDatabase for InMemoryDatabase {
         Ok(count)
     }
 
+    async fn get_application_room_count(&self, application_id: &Uuid) -> Result<usize> {
+        #[cfg(test)]
+        {
+            self.get_application_room_count_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self
+                .pause_get_application_room_count
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                self.get_application_room_count_reached.notify_one();
+                self.release_get_application_room_count.notified().await;
+            }
+            if self
+                .fail_get_application_room_count
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("injected application room count failure for test");
+            }
+        }
+        let rooms = self.rooms.read().await;
+        Ok(rooms
+            .values()
+            .filter(|room| room.application_id == Some(*application_id))
+            .count())
+    }
+
     async fn health_check(&self) -> bool {
         true
     }
@@ -1129,19 +1243,57 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn set_room_application_id(&self, room_id: &RoomId, application_id: Uuid) -> Result<()> {
-        let mut rooms = self.rooms.write().await;
-        if let Some(room) = rooms.get_mut(room_id) {
-            room.application_id = Some(application_id);
+        #[cfg(test)]
+        if self
+            .fail_set_room_application_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected room application persistence failure for test");
         }
+        let mut rooms = self.rooms.write().await;
+        let room = rooms
+            .get_mut(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        room.application_id = Some(application_id);
         Ok(())
     }
 
     async fn clear_room_application_id(&self, room_id: &RoomId) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_clear_room_application_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected room application clear failure for test");
+        }
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             room.application_id = None;
         }
         Ok(())
+    }
+
+    async fn clear_room_application_id_if_matches(
+        &self,
+        room_id: &RoomId,
+        application_id: Uuid,
+    ) -> Result<bool> {
+        #[cfg(test)]
+        if self
+            .fail_clear_room_application_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected room application clear failure for test");
+        }
+        let mut rooms = self.rooms.write().await;
+        let Some(room) = rooms.get_mut(room_id) else {
+            return Ok(false);
+        };
+        if room.application_id != Some(application_id) {
+            return Ok(false);
+        }
+        room.application_id = None;
+        Ok(true)
     }
 
     async fn try_claim_room_cleanup(

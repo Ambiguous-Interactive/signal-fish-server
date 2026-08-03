@@ -131,6 +131,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         protocol_config.clone(),
         reconnection_manager.clone(),
         Arc::clone(&connection_manager),
+        config.auth_enabled,
     );
 
     let (shutdown_drain_tx, _) = watch::channel(false);
@@ -247,6 +248,10 @@ impl DistributedLock for DrainOnLockAcquire {
     async fn cleanup_expired_locks(&self) -> anyhow::Result<usize> {
         self.inner.cleanup_expired_locks().await
     }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
 }
 
 struct DrainAfterCreateDatabase {
@@ -332,6 +337,16 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn clear_room_application_id(&self, room_id: &RoomId) -> anyhow::Result<()> {
         self.inner.clear_room_application_id(room_id).await
+    }
+
+    async fn clear_room_application_id_if_matches(
+        &self,
+        room_id: &RoomId,
+        application_id: uuid::Uuid,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .clear_room_application_id_if_matches(room_id, application_id)
+            .await
     }
 
     async fn get_room(&self, game_name: &str, room_code: &str) -> anyhow::Result<Option<Room>> {
@@ -436,6 +451,13 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn get_game_room_count(&self, game_name: &str) -> anyhow::Result<usize> {
         self.inner.get_game_room_count(game_name).await
+    }
+
+    async fn get_application_room_count(
+        &self,
+        application_id: &uuid::Uuid,
+    ) -> anyhow::Result<usize> {
+        self.inner.get_application_room_count(application_id).await
     }
 
     async fn health_check(&self) -> bool {

@@ -25,7 +25,7 @@ per-app limits.
     "authorized_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "REPLACE_WITH_A_STRONG_SECRET",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "My Awesome Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
@@ -36,23 +36,25 @@ per-app limits.
 }
 ```
 
-Environment equivalent (the app list is a JSON array; `app_secret` is best kept
-out of the config file):
+Environment equivalent (the app list is a JSON array; `app_secret` is a
+reserved server-side field and is not sent by current clients):
 
 ```bash
 export SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true
 export SIGNAL_FISH__SECURITY__CORS_ORIGINS="https://yourgame.com"
 export SIGNAL_FISH__SECURITY__AUTHORIZED_APPS='[
-  {"app_id":"my-game","app_secret":"REPLACE_WITH_A_STRONG_SECRET",
+  {"app_id":"my-game","app_secret":"RESERVED_NOT_USED_BY_CLIENTS",
    "app_name":"My Awesome Game","max_rooms":100,
    "max_players_per_room":16,"rate_limit_per_minute":60}
 ]'
 ```
 
-When to use: any non-local deployment. `max_rooms`, `max_players_per_room`, and
-`rate_limit_per_minute` are optional per-app overrides — omit them to fall back
-to the global limits. Change the example `app_secret`
-(`CHANGE_ME_BEFORE_PRODUCTION`) before deploying. See
+When to use: any non-local deployment. `max_rooms` limits an app's persisted
+rooms across all game names, while `max_players_per_room` caps both new room
+capacity and future admission to existing rooms. Both are enforced only when
+WebSocket auth is enabled; omit them to use the server-wide admission limits.
+`rate_limit_per_minute` is an optional per-app override. Do not expose the
+reserved `app_secret` value to clients. See
 [Authentication](authentication.md) for the client handshake.
 
 ## TURN/STUN

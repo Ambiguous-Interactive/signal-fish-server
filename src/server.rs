@@ -17,7 +17,7 @@ use crate::protocol::{
 use crate::rate_limit::{RateLimitConfig, RoomRateLimiter};
 use anyhow::Result;
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -35,6 +35,8 @@ fn chrono_duration_from_std(duration: Duration) -> chrono::Duration {
 }
 
 mod admin;
+#[cfg(test)]
+mod app_admission_tests;
 mod authority;
 mod connection_manager;
 mod dashboard_cache;
@@ -124,7 +126,8 @@ pub struct EnhancedGameServer {
     /// Durable player removals that failed after the physical connection was
     /// already gone. Maintenance retries these independently of whether
     /// reconnect support is enabled.
-    pending_durable_player_detaches: Arc<DashMap<(RoomId, PlayerId), ()>>,
+    pending_durable_player_detaches:
+        Arc<DashMap<(RoomId, PlayerId), Option<PendingApplicationClaimRollback>>>,
     #[cfg(test)]
     fail_retain_room_publication_snapshot: AtomicBool,
     #[cfg(test)]
@@ -145,6 +148,11 @@ pub struct EnhancedGameServer {
     /// until both socket halves have completed their bounded close path.
     active_socket_tasks: AtomicUsize,
     active_socket_tasks_notify: Notify,
+}
+
+#[derive(Clone, Debug)]
+struct PendingApplicationClaimRollback {
+    application_id: Uuid,
 }
 
 /// Test-only synchronization point for the narrow interval after a reconnect
@@ -183,6 +191,20 @@ pub struct MaxRoomsPerGameExceededError {
     pub game_name: String,
     pub current: usize,
     pub limit: usize,
+}
+
+#[derive(Debug, Error)]
+#[error("Application already has {current} rooms (limit {limit})")]
+pub struct MaxRoomsPerApplicationExceededError {
+    pub current: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Error)]
+#[error("Requested room capacity {requested} exceeds the application limit {limit}")]
+pub struct MaxPlayersPerApplicationExceededError {
+    pub requested: u8,
+    pub limit: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +377,7 @@ impl EnhancedGameServer {
             protocol_config.clone(),
             reconnection_manager.clone(),
             Arc::clone(&connection_manager),
+            config.auth_enabled,
         );
 
         let (shutdown_drain_tx, _) = watch::channel(false);
@@ -564,17 +587,19 @@ impl EnhancedGameServer {
         self.connection_manager.app_id(player_id)
     }
 
-    /// Persist a room -> application mapping for relay enforcement.
-    pub async fn record_room_application(&self, room_id: &RoomId, app_id: Uuid) {
+    /// Persist a room -> application mapping before publishing it in the
+    /// process-local relay cache. Persistence is the authorization authority;
+    /// callers must fail closed rather than accepting a cache-only owner.
+    pub async fn record_room_application(&self, room_id: &RoomId, app_id: Uuid) -> Result<()> {
+        self.database
+            .set_room_application_id(room_id, app_id)
+            .await?;
+        self.cache_room_application(room_id, app_id);
+        Ok(())
+    }
+
+    fn cache_room_application(&self, room_id: &RoomId, app_id: Uuid) {
         self.room_applications.insert(*room_id, app_id);
-        if let Err(err) = self.database.set_room_application_id(room_id, app_id).await {
-            tracing::warn!(
-                %room_id,
-                app_id = %app_id,
-                error = %err,
-                "Failed to persist room application mapping"
-            );
-        }
     }
 
     /// Lookup the owning application for a room, if any.
@@ -584,16 +609,10 @@ impl EnhancedGameServer {
             .map(|entry| *entry.value())
     }
 
-    /// Remove the room -> application mapping when a room is deleted.
-    pub async fn clear_room_application(&self, room_id: &RoomId) {
+    /// Remove the process-local room -> application cache after storage has
+    /// already confirmed the room is deleted.
+    pub fn clear_room_application(&self, room_id: &RoomId) {
         self.room_applications.remove(room_id);
-        if let Err(err) = self.database.clear_room_application_id(room_id).await {
-            tracing::warn!(
-                %room_id,
-                error = %err,
-                "Failed to clear persisted room application mapping"
-            );
-        }
     }
 
     /// Determine whether the client expects a binary payload for the given encoding.
@@ -1065,8 +1084,6 @@ fn relay_projection_work_repeats(cohorts: impl IntoIterator<Item = RelayProjecti
     }
     false
 }
-
-use std::collections::HashSet;
 
 impl InMemoryMessageCoordinator {
     /// Create a coordinator with default delivery policy and private metrics.
