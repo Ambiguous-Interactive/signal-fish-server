@@ -108,12 +108,12 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-mutants
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-nextest
 
@@ -194,14 +194,14 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-mutants
 
       - name: Install cargo-nextest
         # The mutation oracle uses nextest process isolation plus the dedicated
         # profile's per-test termination for progress-removing mutants.
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-nextest
 
