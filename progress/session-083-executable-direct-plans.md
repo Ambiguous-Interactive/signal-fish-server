@@ -82,5 +82,11 @@ and the evaluator's final re-review returned `PASS` with no remaining issue.
   validator contributes 24 and the mutation workflow now covers the inventory
   with 39 complete shards at the unchanged ten-mutant/290-second modeled bound;
   all mutation workflow/script policy tests pass.
+- The first hosted mutation run exposed four surviving mutations in the
+  validator's combined empty/total-length/whitespace guard. The existing
+  overlength examples were also invalid for other reasons, so they did not
+  isolate the 253-byte hostname ceiling. Data-driven valid-DNS cases now prove
+  253 bytes is accepted while 254 and 255 bytes are rejected; an exact local
+  replay of shard 15/39 caught all 10 mutants, including the four survivors.
 - Exact-head hosted CI and GitHub reviewer feedback remain before publication
   is complete.

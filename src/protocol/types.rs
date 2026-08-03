@@ -480,6 +480,22 @@ mod tests {
 
     #[test]
     fn direct_endpoint_accepts_only_usable_direct_targets() {
+        fn dns_hostname_with_length(length: usize) -> String {
+            assert!((1..=255).contains(&length));
+
+            let mut remaining = length;
+            let mut labels = Vec::new();
+            while remaining > 63 {
+                labels.push("a".repeat(63));
+                remaining -= 64; // account for this label and its following dot
+            }
+            labels.push("a".repeat(remaining));
+
+            let hostname = labels.join(".");
+            assert_eq!(hostname.len(), length);
+            hostname
+        }
+
         let cases = [
             ("IPv4", "192.0.2.10", 7777, true),
             ("IPv6", "2001:db8::1", 7777, true),
@@ -513,6 +529,16 @@ mod tests {
                 DirectEndpoint::from_connection_info(&ConnectionInfo::Direct { host, port: 7777 })
                     .is_none(),
                 "overlong host components must be rejected"
+            );
+        }
+
+        for (length, expected) in [(253, true), (254, false), (255, false)] {
+            let host = dns_hostname_with_length(length);
+            assert_eq!(
+                DirectEndpoint::from_connection_info(&ConnectionInfo::Direct { host, port: 7777 })
+                    .is_some(),
+                expected,
+                "DNS hostname length {length} must respect the 253-byte boundary"
             );
         }
 
