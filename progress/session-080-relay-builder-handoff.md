@@ -64,4 +64,7 @@ the full all-feature test suite, `cargo deny`, CI/MSRV/workflow/document/LLM
 policy scripts, hook readiness, and both worktree hook preflights pass. The
 pre-commit hook reports a non-blocking 1,669 ms profile warning (531 ms changed
 file discovery plus 809 ms Rust panic scanning); no hook implementation changed
-in this session. Hosted PR review is recorded after publication.
+in this session. Adversarial review additionally moved missing-stamp,
+terminal-unroute, and reconnect-baseline races onto the new borrowed production
+seam, added production-ingress byte ceilings, and corrected CSV recipient
+reporting. Hosted PR review is recorded after publication.

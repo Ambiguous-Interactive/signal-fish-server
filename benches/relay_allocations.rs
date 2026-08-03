@@ -540,6 +540,12 @@ fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
+    let maximum_bytes_per_relay = match room_size {
+        2 => 696,
+        8 => 1_616,
+        16 => 1_936,
+        _ => panic!("room-{room_size} has no checked-in allocation baseline"),
+    };
     assert!(
         allocation_operations
             <= RELAYS_PER_SAMPLE * maximum_operations_per_relay
@@ -547,14 +553,15 @@ fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
         "production {room_size}-player ingress exceeded {maximum_operations_per_relay} \
          allocation operations per relay"
     );
+    assert!(
+        sample.stats.bytes_allocated
+            <= RELAYS_PER_SAMPLE * maximum_bytes_per_relay + SAMPLE_FIXED_ALLOCATED_BYTES,
+        "production {room_size}-player ingress exceeded {maximum_bytes_per_relay} allocated \
+         bytes per relay"
+    );
 }
 
-fn print_sample(scope: &str, room_size: usize, relays: usize, sample: Sample) {
-    let recipients = if scope.ends_with("_ingress") {
-        room_size - 1
-    } else {
-        1
-    };
+fn print_sample(scope: &str, room_size: usize, recipients: usize, relays: usize, sample: Sample) {
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     println!(
         "{scope},{room_size},{recipients},{relays},{},{},{},{},{},{:.4},{:.2},{:.4},{:.2}",
@@ -585,6 +592,7 @@ fn main() {
             print_sample(
                 fixture.ingress_kind.name(),
                 room_size,
+                room_size - 1,
                 RELAYS_PER_SAMPLE,
                 sample,
             );
@@ -598,6 +606,7 @@ fn main() {
         print_sample(
             "borrowed_coordinator_handoff",
             room_size,
+            room_size - 1,
             RELAYS_PER_SAMPLE,
             sample,
         );
@@ -605,5 +614,5 @@ fn main() {
 
     let mut fixture = QueueFixture::new();
     let sample = repeated_samples(|| fixture.measure());
-    print_sample("classified_queue", 2, RELAYS_PER_SAMPLE, sample);
+    print_sample("classified_queue", 2, 1, RELAYS_PER_SAMPLE, sample);
 }
