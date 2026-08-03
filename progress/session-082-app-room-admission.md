@@ -46,13 +46,17 @@ separate design decision.
 
 ## Local verification
 
-Fifteen focused tests cover cross-app seated/spectator/reconnect denial,
+Sixteen focused tests cover cross-app seated/spectator/reconnect denial,
 cache-loss authorization, reconnect-token preservation, spectator/non-published
 claim behavior, deterministic concurrent legacy claims and cross-game creates,
 auth-disabled ownership, player-cap boundaries and lowering, independent apps,
 failed-create rollback, quota release after real empty-room cleanup, cache
 pruning, and fail-closed/retry-safe lock, count, ownership persistence, detach,
-and rollback errors. The focused suite, formatting, strict
+and rollback errors. Cursor's first hosted review identified that reconnect
+restoration still used only the room's stored capacity; reconnect now applies
+the same current app-cap minimum as seated admission, and a regression proves a
+full-cap denial releases rather than consumes the token. The focused suite,
+formatting, strict
 all-target/all-feature Clippy, and the complete locked all-feature test suite
 pass. Independent adversarial code and test audits completed with zero
 actionable findings. Cargo-deny, CI configuration, workflow hygiene, MSRV,

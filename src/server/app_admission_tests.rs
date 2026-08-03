@@ -826,6 +826,63 @@ async fn application_player_cap_rejects_oversized_creation_and_lowered_legacy_ca
     );
 }
 
+#[tokio::test]
+async fn reconnect_respects_current_application_player_cap_without_consuming_token() {
+    let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(2))]).await;
+    let (original, mut original_rx) = connect_as(&server, APP_A, 44501).await;
+    join_room(&server, &original, "reconnect-cap", None, "Original", 2).await;
+    let joined = receive(&mut original_rx).await;
+    let (room_id, room_code, reconnect_token) = joined_room(joined.as_ref());
+    let reconnect_token = reconnect_token.expect("reconnection token is issued");
+
+    server.unregister_client(&original).await;
+
+    let (replacement, mut replacement_rx) = connect_as(&server, APP_A, 44502).await;
+    join_room(
+        &server,
+        &replacement,
+        "reconnect-cap",
+        Some(&room_code),
+        "Replacement",
+        2,
+    )
+    .await;
+    assert!(matches!(
+        receive(&mut replacement_rx).await.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    let (blocked, mut blocked_rx) = connect_as(&server, APP_A, 44503).await;
+    let mut lowered_policy = server
+        .client_app_info(&blocked)
+        .expect("app policy attached");
+    lowered_policy.max_players_per_room = Some(1);
+    server.set_client_app_info(&blocked, lowered_policy);
+    assert!(
+        !server
+            .handle_reconnect(&blocked, &original, &room_id, &reconnect_token)
+            .await
+    );
+    let blocked_result = receive(&mut blocked_rx).await;
+    let ServerMessage::ReconnectionFailed { error_code, .. } = blocked_result.as_ref() else {
+        panic!("expected ReconnectionFailed, got {blocked_result:?}");
+    };
+    assert_eq!(*error_code, ErrorCode::RoomFull);
+
+    server.unregister_client(&replacement).await;
+
+    let (retry, _retry_rx) = connect_as(&server, APP_A, 44504).await;
+    let mut lowered_policy = server.client_app_info(&retry).expect("app policy attached");
+    lowered_policy.max_players_per_room = Some(1);
+    server.set_client_app_info(&retry, lowered_policy);
+    assert!(
+        server
+            .handle_reconnect(&retry, &original, &room_id, &reconnect_token)
+            .await,
+        "a cap denial must release rather than consume the reconnection token"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn application_room_cap_is_atomic_across_games_and_independent_between_apps() {
     let server = create_server(

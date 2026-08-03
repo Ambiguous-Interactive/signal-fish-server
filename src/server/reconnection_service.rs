@@ -612,8 +612,9 @@ impl EnhancedGameServer {
         // persisted room owner before restoring membership. Return the same
         // non-enumerating outcome as a missing room so an app cannot probe
         // another app's room through reconnect.
-        let reconnect_app_id = if self.config.auth_enabled {
-            let client_app_id = self.client_app_id(current_player_id);
+        let reconnect_app_info = if self.config.auth_enabled {
+            let client_app_info = self.client_app_info(current_player_id);
+            let client_app_id = client_app_info.as_ref().map(|app| app.id);
             if client_app_id.is_none()
                 || room
                     .application_id
@@ -633,12 +634,32 @@ impl EnhancedGameServer {
             if let Some(owner) = room.application_id {
                 self.cache_room_application(room_id, owner);
             }
-            client_app_id
+            client_app_info
         } else {
             None
         };
+        let reconnect_app_id = reconnect_app_info.as_ref().map(|app| app.id);
 
         if !room.players.contains_key(reconnect_player_id) {
+            let effective_max_players = reconnect_app_info
+                .as_ref()
+                .and_then(|app| app.max_players_per_room)
+                .map_or(room.max_players, |app_limit| {
+                    room.max_players.min(app_limit)
+                });
+            if room.players.len() >= usize::from(effective_max_players) {
+                return self
+                    .reject_claimed_reconnect(
+                        current_player_id,
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Room is full",
+                        ErrorCode::RoomFull,
+                    )
+                    .await;
+            }
+
             let Some(player_info) = disconnected.player_info.clone() else {
                 return self
                     .reject_claimed_reconnect(
