@@ -82,5 +82,16 @@ adversarial diff review reported zero major or minor findings after independentl
 checking delivery semantics, guarded traversal, backpressure, snapshot isolation,
 shared-cache activation, benchmark attribution, and documentation consistency.
 
-Hosted CI and exact-head publication evidence remain pending; P38 is not marked
-complete until that final review loop is green.
+## Hosted publication evidence
+
+Draft PR #252 passed all 14 pull-request workflows on code head
+`7b8b7bf7b8b65b96a13e28d1e835c5e62640b330`, including the exact allocation
+ceiling, three-platform lint and Nextest matrix, MSRV, coverage, Miri, ASan,
+four fuzz targets, dependency audits, and every browser/native/Fortress/TURN
+interop lane. Cursor Bugbot reported no issue on that exact head and GitHub
+exposed no inline review threads. Copilot was explicitly requested but returned
+only that the requester's review quota was exhausted; it supplied no actionable
+feedback.
+
+P38 is complete. The final evidence-only head remains subject to the same green
+workflow and explicit review loop before the PR leaves draft state.
