@@ -56,3 +56,12 @@ first asset mutation because `gh release upload` ran from the parent of the
 split checkouts and attempted repository discovery through an absent `.git`
 directory. The follow-up passes `--repo "$GITHUB_REPOSITORY"` to both SBOM and
 binary asset-only uploads and locks that independence into workflow policy.
+
+PR #247 merged that correction at `6d8499897f271b5a477688d07c71dfe55f758da6`.
+Historical Release run 30772076461 then completed successfully from the later
+default branch while preserving the immutable source revision
+`09238c36ab8b086b13a5e50d679df51e32376134` and GHCR digest
+`sha256:efede9dbed5cba2d7f1c09b2143d568a91bc731e6510fd8fbdc81fe66d800d4c`.
+Independent public verification matched the exact Release notes, opened all
+six platform archives, checked all six checksum files, and confirmed the
+CycloneDX SBOM. P36 is therefore complete.

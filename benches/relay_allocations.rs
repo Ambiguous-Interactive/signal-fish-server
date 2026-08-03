@@ -150,8 +150,9 @@ impl FanoutFixture {
         };
 
         // Warm Tokio and every classified queue's backing storage before
-        // taking a steady-state allocator snapshot. Recipient and join_all
-        // storage is intentionally rebuilt inside each measured fan-out.
+        // taking a steady-state allocator snapshot. The healthy path walks
+        // the guarded routing snapshot directly; exceptional backpressure
+        // storage is intentionally not exercised by this baseline.
         let expected = room_size - 1;
         let warmed = fixture.relay_ingress_batch(vec![fixture.payload.clone()]);
         assert_eq!(
@@ -503,14 +504,13 @@ fn repeated_samples(mut measure: impl FnMut() -> Sample) -> Sample {
 fn assert_healthy_fanout_uses_synchronous_fast_path(room_size: usize, sample: Sample) {
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     let maximum_operations_per_relay = match room_size {
-        2 => 2,
-        8 | 16 => 3,
+        2 => 1,
+        8 | 16 => 2,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     let maximum_bytes_per_relay = match room_size {
-        2 => 416,
-        8 => 1_336,
-        16 => 1_656,
+        2 => 368,
+        8 | 16 => 1_048,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     let maximum_operations =
@@ -521,29 +521,28 @@ fn assert_healthy_fanout_uses_synchronous_fast_path(room_size: usize, sample: Sa
         "healthy {room_size}-player fan-out used {allocation_operations} allocation operations \
          across {RELAYS_PER_SAMPLE} relays; expected at most \
          {maximum_operations_per_relay} operations per relay plus one fixed sample operation \
-         after removing the boxed builder handoff"
+         after removing the routed-recipient snapshot"
     );
     assert!(
         sample.stats.bytes_allocated <= maximum_bytes,
         "healthy {room_size}-player fan-out allocated {} bytes across {RELAYS_PER_SAMPLE} \
          relays; expected at most {maximum_bytes_per_relay} bytes per relay plus \
-         {SAMPLE_FIXED_ALLOCATED_BYTES} fixed sample bytes after removing the eight-byte \
-         builder box",
+         {SAMPLE_FIXED_ALLOCATED_BYTES} fixed sample bytes after removing the routed-recipient \
+         snapshot",
         sample.stats.bytes_allocated
     );
 }
 
 fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
     let maximum_operations_per_relay = match room_size {
-        2 => 3,
-        8 | 16 => 4,
+        2 => 2,
+        8 | 16 => 3,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     let maximum_bytes_per_relay = match room_size {
-        2 => 696,
-        8 => 1_616,
-        16 => 1_936,
+        2 => 648,
+        8 | 16 => 1_328,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     assert!(
