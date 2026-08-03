@@ -49,6 +49,7 @@ const RELIABLE_CYCLES: u64 = 2;
 const VOLATILE_DURATION: Duration = Duration::from_secs(60);
 const PHASE_DEADLINE: Duration = Duration::from_secs(90);
 const EVENT_DEADLINE: Duration = Duration::from_secs(30);
+const POST_FAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(60);
 const PADDING_BYTES: usize = 512;
 
 #[derive(Default)]
@@ -302,12 +303,12 @@ async fn drive_until_departure(
     (sent, started.elapsed())
 }
 
-async fn poll_until(context: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + EVENT_DEADLINE;
+async fn poll_until_within(context: &str, timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + timeout;
     while !condition() {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{context}: condition not reached before {EVENT_DEADLINE:?}"
+            "{context}: condition not reached before {timeout:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -589,12 +590,15 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
         .iter()
         .find(|watermark| watermark.player_id == sender_id)
         .unwrap_or_else(|| panic!("Reconnected omitted the active sender watermark"));
-    poll_until("healthy watcher drains both reliable cycles", || {
-        watcher_state.game_data.load(Ordering::Relaxed) >= total_sent
-    })
+    poll_until_within(
+        "healthy watcher drains both reliable cycles",
+        EVENT_DEADLINE,
+        || watcher_state.game_data.load(Ordering::Relaxed) >= total_sent,
+    )
     .await;
     // `victim_ws` is the live second reconnect from the loop.
     let sender_baseline = metrics.delivery_metrics_by_class().reliable.attempted;
+    let volatile_attempted_baseline = metrics.delivery_metrics_by_class().volatile.attempted;
     let volatile_observer = spawn_volatile_observer(victim_ws, sender_id, sender_watermark.seq);
     proxy.throttle(Direction::ServerToClient, Some(DOWNSTREAM_BYTES_PER_SEC));
     let volatile_started = tokio::time::Instant::now();
@@ -614,12 +618,47 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
         volatile_sent += 1;
     }
     proxy.throttle(Direction::ServerToClient, None);
+
+    // Reliable and Volatile share one FIFO data lane. If the marker is queued
+    // behind the overload residue, its reliable sojourn ages while Volatile
+    // frames are still draining and the marker itself can cause a third
+    // slow-consumer close. First establish that both recipients' Volatile
+    // fanouts reached terminal accounting, then use Reliable as the post-fault
+    // stream delimiter it is intended to be.
+    let volatile_attempted_target = volatile_attempted_baseline + volatile_sent * 2;
+    poll_until_within(
+        "volatile fanouts drain before the reliable marker",
+        POST_FAULT_DRAIN_DEADLINE,
+        || {
+            let volatile = metrics.delivery_metrics_by_class().volatile;
+            let resolved = volatile.delivered
+                + volatile.superseded
+                + volatile.dropped_full
+                + volatile.dropped
+                + volatile.abandoned
+                + volatile.unsupported_format;
+            volatile.attempted == volatile_attempted_target && resolved == volatile.attempted
+        },
+    )
+    .await;
+
     send(
         &mut sender_sink,
         &game_data(next_n, DeliveryClass::Reliable, true),
     )
     .await;
     total_sent += volatile_sent + 1;
+
+    // `sender_sink.send` only hands the marker to the sender socket. Establish
+    // that the server ingested and fanned it out on the healthy path before
+    // starting the constrained connection's post-fault drain budget; otherwise
+    // this deadline also charges unrelated sender/server scheduling delay.
+    poll_until_within(
+        "healthy watcher receives the complete H10 stream",
+        EVENT_DEADLINE,
+        || watcher_state.game_data.load(Ordering::Relaxed) >= total_sent,
+    )
+    .await;
 
     let volatile = match tokio::time::timeout(EVENT_DEADLINE, volatile_observer).await {
         Ok(observation) => observation.expect("volatile observer panicked"),
@@ -649,10 +688,6 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
             );
         }
     };
-    poll_until("healthy watcher receives the complete H10 stream", || {
-        watcher_state.game_data.load(Ordering::Relaxed) >= total_sent
-    })
-    .await;
 
     assert_eq!(
         watcher_state.game_data.load(Ordering::Relaxed) - volatile_start_count,

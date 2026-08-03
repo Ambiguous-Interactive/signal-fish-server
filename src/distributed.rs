@@ -30,6 +30,9 @@ pub trait DistributedLock: Send + Sync {
 
     /// Cleanup expired locks - returns number of locks cleaned
     async fn cleanup_expired_locks(&self) -> Result<usize>;
+
+    #[cfg(test)]
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync);
 }
 
 /// Handle for a coordination lock.
@@ -63,6 +66,8 @@ impl LockHandle {
 /// In-memory, process-local coordination lock.
 pub struct InMemoryDistributedLock {
     locks: Arc<RwLock<HashMap<String, LockEntry>>>,
+    #[cfg(test)]
+    fail_acquire_key: Arc<RwLock<Option<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +82,23 @@ impl InMemoryDistributedLock {
     pub fn new() -> Self {
         Self {
             locks: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            fail_acquire_key: Arc::new(RwLock::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn fail_acquire_for_test(&self, key: Option<String>) {
+        *self.fail_acquire_key.write().await = key;
+    }
+
+    #[cfg(test)]
+    async fn should_fail_acquire_for_test(&self, key: &str) -> bool {
+        self.fail_acquire_key
+            .read()
+            .await
+            .as_deref()
+            .is_some_and(|failed_key| failed_key == key)
     }
 
     async fn cleanup_expired(&self) -> usize {
@@ -98,6 +119,10 @@ impl Default for InMemoryDistributedLock {
 #[async_trait]
 impl DistributedLock for InMemoryDistributedLock {
     async fn acquire(&self, key: &str, ttl: Duration) -> Result<LockHandle> {
+        #[cfg(test)]
+        if self.should_fail_acquire_for_test(key).await {
+            anyhow::bail!("injected lock acquisition failure for {key}");
+        }
         // Use common retry executor with a persistent profile (10 attempts)
         let executor = crate::retry::RetryExecutor::new(crate::retry::RetryConfig::persistent());
 
@@ -119,6 +144,10 @@ impl DistributedLock for InMemoryDistributedLock {
     }
 
     async fn try_acquire(&self, key: &str, ttl: Duration) -> Result<Option<LockHandle>> {
+        #[cfg(test)]
+        if self.should_fail_acquire_for_test(key).await {
+            anyhow::bail!("injected lock acquisition failure for {key}");
+        }
         let handle = LockHandle::new(key.to_string(), ttl);
         let expires_at = handle.acquired_at + chrono::Duration::from_std(ttl)?;
 
@@ -185,6 +214,11 @@ impl DistributedLock for InMemoryDistributedLock {
 
     async fn cleanup_expired_locks(&self) -> Result<usize> {
         Ok(self.cleanup_expired().await)
+    }
+
+    #[cfg(test)]
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
     }
 }
 

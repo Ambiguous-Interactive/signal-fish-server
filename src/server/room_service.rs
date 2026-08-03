@@ -1,4 +1,7 @@
-use super::{EnhancedGameServer, MaxRoomsPerGameExceededError};
+use super::{
+    EnhancedGameServer, MaxPlayersPerApplicationExceededError, MaxRoomsPerApplicationExceededError,
+    MaxRoomsPerGameExceededError, PendingApplicationClaimRollback,
+};
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
@@ -12,7 +15,31 @@ use std::time::Duration;
 use thiserror::Error;
 
 const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
+const APPLICATION_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
+
+#[derive(Clone)]
+enum RoomAdmissionKind {
+    Existing {
+        application_claim_rollback: Option<PendingApplicationClaimRollback>,
+    },
+    Created {
+        application_claim_rollback: Option<PendingApplicationClaimRollback>,
+    },
+}
+
+impl RoomAdmissionKind {
+    fn application_claim_rollback(&self) -> Option<&PendingApplicationClaimRollback> {
+        match self {
+            Self::Existing {
+                application_claim_rollback,
+            }
+            | Self::Created {
+                application_claim_rollback,
+            } => application_claim_rollback.as_ref(),
+        }
+    }
+}
 
 /// Typed failure of [`EnhancedGameServer::join_room_with_coordination`], so the
 /// handler classifies each cause to the correct client [`ErrorCode`] by an
@@ -36,6 +63,17 @@ pub(super) enum JoinRoomError {
     /// (→ `MAX_ROOMS_PER_GAME_EXCEEDED`).
     #[error(transparent)]
     MaxRoomsPerGameExceeded(#[from] MaxRoomsPerGameExceededError),
+    /// The authenticated application's cross-game room quota is reached. This
+    /// uses the existing v2 room-cap wire code for backward compatibility.
+    #[error(transparent)]
+    MaxRoomsPerApplicationExceeded(#[from] MaxRoomsPerApplicationExceededError),
+    /// A creator requested a capacity above its configured application cap.
+    #[error(transparent)]
+    MaxPlayersPerApplicationExceeded(#[from] MaxPlayersPerApplicationExceededError),
+    /// The room is absent or belongs to another authenticated application.
+    /// Both cases intentionally share one non-enumerating wire outcome.
+    #[error("Room not found")]
+    RoomNotFound,
     /// The server is draining for shutdown and must not create new rooms
     /// (→ `SERVER_DRAINING`).
     #[error("Server is draining for shutdown")]
@@ -54,6 +92,9 @@ impl JoinRoomError {
         match self {
             Self::RoomFull => ErrorCode::RoomFull,
             Self::MaxRoomsPerGameExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
+            Self::MaxRoomsPerApplicationExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
+            Self::MaxPlayersPerApplicationExceeded(_) => ErrorCode::InvalidMaxPlayers,
+            Self::RoomNotFound => ErrorCode::RoomNotFound,
             Self::ServerDraining => ErrorCode::ServerDraining,
             Self::Internal(_) => ErrorCode::RoomCreationFailed,
         }
@@ -65,9 +106,25 @@ impl EnhancedGameServer {
         &self,
         room_id: RoomId,
         player_id: PlayerId,
+        admission_kind: RoomAdmissionKind,
         reason: &'static str,
     ) {
-        match self
+        if matches!(admission_kind, RoomAdmissionKind::Created { .. }) {
+            match self.database.delete_room(&room_id).await {
+                Ok(_) => {
+                    self.room_applications.remove(&room_id);
+                    let _ = self.room_coordinator.clear_ready_players(&room_id).await;
+                    self.metrics.increment_players_left();
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(%player_id, %room_id, %error, reason, "Failed to roll back unpublished room creation; falling back to durable player detach");
+                }
+            }
+        }
+
+        let application_claim_rollback = admission_kind.application_claim_rollback().cloned();
+        let admission_removed = match self
             .database
             .remove_player_from_room(&room_id, &player_id)
             .await
@@ -75,11 +132,25 @@ impl EnhancedGameServer {
             Ok(_) => {
                 self.pending_durable_player_detaches
                     .remove(&(room_id, player_id));
+                true
             }
             Err(error) => {
                 self.pending_durable_player_detaches
-                    .insert((room_id, player_id), ());
+                    .insert((room_id, player_id), application_claim_rollback.clone());
                 tracing::error!(%player_id, %room_id, %error, reason, "Failed to roll back unpublished room admission; queued durable detach retry");
+                false
+            }
+        };
+        if admission_removed {
+            if let Some(rollback) = application_claim_rollback {
+                if let Err(error) = self
+                    .rollback_room_application_claim_if_unchanged(&room_id, &rollback)
+                    .await
+                {
+                    self.pending_durable_player_detaches
+                        .insert((room_id, player_id), Some(rollback));
+                    tracing::error!(%player_id, %room_id, %error, reason, "Failed to roll back unpublished room ownership claim; queued durable retry");
+                }
             }
         }
         // Admission already moved `players_joined`, but no RoomJoined reached
@@ -301,7 +372,7 @@ impl EnhancedGameServer {
             .await;
 
         match room_join_result {
-            Ok((room, room_event_guard)) => {
+            Ok((room, room_event_guard, admission_kind)) => {
                 room_join_span.record("room_id", tracing::field::display(room.id));
                 let Some((delivery, membership_stamp)) = self
                     .connection_manager
@@ -310,6 +381,7 @@ impl EnhancedGameServer {
                     self.rollback_unpublished_player_admission(
                         room.id,
                         *player_id,
+                        admission_kind,
                         "missing_prepared_connection",
                     )
                     .await;
@@ -438,6 +510,7 @@ impl EnhancedGameServer {
                     self.rollback_unpublished_player_admission(
                         room.id,
                         *player_id,
+                        admission_kind,
                         "undeliverable_room_join_baseline",
                     )
                     .await;
@@ -493,6 +566,18 @@ impl EnhancedGameServer {
                     }
                     return;
                 };
+                if self.config.auth_enabled {
+                    if let (Some(application_id), Some(client_application_id)) =
+                        (current_room.application_id, self.client_app_id(player_id))
+                    {
+                        if application_id == client_application_id {
+                            self.mark_pending_room_application_claim_adopted(
+                                current_room.id,
+                                application_id,
+                            );
+                        }
+                    }
+                }
                 let is_authority = current_room.authority_player == Some(*player_id);
 
                 // Notify other players. This is a v3 wire snapshot, so it
@@ -702,7 +787,7 @@ impl EnhancedGameServer {
                 // backlog before publishing a restored generation.
                 tracing::warn!(%player_id, %room_id, error = %e, "Storage removal failed during disconnect; forcing local terminal teardown");
                 self.pending_durable_player_detaches
-                    .insert((room_id, *player_id), ());
+                    .insert((room_id, *player_id), None);
                 if let Err(authority_error) = self
                     .database
                     .request_room_authority(&room_id, player_id, false)
@@ -926,7 +1011,7 @@ impl EnhancedGameServer {
     }
 
     /// Join a room with process-local admission coordination.
-    pub(super) async fn join_room_with_coordination(
+    async fn join_room_with_coordination(
         &self,
         player_id: &PlayerId,
         game_name: &str,
@@ -934,18 +1019,47 @@ impl EnhancedGameServer {
         player_name: &str,
         max_players: u8,
         supports_authority: bool,
-    ) -> Result<(Room, crate::coordination::RoomEventMutationGuard), JoinRoomError> {
+    ) -> Result<
+        (
+            Room,
+            crate::coordination::RoomEventMutationGuard,
+            RoomAdmissionKind,
+        ),
+        JoinRoomError,
+    > {
+        // Authentication-disabled connections still carry a default AppInfo for
+        // protocol compatibility. Ownership and quotas apply only when auth is
+        // enabled; otherwise newly-created rooms must remain unowned.
+        let client_app_info = if self.config.auth_enabled {
+            match self.client_app_info(player_id) {
+                Some(app_info) => Some(app_info),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "authenticated room admission is missing application context"
+                    )
+                    .into())
+                }
+            }
+        } else {
+            None
+        };
+        let client_app_id = client_app_info.as_ref().map(|app| app.id);
+
+        // Global lock order is room-code -> application-cap -> game-cap. Every
+        // release happens in reverse order. Existing-room joins acquire the
+        // application-cap lock only when claiming a legacy unowned room.
         let lock_key = format!("room_join:{game_name}:{room_code}");
         let lock_handle = self
             .distributed_lock
             .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
             .await?;
+        let mut application_cap_lock: Option<LockHandle> = None;
         let mut game_cap_lock: Option<LockHandle> = None;
         let mut room_event_guard = None;
 
         // Try to join existing room or create new one
         let result = match self.database.get_room(game_name, room_code).await {
-            Ok(Some(mut room)) => {
+            Ok(Some(room_lane)) => {
                 // Admission, routing publication, the directed RoomJoined
                 // baseline, and PlayerJoined enqueue share one room mutation
                 // transaction. Returning this owned guard to the handler keeps
@@ -953,51 +1067,145 @@ impl EnhancedGameServer {
                 // member before its route and lifecycle event are published.
                 room_event_guard = Some(
                     self.message_coordinator
-                        .lock_room_event_mutation(&room.id)
+                        .lock_room_event_mutation(&room_lane.id)
                         .await,
                 );
-                let client_app_id = self.client_app_id(player_id);
-                // Validate player name uniqueness
-                if let Err(reason) =
+                // The code lookup identifies only the mutation lane. Refresh
+                // persistence after entering it so ownership, capacity, and
+                // name checks never authorize from a stale pre-lock snapshot.
+                let mut room = match self.database.get_room_by_id(&room_lane.id).await {
+                    Ok(Some(room)) => room,
+                    Ok(None) => {
+                        let _ = self.distributed_lock.release(&lock_handle).await;
+                        return Err(JoinRoomError::RoomNotFound);
+                    }
+                    Err(error) => {
+                        let _ = self.distributed_lock.release(&lock_handle).await;
+                        return Err(error.into());
+                    }
+                };
+
+                if self.config.auth_enabled
+                    && room
+                        .application_id
+                        .is_some_and(|owner| Some(owner) != client_app_id)
+                {
+                    Err(JoinRoomError::RoomNotFound)
+                } else if let Err(reason) =
                     validation::validate_player_name_uniqueness(player_name, &room.players)
                 {
                     Err(anyhow::anyhow!(reason).into())
                 } else {
-                    let player_info = PlayerInfo {
-                        id: *player_id,
-                        name: player_name.to_string(),
-                        is_authority: false,
-                        is_ready: false,
-                        connected_at: chrono::Utc::now(),
-                        connection_info: None,
-                        // Room-state record (stored in the DB + `room.players`),
-                        // not a wire snapshot: the v3 epoch is filled at
-                        // snapshot-send time, so this stays `None`.
-                        epoch: None,
-                        seq: None,
-                        region_id: room.region_id.clone(),
-                    };
+                    let effective_max_players = client_app_info
+                        .as_ref()
+                        .and_then(|app| app.max_players_per_room)
+                        .map_or(room.max_players, |app_limit| {
+                            room.max_players.min(app_limit)
+                        });
+                    if room.players.len() >= usize::from(effective_max_players) {
+                        Err(JoinRoomError::RoomFull)
+                    } else {
+                        let claimed_application =
+                            room.application_id.is_none() && client_app_id.is_some();
+                        let application_claim_rollback = if claimed_application {
+                            client_app_id.map(|application_id| PendingApplicationClaimRollback {
+                                application_id,
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some(app_id) = client_app_id {
+                            if claimed_application {
+                                if let Some(app_limit) =
+                                    client_app_info.as_ref().and_then(|app| app.max_rooms)
+                                {
+                                    match self
+                                        .acquire_application_room_cap_lock(app_id, app_limit)
+                                        .await
+                                    {
+                                        Ok(lock) => application_cap_lock = Some(lock),
+                                        Err(error) => {
+                                            let _ =
+                                                self.distributed_lock.release(&lock_handle).await;
+                                            return Err(error);
+                                        }
+                                    }
+                                }
+                                if let Err(error) =
+                                    self.record_room_application(&room.id, app_id).await
+                                {
+                                    self.release_cap_lock(&application_cap_lock).await;
+                                    let _ = self.distributed_lock.release(&lock_handle).await;
+                                    return Err(error.into());
+                                }
+                                room.application_id = Some(app_id);
+                            } else if room.application_id == Some(app_id) {
+                                self.cache_room_application(&room.id, app_id);
+                            }
+                        }
 
-                    match self
-                        .database
-                        .add_player_to_room(&room.id, player_info.clone())
-                        .await
-                    {
-                        Ok(true) => {
-                            self.metrics.increment_rooms_joined();
-                            self.metrics.increment_players_joined();
-                            room.players.insert(*player_id, player_info);
-                            if self.room_application_id(&room.id).is_none() {
-                                if let Some(persisted_app) = room.application_id {
-                                    self.room_applications.insert(room.id, persisted_app);
-                                } else if let Some(app_id) = client_app_id {
-                                    self.record_room_application(&room.id, app_id).await;
+                        let player_info = PlayerInfo {
+                            id: *player_id,
+                            name: player_name.to_string(),
+                            is_authority: false,
+                            is_ready: false,
+                            connected_at: chrono::Utc::now(),
+                            connection_info: None,
+                            // Room-state record (stored in the DB + `room.players`),
+                            // not a wire snapshot: the v3 epoch is filled at
+                            // snapshot-send time, so this stays `None`.
+                            epoch: None,
+                            seq: None,
+                            region_id: room.region_id.clone(),
+                        };
+
+                        match self
+                            .database
+                            .add_player_to_room(&room.id, player_info.clone())
+                            .await
+                        {
+                            Ok(true) => {
+                                self.metrics.increment_rooms_joined();
+                                self.metrics.increment_players_joined();
+                                room.players.insert(*player_id, player_info);
+                                Ok((
+                                    room,
+                                    RoomAdmissionKind::Existing {
+                                        application_claim_rollback,
+                                    },
+                                ))
+                            }
+                            Ok(false) => {
+                                if let Some(rollback) = application_claim_rollback.as_ref() {
+                                    match self
+                                        .rollback_or_queue_room_application_claim(
+                                            &room.id, player_id, rollback,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => Err(JoinRoomError::RoomFull),
+                                        Err(error) => Err(error),
+                                    }
+                                } else {
+                                    Err(JoinRoomError::RoomFull)
                                 }
                             }
-                            Ok(room)
+                            Err(error) => {
+                                if let Some(rollback) = application_claim_rollback.as_ref() {
+                                    match self
+                                        .rollback_or_queue_room_application_claim(
+                                            &room.id, player_id, rollback,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => Err(error.into()),
+                                        Err(rollback_error) => Err(rollback_error),
+                                    }
+                                } else {
+                                    Err(error.into())
+                                }
+                            }
                         }
-                        Ok(false) => Err(JoinRoomError::RoomFull),
-                        Err(e) => Err(e.into()),
                     }
                 }
             }
@@ -1005,141 +1213,239 @@ impl EnhancedGameServer {
                 if self.is_draining() {
                     Err(JoinRoomError::ServerDraining)
                 } else {
-                    // Enforce per-game room cap before creating a new room
-                    let cap_lock_key = format!("game_room_cap:{game_name}");
-                    match self
-                        .distributed_lock
-                        .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
-                        .await
+                    if let Some(app_limit) = client_app_info
+                        .as_ref()
+                        .and_then(|app| app.max_players_per_room)
+                        .filter(|limit| max_players > *limit)
                     {
-                        Ok(lock) => {
-                            self.metrics.increment_room_cap_lock_acquisitions();
-                            game_cap_lock = Some(lock);
-                        }
-                        Err(err) => {
-                            tracing::error!("Failed to acquire cap lock: {}", err);
-                            self.metrics.increment_room_cap_lock_failures();
-                        }
+                        let _ = self.distributed_lock.release(&lock_handle).await;
+                        return Err(JoinRoomError::MaxPlayersPerApplicationExceeded(
+                            MaxPlayersPerApplicationExceededError {
+                                requested: max_players,
+                                limit: app_limit,
+                            },
+                        ));
                     }
 
-                    match self.database.get_game_room_count(game_name).await {
-                        Ok(_) if self.is_draining() => {
-                            self.release_game_cap_lock(&game_cap_lock).await;
-                            Err(JoinRoomError::ServerDraining)
+                    let creation_result = async {
+                        if let (Some(app_id), Some(app_limit)) = (
+                            client_app_id,
+                            client_app_info.as_ref().and_then(|app| app.max_rooms),
+                        ) {
+                            application_cap_lock = Some(
+                                self.acquire_application_room_cap_lock(app_id, app_limit)
+                                    .await?,
+                            );
                         }
-                        Ok(current_room_count)
-                            if current_room_count >= self.config.max_rooms_per_game =>
-                        {
+
+                        let cap_lock_key = format!("game_room_cap:{game_name}");
+                        game_cap_lock = Some(
+                            self.distributed_lock
+                                .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
+                                .await
+                                .map_err(|error| {
+                                    tracing::error!(%game_name, %error, "Failed to acquire game room-cap lock");
+                                    self.metrics.increment_room_cap_lock_failures();
+                                    JoinRoomError::Internal(error)
+                                })?,
+                        );
+                        self.metrics.increment_room_cap_lock_acquisitions();
+
+                        if self.is_draining() {
+                            return Err(JoinRoomError::ServerDraining);
+                        }
+                        let current_room_count =
+                            self.database.get_game_room_count(game_name).await?;
+                        if current_room_count >= self.config.max_rooms_per_game {
                             self.metrics.increment_room_cap_denials();
-                            self.release_game_cap_lock(&game_cap_lock).await;
-                            Err(JoinRoomError::MaxRoomsPerGameExceeded(
+                            return Err(JoinRoomError::MaxRoomsPerGameExceeded(
                                 MaxRoomsPerGameExceededError {
                                     game_name: game_name.to_string(),
                                     current: current_room_count,
                                     limit: self.config.max_rooms_per_game,
                                 },
-                            ))
+                            ));
                         }
-                        Ok(_) => {
-                            let relay_type = self.resolve_relay_type(game_name);
-                            let client_app_id = self.client_app_id(player_id);
-                            let region_id = self.region_id().to_string();
-                            let created_room = self
-                                .database
-                                .create_room(
-                                    game_name.to_string(),
-                                    Some(room_code.to_string()),
-                                    max_players,
-                                    supports_authority,
-                                    *player_id,
-                                    relay_type,
-                                    region_id.clone(),
-                                    client_app_id,
-                                )
-                                .await;
 
-                            match created_room {
-                                Ok(room) if self.is_draining() => {
-                                    match self.database.delete_room(&room.id).await {
-                                        Ok(true) => {}
-                                        Ok(false) => {
-                                            tracing::warn!(
-                                                room_id = %room.id,
-                                                "Room created during shutdown drain was already absent during rollback"
-                                            );
-                                        }
-                                        Err(err) => {
-                                            tracing::error!(
-                                                room_id = %room.id,
-                                                error = %err,
-                                                "Failed to roll back room created during shutdown drain"
-                                            );
-                                        }
-                                    }
-                                    self.release_game_cap_lock(&game_cap_lock).await;
-                                    Err(JoinRoomError::ServerDraining)
-                                }
-                                Ok(mut room) => {
-                                    // The database generates a new room id, so no
-                                    // other room-scoped publisher can address its
-                                    // lane before creation. Claim that lane as
-                                    // soon as the id exists and retain it through
-                                    // routing + lifecycle publication.
-                                    room_event_guard = Some(
-                                        self.message_coordinator
-                                            .lock_room_event_mutation(&room.id)
-                                            .await,
+                        let relay_type = self.resolve_relay_type(game_name);
+                        let region_id = self.region_id().to_string();
+                        let room = self
+                            .database
+                            .create_room(
+                                game_name.to_string(),
+                                Some(room_code.to_string()),
+                                max_players,
+                                supports_authority,
+                                *player_id,
+                                relay_type,
+                                region_id,
+                                client_app_id,
+                            )
+                            .await?;
+
+                        if self.is_draining() {
+                            match self.database.delete_room(&room.id).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        room_id = %room.id,
+                                        "Room created during shutdown drain was already absent during rollback"
                                     );
-                                    self.release_game_cap_lock(&game_cap_lock).await;
-                                    self.metrics.increment_rooms_created();
-                                    self.metrics.increment_players_joined();
-                                    if let Some(app_id) = client_app_id {
-                                        self.record_room_application(&room.id, app_id).await;
-                                    }
-                                    if let Err(e) = self
-                                        .database
-                                        .update_player_name(&room.id, player_id, player_name)
-                                        .await
-                                    {
-                                        tracing::warn!(%player_id, "Failed to update creator name: {}", e);
-                                    } else if let Some(creator_info) =
-                                        room.players.get_mut(player_id)
-                                    {
-                                        creator_info.name = player_name.to_string();
-                                    }
-                                    Ok(room)
                                 }
-                                Err(e) => {
-                                    self.release_game_cap_lock(&game_cap_lock).await;
-                                    Err(anyhow::anyhow!(e).into())
+                                Err(error) => {
+                                    tracing::error!(
+                                        room_id = %room.id,
+                                        %error,
+                                        "Failed to roll back room created during shutdown drain"
+                                    );
+                                    return Err(error.into());
                                 }
                             }
+                            return Err(JoinRoomError::ServerDraining);
                         }
-                        Err(err) => {
-                            tracing::error!(
-                                "Failed to read room count for cap enforcement: {}",
-                                err
+
+                        Ok(room)
+                    }
+                    .await;
+
+                    match creation_result {
+                        Ok(mut room) => {
+                            // The database generates a new room id, so no other
+                            // room-scoped publisher can address its lane before
+                            // creation. Retain the lane through routing and
+                            // lifecycle publication.
+                            room_event_guard = Some(
+                                self.message_coordinator
+                                    .lock_room_event_mutation(&room.id)
+                                    .await,
                             );
-                            self.release_game_cap_lock(&game_cap_lock).await;
-                            Err(err.into())
+                            self.metrics.increment_rooms_created();
+                            self.metrics.increment_players_joined();
+                            if let Some(app_id) = client_app_id {
+                                self.cache_room_application(&room.id, app_id);
+                            }
+                            if let Err(error) = self
+                                .database
+                                .update_player_name(&room.id, player_id, player_name)
+                                .await
+                            {
+                                tracing::warn!(%player_id, %error, "Failed to update creator name");
+                            } else if let Some(creator_info) = room.players.get_mut(player_id) {
+                                creator_info.name = player_name.to_string();
+                            }
+                            let application_claim_rollback = client_app_id.map(|application_id| {
+                                PendingApplicationClaimRollback { application_id }
+                            });
+                            Ok((
+                                room,
+                                RoomAdmissionKind::Created {
+                                    application_claim_rollback,
+                                },
+                            ))
                         }
+                        Err(error) => Err(error),
                     }
                 }
             }
             Err(e) => Err(e.into()),
         };
 
+        self.release_cap_lock(&game_cap_lock).await;
+        self.release_cap_lock(&application_cap_lock).await;
         let _ = self.distributed_lock.release(&lock_handle).await;
-        let room = result?;
+        let (room, admission_kind) = result?;
         let guard = room_event_guard.ok_or_else(|| {
             anyhow::anyhow!("successful room admission lost its room publication guard")
         })?;
-        Ok((room, guard))
+        Ok((room, guard, admission_kind))
     }
 
-    async fn release_game_cap_lock(&self, game_cap_lock: &Option<LockHandle>) {
-        if let Some(lock) = game_cap_lock {
+    async fn release_cap_lock(&self, cap_lock: &Option<LockHandle>) {
+        if let Some(lock) = cap_lock {
             let _ = self.distributed_lock.release(lock).await;
+        }
+    }
+
+    async fn acquire_application_room_cap_lock(
+        &self,
+        app_id: uuid::Uuid,
+        app_limit: u32,
+    ) -> Result<LockHandle, JoinRoomError> {
+        let cap_lock_key = format!("application_room_cap:{app_id}");
+        let lock = self
+            .distributed_lock
+            .acquire(&cap_lock_key, APPLICATION_ROOM_CAP_LOCK_TTL)
+            .await
+            .map_err(|error| {
+                tracing::error!(%app_id, %error, "Failed to acquire application room-cap lock");
+                JoinRoomError::Internal(error)
+            })?;
+        let current = match self.database.get_application_room_count(&app_id).await {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::error!(%app_id, %error, "Failed to count application rooms");
+                let _ = self.distributed_lock.release(&lock).await;
+                return Err(JoinRoomError::Internal(error));
+            }
+        };
+        let limit = usize::try_from(app_limit).unwrap_or(usize::MAX);
+        if current >= limit {
+            let _ = self.distributed_lock.release(&lock).await;
+            return Err(JoinRoomError::MaxRoomsPerApplicationExceeded(
+                MaxRoomsPerApplicationExceededError { current, limit },
+            ));
+        }
+        Ok(lock)
+    }
+
+    pub(super) async fn rollback_room_application_claim_if_unchanged(
+        &self,
+        room_id: &RoomId,
+        rollback: &PendingApplicationClaimRollback,
+    ) -> Result<(), JoinRoomError> {
+        if self
+            .database
+            .clear_room_application_id_if_matches(room_id, rollback.application_id)
+            .await?
+        {
+            self.room_applications.remove(room_id);
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_pending_room_application_claim_adopted(
+        &self,
+        room_id: RoomId,
+        application_id: uuid::Uuid,
+    ) {
+        for mut entry in self.pending_durable_player_detaches.iter_mut() {
+            if entry.key().0 == room_id
+                && entry
+                    .value()
+                    .as_ref()
+                    .is_some_and(|rollback| rollback.application_id == application_id)
+            {
+                *entry.value_mut() = None;
+            }
+        }
+    }
+
+    async fn rollback_or_queue_room_application_claim(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        rollback: &PendingApplicationClaimRollback,
+    ) -> Result<(), JoinRoomError> {
+        match self
+            .rollback_room_application_claim_if_unchanged(room_id, rollback)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.pending_durable_player_detaches
+                    .insert((*room_id, *player_id), Some(rollback.clone()));
+                Err(error)
+            }
         }
     }
 

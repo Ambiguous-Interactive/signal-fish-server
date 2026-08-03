@@ -673,6 +673,11 @@ async fn reconnect_clears_stored_transport_status() {
     )
     .await;
 
+    // PlayerLeft commits before the disconnect path physically removes the old
+    // connection. Join that idempotent teardown before an immediate reconnect,
+    // which would otherwise race the server's `has_client` guard.
+    server.disconnect_client(&reporter_id).await;
+
     // Mint a reconnection token through the server handle — obtained in-process
     // here rather than over the wire (same sanctioned pattern as
     // `v3_multipeer_e2e.rs`).

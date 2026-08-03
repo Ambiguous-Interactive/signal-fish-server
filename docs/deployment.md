@@ -448,8 +448,10 @@ Enable file logging:
 
 ## Security Checklist
 
-- [ ] Enable authentication (`require_websocket_auth: true`)
-- [ ] Set strong app secrets
+- [ ] Enable app-ID allowlisting (`require_websocket_auth: true`) where per-app
+      admission policy is needed
+- [ ] Treat app IDs as public labels; the reserved app-secret field is not a
+      current client credential
 - [ ] Configure CORS origins (not `*`)
 - [ ] Serve signaling over `wss://` (TLS) — mandatory for WebRTC: DTLS fingerprints travel in the SDP through
       the signaling channel, so plaintext `ws://` lets an on-path attacker defeat WebRTC encryption (see the

@@ -289,7 +289,7 @@ impl EnhancedGameServer {
                 .await
             {
                 self.pending_durable_player_detaches
-                    .insert((disconnected.room_id, disconnected.player_id), ());
+                    .insert((disconnected.room_id, disconnected.player_id), None);
                 tracing::warn!(
                     player_id = %disconnected.player_id,
                     room_id = %disconnected.room_id,
@@ -607,7 +607,59 @@ impl EnhancedGameServer {
             }
         };
 
+        // Reconnection tokens prove the prior player identity, not the
+        // application principal on this new socket. Re-authorize against the
+        // persisted room owner before restoring membership. Return the same
+        // non-enumerating outcome as a missing room so an app cannot probe
+        // another app's room through reconnect.
+        let reconnect_app_info = if self.config.auth_enabled {
+            let client_app_info = self.client_app_info(current_player_id);
+            let client_app_id = client_app_info.as_ref().map(|app| app.id);
+            if client_app_id.is_none()
+                || room
+                    .application_id
+                    .is_some_and(|owner| Some(owner) != client_app_id)
+            {
+                return self
+                    .reject_claimed_reconnect(
+                        current_player_id,
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Room no longer exists",
+                        ErrorCode::RoomNotFound,
+                    )
+                    .await;
+            }
+            if let Some(owner) = room.application_id {
+                self.cache_room_application(room_id, owner);
+            }
+            client_app_info
+        } else {
+            None
+        };
+        let reconnect_app_id = reconnect_app_info.as_ref().map(|app| app.id);
+
         if !room.players.contains_key(reconnect_player_id) {
+            let effective_max_players = reconnect_app_info
+                .as_ref()
+                .and_then(|app| app.max_players_per_room)
+                .map_or(room.max_players, |app_limit| {
+                    room.max_players.min(app_limit)
+                });
+            if room.players.len() >= usize::from(effective_max_players) {
+                return self
+                    .reject_claimed_reconnect(
+                        current_player_id,
+                        claim_guard,
+                        restored_membership,
+                        restored_authority,
+                        "Room is full",
+                        ErrorCode::RoomFull,
+                    )
+                    .await;
+            }
+
             let Some(player_info) = disconnected.player_info.clone() else {
                 return self
                     .reject_claimed_reconnect(
@@ -1007,7 +1059,13 @@ impl EnhancedGameServer {
             )
             .await;
         match initial_delivery {
-            Ok(crate::coordination::DeliveryOutcome::Delivered) => {}
+            Ok(crate::coordination::DeliveryOutcome::Delivered) => {
+                if room.application_id == reconnect_app_id {
+                    if let Some(application_id) = reconnect_app_id {
+                        self.mark_pending_room_application_claim_adopted(*room_id, application_id);
+                    }
+                }
+            }
             Ok(outcome) => {
                 tracing::warn!(
                     %reconnect_player_id,

@@ -93,5 +93,5 @@ exposed no inline review threads. Copilot was explicitly requested but returned
 only that the requester's review quota was exhausted; it supplied no actionable
 feedback.
 
-P38 is complete. The final evidence-only head remains subject to the same green
-workflow and explicit review loop before the PR leaves draft state.
+P38 merged to `main` in PR #252. Its final evidence-only head retained the same
+green workflow and review result as the validated code head.

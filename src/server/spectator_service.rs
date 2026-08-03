@@ -33,6 +33,7 @@ pub(crate) struct SpectatorService {
     /// reconnection is disabled.
     reconnection_manager: Option<Arc<ReconnectionManager>>,
     connection_manager: Arc<ConnectionManager>,
+    auth_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -58,6 +59,7 @@ impl SpectatorService {
         protocol_config: ProtocolConfig,
         reconnection_manager: Option<Arc<ReconnectionManager>>,
         connection_manager: Arc<ConnectionManager>,
+        auth_enabled: bool,
     ) -> Self {
         Self {
             spectator_rooms: Arc::new(DashMap::new()),
@@ -67,6 +69,7 @@ impl SpectatorService {
             protocol_config,
             reconnection_manager,
             connection_manager,
+            auth_enabled,
         }
     }
 
@@ -191,6 +194,29 @@ impl SpectatorService {
                 ));
             }
         };
+
+        // Room persistence is authoritative. The process-local room/app map is
+        // only a relay cache and may be empty after restart or cache loss.
+        if self.auth_enabled {
+            let Some(client_app_id) = self.connection_manager.app_id(player_id) else {
+                return Err(SpectatorError::new(
+                    "Room not found",
+                    Some(ErrorCode::RoomNotFound),
+                ));
+            };
+            if room
+                .application_id
+                .is_some_and(|owner| owner != client_app_id)
+            {
+                return Err(SpectatorError::new(
+                    "Room not found",
+                    Some(ErrorCode::RoomNotFound),
+                ));
+            }
+            if let Some(owner) = room.application_id {
+                self.room_applications.insert(room.id, owner);
+            }
+        }
 
         if !room.can_spectate() {
             return Err(SpectatorError::new(
@@ -1123,6 +1149,7 @@ mod tests {
             ProtocolConfig::default(),
             None,
             connection_manager,
+            false,
         );
 
         (spectator_service, room, creator_id, coordinator, database)

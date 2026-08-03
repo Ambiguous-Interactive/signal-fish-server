@@ -2033,6 +2033,10 @@ mod tests {
         async fn cleanup_expired_locks(&self) -> Result<usize> {
             Ok(0)
         }
+
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
     }
 
     #[derive(Debug, PartialEq)]

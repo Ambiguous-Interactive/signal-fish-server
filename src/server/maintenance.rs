@@ -33,12 +33,41 @@ impl EnhancedGameServer {
                 continue;
             }
 
+            if matches!(self.database.get_room_by_id(&room_id).await, Ok(None)) {
+                if self
+                    .pending_durable_player_detaches
+                    .remove(&(room_id, player_id))
+                    .is_some()
+                {
+                    cleaned += 1;
+                }
+                continue;
+            }
+
+            // Re-read rollback provenance only after entering the room event
+            // lane. A successfully published same-app admission clears it
+            // under this same lane so a stale pre-lock snapshot cannot erase
+            // ownership that admission adopted.
+            let application_claim_rollback = self
+                .pending_durable_player_detaches
+                .get(&(room_id, player_id))
+                .and_then(|entry| entry.value().clone());
+
             match self
                 .database
                 .remove_player_from_room(&room_id, &player_id)
                 .await
             {
                 Ok(_) => {
+                    if let Some(rollback) = application_claim_rollback.as_ref() {
+                        if let Err(error) = self
+                            .rollback_room_application_claim_if_unchanged(&room_id, rollback)
+                            .await
+                        {
+                            tracing::warn!(%player_id, %room_id, %error, "Failed pending room application-claim rollback; retaining it for retry");
+                            continue;
+                        }
+                    }
                     if self
                         .pending_durable_player_detaches
                         .remove(&(room_id, player_id))
@@ -54,6 +83,31 @@ impl EnhancedGameServer {
         }
 
         cleaned
+    }
+
+    /// Drop process-local application mappings for rooms removed by any
+    /// storage cleanup path, including count-only inactive-room cleanup.
+    pub(crate) async fn prune_room_applications(&self) -> usize {
+        let room_ids: Vec<RoomId> = self
+            .room_applications
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        let mut removed = 0;
+        for room_id in room_ids {
+            match self.database.get_room_by_id(&room_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if self.room_applications.remove(&room_id).is_some() {
+                        removed += 1;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%room_id, %error, "Failed to verify cached room application mapping; retaining it for retry");
+                }
+            }
+        }
+        removed
     }
 
     /// Log that a room has been closed during cleanup.
@@ -335,6 +389,7 @@ impl EnhancedGameServer {
                             // deleted room — independent of the cleanup
                             // idempotency claim below.
                             self.clear_active_session_plan(room_id);
+                            self.clear_room_application(room_id);
 
                             // Likewise drop the coordinator's per-node in-memory
                             // ready set for this deleted room. This is the prompt
@@ -369,7 +424,6 @@ impl EnhancedGameServer {
                             if should_process {
                                 self.publish_room_closed(*room_id, "empty_cleanup");
                                 // Relay server removed in signal-fish-server
-                                self.clear_room_application(room_id).await;
                             } else {
                                 tracing::debug!(
                                     %room_id,
@@ -439,6 +493,18 @@ impl EnhancedGameServer {
                     count = pruned_session_plans,
                     instance_id = %self.instance_id,
                     "Pruned stored session plans for removed rooms"
+                );
+            }
+
+            // App ownership authorization is persisted, but relay policy keeps
+            // a process-local cache. Reconcile it for count-only inactive-room
+            // cleanup just like session plans and ready state.
+            let pruned_room_applications = self.prune_room_applications().await;
+            if pruned_room_applications > 0 {
+                tracing::debug!(
+                    count = pruned_room_applications,
+                    instance_id = %self.instance_id,
+                    "Pruned application mappings for removed rooms"
                 );
             }
 

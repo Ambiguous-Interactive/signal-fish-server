@@ -60,6 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce configured application room ownership and quotas (issue #249).
+  Authenticated apps can no longer join, spectate, or reconnect into another
+  app's persisted room; legacy unowned rooms are claimed only by a successful
+  seated admission. `max_rooms` now applies atomically across game names and
+  `max_players_per_room` caps creation and future seats without ejecting
+  existing players. Auth-disabled rooms remain unowned, and ownership errors
+  use the non-enumerating `ROOM_NOT_FOUND` response.
 - Keep retry sleeps within the configured maximum after jitter is applied
   (issue #205). Persistent in-memory lock contention can no longer turn the
   default 5-second maximum into a 6-second sleep; sub-millisecond precision is

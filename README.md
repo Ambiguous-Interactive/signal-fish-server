@@ -105,7 +105,7 @@ ws://localhost:3536/v2/ws
 - **Rate limiting** -- in-memory limits for auth, room creation/join, and WebRTC signaling
 - **Metrics** -- Prometheus-compatible metrics at `/metrics/prom` and JSON metrics at `/metrics`
 - **Flexible configuration** -- JSON config file with environment variable overrides
-- **Optional authentication** -- config-file-backed app authentication with per-app rate limits
+- **Optional app allowlisting** -- config-file-backed app IDs with per-app room and rate limits
 - **Zero external dependencies** -- everything runs in-memory; no database, no message broker, no cloud services
 
 ## Endpoints
@@ -181,7 +181,7 @@ On startup the server looks for `config.json` in the working directory. See
     "authorized_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "CHANGE_ME_BEFORE_PRODUCTION",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "My Awesome Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
@@ -635,7 +635,7 @@ configured authorized apps and enforces per-app rate limiting based on the
     "authorized_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "a-strong-secret-here",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "My Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
@@ -646,9 +646,12 @@ configured authorized apps and enforces per-app rate limiting based on the
 }
 ```
 
-**Important:** Change the default `app_secret` value before deploying to
-production. The example value `CHANGE_ME_BEFORE_PRODUCTION` in
-`config.example.json` is intentionally insecure configuration.
+The current client handshake sends and validates only `app_id`; configured
+`app_secret` values are reserved and are not client credentials. Do not ship
+them in game binaries. App IDs provide allowlisting, quota accounting, and
+accidental room-collision isolation, not protection from a hostile client that
+knows another app's public ID. See [Authentication](docs/authentication.md) for
+the exact trust boundary.
 
 ## MSRV
 

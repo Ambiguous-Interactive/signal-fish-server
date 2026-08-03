@@ -552,7 +552,9 @@ curl -H "Authorization: Bearer your-secret-token" \
 
 ## Authentication
 
-Optional app-based authentication with per-app limits.
+Optional app-ID allowlisting with per-app room, player, and request limits. The
+current client handshake validates `app_id` only; see the authentication guide
+for the exact trust boundary.
 
 ```json
 
@@ -562,7 +564,7 @@ Optional app-based authentication with per-app limits.
     "authorized_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "secret-key",
+        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "max_rooms": 100,
         "max_players_per_room": 16,
         "rate_limit_per_minute": 60

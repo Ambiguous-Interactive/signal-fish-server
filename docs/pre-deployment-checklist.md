@@ -31,12 +31,11 @@ cargo run -- --print-config
   `*`.
 - [ ] `security.max_connections_per_ip` set to a sane ceiling (default `24`).
 
-## Secrets changed
+## Secrets protected
 
-- [ ] No default secrets remain. The example `app_secret`
-  (`CHANGE_ME_BEFORE_PRODUCTION`) in
-  [`config.example.json`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/config.example.json)
-  is intentionally insecure — replace every `authorized_apps[*].app_secret`.
+- [ ] The reserved `authorized_apps[*].app_secret` field is not exposed to
+  clients or treated as a current WebSocket credential; the handshake validates
+  only the public `app_id` (see [Authentication](authentication.md)).
 - [ ] `turn.static_auth_secret` (if TURN is enabled) is a strong random value,
   supplied via `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET`, not committed to the
   repo.
