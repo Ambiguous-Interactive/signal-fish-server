@@ -88,5 +88,9 @@ and the evaluator's final re-review returned `PASS` with no remaining issue.
   isolate the 253-byte hostname ceiling. Data-driven valid-DNS cases now prove
   253 bytes is accepted while 254 and 255 bytes are rejected; an exact local
   replay of shard 15/39 caught all 10 mutants, including the four survivors.
-- Exact-head hosted CI and GitHub reviewer feedback remain before publication
-  is complete.
+- Behavioral head `d81cafdb6269d4a2b1dc98c0dda9325f7710732c` passed all 20
+  applicable hosted workflows; the sole non-success was the expected skipped
+  Dependabot auto-merge run. Cursor Bugbot's exact-head summary introduced no
+  finding, Copilot acknowledged both requests but was quota-blocked, and no
+  review thread remained. PR #256 was open, ready for review, and mergeable;
+  the final evidence-only head repeats the exact-head CI and reviewer loop.
