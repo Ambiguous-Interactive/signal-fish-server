@@ -459,8 +459,9 @@ async fn missing_sender_stamp_cancels_broadcast_before_any_delivery_attempt() {
         .await
         .expect("register recipient");
 
+    let mut build_message = || None;
     coordinator
-        .broadcast_to_room_except_with_message(&room_id, &sender_id, Box::new(|| None))
+        .broadcast_to_room_except_with_borrowed_message(&room_id, &sender_id, &mut build_message)
         .await
         .expect("missing stamp cancels cleanly");
 
@@ -515,31 +516,33 @@ async fn terminal_unroute_captures_every_stamp_allocated_before_player_left() {
         let connection_manager = Arc::clone(&connection_manager);
         let release = Arc::clone(&release);
         tokio::spawn(async move {
+            let mut build_once = Some(move || {
+                let stamp = connection_manager
+                    .next_relay_stamp_in_room(&sender_id, &room_id)
+                    .expect("sender remains routed during allocation");
+                stamp_allocated_tx
+                    .send(())
+                    .expect("test waits for stamp allocation");
+                let (released, wake) = &*release;
+                let mut released = released.lock().expect("release lock");
+                while !*released {
+                    released = wake.wait(released).expect("release wait");
+                }
+                Some(Arc::new(ServerMessage::GameData {
+                    from_player: sender_id,
+                    data: serde_json::json!({"n": stamp.seq}),
+                    seq: Some(stamp.seq),
+                    epoch: Some(stamp.epoch),
+                    class: None,
+                    key: None,
+                }))
+            });
+            let mut build_message = move || build_once.take().and_then(|build| build());
             coordinator
-                .broadcast_to_room_except_with_message(
+                .broadcast_to_room_except_with_borrowed_message(
                     &room_id,
                     &sender_id,
-                    Box::new(move || {
-                        let stamp = connection_manager
-                            .next_relay_stamp_in_room(&sender_id, &room_id)
-                            .expect("sender remains routed during allocation");
-                        stamp_allocated_tx
-                            .send(())
-                            .expect("test waits for stamp allocation");
-                        let (released, wake) = &*release;
-                        let mut released = released.lock().expect("release lock");
-                        while !*released {
-                            released = wake.wait(released).expect("release wait");
-                        }
-                        Some(Arc::new(ServerMessage::GameData {
-                            from_player: sender_id,
-                            data: serde_json::json!({"n": stamp.seq}),
-                            seq: Some(stamp.seq),
-                            epoch: Some(stamp.epoch),
-                            class: None,
-                            key: None,
-                        }))
-                    }),
+                    &mut build_message,
                 )
                 .await
         })

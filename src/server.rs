@@ -39,6 +39,8 @@ mod authority;
 mod connection_manager;
 mod dashboard_cache;
 mod game_data;
+#[cfg(test)]
+mod game_data_tests;
 mod heartbeat;
 mod maintenance;
 #[cfg(test)]
@@ -70,6 +72,14 @@ pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
 pub use shutdown::ShutdownDrain;
 use spectator_service::SpectatorService;
+
+/// Narrow dev-only entry point for measuring the production game-data handoff
+/// without constructing an `EnhancedGameServer` or spawning background tasks.
+#[cfg(feature = "allocation-tracking")]
+#[doc(hidden)]
+pub mod allocation_benchmark {
+    pub use super::game_data::broadcast_game_data_with;
+}
 
 // Removed unused imports
 
@@ -2574,20 +2584,36 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: Box<dyn FnOnce() -> Option<Arc<ServerMessage>> + Send + 'a>,
     ) -> anyhow::Result<()> {
-        // Lock ordering matches `collect_room_recipients` and reconnect's
-        // initial-message registration path. Holding these read locks while
-        // `build_message` allocates a relay stamp makes stamp allocation and
-        // recipient snapshot one ordered operation relative to reconnect
-        // baselines, which take the write side of the same room lock.
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         let recipients =
             Self::collect_routed_recipients(&room_players, &clients, room_id, Some(except_player));
-
         let message = build_message();
         drop(clients);
         drop(room_players);
+        if let Some(message) = message {
+            self.deliver_to_all(recipients, message, Some(*room_id))
+                .await;
+        }
+        Ok(())
+    }
 
+    async fn broadcast_to_room_except_with_borrowed_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &'a mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
+    ) -> anyhow::Result<()> {
+        // Keep this body direct: an extra async helper would enlarge the
+        // async-trait future allocation on every relay even though it would
+        // not add an allocation operation.
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let recipients =
+            Self::collect_routed_recipients(&room_players, &clients, room_id, Some(except_player));
+        let message = build_message();
+        drop(clients);
+        drop(room_players);
         if let Some(message) = message {
             self.deliver_to_all(recipients, message, Some(*room_id))
                 .await;

@@ -1030,29 +1030,31 @@ async fn game_data_builder_blocks_reconnect_baseline_until_recipient_snapshot_is
         let coordinator = Arc::clone(&coordinator);
         let allocated_stamp = Arc::clone(&allocated_stamp);
         tokio::spawn(async move {
+            let mut build_once = Some(move || {
+                allocated_stamp.store(1, Ordering::SeqCst);
+                builder_started_tx
+                    .send(())
+                    .expect("test should still wait for builder start");
+                tokio::task::block_in_place(|| {
+                    release_builder_rx
+                        .recv()
+                        .expect("test should release the broadcast builder");
+                });
+                Some(Arc::new(ServerMessage::GameData {
+                    from_player: sender_id,
+                    data: serde_json::json!({ "kind": "blocked-broadcast" }),
+                    seq: Some(1),
+                    epoch: Some(1),
+                    class: None,
+                    key: None,
+                }))
+            });
+            let mut build_message = move || build_once.take().and_then(|build| build());
             coordinator
-                .broadcast_to_room_except_with_message(
+                .broadcast_to_room_except_with_borrowed_message(
                     &room_id,
                     &sender_id,
-                    Box::new(move || {
-                        allocated_stamp.store(1, Ordering::SeqCst);
-                        builder_started_tx
-                            .send(())
-                            .expect("test should still wait for builder start");
-                        tokio::task::block_in_place(|| {
-                            release_builder_rx
-                                .recv()
-                                .expect("test should release the broadcast builder");
-                        });
-                        Some(Arc::new(ServerMessage::GameData {
-                            from_player: sender_id,
-                            data: serde_json::json!({ "kind": "blocked-broadcast" }),
-                            seq: Some(1),
-                            epoch: Some(1),
-                            class: None,
-                            key: None,
-                        }))
-                    }),
+                    &mut build_message,
                 )
                 .await
                 .expect("broadcast should complete");

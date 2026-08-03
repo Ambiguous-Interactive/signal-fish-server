@@ -82,22 +82,18 @@ impl EnhancedGameServer {
         if let Some(room_id) = self.get_client_room(player_id).await {
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
-            self.broadcast_game_data_with(
-                player_id,
-                &room_id,
-                Box::new(move || {
-                    let stamp =
-                        connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
-                    Some(ServerMessage::GameData {
-                        from_player: *player_id,
-                        data,
-                        seq: Some(stamp.seq),
-                        epoch: Some(stamp.epoch),
-                        class,
-                        key,
-                    })
-                }),
-            )
+            self.broadcast_game_data_with(player_id, &room_id, move || {
+                let stamp =
+                    connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
+                Some(ServerMessage::GameData {
+                    from_player: *player_id,
+                    data,
+                    seq: Some(stamp.seq),
+                    epoch: Some(stamp.epoch),
+                    class,
+                    key,
+                })
+            })
             .await;
         }
     }
@@ -139,21 +135,17 @@ impl EnhancedGameServer {
         if let Some(room_id) = self.get_client_room(player_id).await {
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
-            self.broadcast_game_data_with(
-                player_id,
-                &room_id,
-                Box::new(move || {
-                    let stamp =
-                        connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
-                    Some(ServerMessage::GameDataBinary {
-                        from_player: *player_id,
-                        encoding,
-                        payload,
-                        seq: Some(stamp.seq),
-                        epoch: Some(stamp.epoch),
-                    })
-                }),
-            )
+            self.broadcast_game_data_with(player_id, &room_id, move || {
+                let stamp =
+                    connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
+                Some(ServerMessage::GameDataBinary {
+                    from_player: *player_id,
+                    encoding,
+                    payload,
+                    seq: Some(stamp.seq),
+                    epoch: Some(stamp.epoch),
+                })
+            })
             .await;
         }
     }
@@ -172,31 +164,22 @@ impl EnhancedGameServer {
     /// cross-instance bus (`distributed::SequencedMessage` serializes the
     /// whole message); the in-memory single-instance coordinator is the only
     /// production backend today, so no remote instance can re-stamp or lose it.
-    async fn broadcast_game_data_with<'a>(
+    async fn broadcast_game_data_with<'a, F>(
         &'a self,
         player_id: &'a PlayerId,
         room_id: &RoomId,
-        build_message: Box<dyn FnOnce() -> Option<ServerMessage> + Send + 'a>,
-    ) {
-        // Count every GameData message accepted for relay. This is the sole
-        // increment site for the `game_data_messages` metric (both the JSON and
-        // binary handlers funnel through here); it was exported to Prometheus
-        // but never incremented before (MISC-11), so the counter read a
-        // permanent 0.
-        self.metrics.increment_game_data_messages();
-
-        // (Room + last_seen liveness is refreshed once upstream per inbound
-        // message — by the router for text frames, by `handle_game_data_binary`
-        // for binary frames — so it is intentionally not repeated here.)
-
-        if let Err(e) = self
-            .message_coordinator
-            .broadcast_to_room_except_with_message(
-                room_id,
-                player_id,
-                Box::new(move || build_message().map(Arc::new)),
-            )
-            .await
+        build_message: F,
+    ) where
+        F: FnOnce() -> Option<ServerMessage> + Send + 'a,
+    {
+        if let Err(e) = broadcast_game_data_with(
+            self.message_coordinator.as_ref(),
+            self.metrics.as_ref(),
+            player_id,
+            room_id,
+            build_message,
+        )
+        .await
         {
             tracing::error!(
                 %player_id,
@@ -206,4 +189,32 @@ impl EnhancedGameServer {
             );
         }
     }
+}
+
+/// Drive the production metric, one-shot adapter, and coordinator handoff.
+pub async fn broadcast_game_data_with<'a, F>(
+    message_coordinator: &'a dyn crate::coordination::MessageCoordinator,
+    metrics: &crate::metrics::ServerMetrics,
+    player_id: &'a PlayerId,
+    room_id: &RoomId,
+    build_message: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Option<ServerMessage> + Send + 'a,
+{
+    metrics.increment_game_data_messages();
+    let mut build_message = one_shot_arc_builder(build_message);
+    message_coordinator
+        .broadcast_to_room_except_with_borrowed_message(room_id, player_id, &mut build_message)
+        .await
+}
+
+pub(super) fn one_shot_arc_builder<F>(
+    build_message: F,
+) -> impl FnMut() -> Option<Arc<ServerMessage>>
+where
+    F: FnOnce() -> Option<ServerMessage>,
+{
+    let mut build_message = Some(build_message);
+    move || build_message.take().and_then(|build| build()).map(Arc::new)
 }
