@@ -19,8 +19,10 @@ use signal_fish_server::coordination::{
 };
 use signal_fish_server::metrics::ServerMetrics;
 use signal_fish_server::protocol::{
-    DeliveryClass, LobbyState, PlayerId, RoomId, ServerMessage, SpectatorJoinedPayload,
+    DeliveryClass, GameDataEncoding, LobbyState, PlayerId, RoomId, ServerMessage,
+    SpectatorJoinedPayload,
 };
+use signal_fish_server::server::allocation_benchmark::broadcast_game_data_with;
 use signal_fish_server::server::InMemoryMessageCoordinator;
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
@@ -29,6 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 
+use bytes::Bytes;
+
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
@@ -36,6 +40,7 @@ const RELAYS_PER_SAMPLE: usize = 4_096;
 // One stable current-thread runtime/block_on allocation belongs to the whole
 // sample, not to any logical relay.
 const SAMPLE_FIXED_ALLOCATION_OPERATIONS: usize = 1;
+const SAMPLE_FIXED_ALLOCATED_BYTES: usize = 64;
 const REPEATS: usize = 5;
 const ROOM_SIZES: [usize; 3] = [2, 8, 16];
 const DATA_CAPACITY: usize = 32;
@@ -50,16 +55,41 @@ struct Sample {
     deliveries: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum IngressKind {
+    Json,
+    Binary,
+}
+
+impl IngressKind {
+    const ALL: [Self; 2] = [Self::Json, Self::Binary];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Json => "production_json_ingress",
+            Self::Binary => "production_binary_ingress",
+        }
+    }
+}
+
+#[derive(Clone)]
+enum IngressPayload {
+    Json(serde_json::Value),
+    Binary(Bytes),
+}
+
 struct FanoutFixture {
     runtime: Runtime,
     coordinator: Arc<InMemoryMessageCoordinator>,
     metrics: Arc<ServerMetrics>,
     receivers: Vec<(PlayerId, OutboundReceiver)>,
-    message: Arc<ServerMessage>,
+    payload: IngressPayload,
+    handoff_message: Arc<ServerMessage>,
+    ingress_kind: IngressKind,
 }
 
 impl FanoutFixture {
-    fn new(room_size: usize) -> Self {
+    fn new(room_size: usize, ingress_kind: IngressKind) -> Self {
         assert!(
             room_size >= 2,
             "fan-out fixture needs a sender and recipient"
@@ -103,20 +133,27 @@ impl FanoutFixture {
             }
         });
 
-        let message = game_data_message(SENDER_ID, 1);
+        // Construct caller-owned payloads before the measured region. The
+        // production ingress cell still builds the ServerMessage and Arc in
+        // the measured region, while the isolated handoff cell uses the
+        // prebuilt minimal envelope retained by the historical baseline.
+        let payload = ingress_payload(ingress_kind);
+        let handoff_message = game_data_message(ingress_kind, SENDER_ID, 1);
         let mut fixture = Self {
             runtime,
             coordinator,
             metrics,
             receivers,
-            message,
+            payload,
+            handoff_message,
+            ingress_kind,
         };
 
         // Warm Tokio and every classified queue's backing storage before
         // taking a steady-state allocator snapshot. Recipient and join_all
         // storage is intentionally rebuilt inside each measured fan-out.
         let expected = room_size - 1;
-        let warmed = fixture.relay_batch(1);
+        let warmed = fixture.relay_ingress_batch(vec![fixture.payload.clone()]);
         assert_eq!(
             warmed, expected,
             "fan-out warm-up must reach every non-sender recipient"
@@ -124,30 +161,56 @@ impl FanoutFixture {
         fixture
     }
 
-    fn relay_batch(&mut self, relays: usize) -> usize {
+    fn relay_ingress_batch(&mut self, payloads: Vec<IngressPayload>) -> usize {
         let coordinator = Arc::clone(&self.coordinator);
-        let message = Arc::clone(&self.message);
+        let metrics = Arc::clone(&self.metrics);
         let receivers = &mut self.receivers;
+        let ingress_kind = self.ingress_kind;
 
         self.runtime.block_on(async move {
             let mut deliveries = 0;
-            for _ in 0..relays {
-                let relay = Arc::clone(&message);
-                coordinator
-                    .broadcast_to_room_except_with_message(
-                        &ROOM_ID,
-                        &SENDER_ID,
-                        Box::new(move || Some(relay)),
-                    )
-                    .await
-                    .expect("fan-out broadcast must succeed");
-                deliveries += drain_recipients(receivers, SENDER_ID);
+            for payload in payloads {
+                broadcast_game_data_with(
+                    coordinator.as_ref(),
+                    metrics.as_ref(),
+                    &SENDER_ID,
+                    &ROOM_ID,
+                    move || Some(game_data_from_payload(ingress_kind, payload, SENDER_ID, 1)),
+                )
+                .await
+                .expect("production game-data handoff must succeed");
+                deliveries += drain_recipients(receivers, SENDER_ID, Some(ingress_kind));
             }
             deliveries
         })
     }
 
-    fn measure(&mut self) -> Sample {
+    fn relay_handoff_batch(&mut self, relays: usize) -> usize {
+        let coordinator = Arc::clone(&self.coordinator);
+        let message = Arc::clone(&self.handoff_message);
+        let receivers = &mut self.receivers;
+        let ingress_kind = self.ingress_kind;
+        self.runtime.block_on(async move {
+            let mut deliveries = 0;
+            for _ in 0..relays {
+                let mut relay = Some(Arc::clone(&message));
+                let mut build_message = move || relay.take();
+                coordinator
+                    .broadcast_to_room_except_with_borrowed_message(
+                        &ROOM_ID,
+                        &SENDER_ID,
+                        &mut build_message,
+                    )
+                    .await
+                    .expect("borrowed coordinator handoff must succeed");
+                deliveries += drain_recipients(receivers, SENDER_ID, Some(ingress_kind));
+            }
+            deliveries
+        })
+    }
+
+    fn measure_ingress(&mut self) -> Sample {
+        let payloads = vec![self.payload.clone(); RELAYS_PER_SAMPLE];
         let attempts_before = self
             .metrics
             .websocket_delivery_attempts
@@ -156,8 +219,9 @@ impl FanoutFixture {
             .metrics
             .websocket_deliveries_enqueued
             .load(Ordering::Relaxed);
+        let messages_before = self.metrics.game_data_messages.load(Ordering::Relaxed);
         let region = Region::new(GLOBAL);
-        let deliveries = self.relay_batch(RELAYS_PER_SAMPLE);
+        let deliveries = self.relay_ingress_batch(payloads);
         let stats = region.change();
         let attempts = self
             .metrics
@@ -169,6 +233,7 @@ impl FanoutFixture {
             .websocket_deliveries_enqueued
             .load(Ordering::Relaxed)
             - enqueued_before;
+        let messages = self.metrics.game_data_messages.load(Ordering::Relaxed) - messages_before;
 
         let expected = RELAYS_PER_SAMPLE * (self.receivers.len() - 1);
         assert_eq!(
@@ -183,7 +248,23 @@ impl FanoutFixture {
             enqueued, expected as u64,
             "allocation baseline is vacuous: successful enqueues disagree"
         );
+        assert_eq!(
+            messages, RELAYS_PER_SAMPLE as u64,
+            "allocation baseline is vacuous: production ingress ledger disagrees"
+        );
 
+        Sample { stats, deliveries }
+    }
+
+    fn measure_handoff(&mut self) -> Sample {
+        let region = Region::new(GLOBAL);
+        let deliveries = self.relay_handoff_batch(RELAYS_PER_SAMPLE);
+        let stats = region.change();
+        assert_eq!(
+            deliveries,
+            RELAYS_PER_SAMPLE * (self.receivers.len() - 1),
+            "borrowed handoff baseline is vacuous"
+        );
         Sample { stats, deliveries }
     }
 }
@@ -205,7 +286,7 @@ impl QueueFixture {
             DATA_CAPACITY,
             CONTROL_CAPACITY,
         );
-        let message = game_data_message(SENDER_ID, 1);
+        let message = game_data_message(IngressKind::Json, SENDER_ID, 1);
         let metadata = DataDeliveryMetadata {
             class: DeliveryClass::Reliable,
             key: None,
@@ -303,18 +384,73 @@ fn classified_room_queue(
     (sender, receiver)
 }
 
-fn game_data_message(from_player: PlayerId, seq: u64) -> Arc<ServerMessage> {
-    Arc::new(ServerMessage::GameData {
-        from_player,
-        data: serde_json::Value::Null,
-        seq: Some(seq),
-        epoch: Some(1),
-        class: Some(DeliveryClass::Reliable),
-        key: None,
-    })
+fn game_data_message(
+    ingress_kind: IngressKind,
+    from_player: PlayerId,
+    seq: u64,
+) -> Arc<ServerMessage> {
+    match ingress_kind {
+        IngressKind::Json => Arc::new(ServerMessage::GameData {
+            from_player,
+            data: serde_json::Value::Null,
+            seq: Some(seq),
+            epoch: Some(1),
+            class: Some(DeliveryClass::Reliable),
+            key: None,
+        }),
+        IngressKind::Binary => Arc::new(ServerMessage::GameDataBinary {
+            from_player,
+            encoding: GameDataEncoding::MessagePack,
+            payload: Bytes::from_static(b"\x83\xa4tick\x07\xa1x\x01\xa1y\xff"),
+            seq: Some(seq),
+            epoch: Some(1),
+        }),
+    }
 }
 
-fn drain_recipients(receivers: &mut [(PlayerId, OutboundReceiver)], sender_id: PlayerId) -> usize {
+fn ingress_payload(ingress_kind: IngressKind) -> IngressPayload {
+    match ingress_kind {
+        IngressKind::Json => IngressPayload::Json(serde_json::json!({
+            "tick": 7,
+            "input": [1, -1, 0],
+        })),
+        IngressKind::Binary => {
+            IngressPayload::Binary(Bytes::from_static(b"\x83\xa4tick\x07\xa1x\x01\xa1y\xff"))
+        }
+    }
+}
+
+fn game_data_from_payload(
+    ingress_kind: IngressKind,
+    payload: IngressPayload,
+    from_player: PlayerId,
+    seq: u64,
+) -> ServerMessage {
+    match (ingress_kind, payload) {
+        (IngressKind::Json, IngressPayload::Json(data)) => ServerMessage::GameData {
+            from_player,
+            data,
+            seq: Some(seq),
+            epoch: Some(1),
+            class: Some(DeliveryClass::Reliable),
+            key: None,
+        },
+        (IngressKind::Binary, IngressPayload::Binary(payload)) => ServerMessage::GameDataBinary {
+            from_player,
+            encoding: GameDataEncoding::MessagePack,
+            payload,
+            seq: Some(seq),
+            epoch: Some(1),
+        },
+        _ => panic!("ingress kind and payload must match"),
+    }
+}
+
+fn drain_recipients(
+    receivers: &mut [(PlayerId, OutboundReceiver)],
+    sender_id: PlayerId,
+    expected_kind: Option<IngressKind>,
+) -> usize {
     receivers
         .iter_mut()
         .filter(|(player_id, _)| *player_id != sender_id)
@@ -322,6 +458,23 @@ fn drain_recipients(receivers: &mut [(PlayerId, OutboundReceiver)], sender_id: P
             let queued = receiver
                 .try_recv()
                 .expect("every non-sender recipient must have one queued relay");
+            if let Some(expected_kind) = expected_kind {
+                let message = match &queued.payload {
+                    OutboundPayload::Message(message) => message.as_ref(),
+                    OutboundPayload::Data(data) => data.message(),
+                    OutboundPayload::DeliveryReport(_) => {
+                        panic!("relay unexpectedly queued a delivery report")
+                    }
+                };
+                assert!(
+                    matches!(
+                        (expected_kind, message),
+                        (IngressKind::Json, ServerMessage::GameData { .. })
+                            | (IngressKind::Binary, ServerMessage::GameDataBinary { .. })
+                    ),
+                    "queued relay variant disagrees with measured ingress"
+                );
+            }
             assert!(
                 matches!(
                     queued.payload,
@@ -349,18 +502,59 @@ fn repeated_samples(mut measure: impl FnMut() -> Sample) -> Sample {
 
 fn assert_healthy_fanout_uses_synchronous_fast_path(room_size: usize, sample: Sample) {
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
-    let maximum_operations = RELAYS_PER_SAMPLE * 4 + SAMPLE_FIXED_ALLOCATION_OPERATIONS;
+    let maximum_operations_per_relay = match room_size {
+        2 => 2,
+        8 | 16 => 3,
+        _ => panic!("room-{room_size} has no checked-in allocation baseline"),
+    };
+    let maximum_bytes_per_relay = match room_size {
+        2 => 416,
+        8 => 1_336,
+        16 => 1_656,
+        _ => panic!("room-{room_size} has no checked-in allocation baseline"),
+    };
+    let maximum_operations =
+        RELAYS_PER_SAMPLE * maximum_operations_per_relay + SAMPLE_FIXED_ALLOCATION_OPERATIONS;
+    let maximum_bytes = RELAYS_PER_SAMPLE * maximum_bytes_per_relay + SAMPLE_FIXED_ALLOCATED_BYTES;
     assert!(
         allocation_operations <= maximum_operations,
         "healthy {room_size}-player fan-out used {allocation_operations} allocation operations \
-         across {RELAYS_PER_SAMPLE} relays; expected at most four operations per relay plus one \
-         fixed sample operation after removing async wait scaffolding from recipients whose \
-         queues accept synchronously"
+         across {RELAYS_PER_SAMPLE} relays; expected at most \
+         {maximum_operations_per_relay} operations per relay plus one fixed sample operation \
+         after removing the boxed builder handoff"
+    );
+    assert!(
+        sample.stats.bytes_allocated <= maximum_bytes,
+        "healthy {room_size}-player fan-out allocated {} bytes across {RELAYS_PER_SAMPLE} \
+         relays; expected at most {maximum_bytes_per_relay} bytes per relay plus \
+         {SAMPLE_FIXED_ALLOCATED_BYTES} fixed sample bytes after removing the eight-byte \
+         builder box",
+        sample.stats.bytes_allocated
+    );
+}
+
+fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
+    let maximum_operations_per_relay = match room_size {
+        2 => 3,
+        8 | 16 => 4,
+        _ => panic!("room-{room_size} has no checked-in allocation baseline"),
+    };
+    let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
+    assert!(
+        allocation_operations
+            <= RELAYS_PER_SAMPLE * maximum_operations_per_relay
+                + SAMPLE_FIXED_ALLOCATION_OPERATIONS,
+        "production {room_size}-player ingress exceeded {maximum_operations_per_relay} \
+         allocation operations per relay"
     );
 }
 
 fn print_sample(scope: &str, room_size: usize, relays: usize, sample: Sample) {
-    let recipients = if scope == "fanout" { room_size - 1 } else { 1 };
+    let recipients = if scope.ends_with("_ingress") {
+        room_size - 1
+    } else {
+        1
+    };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     println!(
         "{scope},{room_size},{recipients},{relays},{},{},{},{},{},{:.4},{:.2},{:.4},{:.2}",
@@ -383,11 +577,30 @@ fn main() {
          allocation_ops_per_delivery,bytes_per_delivery"
     );
 
+    for ingress_kind in IngressKind::ALL {
+        for room_size in ROOM_SIZES {
+            let mut fixture = FanoutFixture::new(room_size, ingress_kind);
+            let sample = repeated_samples(|| fixture.measure_ingress());
+            assert_production_ingress_ceiling(room_size, sample);
+            print_sample(
+                fixture.ingress_kind.name(),
+                room_size,
+                RELAYS_PER_SAMPLE,
+                sample,
+            );
+        }
+    }
+
     for room_size in ROOM_SIZES {
-        let mut fixture = FanoutFixture::new(room_size);
-        let sample = repeated_samples(|| fixture.measure());
+        let mut fixture = FanoutFixture::new(room_size, IngressKind::Json);
+        let sample = repeated_samples(|| fixture.measure_handoff());
         assert_healthy_fanout_uses_synchronous_fast_path(room_size, sample);
-        print_sample("fanout", room_size, RELAYS_PER_SAMPLE, sample);
+        print_sample(
+            "borrowed_coordinator_handoff",
+            room_size,
+            RELAYS_PER_SAMPLE,
+            sample,
+        );
     }
 
     let mut fixture = QueueFixture::new();

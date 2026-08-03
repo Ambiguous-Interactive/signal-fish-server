@@ -1715,13 +1715,37 @@ pub trait MessageCoordinator: Send + Sync {
     /// observe a stamp whose broadcast has not yet chosen whether the restored
     /// socket is a recipient. The builder returns `None` when the sender was
     /// concurrently unregistered before stamp allocation; that relay is then
-    /// canceled instead of exposing unstamped data. Test coordinators that do
-    /// not model concurrent routing can use this fallback.
+    /// canceled instead of exposing unstamped data. This owned, boxed builder
+    /// remains the compatibility seam for downstream coordinator callers and
+    /// implementations. Test coordinators that do not model concurrent routing
+    /// can use this fallback.
     async fn broadcast_to_room_except_with_message<'a>(
         &'a self,
         room_id: &RoomId,
         except_player: &PlayerId,
         build_message: Box<dyn FnOnce() -> Option<Arc<ServerMessage>> + Send + 'a>,
+    ) -> anyhow::Result<()> {
+        if let Some(message) = build_message() {
+            self.broadcast_to_room_except(room_id, except_player, message)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Borrow a one-shot room-message builder while the implementation still
+    /// holds the room-routing snapshot lock.
+    ///
+    /// This additive hot-path seam has the same ordering and cancellation
+    /// contract as [`Self::broadcast_to_room_except_with_message`] without
+    /// requiring the caller to allocate a builder box. Because `FnOnce` is not
+    /// callable through a borrowed trait object, callers adapt it to `FnMut`
+    /// and must return `None` after its first invocation. Implementations must
+    /// invoke the builder at most once.
+    async fn broadcast_to_room_except_with_borrowed_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &'a mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
     ) -> anyhow::Result<()> {
         if let Some(message) = build_message() {
             self.broadcast_to_room_except(room_id, except_player, message)
@@ -2456,7 +2480,6 @@ mod tests {
             let coordinator = FallbackCoordinator::default();
             let build_calls = Arc::new(AtomicUsize::new(0));
             let calls_for_builder = Arc::clone(&build_calls);
-
             coordinator
                 .broadcast_to_room_except_with_message(
                     &room_id,

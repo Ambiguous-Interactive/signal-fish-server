@@ -24,9 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all 3/6 growth reallocations in 2-/8-/16-player mixed-format rooms, reducing
   allocation operations from 18/28/28 to 15/22/22 and allocated bytes by
   17–20%. Repeated frozen-v2 JSON and Rkyv relays also skip a no-op frame cache,
-  reducing 8-/16-player operations from 4 to 3 and bytes by 51%/41%. Exact wire
-  bytes and delivery accounting are unchanged; the runtime benchmark now keeps
-  whole-frame SHA-256 validation outside its timed loop.
+  reducing 8-/16-player operations from 4 to 3 and bytes by 51%/41%. The
+  ingress-to-queue handoff now borrows its one-shot builder instead of heap
+  boxing it while retaining the original public boxed compatibility seam. The
+  isolated handoff measures 2/3/3 operations and 400/1,320/1,640 allocated
+  bytes at 2/8/16 players; separate JSON and binary production-ingress cells,
+  including message-envelope construction, measure 3/4/4 operations. Exact
+  message variants, delivery accounting, and cancellation behavior are
+  checked, and no relay-latency improvement is claimed without an independent
+  timing measurement.
 - Reduce memory-allocation work for frozen-v2 JSON and Rkyv binary relays
   (issue #207). The server now removes one allocation operation in two-player
   rooms, two in 8-/16-player rooms, and one payload-sized copy per relay:
