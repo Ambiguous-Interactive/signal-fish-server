@@ -499,6 +499,8 @@ mod tests {
         let cases = [
             ("IPv4", "192.0.2.10", 7777, true),
             ("IPv6", "2001:db8::1", 7777, true),
+            ("IPv4 with DNS root dot", "192.0.2.10.", 7777, false),
+            ("IPv6 with DNS root dot", "2001:db8::1.", 7777, false),
             ("DNS hostname", "host.example.test", 7777, true),
             ("absolute DNS hostname", "host.example.test.", 7777, true),
             ("localhost", "localhost", 7777, true),
@@ -509,6 +511,12 @@ mod tests {
             ("empty DNS label", "host..example.test", 7777, false),
             ("leading label hyphen", "-host.example.test", 7777, false),
             ("unspecified IPv4", "0.0.0.0", 7777, false),
+            (
+                "unspecified IPv4 with DNS root dot",
+                "0.0.0.0.",
+                7777,
+                false,
+            ),
             ("unspecified IPv6", "::", 7777, false),
         ];
 

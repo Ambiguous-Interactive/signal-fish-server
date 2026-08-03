@@ -32,11 +32,14 @@ fn direct_host_is_usable(host: &str) -> bool {
         return false;
     }
 
-    if let Ok(address) = host.parse::<IpAddr>() {
-        return !address.is_unspecified();
+    let hostname = host.strip_suffix('.').unwrap_or(host);
+    if let Ok(address) = hostname.parse::<IpAddr>() {
+        // A trailing root dot is DNS syntax, not IP-literal syntax. Reject the
+        // ambiguous form instead of letting an unspecified IP masquerade as a
+        // syntactically valid absolute DNS name.
+        return hostname == host && !address.is_unspecified();
     }
 
-    let hostname = host.strip_suffix('.').unwrap_or(host);
     !hostname.is_empty()
         && hostname.split('.').all(|label| {
             !label.is_empty()

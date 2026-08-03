@@ -78,9 +78,9 @@ and the evaluator's final re-review returned `PASS` with no remaining issue.
   GitHub while cargo-deny refreshed RustSec; after resolution recovered, both
   exact failed cargo-deny integration tests passed unchanged. The all-features
   suite and the driver's later advisory gate were green in that same run.
-- `cargo mutants --list` reports 390 mutants. The newly scoped endpoint
-  validator contributes 24 and the mutation workflow now covers the inventory
-  with 39 complete shards at the unchanged ten-mutant/290-second modeled bound;
+- `cargo mutants --list` reports 392 mutants. The newly scoped endpoint
+  validator contributes 26 and the mutation workflow now covers the inventory
+  with 40 complete shards at the unchanged ten-mutant/290-second modeled bound;
   all mutation workflow/script policy tests pass.
 - The first hosted mutation run exposed four surviving mutations in the
   validator's combined empty/total-length/whitespace guard. The existing
@@ -92,5 +92,20 @@ and the evaluator's final re-review returned `PASS` with no remaining issue.
   applicable hosted workflows; the sole non-success was the expected skipped
   Dependabot auto-merge run. Cursor Bugbot's exact-head summary introduced no
   finding, Copilot acknowledged both requests but was quota-blocked, and no
-  review thread remained. PR #256 was open, ready for review, and mergeable;
-  the final evidence-only head repeats the exact-head CI and reviewer loop.
+  review thread remained. PR #256 was open, ready for review, and mergeable.
+- Cursor's review of the first evidence-only head then found that an unspecified
+  IPv4 address with a DNS root dot (`0.0.0.0.`) bypassed the IP parse and passed
+  the absolute-DNS checks. The regression failed red; IP literals with a root
+  dot are now rejected as ambiguous while genuine absolute DNS names remain
+  valid. The two additional scoped mutants raised the measured inventory to 392
+  and the complete matrix to 40 shards.
+- Exact local replays of the affected 15/40 and 16/40 mutation slices caught all
+  10 mutants in each shard. The full all-feature suite, strict all-target clippy,
+  workflow and script policy suites, Actionlint, Prettier, markdownlint, and
+  diff checks are green.
+- A fresh adversarial review caught two fail-open cases in the new multiline
+  workflow-matrix parser: drifting into an unrelated list and discarding invalid
+  or empty members. The parser now anchors the flow sequence to the `shard:`
+  value, stops at sibling indentation, and rejects every malformed member while
+  preserving Prettier's legal trailing comma. Negative regressions cover each
+  case, and the evaluator's final re-review returned `PASS` with zero findings.
