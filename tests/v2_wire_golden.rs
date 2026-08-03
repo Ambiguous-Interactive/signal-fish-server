@@ -937,6 +937,48 @@ fn golden_server_spectator_joined() {
 }
 
 #[test]
+fn v2_room_snapshots_expose_self_declared_connection_info_to_players_and_spectators() {
+    let room_joined = ServerMessage::RoomJoined(Box::new(RoomJoinedPayload {
+        room_id: room(),
+        room_code: "ABC123".to_string(),
+        player_id: player_a(),
+        game_name: "test_game".to_string(),
+        max_players: 4,
+        supports_authority: true,
+        current_players: vec![player_info_b()],
+        is_authority: false,
+        lobby_state: LobbyState::Waiting,
+        ready_players: vec![player_b()],
+        relay_type: "matchbox".to_string(),
+        current_spectators: Vec::new(),
+        ice_servers: Vec::new(),
+        reconnection_token: None,
+    }));
+    let spectator_joined = ServerMessage::SpectatorJoined(Box::new(SpectatorJoinedPayload {
+        room_id: room(),
+        room_code: "ABC123".to_string(),
+        spectator_id: player_a(),
+        game_name: "test_game".to_string(),
+        current_players: vec![player_info_b()],
+        current_spectators: vec![spectator()],
+        lobby_state: LobbyState::Waiting,
+        reason: Some(SpectatorStateChangeReason::Joined),
+    }));
+
+    for (audience, message) in [
+        ("player snapshot", room_joined),
+        ("spectator snapshot", spectator_joined),
+    ] {
+        let value = serde_json::to_value(message).expect("serialize v2 snapshot");
+        assert_eq!(
+            value["data"]["current_players"][0]["connection_info"],
+            json!({ "type": "direct", "host": "10.0.0.5", "port": 7777 }),
+            "{audience} must preserve the documented legacy exposure boundary"
+        );
+    }
+}
+
+#[test]
 fn golden_server_spectator_join_failed() {
     let msg = ServerMessage::SpectatorJoinFailed {
         reason: "not allowed".to_string(),

@@ -14,7 +14,8 @@ use crate::config::{
 use crate::coordination::FinalizedRoom;
 use crate::database::DatabaseConfig;
 use crate::protocol::{
-    IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, Topology, Transport,
+    ConnectionInfo, IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage,
+    Topology, Transport,
 };
 use crate::rate_limit::RateLimitConfig;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
@@ -106,6 +107,10 @@ fn member(
         player_name: name.to_string(),
         is_authority: false,
         joined_at: base_time(),
+        connection_info: Some(ConnectionInfo::Direct {
+            host: "127.0.0.1".to_string(),
+            port: 7777,
+        }),
         version,
         transports,
         topologies,
@@ -784,6 +789,104 @@ fn host_election_is_deterministic_regardless_of_order() {
 }
 
 #[test]
+fn host_direct_requires_a_valid_endpoint_and_elects_an_executable_host() {
+    let authority = PlayerId::new_v4();
+    let executable = PlayerId::new_v4();
+    let mut authority_member = member(
+        authority,
+        "Authority",
+        3,
+        vec![Transport::Relay, Transport::Direct],
+        vec![Topology::Relay, Topology::Host],
+    );
+    authority_member.connection_info = None;
+    let executable_member = member(
+        executable,
+        "Executable",
+        3,
+        vec![Transport::Relay, Transport::Direct],
+        vec![Topology::Relay, Topology::Host],
+    );
+    let cfg = SessionConfig {
+        enable_webrtc: false,
+        ..host_config()
+    };
+
+    let decision = choose_session_plan(
+        "game",
+        Some(authority),
+        vec![authority_member, executable_member],
+        &cfg,
+    );
+
+    assert_eq!(decision.topology, Topology::Host);
+    assert_eq!(decision.transport, Transport::Direct);
+    assert_eq!(decision.host, Some(executable));
+    let plan = decision.plan_for(authority, Vec::new());
+    assert_eq!(
+        plan.direct_endpoint,
+        Some(crate::protocol::DirectEndpoint {
+            host: "127.0.0.1".to_string(),
+            port: 7777,
+        })
+    );
+}
+
+#[test]
+fn host_direct_rejects_missing_and_malformed_host_endpoints() {
+    let cases = [
+        ("missing", None),
+        (
+            "zero port",
+            Some(ConnectionInfo::Direct {
+                host: "192.0.2.10".to_string(),
+                port: 0,
+            }),
+        ),
+        (
+            "unspecified address",
+            Some(ConnectionInfo::Direct {
+                host: "0.0.0.0".to_string(),
+                port: 7777,
+            }),
+        ),
+        (
+            "non-direct metadata",
+            Some(ConnectionInfo::Custom {
+                data: serde_json::Value::Null,
+            }),
+        ),
+    ];
+    let cfg = SessionConfig {
+        enable_webrtc: false,
+        ..host_config()
+    };
+
+    for (name, endpoint) in cases {
+        let mut candidate = member(
+            PlayerId::new_v4(),
+            "Candidate",
+            3,
+            vec![Transport::Relay, Transport::Direct],
+            vec![Topology::Relay, Topology::Host],
+        );
+        candidate.connection_info = endpoint;
+        let decision = choose_session_plan("game", None, vec![candidate], &cfg);
+        assert_eq!(
+            (decision.topology, decision.transport, decision.host),
+            (Topology::Relay, Transport::Relay, None),
+            "{name} must make Host + Direct ineligible"
+        );
+        assert_eq!(
+            decision
+                .plan_for(decision.members[0].player_id, Vec::new())
+                .direct_endpoint,
+            None
+        );
+    }
+}
+
+#[test]
 fn elect_host_prefers_explicit_authority_over_earliest_joiner() {
     // The explicit authority must win even though another member joined earlier.
     let authority = PlayerId::new_v4();
@@ -964,7 +1067,9 @@ fn plan_for_host_host_recipient_targets_all_clients() {
 // `add_player_to_room` gates only on fullness. A WebRTC pair is doomed unless
 // BOTH sides negotiated the transport (`handle_signal` rejects either
 // direction and the offers burn signal rate-limit budget), so `plan_for`
-// filters `peers[]` on both sides with the same predicate host election uses.
+// filters `peers[]` on both sides with the shared session-capability predicate.
+// Host election wraps that predicate with Direct endpoint readiness; non-host
+// Direct clients do not need to expose an endpoint.
 // At finalize the filter is a no-op (`all_support` gates selection), which the
 // emit_* tests above already pin by asserting full peer lists.
 // ---------------------------------------------------------------------------
@@ -1130,6 +1235,68 @@ fn host_invalid_flags_absent_and_unpairable_hosts() {
     };
     assert!(!mesh.host_invalid(&[v3_full(other, "Other")]));
     assert!(!mesh.host_invalid(&[]));
+}
+
+#[test]
+fn direct_host_reconnect_and_failover_revalidate_endpoint_availability() {
+    let old_host = PlayerId::new_v4();
+    let replacement = PlayerId::new_v4();
+    let stored = ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::Direct,
+        host: Some(old_host),
+    };
+    let mut old_host_without_endpoint = member(
+        old_host,
+        "OldHost",
+        3,
+        vec![Transport::Relay, Transport::Direct],
+        vec![Topology::Relay, Topology::Host],
+    );
+    old_host_without_endpoint.connection_info = None;
+    let replacement_with_endpoint = member(
+        replacement,
+        "Replacement",
+        3,
+        vec![Transport::Relay, Transport::Direct],
+        vec![Topology::Relay, Topology::Host],
+    );
+
+    assert!(
+        stored.host_invalid(&[
+            old_host_without_endpoint.clone(),
+            replacement_with_endpoint.clone()
+        ]),
+        "a Direct host that reconnects without endpoint metadata cannot remain authoritative"
+    );
+
+    let resolved = membership_session_decision(
+        Some(stored),
+        Some(old_host),
+        vec![old_host_without_endpoint.clone(), replacement_with_endpoint],
+    );
+    assert_eq!(resolved.decision.host, Some(replacement));
+    assert_eq!(
+        resolved
+            .decision
+            .plan_for(old_host, Vec::new())
+            .direct_endpoint,
+        Some(crate::protocol::DirectEndpoint {
+            host: "127.0.0.1".to_string(),
+            port: 7777,
+        })
+    );
+    assert!(resolved.is_replan);
+
+    let no_replacement = membership_session_decision(
+        Some(stored),
+        Some(old_host),
+        vec![old_host_without_endpoint],
+    );
+    assert_eq!(no_replacement.decision.topology, Topology::Relay);
+    assert_eq!(no_replacement.decision.transport, Transport::Relay);
+    assert_eq!(no_replacement.active_plan_update, Some(None));
+    assert!(!no_replacement.is_replan);
 }
 
 #[test]
@@ -1822,12 +1989,14 @@ async fn emit_host_direct_room_carries_empty_ice_even_with_turn_enabled() {
     server.set_client_protocol(&client, direct);
 
     let room_id = uuid::Uuid::new_v4();
+    let mut host_info = player_info(host, "Host", true);
+    host_info.connection_info = Some(ConnectionInfo::Direct {
+        host: "192.0.2.10".to_string(),
+        port: 7777,
+    });
     let finalized = finalized(
         "host-game",
-        vec![
-            player_info(host, "Host", true),
-            player_info(client, "Client", false),
-        ],
+        vec![host_info, player_info(client, "Client", false)],
         Some(host),
     );
 
@@ -1839,10 +2008,64 @@ async fn emit_host_direct_room_carries_empty_ice_even_with_turn_enabled() {
             other => panic!("expected SessionPlan, got {other:?}"),
         };
         assert_eq!(plan.transport, Transport::Direct);
+        assert_eq!(
+            plan.direct_endpoint,
+            Some(crate::protocol::DirectEndpoint {
+                host: "192.0.2.10".to_string(),
+                port: 7777,
+            })
+        );
         assert!(
             plan.ice_servers.is_empty(),
             "a non-WebRTC plan carries no ICE even with TURN enabled"
         );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn emit_host_direct_room_without_endpoint_falls_back_to_relay() {
+    // Regression for #251: advertising Host + Direct capabilities is not enough
+    // to make that rung executable. Without a self-declared direct endpoint from
+    // an eligible host, every recipient must receive the relay floor instead.
+    let cfg = SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ..SessionConfig::default()
+    };
+    let server = create_server_with_session_and_turn(cfg, turn_off()).await;
+    let (authority, mut authority_rx) = register_client(&server).await;
+    let (client, mut client_rx) = register_client(&server).await;
+    let direct = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
+    };
+    server.set_client_protocol(&authority, direct.clone());
+    server.set_client_protocol(&client, direct);
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "host-game",
+        vec![
+            player_info(authority, "Authority", true),
+            player_info(client, "Client", false),
+        ],
+        Some(authority),
+    );
+
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
+
+    for rx in [&mut authority_rx, &mut client_rx] {
+        let plan = match recv(rx).await.as_ref() {
+            ServerMessage::SessionPlan(plan) => plan.clone(),
+            other => panic!("expected SessionPlan, got {other:?}"),
+        };
+        assert_eq!(plan.topology, Topology::Relay);
+        assert_eq!(plan.transport, Transport::Relay);
+        assert_eq!(plan.host, None);
+        assert!(plan.peers.is_empty());
     }
 }
 
@@ -3421,8 +3644,9 @@ async fn leave_room_host_disconnect_triggers_failover_replan() {
 // member sets (capability profiles, join times, authority designations) and
 // randomized `SessionConfig`s through `choose_session_plan` / `elect_host` /
 // `plan_for` and asserts the CONTRACT-level invariants (legal pairs, the
-// desired ceiling, first-fit ladder semantics, permutation stability, subset
-// monotonicity, glare antisymmetry, star shape, capability filtering) by
+// desired ceiling, first-fit ladder semantics, permutation stability,
+// endpoint-aware subset behavior, glare antisymmetry, star shape, and
+// capability filtering) by
 // recomputing each expectation independently from member/config data — never
 // by calling the code under test a second way.
 //
@@ -3437,7 +3661,7 @@ mod properties {
     use super::super::signaling::local_initiates;
     use super::base_time;
     use crate::config::SessionConfig;
-    use crate::protocol::{IceServer, PlayerId, Topology, Transport};
+    use crate::protocol::{ConnectionInfo, IceServer, PlayerId, Topology, Transport};
     use proptest::prelude::*;
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -3476,6 +3700,18 @@ mod properties {
             && member.transports.contains(&transport)
     }
 
+    /// Independent executable-host predicate. Generated endpoints are either
+    /// absent, this valid loopback target, or an invalid unspecified address.
+    fn member_can_host(member: &SessionMember, topology: Topology, transport: Transport) -> bool {
+        member_supports(member, topology, transport)
+            && (transport != Transport::Direct
+                || matches!(
+                    member.connection_info,
+                    Some(ConnectionInfo::Direct { ref host, port })
+                        if host == "127.0.0.1" && port == 7777
+                ))
+    }
+
     /// Whether one ladder rung fits: ceiling + config gate + every member.
     fn rung_fits(
         members: &[SessionMember],
@@ -3489,6 +3725,10 @@ mod properties {
             && members
                 .iter()
                 .all(|member| member_supports(member, topology, transport))
+            && (transport != Transport::Direct
+                || members
+                    .iter()
+                    .any(|member| member_can_host(member, topology, transport)))
     }
 
     /// The desired ceiling exactly as `choose_session_plan` resolves it.
@@ -3513,7 +3753,7 @@ mod properties {
     /// One member's raw capability surface + a small join-time offset (small
     /// range on purpose, so equal `joined_at` values occur and the
     /// smaller-UUID election tie-break is actually exercised).
-    fn arb_caps() -> impl Strategy<Value = (u16, Vec<Transport>, Vec<Topology>, i64)> {
+    fn arb_caps() -> impl Strategy<Value = (u16, Vec<Transport>, Vec<Topology>, u8, i64)> {
         (
             2u16..=4u16,
             proptest::sample::subsequence(
@@ -3524,6 +3764,7 @@ mod properties {
                 vec![Topology::Relay, Topology::Host, Topology::Mesh],
                 0..=3,
             ),
+            0u8..3u8,
             0i64..4i64,
         )
     }
@@ -3542,14 +3783,27 @@ mod properties {
                 caps.into_iter()
                     .zip(ids)
                     .map(
-                        |((version, transports, topologies, offset), id)| SessionMember {
-                            player_id: Uuid::from_u128(id),
-                            player_name: format!("p{id}"),
-                            is_authority: false,
-                            joined_at: base_time() + chrono::Duration::seconds(offset),
-                            version,
-                            transports,
-                            topologies,
+                        |((version, transports, topologies, endpoint_kind, offset), id)| {
+                            SessionMember {
+                                player_id: Uuid::from_u128(id),
+                                player_name: format!("p{id}"),
+                                is_authority: false,
+                                joined_at: base_time() + chrono::Duration::seconds(offset),
+                                connection_info: match endpoint_kind {
+                                    0 => None,
+                                    1 => Some(ConnectionInfo::Direct {
+                                        host: "127.0.0.1".to_string(),
+                                        port: 7777,
+                                    }),
+                                    _ => Some(ConnectionInfo::Direct {
+                                        host: "0.0.0.0".to_string(),
+                                        port: 7777,
+                                    }),
+                                },
+                                version,
+                                transports,
+                                topologies,
+                            }
                         },
                     )
                     .collect()
@@ -3654,10 +3908,24 @@ mod properties {
                 .into_iter()
                 .any(|rung| rung_fits(&members, desired, &cfg, rung));
             prop_assert_eq!(decision.topology == Topology::Relay, !any_rung_fits);
+
+            let recipient = decision.members[0].player_id;
+            let plan = decision.plan_for(recipient, Vec::new());
+            if decision.transport == Transport::Direct {
+                let host = decision.host.expect("Direct plan elects a host");
+                prop_assert!(members.iter().any(|member| {
+                    member.player_id == host
+                        && member_can_host(member, Topology::Host, Transport::Direct)
+                }), "Direct host must have a usable endpoint");
+                prop_assert!(plan.direct_endpoint.is_some());
+            } else {
+                prop_assert_eq!(plan.direct_endpoint, None);
+            }
         }
 
         /// Host shape: a host is elected iff the topology is `host`; the host
-        /// is always a seated member; a seated authority is always preferred.
+        /// is always an executable seated member; an executable seated
+        /// authority is always preferred.
         #[test]
         #[cfg_attr(miri, ignore)]
         fn selection_host_shape_matches_topology_and_authority(
@@ -3669,9 +3937,15 @@ mod properties {
 
             if decision.topology == Topology::Host {
                 let host = decision.host.expect("host topology elects a host");
-                prop_assert!(members.iter().any(|m| m.player_id == host));
+                prop_assert!(members.iter().any(|m| {
+                    m.player_id == host
+                        && member_can_host(m, decision.topology, decision.transport)
+                }), "selected host must be executable");
                 if let Some(auth) = authority {
-                    if members.iter().any(|m| m.player_id == auth) {
+                    if members.iter().any(|m| {
+                        m.player_id == auth
+                            && member_can_host(m, decision.topology, decision.transport)
+                    }) {
                         prop_assert_eq!(host, auth, "seated authority must be preferred");
                     }
                 }
@@ -3697,13 +3971,13 @@ mod properties {
             prop_assert_eq!(a.host, b.host);
         }
 
-        /// Subset monotonicity: removing members (any non-empty subset, same
-        /// config and game) never makes the chosen rung POORER — `all_support`
-        /// is a universal quantifier, so every rung that fits a set fits each
-        /// of its non-empty subsets, and the first-fit walk can only move up.
+        /// Removing members cannot make a capability-compatible rung poorer.
+        /// The sole exception is intentionally removing every usable Direct
+        /// endpoint: Host + Direct is existentially anchored by at least one
+        /// host, so that subset must fall to the relay floor.
         #[test]
         #[cfg_attr(miri, ignore)]
-        fn selection_is_subset_monotone(
+        fn selection_subset_only_gets_poorer_after_losing_every_direct_anchor(
             (members, subset_indices) in arb_members(6).prop_flat_map(|m| {
                 let len = m.len();
                 let indices: Vec<usize> = (0..len).collect();
@@ -3718,14 +3992,21 @@ mod properties {
                 .collect();
 
             let full = choose_session_plan(game, authority, members, &cfg);
-            let sub = choose_session_plan(game, authority, subset, &cfg);
+            let sub = choose_session_plan(game, authority, subset.clone(), &cfg);
 
-            prop_assert!(
-                rung_index(sub.topology, sub.transport)
-                    <= rung_index(full.topology, full.transport),
-                "subset selected a poorer rung ({:?},{:?}) than the superset ({:?},{:?})",
-                sub.topology, sub.transport, full.topology, full.transport
-            );
+            let subset_is_poorer = rung_index(sub.topology, sub.transport)
+                > rung_index(full.topology, full.transport);
+            if subset_is_poorer {
+                prop_assert_eq!(full.transport, Transport::Direct);
+                prop_assert!(!subset.iter().any(|member| {
+                    member_can_host(member, Topology::Host, Transport::Direct)
+                }), "poorer Direct subset must have lost every endpoint host");
+                prop_assert_eq!(
+                    (sub.topology, sub.transport),
+                    RELAY_FLOOR,
+                    "losing every Direct endpoint must fall to relay"
+                );
+            }
         }
     }
 
@@ -3769,7 +4050,7 @@ mod properties {
         }
 
         /// The replan-site election (replan_host_session): the member slice is
-        /// pre-filtered to session-capable members and the authority preference
+        /// pre-filtered to executable host members and the authority preference
         /// passes through the SAME filter, so an authority that cannot run the
         /// session is neither preferred nor electable — authority never
         /// outranks the capability gate. Mirrors the production filter exactly
@@ -3785,7 +4066,7 @@ mod properties {
             // capability predicate recomputed from raw member data.
             let electable: Vec<SessionMember> = members
                 .iter()
-                .filter(|m| member_supports(m, topology, transport))
+                .filter(|m| member_can_host(m, topology, transport))
                 .cloned()
                 .collect();
             let electable_authority = authority
@@ -3800,8 +4081,8 @@ mod properties {
                     .find(|m| m.player_id == host)
                     .expect("elected host is a member");
                 prop_assert!(
-                    member_supports(host_member, topology, transport),
-                    "an elected host must be capable of the stored session pair"
+                    member_can_host(host_member, topology, transport),
+                    "an elected host must be able to execute the stored session pair"
                 );
                 // A capable seated authority always wins the filtered election.
                 if let Some(auth) = authority {
@@ -3816,7 +4097,7 @@ mod properties {
                                 || members
                                     .iter()
                                     .any(|m| m.player_id == auth
-                                        && member_supports(m, topology, transport))
+                                        && member_can_host(m, topology, transport))
                         );
                     }
                 }
@@ -3850,6 +4131,11 @@ mod properties {
             prop_assert_eq!(plan.transport, decision.transport);
             prop_assert_eq!(plan.host, decision.host);
             prop_assert_eq!(plan.fallback, Transport::Relay);
+            if decision.transport == Transport::Direct && decision.host.is_some() {
+                prop_assert!(plan.direct_endpoint.is_some());
+            } else {
+                prop_assert_eq!(plan.direct_endpoint, None);
+            }
             prop_assert_eq!(
                 serde_json::to_value(&plan.ice_servers).expect("ice serializes"),
                 serde_json::to_value(&ice).expect("ice serializes"),
@@ -3971,7 +4257,7 @@ mod properties {
         ) {
             let electable: Vec<SessionMember> = members
                 .iter()
-                .filter(|m| member_supports(m, topology, transport))
+                .filter(|m| member_can_host(m, topology, transport))
                 .cloned()
                 .collect();
             let electable_authority = authority

@@ -1,7 +1,59 @@
 use crate::config::ProtocolConfig;
 use std::collections::HashMap;
 
-use super::types::{PlayerId, PlayerInfo};
+use super::types::{ConnectionInfo, DirectEndpoint, PlayerId, PlayerInfo};
+
+impl DirectEndpoint {
+    /// Validate and project legacy direct metadata into the authoritative v3
+    /// endpoint shape. Non-direct metadata and unusable addresses are ignored.
+    #[must_use]
+    pub fn from_connection_info(connection_info: &ConnectionInfo) -> Option<Self> {
+        let ConnectionInfo::Direct { host, port } = connection_info else {
+            return None;
+        };
+
+        if *port == 0 || !direct_host_is_usable(host) {
+            return None;
+        }
+
+        Some(Self {
+            host: host.clone(),
+            port: *port,
+        })
+    }
+}
+
+/// Accept an IP address (except an unspecified address) or a conservative DNS
+/// hostname. Resolution and reachability remain client responsibilities.
+fn direct_host_is_usable(host: &str) -> bool {
+    use std::net::IpAddr;
+
+    if host.is_empty() || host.len() > 253 || host.trim() != host {
+        return false;
+    }
+
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return !address.is_unspecified();
+    }
+
+    let hostname = host.strip_suffix('.').unwrap_or(host);
+    !hostname.is_empty()
+        && hostname.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
 
 pub fn validate_game_name_with_config(name: &str, config: &ProtocolConfig) -> Result<(), String> {
     if name.is_empty() {

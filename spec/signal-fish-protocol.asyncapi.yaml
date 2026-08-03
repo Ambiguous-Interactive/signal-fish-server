@@ -686,13 +686,32 @@ components:
       type: object
       description: >-
         Legacy self-declared peer metadata (tagged by an inner `type` field:
-        direct | unity_relay | relay | webrtc | custom). Not v3 negotiation.
+        direct | unity_relay | relay | webrtc | custom). Visible in room member
+        snapshots and GameStarting; not v3 capability negotiation. A validated
+        direct value is also used to elect an executable Direct host.
       required: [type]
       properties:
         type:
           type: string
           enum: [direct, unity_relay, relay, webrtc, custom]
       additionalProperties: true
+    DirectEndpoint:
+      type: object
+      additionalProperties: false
+      description: >-
+        Syntactically usable, self-declared connect target for the elected
+        Direct host. Validation does not prove resolution or reachability.
+      required: [host, port]
+      properties:
+        host:
+          type: string
+          minLength: 1
+          maxLength: 253
+          description: Non-unspecified IP address or conservative DNS hostname.
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
     PlayerNameRulesPayload:
       type: object
       required:
@@ -1277,6 +1296,9 @@ components:
             host:
               allOf: [{ $ref: '#/components/schemas/PlayerId' }]
               description: Present only for host topology.
+            direct_endpoint:
+              allOf: [{ $ref: '#/components/schemas/DirectEndpoint' }]
+              description: Present exactly when transport is direct.
             peers:
               type: array
               items: { $ref: '#/components/schemas/SessionPeer' }
@@ -1297,6 +1319,17 @@ components:
                   peers: { maxItems: 0 }
                   ice_servers: { maxItems: 0 }
                 not: { required: [host] }
+            - if:
+                required: [transport]
+                properties:
+                  transport: { const: direct }
+              then:
+                required: [host, direct_endpoint]
+                properties:
+                  topology: { const: host }
+                  ice_servers: { maxItems: 0 }
+              else:
+                not: { required: [direct_endpoint] }
       required: [type, data]
     Pong:
       type: object

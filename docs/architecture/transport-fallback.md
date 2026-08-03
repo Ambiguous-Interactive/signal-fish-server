@@ -49,7 +49,8 @@ on SessionPlan(plan):
     if plan.transport == relay:
         use GameData over the WebSocket relay            # the floor
     else if plan.transport == direct:
-        start direct host/client P2P using plan.host + plan.peers
+        require plan.host + plan.direct_endpoint
+        start direct host/client P2P using plan.direct_endpoint + plan.peers
         if direct path established within the timeout:
             (optionally) stop sending GameData over the relay
             emit ClientMessage::TransportStatus { transport, connected: true }
@@ -85,6 +86,11 @@ Key points:
   client-side latency/robustness choice, not a protocol requirement.
 - **Fallback is always available.** On any P2P failure or timeout the client
   resumes `GameData` over the relay — which never stopped accepting it.
+- **Direct endpoints are self-declared.** The server validates syntax and host
+  eligibility, then repeats the selected host/port in the authoritative plan;
+  it does not probe reachability. A client that does not implement Direct must
+  reject the plan explicitly, report `connected: false`, and use the relay
+  fallback (the in-repo native reference client follows this contract).
 
 ## Server's unconditional relay guarantee
 

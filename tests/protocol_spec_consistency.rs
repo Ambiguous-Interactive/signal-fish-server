@@ -253,6 +253,107 @@ fn spec_has_no_dangling_local_references() {
 }
 
 #[test]
+fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
+    use signal_fish_server::protocol::{
+        DirectEndpoint, ServerMessage, SessionPlanPayload, Topology, Transport,
+    };
+    use uuid::Uuid;
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+    let schema = mapping_path(
+        root,
+        &["components", "schemas", "SessionPlan", "properties", "data"],
+    )
+    .expect("spec must define SessionPlan.data");
+    let endpoint_schema = mapping_path(root, &["components", "schemas", "DirectEndpoint"])
+        .expect("spec must define DirectEndpoint");
+
+    assert_eq!(
+        mapping_path(schema, &["properties", "direct_endpoint", "allOf"])
+            .and_then(Yaml::as_sequence)
+            .and_then(|items| items.first())
+            .and_then(|item| item.as_mapping_get("$ref"))
+            .and_then(Yaml::as_str),
+        Some("#/components/schemas/DirectEndpoint")
+    );
+    let endpoint_required: BTreeSet<_> = endpoint_schema
+        .as_mapping_get("required")
+        .and_then(Yaml::as_sequence)
+        .expect("DirectEndpoint must list required fields")
+        .iter()
+        .map(|field| field.as_str().expect("required field must be a string"))
+        .collect();
+    assert_eq!(endpoint_required, BTreeSet::from(["host", "port"]));
+    assert_eq!(
+        mapping_path(endpoint_schema, &["properties", "host", "minLength"])
+            .and_then(Yaml::as_integer),
+        Some(1)
+    );
+    assert_eq!(
+        mapping_path(endpoint_schema, &["properties", "port", "minimum"])
+            .and_then(Yaml::as_integer),
+        Some(1)
+    );
+
+    let direct_branch = schema
+        .as_mapping_get("allOf")
+        .and_then(Yaml::as_sequence)
+        .expect("SessionPlan.data must declare conditional branches")
+        .iter()
+        .find(|branch| {
+            mapping_path(branch, &["if", "properties", "transport", "const"]).and_then(Yaml::as_str)
+                == Some("direct")
+        })
+        .expect("SessionPlan.data must condition transport=direct");
+    let direct_required: BTreeSet<_> = mapping_path(direct_branch, &["then", "required"])
+        .and_then(Yaml::as_sequence)
+        .expect("Direct SessionPlan branch must list required fields")
+        .iter()
+        .map(|field| field.as_str().expect("required field must be a string"))
+        .collect();
+    assert_eq!(direct_required, BTreeSet::from(["host", "direct_endpoint"]));
+    assert_eq!(
+        mapping_path(direct_branch, &["then", "properties", "topology", "const"])
+            .and_then(Yaml::as_str),
+        Some("host")
+    );
+    assert_eq!(
+        mapping_path(direct_branch, &["else", "not", "required"])
+            .and_then(Yaml::as_sequence)
+            .and_then(|fields| fields.first())
+            .and_then(Yaml::as_str),
+        Some("direct_endpoint")
+    );
+
+    let host = Uuid::from_u128(10);
+    let message = ServerMessage::SessionPlan(Box::new(SessionPlanPayload {
+        topology: Topology::Host,
+        transport: Transport::Direct,
+        host: Some(host),
+        direct_endpoint: Some(DirectEndpoint {
+            host: "192.0.2.10".to_string(),
+            port: 7777,
+        }),
+        peers: Vec::new(),
+        ice_servers: Vec::new(),
+        fallback: Transport::Relay,
+    }));
+    let serialized = serde_json::to_value(message).expect("serialize Direct SessionPlan");
+    assert_eq!(serialized["type"], "SessionPlan");
+    assert_eq!(serialized["data"]["topology"], "host");
+    assert_eq!(serialized["data"]["transport"], "direct");
+    assert_eq!(serialized["data"]["host"], host.to_string());
+    assert_eq!(serialized["data"]["direct_endpoint"]["host"], "192.0.2.10");
+    assert_eq!(serialized["data"]["direct_endpoint"]["port"], 7777);
+    assert!(serialized["data"].get("ice_servers").is_none());
+}
+
+#[test]
 fn spec_delivery_report_gap_bound_matches_protocol_constant() {
     use signal_fish_server::protocol::DELIVERY_REPORT_MAX_GAPS;
 

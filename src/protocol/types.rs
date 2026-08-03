@@ -195,6 +195,14 @@ pub struct SessionPlanPayload {
     /// The elected host, present only for `host` topology.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<PlayerId>,
+    /// Validated endpoint for the elected host of a `host + direct` plan.
+    ///
+    /// Present only when `transport == direct`. The endpoint is copied from
+    /// the host's self-declared [`ConnectionInfo::Direct`] metadata after
+    /// syntax/usability validation; it is not proof that the address is
+    /// reachable. Clients must retain the relay fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_endpoint: Option<DirectEndpoint>,
     /// Peers this recipient should connect to (excludes the recipient itself).
     pub peers: Vec<SessionPeer>,
     /// ICE (STUN/TURN) servers for WebRTC; empty (and omitted) for non-WebRTC plans.
@@ -204,11 +212,13 @@ pub struct SessionPlanPayload {
     pub fallback: Transport,
 }
 
-/// Legacy, self-declared peer metadata carried in `GameStarting`.
+/// Legacy, self-declared peer metadata carried in room snapshots and
+/// `GameStarting`.
 ///
 /// This is preserved for the v2/back-compat handoff surface. It is not protocol
 /// v3 transport negotiation and must not be treated as proof of direct/WebRTC
-/// reachability.
+/// reachability. A validated Direct variant is also the execution-readiness
+/// input for electing a v3 `host + direct` host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConnectionInfo {
@@ -251,6 +261,17 @@ pub enum ConnectionInfo {
     Custom { data: serde_json::Value },
 }
 
+/// A syntactically usable direct host endpoint carried by a v3
+/// [`SessionPlanPayload`].
+///
+/// This type deliberately models only the connect target. It does not claim
+/// that the self-declared address is reachable from another room member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+
 /// Information about a player in a room
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerInfo {
@@ -259,7 +280,10 @@ pub struct PlayerInfo {
     pub is_authority: bool,
     pub is_ready: bool,
     pub connected_at: chrono::DateTime<chrono::Utc>,
-    /// Legacy self-declared peer metadata for `GameStarting`.
+    /// Legacy self-declared peer metadata exposed in room snapshots and
+    /// `GameStarting`. A validated Direct value is also the host-readiness
+    /// input for v3 `host + direct` election; it remains self-declared and is
+    /// not reachability proof.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
     /// Server-tracked incarnation epoch (v3 only): this player's current
@@ -453,6 +477,50 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use serde_json::json;
+
+    #[test]
+    fn direct_endpoint_accepts_only_usable_direct_targets() {
+        let cases = [
+            ("IPv4", "192.0.2.10", 7777, true),
+            ("IPv6", "2001:db8::1", 7777, true),
+            ("DNS hostname", "host.example.test", 7777, true),
+            ("absolute DNS hostname", "host.example.test.", 7777, true),
+            ("localhost", "localhost", 7777, true),
+            ("zero port", "192.0.2.10", 0, false),
+            ("empty host", "", 7777, false),
+            ("surrounding whitespace", " 192.0.2.10", 7777, false),
+            ("URL instead of host", "https://example.test", 7777, false),
+            ("empty DNS label", "host..example.test", 7777, false),
+            ("leading label hyphen", "-host.example.test", 7777, false),
+            ("unspecified IPv4", "0.0.0.0", 7777, false),
+            ("unspecified IPv6", "::", 7777, false),
+        ];
+
+        for (name, host, port, expected) in cases {
+            let info = ConnectionInfo::Direct {
+                host: host.to_string(),
+                port,
+            };
+            assert_eq!(
+                DirectEndpoint::from_connection_info(&info).is_some(),
+                expected,
+                "{name}: host={host:?}, port={port}"
+            );
+        }
+
+        for host in ["a".repeat(254), format!("{}.test", "a".repeat(64))] {
+            assert!(
+                DirectEndpoint::from_connection_info(&ConnectionInfo::Direct { host, port: 7777 })
+                    .is_none(),
+                "overlong host components must be rejected"
+            );
+        }
+
+        let non_direct = ConnectionInfo::Custom {
+            data: serde_json::Value::Null,
+        };
+        assert!(DirectEndpoint::from_connection_info(&non_direct).is_none());
+    }
 
     struct PeerConnectionCase {
         name: &'static str,

@@ -40,7 +40,7 @@ additional_cargo_test_args = ["--profile", "mutants"]
 # vacuously missed by the default-feature oracle. Do NOT pass `--all-features`:
 # enabling `tls` (rustls/axum-server) and `legacy-fullmesh`
 # (matchbox_signaling) changes neither the generated mutant set (`cargo mutants
-# --list` stays 343) nor the catch outcome; it only drags those heavy deps into
+# --list` stays aligned with the guarded inventory) nor the catch outcome; it only drags those heavy deps into
 # every per-mutant build/relink.
 #
 # Standing rules (enforced by tests/ci_config_tests.rs::

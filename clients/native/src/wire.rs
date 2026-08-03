@@ -69,7 +69,7 @@ pub async fn send_game_data_with_delivery(
     send_client_message(ws, &message).await
 }
 
-fn game_data_message(data: serde_json::Value) -> ClientMessage {
+pub(crate) fn game_data_message(data: serde_json::Value) -> ClientMessage {
     ClientMessage::GameData {
         data,
         class: None,

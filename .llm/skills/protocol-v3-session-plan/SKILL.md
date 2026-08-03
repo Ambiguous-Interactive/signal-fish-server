@@ -26,7 +26,9 @@ Richest-first, that is:
 
 1. `Mesh + WebRtc` — `desired == Mesh`, `enable_webrtc`, all support mesh+webrtc.
 2. `Host + WebRtc` — `desired ∈ {Mesh, Host}`, `enable_webrtc`, all support host+webrtc.
-3. `Host + Direct` — `desired ∈ {Mesh, Host}`, `enable_direct`, all support host+direct (LAN).
+3. `Host + Direct` — `desired ∈ {Mesh, Host}`, `enable_direct`, all support
+   host+direct (LAN), and at least one capability-compatible member has a
+   validated Direct endpoint from `ProvideConnectionInfo`.
 4. `Relay + Relay` — the universal floor (always available).
 
 So a `Mesh`-preferring room that cannot run mesh **falls back to a host topology
@@ -70,10 +72,11 @@ Per path:
 - `handle_session_member_departure` re-elects + re-emits to every remaining v3
   member (via the shared `replan_host_session`) whenever the stored host is
   invalid (`ActiveSessionPlan::host_invalid`: absent from the current members,
-  or still seated but failing the session predicate after a
-  capability-downgrading reconnect) — capability-aware: only v3 members
-  supporting the sticky pair are electable (the authority preference passes the
-  same filter), and if none qualifies the stored entry is dropped with no
+  or still seated but failing the host predicate after a capability-downgrading
+  reconnect or losing a usable Direct endpoint) — capability-aware: only v3
+  members supporting the sticky pair are electable, and Direct candidates must
+  additionally expose a validated endpoint (the authority preference passes the
+  same filter). If none qualifies the stored entry is dropped with no
   emission and no `session_replans_emitted` increment. Topology/transport are
   sticky for the session lifetime.
 
@@ -84,8 +87,8 @@ the session's sticky pair (`add_player_to_room` gates only on fullness — e.g. 
 v3 relay-only client can seat-fill a `mesh + webrtc` room).
 `SessionPlanDecision::plan_for` — the single peer-list seam every emission path
 shares (finalize, failover/heal re-plan, late join / reconnect) — filters
-`peers[]` with the same predicate host election uses (v3 + sticky topology +
-sticky transport, `SessionMember::supports_session`): a member that did not
+`peers[]` with `SessionMember::supports_session` (v3 + sticky topology + sticky
+transport): a member that did not
 negotiate the session's pair still RECEIVES its v3-gated plan, but with an
 **empty** `peers` list (`fallback: relay` is its data path; `host` stays as
 elected, informational), and capable recipients never see it listed. The
@@ -93,6 +96,14 @@ At finalize the filter is vacuous for non-relay decisions (`all_support`
 gates selection); an elected host always satisfies the predicate (debug-asserted
 in `host_peers_for`, structurally unfireable: `host_invalid` re-plans away any
 host that stops satisfying it before plans are built).
+
+Host election deliberately uses the stricter `SessionMember::can_host`
+predicate. For WebRTC this is equivalent to `supports_session`; for Direct it
+also requires `direct_endpoint()` to validate the member's self-declared
+host/port. The elected endpoint is copied into every Direct
+`SessionPlan.direct_endpoint`, revalidated on membership refresh/reconnect, and
+replaced on endpoint-aware failover. Do not require non-host Direct clients to
+advertise an endpoint, and do not use endpoint readiness to filter peer lists.
 
 The two predicates are distinct and must not be conflated: `is_relay()` decides
 whether a plan is sticky room state (relay is explicit on the wire but not

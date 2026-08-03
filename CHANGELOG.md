@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix `host + direct` plans that advertised an unusable peer-to-peer upgrade
+  (issue #251). Direct selection now requires an endpoint-ready host, skips an
+  authority that cannot anchor the connection, and carries the validated host
+  and port in every authoritative v3 `SessionPlan`; reconnect and failover
+  revalidate the replacement host, while the relay floor remains available.
+  The endpoint remains self-declared and retains the legacy exposure boundary:
+  room snapshots can reveal it to v2/v3 players and spectators, so it is not an
+  authenticated identity or v3-only privacy boundary.
+  Both reference clients now explicitly reject Direct execution they do not
+  implement, report the failed transport, and engage that relay fallback.
 - Enforce configured application room ownership and quotas (issue #249).
   Authenticated apps can no longer join, spectate, or reconnect into another
   app's persisted room; legacy unowned rooms are claimed only by a successful

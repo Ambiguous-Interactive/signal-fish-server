@@ -39,11 +39,12 @@
 //! `main` bounds every await in this module.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::future::Future;
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, ErrorCode, GameDataEncoding, IceServer, LobbyState, PlayerId, PlayerInfo,
-    ServerMessage, Transport,
+    ClientMessage, DirectEndpoint, ErrorCode, GameDataEncoding, IceServer, LobbyState, PlayerId,
+    PlayerInfo, ServerMessage, Transport,
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -1262,19 +1263,15 @@ impl Orchestrator<'_> {
                 if self.cli.leave_on_game_start {
                     return Ok(());
                 }
+                if plan.transport == Transport::Direct {
+                    self.reject_unsupported_direct_plan(plan.direct_endpoint.as_ref())
+                        .await?;
+                }
                 if plan.transport == Transport::WebRtc {
                     self.webrtc_plan_seen = true;
                     self.last_ice_servers = plan.ice_servers.clone();
                 }
-                let planned_peers: BTreeSet<_> = if plan.transport == Transport::WebRtc {
-                    plan.peers
-                        .iter()
-                        .map(|peer| peer.player_id)
-                        .filter(|peer| *peer != self.my_id)
-                        .collect()
-                } else {
-                    BTreeSet::new()
-                };
+                let planned_peers = session_plan_peer_ids(plan.transport, &plan.peers, self.my_id);
                 let delta = authoritative_peer_delta(&self.expected_peers, &planned_peers);
                 let mut added =
                     connection_targets_for_plan(&delta, |peer| self.engine.is_paired(peer));
@@ -1879,6 +1876,22 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
+    /// The native reference client demonstrates WebRTC and the relay floor; it
+    /// does not implement a game-specific direct socket. Reject Direct loudly
+    /// and report the fallback instead of silently treating its peer list as
+    /// empty while having advertised support through a custom CLI override.
+    async fn reject_unsupported_direct_plan(
+        &mut self,
+        endpoint: Option<&DirectEndpoint>,
+    ) -> Result<(), FatalError> {
+        reject_unsupported_direct_plan_with(
+            endpoint,
+            |message| async move { self.send_message(&message).await },
+            |event| emit(&event),
+        )
+        .await
+    }
+
     /// Send `PlayerReady` once the expected member count is seated AND the
     /// server has moved the room into the Lobby state (readiness is rejected
     /// while the room is `Waiting`; the `LobbyStateChanged{lobby}` broadcast
@@ -2074,6 +2087,58 @@ impl Orchestrator<'_> {
     }
 }
 
+fn direct_plan_rejection_message(endpoint: Option<&DirectEndpoint>) -> String {
+    let endpoint = endpoint.map_or_else(
+        || "without a validated endpoint".to_string(),
+        |endpoint| format!("for {}:{}", endpoint.host, endpoint.port),
+    );
+    format!(
+        "direct SessionPlan {endpoint} is unsupported by the native reference client; using relay fallback"
+    )
+}
+
+fn session_plan_peer_ids(
+    transport: Transport,
+    peers: &[signal_fish_server::protocol::SessionPeer],
+    my_id: PlayerId,
+) -> BTreeSet<PlayerId> {
+    if transport == Transport::WebRtc {
+        peers
+            .iter()
+            .map(|peer| peer.player_id)
+            .filter(|peer| *peer != my_id)
+            .collect()
+    } else {
+        BTreeSet::new()
+    }
+}
+
+async fn reject_unsupported_direct_plan_with<Send, SendFuture, Emit>(
+    endpoint: Option<&DirectEndpoint>,
+    send: Send,
+    mut emit_event: Emit,
+) -> Result<(), FatalError>
+where
+    Send: FnOnce(ClientMessage) -> SendFuture,
+    SendFuture: Future<Output = Result<(), FatalError>>,
+    Emit: FnMut(Event),
+{
+    emit_event(Event::Error {
+        message: direct_plan_rejection_message(endpoint),
+    });
+    send(ClientMessage::TransportStatus {
+        transport: Transport::Direct,
+        connected: false,
+    })
+    .await?;
+    emit_event(Event::TransportStatusSent {
+        transport: Transport::Direct,
+        connected: false,
+    });
+    emit_event(Event::FallbackEngaged);
+    Ok(())
+}
+
 /// A harness-held client treats the soft run deadline as advisory after it has
 /// reported success. It must wait both for the harness release and for the
 /// post-release linger that was armed on the release-observation tick.
@@ -2145,8 +2210,8 @@ mod tests {
 
     use serde_json::json;
     use signal_fish_server::protocol::{
-        DeliveryCountersByClass, DeliveryReportPayload, GameDataEncoding, LobbyState, PlayerId,
-        ServerMessage,
+        DeliveryCountersByClass, DeliveryReportPayload, DirectEndpoint, GameDataEncoding,
+        LobbyState, PlayerId, ServerMessage,
     };
 
     use crate::accountability::DeliveryAccountability;
@@ -2155,17 +2220,102 @@ mod tests {
     use super::{
         arm_pair_window, authoritative_peer_delta, changed_transport_status,
         clear_departed_membership_plan, connection_targets_for_plan,
-        consume_join_accountability_preface, harness_aware_base_wake,
-        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
-        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
-        require_finalized_membership_plan, requires_authoritative_finalization_plan,
-        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
+        consume_join_accountability_preface, direct_plan_rejection_message,
+        harness_aware_base_wake, is_terminal_peer_connection_state, needs_ice_gathering_marker,
+        negotiated_version_from, next_handshake_message, note_current_pair_connected,
+        p2p_retry_delay, reject_unsupported_direct_plan_with, require_finalized_membership_plan,
+        requires_authoritative_finalization_plan, resolve_drop_ice_from,
+        restore_reconnected_member, retryable_missing_peers, session_plan_peer_ids,
         should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
         should_resolve_connected_pair, validate_json_negotiated_server_message, PairGeneration,
         EXIT_PROTOCOL_ERROR,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+
+    #[test]
+    fn direct_plan_rejection_is_explicit_with_or_without_endpoint() {
+        let endpoint = DirectEndpoint {
+            host: "192.0.2.10".to_string(),
+            port: 7777,
+        };
+        assert_eq!(
+            direct_plan_rejection_message(Some(&endpoint)),
+            "direct SessionPlan for 192.0.2.10:7777 is unsupported by the native reference client; using relay fallback"
+        );
+        assert_eq!(
+            direct_plan_rejection_message(None),
+            "direct SessionPlan without a validated endpoint is unsupported by the native reference client; using relay fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_plan_dispatch_reports_failure_clears_p2p_and_keeps_relay_available() {
+        use std::cell::RefCell;
+
+        use signal_fish_server::protocol::{SessionPeer, Transport};
+
+        let endpoint = DirectEndpoint {
+            host: "192.0.2.10".to_string(),
+            port: 7777,
+        };
+        let sent = RefCell::new(Vec::new());
+        let events = RefCell::new(Vec::new());
+        reject_unsupported_direct_plan_with(
+            Some(&endpoint),
+            |message| {
+                sent.borrow_mut()
+                    .push(serde_json::to_value(message).expect("serialize client message"));
+                std::future::ready(Ok(()))
+            },
+            |event| {
+                events
+                    .borrow_mut()
+                    .push(serde_json::to_value(event).expect("serialize event"));
+            },
+        )
+        .await
+        .expect("Direct rejection action succeeds");
+
+        let me = PlayerId::new_v4();
+        let prior_peer = PlayerId::new_v4();
+        let peers = vec![SessionPeer {
+            player_id: prior_peer,
+            player_name: "prior".to_string(),
+            is_authority: false,
+            initiate: true,
+        }];
+        let planned = session_plan_peer_ids(Transport::Direct, &peers, me);
+        let delta = authoritative_peer_delta(&BTreeSet::from([prior_peer]), &planned);
+
+        assert!(
+            planned.is_empty(),
+            "Direct must clear WebRTC peer obligations"
+        );
+        assert_eq!(delta.removed, BTreeSet::from([prior_peer]));
+        assert_eq!(
+            sent.borrow().as_slice(),
+            &[json!({
+                "type": "TransportStatus",
+                "data": { "transport": "direct", "connected": false }
+            })]
+        );
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .map(|event| event["event"].as_str().expect("event name"))
+                .collect::<Vec<_>>(),
+            ["error", "transport_status_sent", "fallback_engaged"]
+        );
+
+        let relay = wire::game_data_message(json!({ "relay_msg": "still-live" }));
+        assert_eq!(
+            serde_json::to_value(relay).expect("serialize relay GameData")["type"],
+            "GameData",
+            "relay GameData remains available after the Direct rejection"
+        );
+    }
 
     #[test]
     fn only_websocket_ping_pong_are_transparent_to_application_ordering() {

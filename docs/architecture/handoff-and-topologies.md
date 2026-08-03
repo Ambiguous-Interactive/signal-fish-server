@@ -44,15 +44,19 @@ every current player is ready, and the server broadcasts the unchanged
 2. **Select a plan.** The server computes a single room-wide plan by walking the
    richest-first ladder, settling on the first rung that fits the per-game desired
    ceiling, has its transport enabled, and is supported by **every** member.
-   Otherwise it settles on the relay floor. This is the single source of truth in
-   `src/server/session_policy.rs` (`UPGRADE_LADDER` + `RELAY_FLOOR`).
+   `host + direct` also requires at least one endpoint-ready host; without one,
+   that rung is skipped. Otherwise it settles on the relay floor. This is the
+   single source of truth in `src/server/session_policy.rs` (`UPGRADE_LADDER` +
+   `RELAY_FLOOR`).
 3. **Elect a host** (host topology only). Prefer the room's designated authority
-   when present; otherwise the earliest joiner, breaking ties by the smaller UUID
-   for determinism.
+   when it can execute the selected plan; otherwise the earliest eligible joiner,
+   breaking ties by the smaller UUID for determinism. Direct hosts must have a
+   validated self-declared endpoint.
 4. **Emit per-recipient `SessionPlan`s.** Each v3 member receives a plan tailored
    to it — its own `peers` list, per-recipient `initiate` flags, and ICE servers
-   only when the selected transport is WebRTC. A relay-floor plan has no host,
-   peers, or ICE and explicitly resets stale P2P state.
+   only when the selected transport is WebRTC. A Direct plan instead repeats the
+   elected host's validated `direct_endpoint`. A relay-floor plan has no host,
+   endpoint, peers, or ICE and explicitly resets stale P2P state.
 5. **Record the decision.** A non-relay decision is stored as the room's _active
    session plan_ (topology, transport, host) — the single source of truth for
    the session the room is running. Late joins, reconnects, and departures
@@ -152,23 +156,28 @@ check for it:
   capable refreshes membership-derived plan fields without counting a host
   re-plan.
 
-Re-election is **capability-aware**: only members that negotiated v3 plus the
-stored sticky (topology, transport) pair are electable — a seat-filling v2 or
+Re-election is **execution-aware**: only members that negotiated v3 plus the
+stored sticky (topology, transport) pair are electable, and a Direct candidate
+must still expose a validated endpoint — a seat-filling v2 or
 v3-relay-only member (which can even hold authority) is never named host of a
 session it cannot run. The authority preference passes the same filter; among
 qualifying members the rule is unchanged (authority preferred, else earliest
 joiner, smaller-UUID tie-break). If **no** member qualifies, the stored plan is
-dropped and nothing is emitted — the session is over and the relay floor
-carries the room.
+dropped and the relay floor carries the room. Direct endpoints are repeated on
+full late-join/reconnect/failover plan refreshes. An endpoint update by itself
+never changes the session's sticky topology or transport; a room finalized to
+relay is not upgraded mid-game.
 
-Re-issued and late-join plan **peer lists are filtered by the same predicate**
-as election: `peers[]` names only members that negotiated v3 plus the session's
-topology and transport, so a member that did not (e.g. a v3-relay-only
+Re-issued and late-join plan **peer lists use the session-capability predicate**:
+`peers[]` names only members that negotiated v3 plus the session's topology and
+transport, so a member that did not (e.g. a v3-relay-only
 seat-filler, or one lacking the session's topology) receives its plan with an
 empty `peers` list — it participates via the relay floor, with `host` kept as
 elected, informational — and never appears in other members' lists. At
 finalization the filter is vacuous for non-relay plans, because an upgrade is
-selected only when every member supports it.
+selected only when every member supports it. Host election uses a deliberately
+stricter predicate: for Direct, the candidate must additionally have a
+validated endpoint. Non-host Direct clients need no endpoint.
 
 - **Any other departure** (a mesh member, a host-topology client while the host
   remains) re-emits nothing: `PlayerLeft` already tells peers to prune the

@@ -86,7 +86,12 @@ the recipient's transport capabilities (peer status is useful to any v3 client).
 `ProvideConnectionInfo` / `GameStarting.peer_connections` is legacy,
 self-declared metadata for the v2 handoff surface. It is preserved for backward
 compatibility and must not be treated as proof of negotiated v3 `direct` or
-`webrtc` transport capability.
+`webrtc` transport capability. The one execution-readiness use is
+`host + direct`: after the normal v3 capability intersection, host election
+requires a syntactically usable Direct endpoint and copies it into
+`SessionPlan.direct_endpoint`. The original metadata remains visible in legacy
+player snapshots (including snapshots sent to spectators), so it is not a
+v3-only privacy boundary.
 
 Accepted sockets set `TCP_NODELAY`: every accepted WebSocket socket must disable
 Nagle so small bidirectional relay frames are not stalled ~40-90 ms by the
