@@ -61,8 +61,8 @@ all-target/all-feature Clippy, and the complete locked all-feature test suite
 pass. Independent adversarial code and test audits completed with zero
 actionable findings. Cargo-deny, CI configuration, workflow hygiene, MSRV,
 documentation, markdown, hook-readiness, policy-test, actionlint, and fast local
-CI gates all pass. Hosted CI and external reviewer status are recorded on PR
-#254; P39 completes only when that exact head is terminal green with no
+CI gates all pass. Hosted CI and external reviewer status are recorded on pull
+request #254; P39 completes only when that exact head is terminal green with no
 unresolved feedback.
 
 Dependabot PR #253's `taiki-e/install-action` and `actions/setup-java` pin bumps
