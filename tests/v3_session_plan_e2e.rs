@@ -15,7 +15,8 @@ mod websocket_test_helpers;
 use futures_util::SinkExt;
 use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
-    ClientMessage, IceServer, PlayerId, RoomId, ServerMessage, Topology, Transport,
+    ClientMessage, ConnectionInfo, DirectEndpoint, IceServer, PlayerId, RoomId, ServerMessage,
+    Topology, Transport,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
@@ -172,6 +173,18 @@ async fn authenticate_v3_mesh(ws: &mut WsStream) {
         Some(3),
         Some(vec![Transport::Relay, Transport::WebRtc]),
         Some(vec![Topology::Relay, Topology::Mesh]),
+        Some(3),
+    )
+    .await;
+}
+
+/// Authenticate as a v3 host+direct client.
+async fn authenticate_v3_direct(ws: &mut WsStream) {
+    authenticate(
+        ws,
+        Some(3),
+        Some(vec![Transport::Relay, Transport::Direct]),
+        Some(vec![Topology::Relay, Topology::Host]),
         Some(3),
     )
     .await;
@@ -363,6 +376,78 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
     assert_eq!(plan2.peers[0].player_id, peer1_id);
     assert_ne!(plan1.peers[0].initiate, plan2.peers[0].initiate);
     assert_eq!(plan1.peers[0].initiate, peer1_id < peer2_id);
+    running_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn direct_room_selects_and_delivers_the_validated_host_endpoint() {
+    let running_server = start_server_with_session(SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ..SessionConfig::default()
+    })
+    .await;
+    let addr = running_server.addr();
+
+    let mut host = connect(addr).await;
+    authenticate_v3_direct(&mut host).await;
+    let (_room_id, room_code, host_id) = join_room(&mut host, None, "Host").await;
+    send(
+        &mut host,
+        &ClientMessage::ProvideConnectionInfo {
+            connection_info: ConnectionInfo::Direct {
+                host: "192.0.2.10".to_string(),
+                port: 7777,
+            },
+        },
+    )
+    .await;
+    send(&mut host, &ClientMessage::Ping).await;
+    next_matching_server_message_within(
+        &mut host,
+        SERVER_MESSAGE_TIMEOUT,
+        "ProvideConnectionInfo processing barrier",
+        |message| matches!(message, ServerMessage::Pong).then_some(()),
+    )
+    .await;
+
+    let mut client = connect(addr).await;
+    authenticate_v3_direct(&mut client).await;
+    let (_room_id, _code, client_id) = join_room(&mut client, Some(room_code), "Client").await;
+
+    ready(&mut host).await;
+    await_ready_count(&mut host, 1).await;
+    await_ready_count(&mut client, 1).await;
+    ready(&mut client).await;
+    await_ready_count(&mut host, 2).await;
+    await_ready_count(&mut client, 2).await;
+    send(&mut host, &ClientMessage::StartGame).await;
+
+    let (host_plan, client_plan) =
+        tokio::join!(read_finalization(&mut host), read_finalization(&mut client));
+    let host_plan = host_plan.expect_session_plan("Direct host");
+    let client_plan = client_plan.expect_session_plan("Direct client");
+    let endpoint = Some(DirectEndpoint {
+        host: "192.0.2.10".to_string(),
+        port: 7777,
+    });
+
+    for plan in [&host_plan, &client_plan] {
+        assert_eq!(plan.topology, Topology::Host);
+        assert_eq!(plan.transport, Transport::Direct);
+        assert_eq!(plan.host, Some(host_id));
+        assert_eq!(plan.direct_endpoint, endpoint);
+        assert!(plan.ice_servers.is_empty());
+        assert_eq!(plan.fallback, Transport::Relay);
+    }
+    assert_eq!(host_plan.peers.len(), 1);
+    assert_eq!(host_plan.peers[0].player_id, client_id);
+    assert!(!host_plan.peers[0].initiate);
+    assert_eq!(client_plan.peers.len(), 1);
+    assert_eq!(client_plan.peers[0].player_id, host_id);
+    assert!(client_plan.peers[0].initiate);
+
     running_server.shutdown().await;
 }
 

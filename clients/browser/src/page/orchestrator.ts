@@ -240,6 +240,53 @@ export function clearDepartedMembershipPlan(
   }
 }
 
+/** Describe why this WebRTC-only reference client rejects a Direct plan. */
+export function directPlanRejectionMessage(endpoint: unknown): string {
+  const candidate =
+    typeof endpoint === 'object' && endpoint !== null
+      ? (endpoint as Record<string, unknown>)
+      : undefined;
+  const host = candidate?.['host'];
+  const port = candidate?.['port'];
+  const target =
+    typeof host === 'string' &&
+    host.length > 0 &&
+    typeof port === 'number' &&
+    Number.isInteger(port) &&
+    port > 0 &&
+    port <= 65_535
+      ? `for ${host}:${port}`
+      : 'without a validated endpoint';
+  return `direct SessionPlan ${target} is unsupported by the browser reference client; using relay fallback`;
+}
+
+/**
+ * Apply the complete browser-reference Direct rejection contract. Keeping the
+ * status frame and observable events behind one seam makes the real
+ * orchestrator path directly testable without a browser/WebRTC runtime.
+ */
+export function rejectUnsupportedDirectPlan(
+  endpoint: unknown,
+  sendFrame: (frame: string) => void,
+  emitEvent: (event: Record<string, unknown>) => void = emit,
+): void {
+  emitEvent({ event: 'error', message: directPlanRejectionMessage(endpoint) });
+  sendFrame(clientFrame('TransportStatus', { transport: 'direct', connected: false }));
+  emitEvent({ event: 'transport_status_sent', transport: 'direct', connected: false });
+  emitEvent({ event: 'fallback_engaged' });
+}
+
+/** Resolve authoritative WebRTC peer obligations; non-WebRTC plans clear all. */
+export function sessionPlanPeerIds(
+  transport: string,
+  peers: readonly Record<string, unknown>[],
+  myId: string,
+): string[] {
+  return transport === 'webrtc'
+    ? peers.map((peer) => String(peer['player_id'])).filter((peer) => peer !== myId)
+    : [];
+}
+
 /**
  * Run the full client lifecycle; emits every stdout event except the final
  * `exiting` (owned by the CLI) and resolves with the exit code. Never rejects.
@@ -952,16 +999,16 @@ class Orchestrator {
         if (this.config.leaveOnGameStart) {
           break;
         }
+        if (transport === 'direct') {
+          rejectUnsupportedDirectPlan(data['direct_endpoint'], (frame) =>
+            this.sendFrame(frame),
+          );
+        }
         if (transport === 'webrtc') {
           this.webrtcPlanSeen = true;
           this.lastIceServers = iceServers;
         }
-        const plannedPeers =
-          transport === 'webrtc'
-            ? peers
-                .map((peer) => String(peer['player_id']))
-                .filter((peer) => peer !== this.myId)
-            : [];
+        const plannedPeers = sessionPlanPeerIds(transport, peers, this.myId);
         const delta = authoritativePeerDelta(this.expectedPeers, plannedPeers);
         for (const peer of delta.removed) {
           this.removePairObligation(peer);

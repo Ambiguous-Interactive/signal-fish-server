@@ -48,8 +48,8 @@ use proptest::prelude::*;
 use serde_json::{json, Value};
 use signal_fish_server::config::TurnConfig;
 use signal_fish_server::protocol::{
-    ClientMessage, GameDataEncoding, IceServer, ServerMessage, SessionPeer, SessionPlanPayload,
-    Topology, Transport,
+    ClientMessage, DirectEndpoint, GameDataEncoding, IceServer, ServerMessage, SessionPeer,
+    SessionPlanPayload, Topology, Transport,
 };
 use signal_fish_server::security::{build_ice_servers, mint_turn_credentials, turn_expiry_unix};
 use uuid::Uuid;
@@ -152,18 +152,24 @@ fn arb_session_plan() -> impl Strategy<Value = SessionPlanPayload> {
         arb_topology(),
         arb_transport(),
         proptest::option::of(arb_uuid()),
+        proptest::option::of(
+            ("[a-z]{1,12}", 1u16..=u16::MAX).prop_map(|(host, port)| DirectEndpoint { host, port }),
+        ),
         proptest::collection::vec(arb_session_peer(), 0..5),
         proptest::collection::vec(arb_ice_server(), 0..3),
         arb_transport(),
     )
         .prop_map(
-            |(topology, transport, host, peers, ice_servers, fallback)| SessionPlanPayload {
-                topology,
-                transport,
-                host,
-                peers,
-                ice_servers,
-                fallback,
+            |(topology, transport, host, direct_endpoint, peers, ice_servers, fallback)| {
+                SessionPlanPayload {
+                    topology,
+                    transport,
+                    host,
+                    direct_endpoint,
+                    peers,
+                    ice_servers,
+                    fallback,
+                }
             },
         )
 }

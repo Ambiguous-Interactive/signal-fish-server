@@ -44,6 +44,10 @@ The server picks one plan per room from the intersection of what all members
 advertise, hands it out at the finalization handoff, brokers the WebRTC
 handshake (targeted offer/answer/ICE relay), and always keeps the relay live as
 the fallback tier (P2P primary -> TURN relay -> WebSocket relay last resort).
+`host + direct` additionally requires an electable host with a syntactically
+usable self-declared endpoint. The validated endpoint is copied into the
+authoritative `SessionPlan`; it remains a reachability claim by that client,
+not a server probe or guarantee.
 
 ### 2. Additive, capability-gated versioning (v2 frozen)
 

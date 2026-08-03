@@ -319,9 +319,13 @@ them (see [Rate Limiting](#rate-limiting)).
 At lobby finalization, each v3-capable member of a non-relay room receives a
 per-recipient `SessionPlan` alongside the unchanged `GameStarting`. The plan
 carries the chosen `topology` and `transport`, the elected `host` (for `host`
-topology), the `peers` this recipient should connect to (each with an `initiate`
+topology), a validated `direct_endpoint` when the selected transport is
+`direct`, the `peers` this recipient should connect to (each with an `initiate`
 flag so exactly one side of every pair sends the offer), the `ice_servers` to
 gather against, and a universal `fallback` transport that is always `relay`.
+`host + direct` is eligible only when at least one capable host has supplied a
+syntactically usable endpoint; the endpoint remains self-declared, so clients
+must retain the relay fallback.
 
 ### ICE Pre-Gather
 

@@ -417,7 +417,10 @@ the exact gap-authorization contract.
 - `default_topology` - Preferred topology for games not in `game_topology_mappings` (`relay`, `host`, `mesh`; default: `relay`)
 - `game_topology_mappings` - Per-game topology overrides, e.g. `{"FastFPS": "mesh", "BoardGame": "host"}`
 - `enable_webrtc` - Permit the WebRTC transport for `mesh`/`host` upgrades (default: true)
-- `enable_direct` - Permit the Direct (LAN/routable) transport for `host` upgrades (default: true)
+- `enable_direct` - Permit the Direct (LAN/routable) transport for `host`
+  upgrades (default: true). Selection still requires every member to advertise
+  `host + direct` and at least one electable host to provide a validated Direct
+  endpoint; otherwise the ladder continues to the relay floor.
 - `enable_ice_pregather` - Surface the composed ICE list (static `ice_servers`, then STUN, then a freshly minted
   TURN credential) on `RoomJoined`/`Reconnected` so v3 WebRTC-capable clients can pre-gather ICE candidates during
   the lobby wait (default: true). Only fires for non-relay-desired games in non-finalized rooms; the `SessionPlan`

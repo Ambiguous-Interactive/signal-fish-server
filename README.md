@@ -337,7 +337,7 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 | `GameData`         | Send arbitrary game data; negotiated v3 JSON may select reliable, keyed-latest, or volatile delivery |
 | `AuthorityRequest` | Request or release game authority                                                |
 | `PlayerReady`      | Toggle your ready/unready state in the lobby                                     |
-| `ProvideConnectionInfo` | Share legacy self-declared metadata for v2/back-compat; not v3 capability proof |
+| `ProvideConnectionInfo` | Share self-declared peer metadata; a usable Direct endpoint can make an otherwise-capable `host + direct` plan executable, but is not reachability proof |
 | `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`        |
 | `JoinAsSpectator`  | Join a room as a spectator (read-only observer)                                  |
 | `LeaveSpectator`   | Leave spectator mode                                                             |

@@ -7,8 +7,9 @@
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, GameDataEncoding, IceServer, PlayerId, ProtocolInfoPayload, ServerMessage,
-    SessionPeer, SessionPlanPayload, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
+    ClientMessage, DirectEndpoint, GameDataEncoding, IceServer, PlayerId, ProtocolInfoPayload,
+    ServerMessage, SessionPeer, SessionPlanPayload, Topology, Transport,
+    PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
 
 // ---------------------------------------------------------------------------
@@ -479,6 +480,7 @@ fn session_plan_mesh_wire_shape_and_tokens() {
         topology: Topology::Mesh,
         transport: Transport::WebRtc,
         host: None,
+        direct_endpoint: None,
         peers: vec![SessionPeer {
             player_id: peer,
             player_name: "P2".to_string(),
@@ -521,6 +523,10 @@ fn session_plan_mesh_wire_shape_and_tokens() {
         data.as_object().unwrap().get("host").is_none(),
         "host must be omitted when None"
     );
+    assert!(
+        data.as_object().unwrap().get("direct_endpoint").is_none(),
+        "direct_endpoint must be omitted outside Direct plans"
+    );
 }
 
 #[test]
@@ -530,6 +536,10 @@ fn session_plan_host_some_is_present_on_wire() {
         topology: Topology::Host,
         transport: Transport::Direct,
         host: Some(host),
+        direct_endpoint: Some(DirectEndpoint {
+            host: "192.0.2.10".to_string(),
+            port: 7777,
+        }),
         peers: vec![],
         ice_servers: vec![],
         fallback: Transport::Relay,
@@ -540,6 +550,8 @@ fn session_plan_host_some_is_present_on_wire() {
     assert_eq!(data["topology"], json!("host"));
     assert_eq!(data["transport"], json!("direct"));
     assert_eq!(data["host"], json!(host.to_string()));
+    assert_eq!(data["direct_endpoint"]["host"], json!("192.0.2.10"));
+    assert_eq!(data["direct_endpoint"]["port"], json!(7777));
     // ice_servers empty => omitted (skip_serializing_if Vec::is_empty).
     assert!(
         data.as_object().unwrap().get("ice_servers").is_none(),
@@ -575,6 +587,7 @@ fn session_plan_round_trips_json_and_msgpack() {
         topology: Topology::Host,
         transport: Transport::WebRtc,
         host: Some(host),
+        direct_endpoint: None,
         peers: vec![SessionPeer {
             player_id: peer,
             player_name: "Peer".to_string(),
@@ -613,6 +626,7 @@ fn session_plan_default_ice_servers_when_field_absent() {
         ServerMessage::SessionPlan(plan) => {
             assert_eq!(plan.topology, Topology::Host);
             assert_eq!(plan.host, Some(host));
+            assert_eq!(plan.direct_endpoint, None);
             assert!(
                 plan.ice_servers.is_empty(),
                 "absent ice_servers must default to empty"
@@ -686,6 +700,7 @@ fn assert_session_plan_eq(expected: &ServerMessage, actual: &ServerMessage) {
             assert_eq!(a.topology, b.topology);
             assert_eq!(a.transport, b.transport);
             assert_eq!(a.host, b.host);
+            assert_eq!(a.direct_endpoint, b.direct_endpoint);
             assert_eq!(a.fallback, b.fallback);
             assert_eq!(a.peers.len(), b.peers.len());
             for (pa, pb) in a.peers.iter().zip(b.peers.iter()) {

@@ -113,8 +113,10 @@ pub enum ClientMessage {
     StartGame,
     /// Provide legacy, self-declared v2/back-compat connection metadata.
     ///
-    /// Stored for `GameStarting.peer_connections[*].connection_info`; not used
-    /// to negotiate v3 transport capability and not proof of P2P reachability.
+    /// Stored for `GameStarting.peer_connections[*].connection_info`. A usable
+    /// Direct endpoint may make an otherwise capability-compatible v3
+    /// `host + direct` plan executable and is then repeated in `SessionPlan`;
+    /// it does not negotiate capability or prove P2P reachability.
     ProvideConnectionInfo { connection_info: ConnectionInfo },
     /// Heartbeat to maintain connection
     Ping,
@@ -432,8 +434,9 @@ pub enum ServerMessage {
     /// Game is starting with legacy peer metadata.
     ///
     /// `peer_connections` may include self-declared `ConnectionInfo` from
-    /// `ProvideConnectionInfo`. v3 topology/transport/ICE/fallback directives
-    /// are carried by [`ServerMessage::SessionPlan`], not this message.
+    /// `ProvideConnectionInfo`. v3 topology/transport/endpoint/ICE/fallback
+    /// directives are carried by [`ServerMessage::SessionPlan`], not this
+    /// message.
     GameStarting {
         peer_connections: Vec<PeerConnectionInfo>,
     },
@@ -462,8 +465,9 @@ pub enum ServerMessage {
     ///
     /// Sent after the unchanged [`ServerMessage::GameStarting`] to every
     /// v3-capable member. It carries the chosen topology/transport, the host
-    /// (for `host` topology), the recipient's peer list with per-recipient
-    /// `initiate` flags, ICE servers, and the relay `fallback`. Relay-resolved
+    /// (for `host` topology), the validated host endpoint for Direct, the
+    /// recipient's peer list with per-recipient `initiate` flags, ICE servers,
+    /// and the relay `fallback`. Relay-resolved
     /// rooms send an explicit `relay`/`relay` plan with no host, peers, or ICE so
     /// the latest plan is always an authoritative reset. Protocol-v2 clients
     /// never observe this variant (boxed to keep the enum small, mirroring

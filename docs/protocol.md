@@ -251,12 +251,14 @@ effectively a v3+ feature.
 
 ### ProvideConnectionInfo
 
-Provide legacy, self-declared peer connection metadata for the v2
-`GameStarting.peer_connections` handoff. This metadata is preserved for
-backward compatibility and is not part of protocol v3 capability negotiation:
-it does not prove that a client negotiated `direct` or `webrtc`, and it does not
-drive v3 `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`,
-`PeerTransportStatus`, or transport metrics.
+Provide legacy, self-declared peer connection metadata. It remains visible in
+v2-compatible room snapshots and `GameStarting.peer_connections`. It is not a
+v3 capability negotiation signal and does not prove reachability. One narrow v3
+use exists: a syntactically usable `direct` host/port makes an otherwise
+capability-compatible `host + direct` rung executable and is repeated as the
+elected host's `SessionPlan.direct_endpoint`. `ProvideConnectionInfo` is not
+itself a capability, status, or metrics event, and it does not authorize
+`Signal` or `NewPeer`; those retain their negotiated-v3 gates.
 
 ```json
 
@@ -1294,7 +1296,22 @@ sent after the unchanged `GameStarting`, and only to v3-capable members. Every v
 upgrade rung fits, the server emits an explicit `topology: "relay"`, `transport: "relay"`, empty-peers reset.
 Protocol-v2 members never observe it. Each recipient gets its own tailored `peers` list, `initiate` flags, and, for
 WebRTC transports, ICE servers with freshly minted TURN credentials. It carries topology, transport, peers, ICE
-servers, and relay fallback; it does not carry legacy `ConnectionInfo` or direct host/port endpoint details.
+servers, and relay fallback. For `host + direct`, it also carries
+`direct_endpoint: { host, port }`, projected from the elected host's validated
+self-declared `ConnectionInfo::Direct`. Other plans omit the field. Validation
+proves only that the host/port is syntactically connectable (non-zero port;
+non-empty bounded IP address or DNS hostname; no unspecified address), not that
+the endpoint is reachable, so the relay fallback remains mandatory.
+
+Endpoint visibility follows the existing room-member metadata boundary, not the
+v3 plan boundary. `PlayerInfo.connection_info` can expose the self-declared
+host/port to v2 or v3 players through `RoomJoined`, `PlayerJoined`, and
+`Reconnected`, and to spectators through `SpectatorJoined.current_players`.
+`GameStarting.peer_connections` repeats it to players. A finalized v3 room also
+repeats the elected endpoint in `SessionPlan.direct_endpoint`. Clients should
+therefore advertise only an address they intend room players and spectators to
+observe and players to attempt. The server does not publish it through room
+discovery, authenticate it as a network identity, or prove it reachable.
 
 `SessionPlan` can also be **re-issued mid-session** (same message shape, same v3 gating). Two triggers:
 
@@ -1302,8 +1319,10 @@ servers, and relay fallback; it does not carry legacy `ConnectionInfo` or direct
   departure, self-healed on a late join that finds the stored host missing, or (after a reconnect that downgraded
   its negotiated capabilities) seated but no longer able to run the session — the server re-elects a host over the
   remaining members and sends every remaining v3 member a fresh tailored plan — same topology and transport, new
-  `host`, fresh per-recipient ICE for WebRTC. Only members that negotiated v3 plus the session's sticky
-  topology/transport pair are electable (a seat-filling relay-only member is never named host of a session it
+  `host`, fresh per-recipient ICE for WebRTC, or the replacement host's
+  validated endpoint for Direct. Only members that negotiated v3 plus the
+  session's sticky topology/transport pair are electable, and Direct candidates
+  must also expose a usable endpoint (a seat-filling relay-only member is never named host of a session it
   cannot run); among those the rule is authority preferred, else earliest joiner, smaller-UUID tie-break. If no
   member qualifies, no plan is re-issued — the session is over and the relay floor carries the room. A host
   departure itself is still signaled by `PlayerLeft` (with the v3 terminal
@@ -1466,6 +1485,11 @@ Rules:
 
 - **All-members-v3 required.** Any non-relay rung requires every room member to be v3-capable _and_ to support that
   rung's topology and transport. A single non-supporting member skips the rung.
+- **Direct must be executable.** `host + direct` additionally requires at least
+  one capable member with a validated `ProvideConnectionInfo` Direct endpoint.
+  Host election considers only those endpoint-ready members: an endpoint-less
+  authority is skipped in favor of the earliest eligible host. If none exists,
+  the ladder continues to relay.
 - **Relay floor always wins** when no rung fits. V3 members receive an explicit no-peer `relay`/`relay`
   `SessionPlan`; v2 members receive no plan and keep their frozen wire behavior.
 - **`desired` is a ceiling, not an exact match.** A mesh-preferring room that cannot run mesh falls back to a host
@@ -1495,11 +1519,18 @@ run the session — a relay-only client, or one that negotiated the
 session) — still receives the (v3-gated) `SessionPlan` describing the running session — with an **empty** `peers`
 list, since every pair with it sits outside the session contract (a relay-only peer would additionally be rejected
 by `Signal` validation); `fallback: "relay"` is its data path. Symmetrically, a session-incapable member already
-seated in the room is omitted from a capable joiner's `peers`. A `host + direct` (LAN) plan still names its
-topology/transport and peers but carries no ICE because there is no WebRTC signaling to broker; any
-address metadata remains the legacy, self-declared `GameStarting.peer_connections` / `ProvideConnectionInfo`
-surface rather than a negotiated v3 transport proof. After a host failover the stored host is the _re-elected_
-one, so an ex-host that reconnects is paired as a client of the new host.
+seated in the room is omitted from a capable joiner's `peers`. A `host + direct`
+(LAN) plan names its topology/transport and peers, carries the elected host's
+validated `direct_endpoint`, and carries no ICE because there is no WebRTC
+signaling to broker. The endpoint originates from `ProvideConnectionInfo`,
+remains self-declared, and is repeated in every authoritative plan so
+finalization, late joins, reconnects, and failover do not depend on separately
+correlating legacy `GameStarting` metadata. A Direct host that reconnects
+without a usable endpoint is invalid and triggers endpoint-aware re-election;
+after failover, an ex-host reconnects as a client of the new host. Endpoint
+updates do not change a finalized room's sticky topology/transport; they are
+observed on the next membership refresh, while an already-relay room is never
+upgraded mid-session.
 
 ### Glare / offerer rule
 

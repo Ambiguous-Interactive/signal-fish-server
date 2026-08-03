@@ -109,7 +109,7 @@ your "Start" affordance when both conditions allow it.
 | `Reconnect` after a drop | Optional (see [Reconnection](../concepts/reconnection.md)) |
 | `JoinAsSpectator` / `LeaveSpectator` | Optional (see [Spectator Mode](../concepts/spectator-mode.md)) |
 | `AuthorityRequest` | Optional (see [Authority System](../concepts/authority.md)) |
-| `ProvideConnectionInfo` | Optional legacy peer metadata |
+| `ProvideConnectionInfo` | Optional self-declared peer metadata; a usable Direct endpoint is required before `host + direct` can be selected |
 | `Signal`, `SessionPlan`, `NewPeer`, `TransportStatus`, `PeerTransportStatus` | Optional (**v3 only**) |
 | `DeliveryReport` | **Mandatory for negotiated v3**; peers may send `latest` / `volatile` even when you do not |
 | `RelayStats`, `GoingAway` | Optional v3 diagnostics / shutdown handling |
@@ -138,9 +138,13 @@ even on the `/v3/ws` endpoint. The server echoes the negotiated
 
 After `GameStarting`, every v3 member receives a per-recipient
 **`SessionPlan`** describing the chosen `topology`, `transport`, optional
-`host`, `peers` with per-peer `initiate` flags, `ice_servers`, and universal
-`fallback`. Relay-resolved rooms send `relay`/`relay` with an empty peer list,
-which is an authoritative instruction to clear stale P2P state.
+`host`, optional validated `direct_endpoint`, `peers` with per-peer `initiate`
+flags, `ice_servers`, and universal `fallback`. Relay-resolved rooms send
+`relay`/`relay` with an empty peer list, which is an authoritative instruction
+to clear stale P2P state. Advertise `direct` only when the client implements a
+Direct socket and, if it may host, send `ProvideConnectionInfo` before
+finalization. A Direct endpoint is self-declared rather than a reachability
+proof, so failure still transitions to the relay floor.
 
 The signaling rules you must follow:
 

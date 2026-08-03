@@ -6,13 +6,16 @@ import {
   authoritativePeerDelta,
   changedTransportStatus,
   clearDepartedMembershipPlan,
+  directPlanRejectionMessage,
   isTerminalPeerConnectionState,
   observeJoinHandshakeFrame,
   requireFinalizedMembershipPlan,
   requiresAuthoritativeFinalizationPlan,
+  rejectUnsupportedDirectPlan,
   restoreReconnectedMember,
   shouldBufferSignalForUnpairedPeer,
   shouldResolveConnectedPair,
+  sessionPlanPeerIds,
 } from './orchestrator.js';
 import {
   NON_TEXT_APPLICATION_FRAME,
@@ -564,6 +567,70 @@ test('authoritative SessionPlan replaces topology and supports an empty no-pair 
   const empty = authoritativePeerDelta(new Set([retained, added]), []);
   if (empty.removed.length !== 2 || empty.retained.length !== 0 || empty.added.length !== 0) {
     throw new Error(`empty plan did not remove every pair ${JSON.stringify(empty)}`);
+  }
+});
+
+test('Direct plan rejection is explicit with or without a validated endpoint', () => {
+  const withEndpoint = directPlanRejectionMessage({ host: '192.0.2.10', port: 7777 });
+  if (
+    withEndpoint !==
+    'direct SessionPlan for 192.0.2.10:7777 is unsupported by the browser reference client; using relay fallback'
+  ) {
+    throw new Error(`unexpected Direct endpoint rejection: ${withEndpoint}`);
+  }
+
+  for (const endpoint of [
+    undefined,
+    { host: '', port: 7777 },
+    { host: 'host.test', port: 0 },
+  ]) {
+    const withoutEndpoint = directPlanRejectionMessage(endpoint);
+    if (!withoutEndpoint.includes('without a validated endpoint')) {
+      throw new Error(
+        `malformed Direct endpoint was described as validated: ${withoutEndpoint}`,
+      );
+    }
+  }
+});
+
+test('Direct SessionPlan dispatch reports failure, clears P2P, and leaves relay usable', () => {
+  const frames: string[] = [];
+  const events: Array<Record<string, unknown>> = [];
+  const priorPeer = playerId(13);
+
+  rejectUnsupportedDirectPlan(
+    { host: '192.0.2.10', port: 7777 },
+    (frame) => frames.push(frame),
+    (event) => events.push(event),
+  );
+  const planned = sessionPlanPeerIds(
+    'direct',
+    [{ player_id: priorPeer, initiate: true }],
+    SENDER,
+  );
+  const delta = authoritativePeerDelta(new Set([priorPeer]), planned);
+  sendGameData((frame) => frames.push(frame), { relay_msg: 'still-live' });
+
+  if (planned.length !== 0 || delta.removed.join() !== priorPeer) {
+    throw new Error(`Direct plan retained stale P2P obligations: ${JSON.stringify(delta)}`);
+  }
+  const status = JSON.parse(frames[0] ?? 'null') as Record<string, unknown>;
+  if (
+    status['type'] !== 'TransportStatus' ||
+    (status['data'] as Record<string, unknown>)?.['transport'] !== 'direct' ||
+    (status['data'] as Record<string, unknown>)?.['connected'] !== false
+  ) {
+    throw new Error(`Direct rejection did not send disconnected status: ${frames[0]}`);
+  }
+  const relay = JSON.parse(frames[1] ?? 'null') as Record<string, unknown>;
+  if (relay['type'] !== 'GameData') {
+    throw new Error(`relay GameData was not usable after Direct rejection: ${frames[1]}`);
+  }
+  if (
+    events.map((event) => event['event']).join(',') !==
+    'error,transport_status_sent,fallback_engaged'
+  ) {
+    throw new Error(`unexpected Direct rejection event sequence: ${JSON.stringify(events)}`);
   }
 });
 

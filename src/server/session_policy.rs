@@ -17,7 +17,7 @@
 //! via [`EnhancedGameServer::handle_session_member_departure`], or a late join /
 //! reconnect) finds a `host`-topology entry whose stored host is invalid — no
 //! longer a member, or seated but no longer capable of the session
-//! ([`ActiveSessionPlan::host_invalid`]) — capability-aware repair re-elects a
+//! ([`ActiveSessionPlan::host_invalid`]) — execution-aware repair re-elects a
 //! host and re-emits fresh per-recipient `SessionPlan`s. Topology and
 //! transport are **sticky for the session lifetime**: the ladder runs once at
 //! finalize and is never re-run mid-session, even though the capability
@@ -49,8 +49,8 @@ use crate::coordination::{
     StartGamePublication, StartGamePublicationBuilder,
 };
 use crate::protocol::{
-    IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, SessionPeer,
-    SessionPlanPayload, Topology, Transport,
+    ConnectionInfo, DirectEndpoint, IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId,
+    ServerMessage, SessionPeer, SessionPlanPayload, Topology, Transport,
 };
 
 use super::signaling::local_initiates;
@@ -110,9 +110,9 @@ impl ActiveSessionPlan {
 
     /// Whether `member` negotiated everything required to participate in — and
     /// in particular to *host* — this stored session: protocol v3 plus the
-    /// sticky (topology, transport) pair.
+    /// sticky (topology, transport) pair, and a usable endpoint for Direct.
     fn supported_by(&self, member: &SessionMember) -> bool {
-        member.supports_session(self.topology, self.transport)
+        member.can_host(self.topology, self.transport)
     }
 }
 
@@ -127,6 +127,7 @@ pub(crate) struct SessionMember {
     pub player_name: String,
     pub is_authority: bool,
     pub joined_at: chrono::DateTime<chrono::Utc>,
+    pub connection_info: Option<ConnectionInfo>,
     pub version: u16,
     pub transports: Vec<Transport>,
     pub topologies: Vec<Topology>,
@@ -151,13 +152,27 @@ impl SessionMember {
     /// Whether this member negotiated everything required to run a session on
     /// the given (topology, transport) pair: protocol v3 plus both axes.
     ///
-    /// The single capability predicate shared by plan selection
-    /// ([`all_support`]), host re-election ([`ActiveSessionPlan::supported_by`]),
-    /// and per-recipient peer-list filtering
-    /// ([`SessionPlanDecision::plan_for`]) — keeping "who can run this session"
-    /// one rule everywhere.
+    /// The capability predicate shared by plan selection ([`all_support`]) and
+    /// per-recipient peer-list filtering ([`SessionPlanDecision::plan_for`]).
+    /// Host validity and election wrap this with [`Self::can_host`], which adds
+    /// Direct endpoint readiness.
     fn supports_session(&self, topology: Topology, transport: Transport) -> bool {
         self.supports_v3() && self.supports_topology(topology) && self.supports_transport(transport)
+    }
+
+    /// Validated direct endpoint this member can expose when elected host.
+    fn direct_endpoint(&self) -> Option<DirectEndpoint> {
+        self.connection_info
+            .as_ref()
+            .and_then(DirectEndpoint::from_connection_info)
+    }
+
+    /// Whether this member can anchor the selected host transport. Direct
+    /// requires a usable endpoint in addition to negotiated capabilities;
+    /// WebRTC carries its own connection establishment through signaling.
+    fn can_host(&self, topology: Topology, transport: Transport) -> bool {
+        self.supports_session(topology, transport)
+            && (transport != Transport::Direct || self.direct_endpoint().is_some())
     }
 }
 
@@ -249,6 +264,16 @@ fn all_support(members: &[SessionMember], topology: Topology, transport: Transpo
         && members
             .iter()
             .all(|member| member.supports_session(topology, transport))
+}
+
+/// Whether a capability-compatible rung has every piece needed to execute it.
+/// Only `host + direct` has an additional requirement: at least one capable
+/// member must have provided a syntactically usable connect endpoint.
+fn rung_is_executable(members: &[SessionMember], topology: Topology, transport: Transport) -> bool {
+    transport != Transport::Direct
+        || members
+            .iter()
+            .any(|member| member.can_host(topology, transport))
 }
 
 /// The session-upgrade ladder (ADR-0001 §1), richest rung first.
@@ -385,7 +410,8 @@ pub(crate) fn is_valid_pair(topology: Topology, transport: Transport) -> bool {
 ///
 /// 1. `Mesh` + WebRTC — `desired == Mesh`, webrtc enabled, all support mesh+webrtc.
 /// 2. `Host` + WebRTC — `desired ∈ {Mesh, Host}`, webrtc enabled, all support host+webrtc.
-/// 3. `Host` + Direct — `desired ∈ {Mesh, Host}`, direct enabled, all support host+direct (LAN).
+/// 3. `Host` + Direct — `desired ∈ {Mesh, Host}`, direct enabled, all support
+///    host+direct, and at least one electable host has a validated endpoint (LAN).
 /// 4. `Relay` + Relay — the universal floor (always available).
 ///
 /// So a `Mesh`-preferring room that cannot run mesh still falls back to a host
@@ -413,6 +439,7 @@ pub(crate) fn choose_session_plan(
             topology_rank(topology) <= topology_rank(desired)
                 && transport_enabled(cfg, transport)
                 && all_support(&members, topology, transport)
+                && rung_is_executable(&members, topology, transport)
         })
         .unwrap_or(RELAY_FLOOR);
 
@@ -422,7 +449,12 @@ pub(crate) fn choose_session_plan(
     );
 
     let host = if topology == Topology::Host {
-        elect_host(authority, &members)
+        let electable: Vec<_> = members
+            .iter()
+            .filter(|member| member.can_host(topology, transport))
+            .cloned()
+            .collect();
+        elect_host(authority, &electable)
     } else {
         None
     };
@@ -490,9 +522,10 @@ impl SessionPlanDecision {
         self.transport == Transport::WebRtc
     }
 
-    /// Whether `member` negotiated everything required to actually run this
-    /// plan's P2P pairing (v3 + this decision's (topology, transport) pair) —
-    /// the same predicate host election uses ([`ActiveSessionPlan::supported_by`]).
+    /// Whether `member` negotiated everything required to participate in this
+    /// plan's P2P pairing (v3 + this decision's (topology, transport) pair).
+    /// Host election deliberately uses the stricter [`SessionMember::can_host`]
+    /// predicate, because only a Direct host needs to expose an endpoint.
     ///
     /// Re-issued and late-join member lists can contain members that never
     /// negotiated the session's sticky pair (`add_player_to_room` gates only on
@@ -500,7 +533,7 @@ impl SessionPlanDecision {
     /// room). A WebRTC pair is doomed unless BOTH sides negotiated the
     /// transport — `handle_signal` rejects either direction and the wasted
     /// offers burn signal rate-limit budget — so [`Self::plan_for`] filters the
-    /// peer list on both sides: "who can run this session" is one rule everywhere.
+    /// peer list on both sides using the shared capability predicate.
     pub(crate) fn pairable(&self, member: &SessionMember) -> bool {
         member.supports_session(self.topology, self.transport)
     }
@@ -576,10 +609,24 @@ impl SessionPlanDecision {
             topology: self.topology,
             transport: self.transport,
             host: self.host,
+            direct_endpoint: self.direct_endpoint(),
             peers,
             ice_servers,
             fallback: Transport::Relay,
         }
+    }
+
+    /// The elected host's validated connect target for `host + direct`.
+    fn direct_endpoint(&self) -> Option<DirectEndpoint> {
+        if self.transport != Transport::Direct {
+            return None;
+        }
+
+        let host = self.host?;
+        self.members
+            .iter()
+            .find(|member| member.player_id == host)?
+            .direct_endpoint()
     }
 
     /// Build the per-recipient peer list for `host` topology. Only reached for
@@ -662,6 +709,7 @@ impl EnhancedGameServer {
                     player_name: player.name.clone(),
                     is_authority: player.is_authority,
                     joined_at: player.connected_at,
+                    connection_info: player.connection_info.clone(),
                     version: proto.version,
                     transports: proto.transports.clone(),
                     topologies: proto.topologies.clone(),
@@ -698,6 +746,7 @@ impl EnhancedGameServer {
                         player_name: player.name.clone(),
                         is_authority: player.is_authority,
                         joined_at: player.connected_at,
+                        connection_info: player.connection_info.clone(),
                         version: protocol.version,
                         transports: protocol.transports,
                         topologies: protocol.topologies,
@@ -905,7 +954,7 @@ impl EnhancedGameServer {
     /// ([`ActiveSessionPlan::host_invalid`]: no longer a member, or seated but
     /// no longer capable of the session after a capability-downgrading
     /// reconnect) — triggers a re-emission, via the shared
-    /// [`Self::replan_host_session`] (capability-aware re-election + fresh
+    /// [`Self::replan_host_session`] (execution-aware re-election + fresh
     /// per-recipient `SessionPlan`s, same topology and transport). The trigger
     /// is deliberately "the stored host is invalid", not "the departed player
     /// was the host": the hook runs after removal, so a departing host is
@@ -1030,13 +1079,14 @@ impl EnhancedGameServer {
     /// transaction; finalized additions use [`membership_session_decision`] to
     /// fold the same repair into their lifecycle publication.
     ///
-    /// Election is **capability-aware**: only members that negotiated v3 AND
-    /// the stored sticky (topology, transport) pair are electable. A weaker
+    /// Election is **execution-aware**: only members that negotiated v3 AND
+    /// the stored sticky (topology, transport) pair are electable, and Direct
+    /// candidates must expose a validated endpoint. A weaker
     /// member can legitimately sit in a finalized room (a seat-filling join
     /// gates only on fullness) and can even hold authority (plain v2
     /// `RequestAuthority` has no version gate), but it must never be named host
     /// of a session it cannot run — the v3 members would receive a failover
-    /// plan naming a host `handle_signal` rejects. The member slice is
+    /// plan naming a host that cannot anchor the selected transport. The member slice is
     /// pre-filtered and the authority preference passes through the same
     /// filter (authority must not outrank the capability gate); [`elect_host`]
     /// itself stays generic — its other caller, finalize-time

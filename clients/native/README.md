@@ -122,7 +122,7 @@ process continues to its normal bounded exit.
 | `peer_joined` | `player_id` | Another player joined |
 | `player_left` | `player_id` | Another player left |
 | `game_starting` | `is_authority` | Lobby finalized (this client's own authority flag); never re-broadcast to late joiners |
-| `session_plan` | `topology`, `transport`, `host`, `peers[{player_id, initiate}]`, `ice_servers_count`, `fallback` | The full authoritative per-recipient v3 directive; Relay/Relay carries no peers |
+| `session_plan` | `topology`, `transport`, `host`, `peers[{player_id, initiate}]`, `ice_servers_count`, `fallback` | The full authoritative per-recipient v3 directive; Relay/Relay carries no peers. This WebRTC reference client explicitly rejects Direct plans, reports `connected: false`, and uses the relay fallback |
 | `new_peer` | `peer_id`, `you_initiate` | Compatible incremental pairing directive (the universal server uses full plans) |
 | `p2p_gate_released` | `pending_pairs` | Native-only harness proof that the release-file barrier opened and released the expected planned pairs |
 | `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`pair_retry`/`other`) |
