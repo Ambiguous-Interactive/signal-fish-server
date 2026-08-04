@@ -91,9 +91,10 @@ pub struct Cli {
     #[arg(long)]
     pub relay_payload: Option<String>,
 
-    /// Deterministically cripple ICE: bind no UDP transport sockets AND
-    /// silently drop all outbound/inbound IceCandidate signals. Used by
-    /// fallback scenarios to force the relay floor.
+    /// Deterministically cripple ICE: retain only a dummy loopback transport,
+    /// register no usable local candidate, and silently drop all outbound and
+    /// inbound IceCandidate signals. Used by fallback scenarios to force the
+    /// relay floor while preserving SDP flow.
     #[arg(long)]
     pub cripple_ice: bool,
 

@@ -1865,8 +1865,9 @@ impl Orchestrator<'_> {
             SignalKind::IceCandidate => {
                 let pairwise_drop = self.drop_ice_from == Some(from);
                 if self.cli.cripple_ice || pairwise_drop {
-                    // Belt and braces with the engine's zero-socket cripple mode:
-                    // selected inbound candidates are dropped, never applied.
+                    // Belt and braces with the engine's loopback-only cripple
+                    // mode: selected inbound candidates are dropped, never
+                    // applied.
                     tracing::debug!(%from, "fault injection: dropping inbound ICE candidate");
                     if pairwise_drop {
                         emit(&Event::IceCandidateDropped { from });

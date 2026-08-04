@@ -15,10 +15,10 @@
 //!   webrtc-rs's `RTCIceCandidateInit` (camelCase `candidate` / `sdpMid` /
 //!   `sdpMLineIndex` / `usernameFragment`, matchbox-compatible). Remote candidates that arrive
 //!   before the remote description are buffered and flushed afterwards.
-//! - **Crippled mode** (`--cripple-ice`): the peer connection binds no UDP
-//!   transport sockets, and candidate signals are
-//!   dropped in both directions — deterministic non-connectivity for fallback
-//!   scenarios.
+//! - **Crippled mode** (`--cripple-ice`): the peer connection binds only an
+//!   isolated loopback socket, and candidate signals are dropped in both
+//!   directions — deterministic non-connectivity while preserving normal
+//!   offer/answer and ICE-gathering lifecycle events for fallback scenarios.
 //!
 //! The engine is owned and driven by the single orchestrator task. webrtc-rs's
 //! async peer handler and polled data channels never touch engine state directly;
@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use rtc::ice::mdns::MulticastDnsMode;
+use rtc::ice::{mdns::MulticastDnsMode, network_type::NetworkType};
 use signal_fish_server::protocol::{IceServer, PlayerId};
 use tokio::sync::mpsc;
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
@@ -236,6 +236,14 @@ impl Engine {
         let mut setting_engine = SettingEngine::default();
         if self.disable_mdns {
             setting_engine.set_multicast_dns_mode(MulticastDnsMode::Disabled);
+        }
+        if self.crippled {
+            // The 0.20 driver requires at least one socket, but the ICE agent
+            // must never register that dummy UDP socket as a usable local
+            // candidate. Permit only TCP4 candidates while supplying no TCP
+            // listeners. This also rejects UDP candidates embedded directly
+            // in remote SDP, below the signaling layer's candidate filters.
+            setting_engine.set_network_types(vec![NetworkType::Tcp4]);
         }
         let handler = Arc::new(PeerHandler {
             peer,
@@ -574,7 +582,15 @@ fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> 
 /// the ICE candidate grammar cannot carry the local interface's scope ID.
 fn local_udp_addrs(crippled: bool) -> Result<Vec<SocketAddr>> {
     if crippled {
-        return Ok(Vec::new());
+        // rtc/webrtc 0.20 rejects a peer connection with no sockets or
+        // listeners. Keep the fault deterministic with a loopback-only
+        // transport. Crippled SettingEngine accepts only TCP4 candidates while
+        // the builder supplies no TCP listeners, so the ICE agent cannot
+        // register this UDP socket as a local candidate. PeerHandler and the
+        // client retain outbound/inbound signaling filters as defense in
+        // depth while offer/answer and gathering completion still follow the
+        // real peer-connection lifecycle.
+        return Ok(vec![SocketAddr::from(([127, 0, 0, 1], 0))]);
     }
 
     let mut addrs = BTreeSet::new();
@@ -673,6 +689,150 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn crippled_engine_builds_full_mesh_links_without_candidate_leakage() {
+        const REMOTE_PEERS: u128 = 15;
+
+        assert_eq!(
+            local_udp_addrs(true).expect("crippled transport address resolves"),
+            vec![SocketAddr::from(([127, 0, 0, 1], 0))]
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(true, true, false, tx).expect("crippled engine builds");
+        for ordinal in 1..=REMOTE_PEERS {
+            let peer = PlayerId::from_u128(ordinal);
+            engine
+                .pair_with(peer, true, &[])
+                .await
+                .unwrap_or_else(|error| panic!("peer {ordinal} pairs: {error:#}"))
+                .unwrap_or_else(|| panic!("peer {ordinal} produces an offer"));
+        }
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut completed = BTreeSet::new();
+            while completed.len() < REMOTE_PEERS as usize {
+                match rx.recv().await.expect("engine event channel stays open") {
+                    EngineEvent::IceGatheringComplete { peer, .. } => {
+                        completed.insert(peer);
+                    }
+                    EngineEvent::LocalCandidate { peer, .. } => {
+                        panic!("crippled engine leaked a candidate for {peer}");
+                    }
+                    _ => {}
+                }
+            }
+            completed
+        })
+        .await
+        .expect("every crippled link completes ICE gathering");
+        assert_eq!(completed.len(), REMOTE_PEERS as usize);
+
+        for link in engine.peers.values() {
+            let report = link
+                .pc
+                .get_stats(std::time::Instant::now(), StatsSelector::None)
+                .await;
+            assert!(
+                report
+                    .iter()
+                    .all(|entry| !matches!(entry, RTCStatsReportEntry::LocalCandidate(_))),
+                "crippled ICE agent must register no local candidate"
+            );
+        }
+
+        for ordinal in 1..=REMOTE_PEERS {
+            engine
+                .remove_peer(PlayerId::from_u128(ordinal))
+                .await
+                .unwrap_or_else(|error| panic!("peer {ordinal} closes: {error:#}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn crippled_engine_rejects_candidate_embedded_in_remote_sdp() {
+        let healthy_id = PlayerId::from_u128(1);
+        let crippled_id = PlayerId::from_u128(2);
+        let (healthy_tx, mut healthy_rx) = mpsc::unbounded_channel();
+        let (crippled_tx, mut crippled_rx) = mpsc::unbounded_channel();
+        let mut healthy = Engine::new(false, true, false, healthy_tx).expect("healthy engine");
+        let mut crippled = Engine::new(true, true, false, crippled_tx).expect("crippled engine");
+
+        let offer = healthy
+            .pair_with(crippled_id, true, &[])
+            .await
+            .expect("healthy initiator pairs")
+            .expect("healthy initiator offers");
+        crippled
+            .pair_with(healthy_id, false, &[])
+            .await
+            .expect("crippled responder pairs");
+
+        let healthy_candidate = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match healthy_rx
+                    .recv()
+                    .await
+                    .expect("healthy event channel stays open")
+                {
+                    EngineEvent::LocalCandidate { candidate_json, .. } => {
+                        break serde_json::from_str::<RTCIceCandidateInit>(&candidate_json)
+                            .expect("healthy candidate parses");
+                    }
+                    EngineEvent::IceGatheringComplete { .. } => {
+                        panic!("healthy gathering completed without a candidate");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("healthy candidate gathers");
+        let offer_with_candidate = format!("{offer}a={}\r\n", healthy_candidate.candidate);
+
+        let answer = crippled
+            .handle_offer(healthy_id, offer_with_candidate)
+            .await
+            .expect("crippled responder accepts candidate-bearing offer");
+        healthy
+            .handle_answer(crippled_id, answer)
+            .await
+            .expect("healthy initiator accepts answer");
+
+        let observation = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match tokio::time::timeout_at(observation, crippled_rx.recv()).await {
+                Ok(Some(EngineEvent::PcState {
+                    state: RTCPeerConnectionState::Connected,
+                    ..
+                })) => panic!("crippled peer connected through an SDP-embedded candidate"),
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("crippled event channel closed during observation"),
+                Err(_) => break,
+            }
+        }
+
+        let report = crippled.peers[&healthy_id]
+            .pc
+            .get_stats(std::time::Instant::now(), StatsSelector::None)
+            .await;
+        assert!(
+            report
+                .iter()
+                .all(|entry| !matches!(entry, RTCStatsReportEntry::LocalCandidate(_))),
+            "crippled ICE agent must retain no local candidate"
+        );
+
+        healthy
+            .remove_peer(crippled_id)
+            .await
+            .expect("healthy peer closes");
+        crippled
+            .remove_peer(healthy_id)
+            .await
+            .expect("crippled peer closes");
+    }
 
     #[tokio::test]
     async fn gathered_host_candidates_never_advertise_wildcard_addresses() {

@@ -26,8 +26,8 @@
 //!    along star edges (4 directed endpoints, no client<->client traffic),
 //!    and the exchange completes in both directions on both channels.
 //! 3. `mesh_n3_partial_ice_cripple_relay_fallback` — one member runs with
-//!    `--cripple-ice` (no candidates gathered, candidate signals dropped both
-//!    ways): the healthy pair still connects and exchanges on both channels,
+//!    `--cripple-ice` (no usable local candidates registered; candidate
+//!    signals dropped both ways): the healthy pair still connects and exchanges on both channels,
 //!    the crippled member resolves `TransportStatus{webrtc,false}` exactly
 //!    once and engages the relay fallback, the asymmetric status fan-out is
 //!    observed by everyone, and the relay floor carries every member's
@@ -725,7 +725,8 @@ async fn host_star_n3_webrtc() {
 async fn mesh_n3_partial_ice_cripple_relay_fallback() {
     let _serial = acquire_serial().await;
     // All members run a SHORT P2P window: the crippled pairs can never
-    // connect (no candidates exist in either direction), so every member
+    // connect (the crippled endpoint registers no local candidate and applies
+    // no remote candidate), so every member
     // resolves its overall status at this deadline — the healthy pair with
     // one connected pair (>= 1 rule => true), the crippled member with zero
     // (=> false + fallback). 6 s comfortably covers the healthy pair's
@@ -754,8 +755,9 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
                 extra_args: HEALTHY_ARGS,
                 v2_endpoint: false,
             },
-            // The crippled member gathers no candidates and drops candidate
-            // signals both ways; no --exchange (its pairs never open).
+            // The crippled member registers no usable local candidates and
+            // drops candidate signals both ways; no --exchange (its pairs
+            // never open).
             ClientConfig {
                 exchange: false,
                 relay: true,

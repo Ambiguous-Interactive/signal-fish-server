@@ -74,6 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve deterministic `--cripple-ice` fallback on webrtc-rs 0.20 by keeping
+  offer/answer and gathering lifecycles live while preventing both local and
+  SDP-embedded remote candidates from forming an ICE pair.
 - Fix the codegen-facing AsyncAPI accountability envelopes (issue #261).
   Room snapshots, relayed game data, lifecycle watermarks, and reconnect replay
   now expose closed protocol-v2/protocol-v3 wire unions that reject impossible
