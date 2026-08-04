@@ -1,13 +1,15 @@
 import { DELIVERY_REPORT_MAX_GAPS, DeliveryAccountability } from './accountability.js';
 import { encode } from '@msgpack/msgpack';
-import { Engine, RELIABLE_LABEL } from './engine.js';
+import { Engine, RELIABLE_LABEL, UNRELIABLE_LABEL } from './engine.js';
 import {
   applyJoinAccountabilityBaseline,
   authoritativePeerDelta,
   changedTransportStatus,
   clearDepartedMembershipPlan,
+  connectionTargetsForPlan,
   directPlanRejectionMessage,
   isTerminalPeerConnectionState,
+  noteCurrentPairConnected,
   observeJoinHandshakeFrame,
   requireFinalizedMembershipPlan,
   requiresAuthoritativeFinalizationPlan,
@@ -700,11 +702,42 @@ test('only failed and closed peer-connection states are terminal', () => {
   }
 });
 
+test('pair connection is reported once across transport generations', () => {
+  const connected = new Set<string>();
+  const reported = new Set<string>();
+  if (!noteCurrentPairConnected(connected, reported, SENDER)) {
+    throw new Error('the first generation did not report its logical pair');
+  }
+  connected.delete(SENDER);
+  if (noteCurrentPairConnected(connected, reported, SENDER)) {
+    throw new Error('a retained-peer rebuild duplicated the logical pair event');
+  }
+  connected.delete(SENDER);
+  reported.delete(SENDER);
+  if (!noteCurrentPairConnected(connected, reported, SENDER)) {
+    throw new Error('a new authoritative obligation did not report its logical pair');
+  }
+});
+
+test('a fresh plan retries a retained obligation whose engine link is absent', () => {
+  const retained = playerId(71);
+  const delta = authoritativePeerDelta(new Set([retained]), [retained]);
+  const targets = connectionTargetsForPlan(delta, () => false);
+  if (!targets.has(retained)) {
+    throw new Error('fresh plan did not retry the absent retained link');
+  }
+  if (connectionTargetsForPlan(delta, () => true).size !== 0) {
+    throw new Error('fresh plan rebuilt an existing retained link without a wire barrier');
+  }
+});
+
 test('removed browser peer links cannot emit callbacks after the same peer is re-paired', async () => {
   class FakeDataChannel {
     readonly label: string;
     readyState = 'connecting';
     onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
     onmessage: ((event: { data: unknown }) => void) | null = null;
 
     constructor(label: string) {
@@ -714,6 +747,7 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
 
   class FakePeerConnection {
     static readonly instances: FakePeerConnection[] = [];
+    static readonly configurations: RTCConfiguration[] = [];
     static failNextOffer = false;
     connectionState = 'new';
     onconnectionstatechange: (() => void) | null = null;
@@ -722,8 +756,9 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
       | null = null;
     ondatachannel: ((event: { channel: RTCDataChannel }) => void) | null = null;
 
-    constructor() {
+    constructor(configuration: RTCConfiguration) {
       FakePeerConnection.instances.push(this);
+      FakePeerConnection.configurations.push(configuration);
     }
 
     close(): void {}
@@ -762,6 +797,8 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
       onPcState: (peer, generation, state) => queueIfCurrent(peer, generation, `pc:${state}`),
       onChannelOpen: (peer, generation, label) =>
         queueIfCurrent(peer, generation, `open:${label}`),
+      onChannelClosed: (peer, generation, label) =>
+        queueIfCurrent(peer, generation, `closed:${label}`),
       onChannelMessage: (peer, generation, label, text) =>
         queueIfCurrent(peer, generation, `message:${label}:${text}`),
     });
@@ -773,6 +810,19 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
     }
     const staleChannel = new FakeDataChannel(RELIABLE_LABEL);
     stalePc.ondatachannel?.({ channel: staleChannel as unknown as RTCDataChannel });
+    if (staleChannel.onclose === null) {
+      throw new Error('required data-channel close callback was not registered');
+    }
+    const extraChannel = new FakeDataChannel('application-extra');
+    stalePc.ondatachannel?.({ channel: extraChannel as unknown as RTCDataChannel });
+    if (extraChannel.onclose !== null || extraChannel.onerror !== null) {
+      throw new Error('an optional application channel incorrectly determined pair health');
+    }
+    const errorFirstChannel = new FakeDataChannel(UNRELIABLE_LABEL);
+    stalePc.ondatachannel?.({ channel: errorFirstChannel as unknown as RTCDataChannel });
+    if (errorFirstChannel.onerror === null) {
+      throw new Error('required data-channel error callback was not registered');
+    }
 
     // These callbacks are valid when accepted by the engine, but their queued
     // orchestrator work is deliberately held until after replacement.
@@ -782,15 +832,30 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
     staleChannel.readyState = 'open';
     staleChannel.onopen?.();
     staleChannel.onmessage?.({ data: 'queued-stale' });
-    if (queued.length < 4 || queued.length > 4 || observed.length !== 0) {
+    staleChannel.onclose?.();
+    staleChannel.onerror?.();
+    errorFirstChannel.onerror?.();
+    errorFirstChannel.onclose?.();
+    const queuedBeforeReplacement = queued.length;
+    if (queuedBeforeReplacement !== 6 || observed.length !== 0) {
       throw new Error('old-link callbacks were not held at the queue boundary');
     }
 
     engine.removePeer(SENDER);
-    await engine.pairWith(SENDER, false, []);
+    const refreshedIce = [
+      { urls: ['turn:turn.example.test'], username: 'new', credential: 'new' },
+    ];
+    await engine.pairWith(SENDER, false, refreshedIce);
     const currentPc = FakePeerConnection.instances[1];
     if (currentPc === undefined) {
       throw new Error('replacement fake peer connection was not constructed');
+    }
+    const replacementConfig = FakePeerConnection.configurations[1];
+    if (
+      replacementConfig?.iceServers?.[0]?.urls?.[0] !== 'turn:turn.example.test' ||
+      replacementConfig.iceServers[0]?.username !== 'new'
+    ) {
+      throw new Error('replacement link did not apply refreshed ICE credentials');
     }
 
     for (const dispatch of queued.splice(0)) {
@@ -810,6 +875,7 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
       channel: new FakeDataChannel('stale') as unknown as RTCDataChannel,
     });
     staleChannel.onmessage?.({ data: 'stale' });
+    staleChannel.onclose?.();
     if (queued.length !== 0 || observed.length !== 0) {
       throw new Error(`stale callbacks escaped replacement guard: ${observed.join(', ')}`);
     }
@@ -821,7 +887,13 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
     currentPc.ondatachannel?.({ channel: currentChannel as unknown as RTCDataChannel });
     currentChannel.readyState = 'open';
     currentChannel.onopen?.();
+    const currentUnreliable = new FakeDataChannel(UNRELIABLE_LABEL);
+    currentPc.ondatachannel?.({ channel: currentUnreliable as unknown as RTCDataChannel });
+    currentUnreliable.readyState = 'open';
+    currentUnreliable.onopen?.();
     currentChannel.onmessage?.({ data: 'fresh' });
+    currentChannel.onclose?.();
+    currentChannel.readyState = 'closed';
     for (const dispatch of queued.splice(0)) {
       dispatch();
     }
@@ -829,7 +901,9 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
       'pc:connected',
       'candidate:{"candidate":"fresh"}',
       `open:${RELIABLE_LABEL}`,
+      `open:${UNRELIABLE_LABEL}`,
       `message:${RELIABLE_LABEL}:fresh`,
+      `closed:${RELIABLE_LABEL}`,
     ];
     if (observed.join('\n') !== expected.join('\n')) {
       throw new Error(`current callbacks were lost or reordered: ${observed.join(', ')}`);

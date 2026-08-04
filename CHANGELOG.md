@@ -60,6 +60,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject clients whose declared protocol maximum is below the deployment
+  minimum instead of silently upgrading them (issue #257). The authentication
+  response now uses `UNSUPPORTED_PROTOCOL_VERSION`, including auth-disabled
+  connections whose endpoint default is incompatible with a v3-only server.
+- Keep rooms protected from garbage collection while a reconnect claim is in
+  flight, even when the original reconnect window expires during restoration
+  (issue #257).
+- Detect required WebRTC data-channel close and error events in both reference
+  clients (issue #257). A lost channel now tears down the unusable peer link,
+  reports the transport disconnected, and engages the live WebSocket relay
+  fallback even if the peer connection itself still says `connected`.
+- Correct the protocol-v3 AsyncAPI and canonical samples (issue #257).
+  Connection metadata and session plans now expose exact legal schema unions,
+  nullable authority fields match their actual wire shape, and v3 room
+  snapshots always pair `epoch` with the recipient-visible `seq` baseline.
 - Fix `host + direct` plans that advertised an unusable peer-to-peer upgrade
   (issue #251). Direct selection now requires an endpoint-ready host, skips an
   authority that cannot anchor the connection, and carries the validated host

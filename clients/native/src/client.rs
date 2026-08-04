@@ -1505,20 +1505,7 @@ impl Orchestrator<'_> {
                     state: state.to_string(),
                 });
                 if is_terminal_peer_connection_state(&state) {
-                    self.connected_pairs.remove(&peer);
-                    self.pair_connected_reported.remove(&peer);
-                    self.ice_gathering_complete.remove(&peer);
-                    self.sent_labels.remove(&peer);
-                    self.received_labels.remove(&peer);
-                    self.pending_signals.remove(&peer);
-                    self.engine.remove_peer(peer).await.map_err(|error| {
-                        FatalError::connection(format!(
-                            "close terminal peer connection {peer}: {error:#}"
-                        ))
-                    })?;
-                    if self.webrtc_plan_seen {
-                        self.resolve_transport_status().await?;
-                    }
+                    self.handle_peer_transport_loss(peer).await?;
                 }
             }
             EngineEvent::RemoteChannel { peer, channel, .. } => {
@@ -1533,6 +1520,10 @@ impl Orchestrator<'_> {
                     self.on_pair_connected(peer).await?;
                 }
             }
+            EngineEvent::ChannelClosed { peer, label, .. } => {
+                emit(&Event::ChannelClosed { peer, label });
+                self.handle_peer_transport_loss(peer).await?;
+            }
             EngineEvent::ChannelMessage {
                 peer, label, text, ..
             } => {
@@ -1542,6 +1533,26 @@ impl Orchestrator<'_> {
                     .insert(label.clone());
                 emit(&Event::ChannelMessage { peer, label, text });
             }
+        }
+        Ok(())
+    }
+
+    /// Tear down an unusable P2P link while retaining its planned obligation.
+    async fn handle_peer_transport_loss(&mut self, peer: PlayerId) -> Result<(), FatalError> {
+        self.connected_pairs.remove(&peer);
+        self.ice_gathering_complete.remove(&peer);
+        self.sent_labels.remove(&peer);
+        self.received_labels.remove(&peer);
+        self.pending_signals.remove(&peer);
+        if let Err(error) = self.engine.remove_peer(peer).await {
+            let message = format!(
+                "failed to close unusable peer connection {peer}; continuing on relay: {error:#}"
+            );
+            tracing::warn!(%peer, %error, "peer cleanup failed while engaging relay fallback");
+            emit(&Event::Error { message });
+        }
+        if self.webrtc_plan_seen {
+            self.resolve_transport_status().await?;
         }
         Ok(())
     }
@@ -2466,19 +2477,16 @@ mod tests {
     }
 
     #[test]
-    fn retained_peer_without_an_engine_link_is_retried_by_a_fresh_plan() {
-        let peer = PlayerId::from_u128(2);
-        let peers = BTreeSet::from([peer]);
-        let retained = authoritative_peer_delta(&peers, &peers);
+    fn fresh_plan_retries_retained_obligation_with_absent_engine_link() {
+        let retained = PlayerId::from_u128(2);
+        let peers = BTreeSet::from([retained]);
+        let delta = authoritative_peer_delta(&peers, &peers);
         assert_eq!(
-            connection_targets_for_plan(&retained, |_| false),
-            BTreeSet::from([peer]),
-            "failed setup left no link, so a fresh plan must retry"
+            connection_targets_for_plan(&delta, |_| false),
+            peers,
+            "a fresh plan must retry an absent retained link"
         );
-        assert!(
-            connection_targets_for_plan(&retained, |_| true).is_empty(),
-            "a healthy retained link must not be rebuilt"
-        );
+        assert!(connection_targets_for_plan(&delta, |_| true).is_empty());
     }
 
     #[test]

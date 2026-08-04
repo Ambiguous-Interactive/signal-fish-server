@@ -61,9 +61,11 @@ and `#[serde(default)]` so existing v2 wire bytes are unchanged.
 - Negotiation reuses the existing `game_data_format` mechanism: `Authenticate`
   gains optional `protocol_version`, `supported_transports`, and
   `supported_topologies`; the server computes
-  `negotiated_version = clamp(client_max, min_protocol_version, max_protocol_version)`
-  (defaults `min = 2`, `max = 3`; a client that omits its version is treated as
-  `min_protocol_version`) and stores caps per connection.
+  `negotiated_version = min(client_max, max_protocol_version)` (defaults
+  `min = 2`, `max = 3`; a client that omits its version uses the endpoint
+  default). If that result is below `min_protocol_version`, authentication is
+  rejected; the server never raises a client above its declared maximum. It
+  stores caps per accepted connection.
 - A non-relay v3 plan is only **chosen** for a room when **all** members are
   v3-capable for the required transport; otherwise the room is assigned
   `relay`. Each v3 member receives an explicit no-peer relay plan, while v2

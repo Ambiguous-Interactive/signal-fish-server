@@ -83,6 +83,12 @@ pub enum EngineEvent {
         generation: u64,
         label: String,
     },
+    /// A required data channel closed or became unreadable.
+    ChannelClosed {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
+    },
     /// A text message arrived on an open data channel.
     ChannelMessage {
         peer: PlayerId,
@@ -106,6 +112,9 @@ impl EngineEvent {
                 peer, generation, ..
             }
             | Self::ChannelOpen {
+                peer, generation, ..
+            }
+            | Self::ChannelClosed {
                 peer, generation, ..
             }
             | Self::ChannelMessage {
@@ -508,7 +517,7 @@ impl Engine {
     }
 }
 
-/// Wire `on_open` / `on_message` so both forward to the orchestrator.
+/// Wire data-channel lifecycle callbacks so they forward to the orchestrator.
 ///
 /// webrtc-rs invokes an `on_open` handler immediately when the channel is
 /// already open at registration time, so the responder path (registration
@@ -534,13 +543,42 @@ fn register_channel_handlers_on(
     }));
 
     let message_events = events.clone();
+    let message_label = label.clone();
     channel.on_message(Box::new(move |message| {
         let text = String::from_utf8_lossy(&message.data).into_owned();
         let _ = message_events.send(EngineEvent::ChannelMessage {
             peer,
             generation,
-            label: label.clone(),
+            label: message_label.clone(),
             text,
+        });
+        Box::pin(async {})
+    }));
+
+    // Application-defined extra channels do not determine this reference
+    // client's pair health. Only the two protocol-required labels are terminal.
+    if label != RELIABLE_LABEL && label != UNRELIABLE_LABEL {
+        return;
+    }
+
+    let close_events = events.clone();
+    let close_label = label.clone();
+    channel.on_close(Box::new(move || {
+        let _ = close_events.send(EngineEvent::ChannelClosed {
+            peer,
+            generation,
+            label: close_label.clone(),
+        });
+        Box::pin(async {})
+    }));
+
+    let error_events = events.clone();
+    channel.on_error(Box::new(move |error| {
+        tracing::warn!(%peer, channel = %label, %error, "data channel became unreadable");
+        let _ = error_events.send(EngineEvent::ChannelClosed {
+            peer,
+            generation,
+            label: label.clone(),
         });
         Box::pin(async {})
     }));
@@ -651,6 +689,11 @@ mod tests {
                 generation: stale_generation,
                 label: RELIABLE_LABEL.to_string(),
             },
+            EngineEvent::ChannelClosed {
+                peer,
+                generation: stale_generation,
+                label: RELIABLE_LABEL.to_string(),
+            },
             EngineEvent::ChannelMessage {
                 peer,
                 generation: stale_generation,
@@ -675,5 +718,103 @@ mod tests {
         let peer = PlayerId::from_u128(0xc);
         // Unknown peer: never connected.
         assert!(!engine.note_channel_open(peer, RELIABLE_LABEL));
+    }
+
+    #[tokio::test]
+    async fn closing_a_live_required_channel_emits_current_channel_closed() {
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        let mut a = Engine::new(false, true, false, a_tx).expect("engine A builds");
+        let mut b = Engine::new(false, true, false, b_tx).expect("engine B builds");
+        let a_id = PlayerId::from_u128(0xa);
+        let b_id = PlayerId::from_u128(0xb);
+
+        let offer = a
+            .pair_with(b_id, true, &[])
+            .await
+            .expect("A pairs")
+            .expect("initiator offer");
+        b.pair_with(a_id, false, &[])
+            .await
+            .expect("B pairs as responder");
+        let answer = b.handle_offer(a_id, offer).await.expect("B answers");
+        a.handle_answer(b_id, answer)
+            .await
+            .expect("A applies answer");
+
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut a_connected = false;
+            let mut b_connected = false;
+            while !a_connected || !b_connected {
+                tokio::select! {
+                    event = a_rx.recv() => match event.expect("A event channel stays open") {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            b.handle_remote_candidate(a_id, &candidate_json)
+                                .await
+                                .expect("B applies A candidate");
+                        }
+                        EngineEvent::RemoteChannel { channel, .. } => {
+                            a.store_remote_channel(b_id, channel);
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            a_connected |= a.note_channel_open(b_id, &label);
+                        }
+                        _ => {}
+                    },
+                    event = b_rx.recv() => match event.expect("B event channel stays open") {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            a.handle_remote_candidate(b_id, &candidate_json)
+                                .await
+                                .expect("A applies B candidate");
+                        }
+                        EngineEvent::RemoteChannel { channel, .. } => {
+                            b.store_remote_channel(a_id, channel);
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            b_connected |= b.note_channel_open(a_id, &label);
+                        }
+                        _ => {}
+                    },
+                }
+            }
+        })
+        .await
+        .expect("local peer pair connects");
+
+        assert_eq!(
+            a.peers[&b_id].pc.connection_state(),
+            RTCPeerConnectionState::Connected
+        );
+        a.channel(b_id, RELIABLE_LABEL)
+            .expect("required channel exists")
+            .close()
+            .await
+            .expect("required channel closes");
+
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let EngineEvent::ChannelClosed {
+                    peer,
+                    generation,
+                    label,
+                } = a_rx.recv().await.expect("A event channel stays open")
+                {
+                    break (peer, generation, label);
+                }
+            }
+        })
+        .await
+        .expect("close callback arrives");
+        assert_eq!(closed.0, b_id);
+        assert!(a.is_current_generation(closed.0, closed.1));
+        assert_eq!(closed.2, RELIABLE_LABEL);
+        assert_eq!(
+            a.peers[&b_id].pc.connection_state(),
+            RTCPeerConnectionState::Connected,
+            "data-channel loss must be observable even while the PC remains connected"
+        );
+
+        a.remove_peer(b_id).await.expect("A closes");
+        b.remove_peer(a_id).await.expect("B closes");
     }
 }

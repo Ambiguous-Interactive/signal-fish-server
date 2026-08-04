@@ -10,7 +10,7 @@ mod websocket_test_helpers;
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::AppAuthEntry;
 use signal_fish_server::protocol::{
-    ClientMessage, ServerMessage, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
+    ClientMessage, ErrorCode, ServerMessage, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
@@ -51,6 +51,33 @@ async fn start_server_with_auth_and_stats(
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
+
+    let game_server = EnhancedGameServer::new(
+        server_config,
+        protocol_config,
+        signal_fish_server::config::RelayTypeConfig::default(),
+        signal_fish_server::config::SessionConfig::default(),
+        signal_fish_server::config::TurnConfig::default(),
+        signal_fish_server::database::DatabaseConfig::InMemory,
+        signal_fish_server::config::MetricsConfig::default(),
+        signal_fish_server::config::CoordinationConfig::default(),
+        signal_fish_server::config::TransportSecurityConfig::default(),
+        auth_enabled.then(app_entry).into_iter().collect(),
+    )
+    .await
+    .expect("server builds");
+
+    start_server(game_server).await
+}
+
+async fn start_v3_only_server(auth_enabled: bool) -> RunningTestServer {
+    let mut server_config: ServerConfig = test_server_config();
+    server_config.auth_enabled = auth_enabled;
+
+    let mut protocol_config = test_protocol_config();
+    protocol_config.sdk_compatibility.enforce = false;
+    protocol_config.min_protocol_version = 3;
+    protocol_config.max_protocol_version = 3;
 
     let game_server = EnhancedGameServer::new(
         server_config,
@@ -328,6 +355,65 @@ async fn v2_client_stays_v2_on_default_server() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn v3_only_server_rejects_explicit_v2_instead_of_silently_upgrading() {
+    let running_server = start_v3_only_server(true).await;
+    let mut ws = connect(running_server.addr(), "/v3/ws").await;
+
+    let json = serde_json::to_string(&version_only_auth(Some(2))).unwrap();
+    ws.send(Message::Text(json.into())).await.unwrap();
+
+    match next_server_message(&mut ws).await {
+        ServerMessage::AuthenticationError { error, error_code } => {
+            assert_eq!(error_code, ErrorCode::UnsupportedProtocolVersion);
+            assert!(error.contains("below the server minimum 3"), "{error}");
+        }
+        other => panic!("expected protocol AuthenticationError, got {other:?}"),
+    }
+    running_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_disabled_v3_only_server_rejects_v2_endpoint_default() {
+    let running_server = start_v3_only_server(false).await;
+    let mut ws = connect(running_server.addr(), "/v2/ws").await;
+
+    match next_server_message(&mut ws).await {
+        ServerMessage::AuthenticationError { error, error_code } => {
+            assert_eq!(error_code, ErrorCode::UnsupportedProtocolVersion);
+            assert!(error.contains("below the server minimum 3"), "{error}");
+        }
+        other => panic!("expected protocol AuthenticationError, got {other:?}"),
+    }
+    running_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_disabled_v3_only_server_closes_after_explicit_v2_authenticate() {
+    let running_server = start_v3_only_server(false).await;
+    let mut ws = connect(running_server.addr(), "/v3/ws").await;
+
+    let json = serde_json::to_string(&version_only_auth(Some(2))).unwrap();
+    ws.send(Message::Text(json.into())).await.unwrap();
+
+    match next_server_message(&mut ws).await {
+        ServerMessage::AuthenticationError { error, error_code } => {
+            assert_eq!(error_code, ErrorCode::UnsupportedProtocolVersion);
+            assert!(error.contains("below the server minimum 3"), "{error}");
+        }
+        other => panic!("expected protocol AuthenticationError, got {other:?}"),
+    }
+
+    let closed = tokio::time::timeout(SERVER_MESSAGE_TIMEOUT, ws.next())
+        .await
+        .expect("server must close the provisionally authenticated socket");
+    assert!(
+        matches!(closed, None | Some(Ok(Message::Close(_)))),
+        "unsupported auth-disabled negotiation must close without application processing: {closed:?}"
+    );
     running_server.shutdown().await;
 }
 

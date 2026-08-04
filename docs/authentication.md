@@ -67,6 +67,9 @@ ws.onmessage = (event) => {
 A failed `Authenticate` is reported as a dedicated `AuthenticationError` message. If the
 client instead sends any other message before authenticating, the server replies with a
 generic `Error` carrying `error_code === 'MISSING_APP_ID'` and closes the connection.
+When a client's explicit maximum protocol version is below the deployment's configured
+minimum, `AuthenticationError` carries `UNSUPPORTED_PROTOCOL_VERSION`; the server never
+silently upgrades that client.
 
 > **Current trust boundary:** the WebSocket handshake validates the public
 > `app_id`; clients do not send `app_secret`. Application ownership and quotas

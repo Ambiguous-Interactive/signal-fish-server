@@ -133,13 +133,14 @@ fn v3_server_message_samples_deserialize_into_server_message() {
     );
 }
 
-fn assert_runtime_v3_snapshot_epochs(players: &[PlayerInfo], line_no: usize, kind: &str) {
+fn assert_runtime_v3_snapshot_baselines(players: &[PlayerInfo], line_no: usize, kind: &str) {
     for player in players {
         assert!(
-            player.epoch.is_some_and(|epoch| epoch > 0),
-            "v3 sample line {line_no} has runtime-impossible {kind}.current_players epoch for {}: {:?}",
+            player.epoch.is_some_and(|epoch| epoch > 0) && player.seq.is_some(),
+            "v3 sample line {line_no} has runtime-impossible {kind}.current_players epoch/seq baseline for {}: ({:?}, {:?})",
             player.id,
-            player.epoch
+            player.epoch,
+            player.seq
         );
     }
 }
@@ -148,7 +149,7 @@ fn assert_runtime_v3_snapshot_epochs(players: &[PlayerInfo], line_no: usize, kin
 /// from one production always populates after v3 negotiation. Pin the runtime
 /// snapshot invariant explicitly so canonical v3 examples cannot omit epochs.
 #[test]
-fn v3_server_snapshot_samples_include_runtime_epochs() {
+fn v3_server_snapshot_samples_include_runtime_epoch_seq_pairs() {
     let relative = ".llm/code-samples/protocol/v3-server-messages.jsonl";
     let mut saw_room_joined = false;
 
@@ -159,16 +160,32 @@ fn v3_server_snapshot_samples_include_runtime_epochs() {
         match message {
             ServerMessage::RoomJoined(payload) => {
                 saw_room_joined = true;
-                assert_runtime_v3_snapshot_epochs(&payload.current_players, line_no, "RoomJoined");
+                assert_runtime_v3_snapshot_baselines(
+                    &payload.current_players,
+                    line_no,
+                    "RoomJoined",
+                );
+                let ready: std::collections::BTreeSet<_> =
+                    payload.ready_players.iter().copied().collect();
+                for player in &payload.current_players {
+                    assert_eq!(
+                        ready.contains(&player.id),
+                        player.is_ready,
+                        "v3 sample line {line_no} RoomJoined readiness disagrees for {}",
+                        player.id
+                    );
+                }
             }
-            ServerMessage::SpectatorJoined(payload) => assert_runtime_v3_snapshot_epochs(
+            ServerMessage::SpectatorJoined(payload) => assert_runtime_v3_snapshot_baselines(
                 &payload.current_players,
                 line_no,
                 "SpectatorJoined",
             ),
-            ServerMessage::Reconnected(payload) => {
-                assert_runtime_v3_snapshot_epochs(&payload.current_players, line_no, "Reconnected")
-            }
+            ServerMessage::Reconnected(payload) => assert_runtime_v3_snapshot_baselines(
+                &payload.current_players,
+                line_no,
+                "Reconnected",
+            ),
             _ => {}
         }
     }

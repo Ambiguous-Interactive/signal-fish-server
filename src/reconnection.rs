@@ -1062,8 +1062,8 @@ impl ReconnectionManager {
             .collect()
     }
 
-    /// Room IDs that currently hold at least one **unexpired** reconnection
-    /// record. Room garbage collection must not delete these rooms: a room
+    /// Room IDs that currently hold at least one unexpired or actively claimed
+    /// reconnection record. Room garbage collection must not delete these rooms: a room
     /// whose members disconnected simultaneously is empty, so it would
     /// otherwise be reaped by the empty-room sweep before its still-valid
     /// reconnection tokens could be redeemed — the reconnect then fails
@@ -1079,7 +1079,7 @@ impl ReconnectionManager {
             .await
             .disconnected_players
             .values()
-            .filter(|record| !record.disconnected.is_expired(window))
+            .filter(|record| record.claim.is_some() || !record.disconnected.is_expired(window))
             .map(|record| record.disconnected.room_id)
             .collect()
     }
@@ -1268,6 +1268,44 @@ mod tests {
         assert!(
             manager.rooms_with_active_reconnections().await.is_empty(),
             "completing the reconnection releases the room"
+        );
+    }
+
+    /// Issue #257: once a reconnect is admitted, its exclusive claim owns the
+    /// restore attempt even if the original wall-clock window expires while
+    /// storage or room-lane work is still in flight. Room GC must therefore
+    /// continue protecting the empty room until the claim completes or is
+    /// released.
+    #[tokio::test]
+    async fn claimed_reconnection_remains_gc_protected_after_original_window() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+        let claimant = Uuid::new_v4();
+
+        manager
+            .claim_reconnection(&claimant, &player_id, &room_id, &token)
+            .await
+            .expect("the still-valid reconnect is admitted and claimed");
+
+        manager
+            .replay_state
+            .write()
+            .await
+            .disconnected_players
+            .get_mut(&player_id)
+            .expect("claimed record remains pending")
+            .disconnected
+            .disconnected_at = Utc::now() - Duration::seconds(301);
+
+        let protected = manager.rooms_with_active_reconnections().await;
+        assert!(
+            protected.contains(&room_id),
+            "an in-flight claim must keep its room alive after the admission window crosses"
         );
     }
 
