@@ -77,5 +77,18 @@ instead of expecting no post-join status.
 - #261 makes the remaining versioned AsyncAPI accountability envelopes exact,
   disjoint v2/v3 wire unions.
 
-PR #262 is published. Exact-head hosted review and CI completion are pending
-the fixture correction follow-up push.
+## Hosted publication evidence
+
+PR #262 is ready for review. Implementation head
+`f0137b939c3109704e7237a8c45b12f0b6768fc2` passed all 18 applicable
+workflows; Dependabot auto-merge was the sole intentional skip. This includes
+main CI on Linux, macOS, and Windows, Advanced Safety, fuzzing, all mutation
+shards, formal verification, nightly stress, native/browser/TURN interop, and
+the documentation/tooling gates.
+
+Cursor's exact-head follow-up reported no new issues. Copilot was explicitly
+requested after both pushes and reported requester quota exhaustion both
+times. The sole hosted review thread is fixed, answered, resolved, and
+outdated, leaving zero unresolved threads. The final bookkeeping-only commit
+records this evidence; it changes no protocol or runtime behavior and receives
+its own exact-head hosted gate before session closure.
