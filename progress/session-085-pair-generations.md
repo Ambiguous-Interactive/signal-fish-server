@@ -65,6 +65,10 @@ instead of expecting no post-join status.
   same-generation asymmetric-link correction plus active-document shorthand
   repairs; the second reported zero actionable findings and independently
   passed strict Rust/browser/docs validation.
+- Cursor's first hosted pass caught reversed outer/inner map cardinalities in
+  the hand-built MessagePack depth fixture. The corrected fixture now proves
+  both the debug rejection boundary and the release-profile 1021-level valid
+  acceptance boundary instead of failing early on an invalid envelope.
 
 ## Follow-ups recorded
 
@@ -73,4 +77,5 @@ instead of expecting no post-join status.
 - #261 makes the remaining versioned AsyncAPI accountability envelopes exact,
   disjoint v2/v3 wire unions.
 
-Hosted review and CI evidence are pending publication of the session PR.
+PR #262 is published. Exact-head hosted review and CI completion are pending
+the fixture correction follow-up push.

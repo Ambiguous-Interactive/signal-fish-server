@@ -325,11 +325,11 @@ fn msgpack_signal_depth_bomb(depth: usize) -> Vec<u8> {
     }
 
     let mut bytes = Vec::new();
-    bytes.push(0x83); // fixmap, 3 entries
+    bytes.push(0x82); // fixmap, 2 entries
     push_fixstr(&mut bytes, "type");
     push_fixstr(&mut bytes, "Signal");
     push_fixstr(&mut bytes, "data");
-    bytes.push(0x82); // fixmap, 2 entries
+    bytes.push(0x83); // fixmap, 3 entries
     push_fixstr(&mut bytes, "to");
     bytes.extend_from_slice(&[0xc4, 16]); // bin8, 16 bytes (uuid wire form)
     bytes.extend_from_slice(&[0u8; 16]);
