@@ -7559,7 +7559,7 @@ fn test_lychee_config_format_is_valid_toml() {
     // Basic TOML validation (full validation would require a TOML parser)
     // Check for unbalanced quotes
     let double_quotes = content.matches('"').count();
-    if double_quotes % 2 != 0 {
+    if !double_quotes.is_multiple_of(2) {
         panic!(
             ".lychee.toml has unbalanced quotes.\n\
              Found {double_quotes} double quotes (should be even).\n\
@@ -7696,7 +7696,7 @@ fn test_markdown_technical_terms_consistency() {
     let root = repo_root();
 
     // Data-driven test cases: (incorrect_pattern, correct_term, context)
-    let test_cases = vec![
+    let test_cases = [
         (r"\bgithub\b", "GitHub", "Service name"),
         (r"\bwebsocket\b", "WebSocket", "Protocol name"),
         (r"\bjavascript\b", "JavaScript", "Language name"),
@@ -16731,7 +16731,7 @@ fn test_workflow_files_use_two_space_indentation() {
                     in_multiline_block = true;
                     block_indent = indent;
                     // Still check this line's own indentation (it's a YAML key)
-                    if indent % 2 != 0 {
+                    if !indent.is_multiple_of(2) {
                         odd_indent_lines.push((line_idx + 1, indent, line.to_string()));
                     }
                     continue;
@@ -16749,7 +16749,7 @@ fn test_workflow_files_use_two_space_indentation() {
             }
 
             // Check YAML-level lines for 2-space indentation (even number of spaces)
-            if indent % 2 != 0 {
+            if !indent.is_multiple_of(2) {
                 odd_indent_lines.push((line_idx + 1, indent, line.to_string()));
             }
 

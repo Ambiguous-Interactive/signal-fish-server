@@ -95,7 +95,7 @@ Native desktop clients (Linux, Windows, macOS) have the widest choice of stack:
 - **`webrtc-rs`** — pure Rust, no system dependencies. This is what the in-repo
   [`clients/native/`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/clients/native/README.md)
   reference client
-  uses (version 0.17), exercising real ICE gathering, DTLS handshakes, and SCTP data channels over loopback. The
+  uses (version 0.20), exercising real ICE gathering, DTLS handshakes, and SCTP data channels over loopback. The
   reference client is exercised in CI on Linux; the same pure-Rust stack is portable to Windows and macOS.
 - **libdatachannel** — a lean C/C++ library (with bindings for many languages) that is the recommended embed when
   you need a small footprint and broad browser interop.

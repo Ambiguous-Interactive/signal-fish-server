@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Raise the exact Rust MSRV from 1.89 to 1.91 and migrate the standalone native
+  reference client from webrtc-rs 0.17 to 0.20 (issue #268). The port preserves
+  the matchbox candidate wire shape, deterministic ICE crippling, generation
+  fencing, and native/browser/TURN interoperability while adopting the 0.20
+  async peer-event handler and poll-driven data-channel API. Concrete active interface
+  binds preserve usable zero-STUN host candidates without advertising wildcard
+  addresses, including scope-correct global and loopback IPv6 candidates.
 - **Breaking:** Fence protocol-v3 WebRTC signaling with a required
   `SessionPlan.generation` UUID carried by every client and server `Signal`
   envelope (issue #258). Clients must rebuild retained WebRTC pairs when the

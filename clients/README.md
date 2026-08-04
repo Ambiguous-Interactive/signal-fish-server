@@ -15,7 +15,7 @@ context.
 
 | Client | Directory | Stack | Status |
 |--------|-----------|-------|--------|
-| Native | [`native/`](native/README.md) | Rust + [webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.17 (real DTLS/SCTP data channels) | ✅ In-repo, CI-enforced (`.github/workflows/webrtc-interop.yml`) |
+| Native | [`native/`](native/README.md) | Rust + [webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.20 (real DTLS/SCTP data channels) | ✅ In-repo, CI-enforced (`.github/workflows/webrtc-interop.yml`) |
 | Browser | [`browser/`](browser/README.md) | TypeScript + real headless-Chromium `RTCPeerConnection` (playwright-core) | ✅ In-repo, CI-enforced (`.github/workflows/browser-interop.yml`) |
 | Fortress | [`fortress/`](fortress/README.md) | Rust + `fortress-rollback` 0.10.0 + released Signal Fish Rust client 0.8.0 | ✅ In-repo issue-242 regression, CI-enforced (`.github/workflows/fortress-interop.yml`) |
 | Fortress WASM | [`fortress-wasm/`](fortress-wasm/README.md) | Godot 4.5 no-thread WASM + Fortress 0.10.0 + released client/adapter 0.9.0 | CI-enforced healthy Chromium acceptance plus expected-`BUSTED` negative control (`.github/workflows/fortress-wasm-interop.yml`) |

@@ -1,7 +1,7 @@
 # signal-fish-reference-native
 
 A **native Rust reference client** for the Signal Fish protocol v3 with a **real WebRTC stack**
-([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.17: actual ICE gathering, DTLS handshakes, and SCTP data
+([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.20: actual ICE gathering, DTLS handshakes, and SCTP data
 channels). It exists for **conformance and reference** — executable documentation of the client side of
 [`docs/protocol.md`](../../docs/protocol.md) and the engine of the in-repo multi-process interop suite. It is
 **not a product**: no reconnection logic, no game loop, no API stability promises.
@@ -58,8 +58,8 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--exchange` | off | When a P2P pair fully opens, send exactly one text message per channel and require the symmetric receives (see success criteria) |
 | `--exchange-release-file <PATH>` | — | Test harness only; requires `--exchange`. Establish every planned pair and finish local ICE gathering, emit `exchange_ready`, then hold the exact channel exchange until PATH exists. Normal exchange behavior is unchanged when omitted |
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
-| `--cripple-ice` | off | Deterministically break ICE: reject every interface during gathering AND drop all outbound/inbound `IceCandidate` signals (SDP offer/answer still flows). Forces the relay fallback |
-| `--disable-mdns` | off | Test harness only: expose raw host candidates instead of mDNS names so unicast packet-loss experiments do not fault their discovery control plane. Normal candidate privacy is unchanged when omitted |
+| `--cripple-ice` | off | Deterministically break ICE: bind no UDP transport sockets AND drop all outbound/inbound `IceCandidate` signals (SDP offer/answer still flows). Forces the relay fallback |
+| `--disable-mdns` | off | Test harness only: disable resolution of remote `.local` candidates so packet-loss experiments do not fault their mDNS discovery control plane. Native host candidates are raw IPs in either mode; normal mode retains mDNS query support for browser peers |
 | `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
 | `--ice-transport-policy <POLICY>` | `all` | ICE candidate policy: `all` permits every gathered candidate type; `relay` requires a TURN-relayed path. The repository's local coturn gate uses `relay` to prove production-minted TURN credentials rather than a direct host path |
 | `--p2p-release-file <PATH>` | — | Test harness only: keep processing WebSocket traffic but defer peer-connection creation until PATH exists. The TURN gate uses this to prove the relay floor before ICE establishment begins |

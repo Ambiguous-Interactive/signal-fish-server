@@ -6,7 +6,7 @@ Get Signal Fish Server running and two clients connected in under 5 minutes.
 
 You need one of the following:
 
-- **Rust 1.89+** -- to build and run from source
+- **Rust 1.91+** -- to build and run from source
 - **Docker** -- to run the pre-built container image
 
 ## Step 1: Start the Server

@@ -91,9 +91,9 @@ pub struct Cli {
     #[arg(long)]
     pub relay_payload: Option<String>,
 
-    /// Deterministically cripple ICE: reject every network interface during
-    /// candidate gathering AND silently drop all outbound/inbound IceCandidate
-    /// signals. Used by fallback scenarios to force the relay floor.
+    /// Deterministically cripple ICE: bind no UDP transport sockets AND
+    /// silently drop all outbound/inbound IceCandidate signals. Used by
+    /// fallback scenarios to force the relay floor.
     #[arg(long)]
     pub cripple_ice: bool,
 
@@ -109,9 +109,9 @@ pub struct Cli {
     #[arg(long)]
     pub p2p_release_file: Option<PathBuf>,
 
-    /// TEST HARNESS ONLY: disable multicast-DNS host-candidate obfuscation.
-    /// Packet-loss tests use raw loopback host candidates so the injected
-    /// unicast loss cannot deadlock ICE gathering on mDNS discovery traffic.
+    /// TEST HARNESS ONLY: disable multicast-DNS candidate resolution. Native
+    /// host candidates remain raw IPs in either mode; this keeps remote `.local`
+    /// discovery traffic out of packet-loss experiments.
     #[arg(long)]
     pub disable_mdns: bool,
 

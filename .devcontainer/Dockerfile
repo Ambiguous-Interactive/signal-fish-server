@@ -2,7 +2,7 @@
 # https://github.com/Ambiguous-Interactive/signal-fish-server
 
 FROM mcr.microsoft.com/devcontainers/rust:2-bookworm
-# Project MSRV: 1.89.0 — this image must provide >= 1.89
+# Project MSRV: 1.91.0 — this image must provide >= 1.91
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 

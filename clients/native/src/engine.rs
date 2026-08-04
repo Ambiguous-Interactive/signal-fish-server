@@ -13,39 +13,34 @@
 //! - **Trickle ICE**: every gathered local candidate is surfaced for relay as
 //!   `{"IceCandidate": <json>}` where `<json>` is the serde serialization of
 //!   webrtc-rs's `RTCIceCandidateInit` (camelCase `candidate` / `sdpMid` /
-//!   `sdpMLineIndex`, matchbox-compatible). Remote candidates that arrive
+//!   `sdpMLineIndex` / `usernameFragment`, matchbox-compatible). Remote candidates that arrive
 //!   before the remote description are buffered and flushed afterwards.
-//! - **Crippled mode** (`--cripple-ice`): the interface filter rejects every
-//!   interface so no host candidates are gathered, and candidate signals are
+//! - **Crippled mode** (`--cripple-ice`): the peer connection binds no UDP
+//!   transport sockets, and candidate signals are
 //!   dropped in both directions — deterministic non-connectivity for fallback
 //!   scenarios.
 //!
-//! The engine is owned and driven by the single orchestrator task. webrtc-rs
-//! callbacks never touch engine state directly; they forward through an
-//! unbounded [`EngineEvent`] channel back to the orchestrator, which avoids
-//! both lock contention and the documented hazards of calling peer-connection
-//! methods from inside its own callbacks.
+//! The engine is owned and driven by the single orchestrator task. webrtc-rs's
+//! async peer handler and polled data channels never touch engine state directly;
+//! they forward through an unbounded [`EngineEvent`] channel back to the orchestrator.
 
 use std::collections::{BTreeSet, HashMap};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use rtc::ice::mdns::MulticastDnsMode;
 use signal_fish_server::protocol::{IceServer, PlayerId};
 use tokio::sync::mpsc;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::setting_engine::SettingEngine;
-use webrtc::api::{APIBuilder, API};
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
+use webrtc::peer_connection::{
+    PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
+    RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCIceTransportPolicy,
+    RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, RTCStatsReportEntry,
+    SettingEngine, StatsSelector,
+};
+use webrtc::runtime::{default_runtime, Runtime};
 
 /// Label of the ordered, reliable data channel (commands / critical events).
 pub const RELIABLE_LABEL: &str = "reliable";
@@ -75,7 +70,8 @@ pub enum EngineEvent {
     RemoteChannel {
         peer: PlayerId,
         generation: u64,
-        channel: Arc<RTCDataChannel>,
+        label: String,
+        channel: Arc<dyn DataChannel>,
     },
     /// A data channel (local or remote) reached the open state.
     ChannelOpen {
@@ -127,10 +123,10 @@ impl EngineEvent {
 /// Per-remote-peer connection state.
 struct PeerLink {
     generation: u64,
-    pc: Arc<RTCPeerConnection>,
+    pc: Arc<dyn PeerConnection>,
     /// Channels by label, both locally created (initiator) and remotely
     /// announced (responder).
-    channels: HashMap<String, Arc<RTCDataChannel>>,
+    channels: HashMap<String, Arc<dyn DataChannel>>,
     /// Labels observed open so far; the pair is connected when both labels are in.
     open_labels: BTreeSet<String>,
     /// Remote ICE candidates cannot be applied before the remote description.
@@ -142,8 +138,9 @@ struct PeerLink {
 /// The per-client WebRTC engine. Owned by the orchestrator task; all methods
 /// are called from that single task, so no interior locking is needed.
 pub struct Engine {
-    api: API,
     crippled: bool,
+    disable_mdns: bool,
+    runtime: Arc<dyn Runtime>,
     events: mpsc::UnboundedSender<EngineEvent>,
     peers: HashMap<PlayerId, PeerLink>,
     next_generation: u64,
@@ -151,38 +148,20 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Build the engine: default `MediaEngine` codecs + default interceptor
-    /// registry; the `SettingEngine` is default unless a harness requests an
-    /// ICE fault mode or raw host candidates.
+    /// Build the engine with the default runtime and settings unless a harness
+    /// requests deterministic ICE failure or disables remote mDNS resolution.
     pub fn new(
         crippled: bool,
         disable_mdns: bool,
         relay_only: bool,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Result<Self> {
-        let mut media_engine = MediaEngine::default();
-        media_engine
-            .register_default_codecs()
-            .context("register default codecs")?;
-        let registry = register_default_interceptors(Registry::new(), &mut media_engine)
-            .context("register default interceptors")?;
-        let mut setting_engine = SettingEngine::default();
-        if crippled {
-            // Reject every interface: no host candidates are ever gathered.
-            setting_engine.set_interface_filter(Box::new(|_interface: &str| false));
-        }
-        if disable_mdns {
-            setting_engine
-                .set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
-        }
-        let api = APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .with_setting_engine(setting_engine)
-            .build();
+        let runtime = default_runtime()
+            .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
         Ok(Self {
-            api,
             crippled,
+            disable_mdns,
+            runtime,
             events,
             peers: HashMap::new(),
             next_generation: 0,
@@ -246,20 +225,36 @@ impl Engine {
             .ok_or_else(|| anyhow!("peer-link generation overflow"))?;
         let generation = self.next_generation;
 
-        let config = RTCConfiguration {
-            ice_servers: convert_ice_servers(ice_servers),
-            ice_transport_policy: if self.relay_only {
+        let config = RTCConfigurationBuilder::new()
+            .with_ice_servers(convert_ice_servers(ice_servers))
+            .with_ice_transport_policy(if self.relay_only {
                 RTCIceTransportPolicy::Relay
             } else {
                 RTCIceTransportPolicy::All
-            },
-            ..RTCConfiguration::default()
-        };
-        let pc = Arc::new(
-            self.api
-                .new_peer_connection(config)
+            })
+            .build();
+        let mut setting_engine = SettingEngine::default();
+        if self.disable_mdns {
+            setting_engine.set_multicast_dns_mode(MulticastDnsMode::Disabled);
+        }
+        let handler = Arc::new(PeerHandler {
+            peer,
+            generation,
+            crippled: self.crippled,
+            events: self.events.clone(),
+            runtime: self.runtime.clone(),
+        });
+        let udp_addrs = local_udp_addrs(self.crippled)?;
+        let pc: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(config)
+                .with_setting_engine(setting_engine)
+                .with_handler(handler)
+                .with_runtime(self.runtime.clone())
+                .with_udp_addrs(udp_addrs)
+                .build()
                 .await
-                .context("create RTCPeerConnection")?,
+                .context("create peer connection")?,
         );
         let link = PeerLink {
             generation,
@@ -271,8 +266,6 @@ impl Engine {
             pair_connected: false,
         };
         self.peers.insert(peer, link);
-        self.register_pc_handlers(peer, generation, &pc);
-
         let result = async {
             if !initiate {
                 return Ok(None);
@@ -287,16 +280,29 @@ impl Engine {
                 .create_data_channel(
                     UNRELIABLE_LABEL,
                     Some(RTCDataChannelInit {
-                        ordered: Some(false),
+                        ordered: false,
                         max_retransmits: Some(0),
                         ..RTCDataChannelInit::default()
                     }),
                 )
                 .await
                 .context("create unreliable data channel")?;
-            for channel in [&reliable, &unreliable] {
-                self.register_channel_handlers(peer, generation, channel);
-            }
+            spawn_channel_event_loop(
+                &self.runtime,
+                &self.events,
+                peer,
+                generation,
+                RELIABLE_LABEL.to_string(),
+                reliable.clone(),
+            );
+            spawn_channel_event_loop(
+                &self.runtime,
+                &self.events,
+                peer,
+                generation,
+                UNRELIABLE_LABEL.to_string(),
+                unreliable.clone(),
+            );
             let link = self
                 .peers
                 .get_mut(&peer)
@@ -404,9 +410,14 @@ impl Engine {
     }
 
     /// Store a remotely announced data channel (responder path).
-    pub fn store_remote_channel(&mut self, peer: PlayerId, channel: Arc<RTCDataChannel>) {
+    pub fn store_remote_channel(
+        &mut self,
+        peer: PlayerId,
+        label: String,
+        channel: Arc<dyn DataChannel>,
+    ) {
         if let Some(link) = self.peers.get_mut(&peer) {
-            link.channels.insert(channel.label().to_string(), channel);
+            link.channels.insert(label, channel);
         } else {
             tracing::warn!(%peer, "remote channel announced for unknown peer");
         }
@@ -430,7 +441,7 @@ impl Engine {
     }
 
     /// Look up a stored channel by peer and label.
-    pub fn channel(&self, peer: PlayerId, label: &str) -> Option<Arc<RTCDataChannel>> {
+    pub fn channel(&self, peer: PlayerId, label: &str) -> Option<Arc<dyn DataChannel>> {
         self.peers
             .get(&peer)
             .and_then(|link| link.channels.get(label))
@@ -440,147 +451,210 @@ impl Engine {
     /// Candidate types of the selected ICE path for a connected peer.
     pub async fn selected_candidate_types(&self, peer: PlayerId) -> Option<(String, String)> {
         let pc = self.peers.get(&peer)?.pc.clone();
-        let dtls = pc.sctp().transport();
-        let pair = dtls.ice_transport().get_selected_candidate_pair().await?;
-        Some((pair.local.typ.to_string(), pair.remote.typ.to_string()))
-    }
-
-    /// Wire the peer-connection level callbacks for `peer`.
-    ///
-    /// Callbacks only forward through the event channel (sends to a dropped
-    /// receiver are ignored: that happens only during shutdown).
-    fn register_pc_handlers(&self, peer: PlayerId, generation: u64, pc: &Arc<RTCPeerConnection>) {
-        let events = self.events.clone();
-        pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            let _ = events.send(EngineEvent::PcState {
-                peer,
-                generation,
-                state,
-            });
-            Box::pin(async {})
-        }));
-
-        let events = self.events.clone();
-        let crippled = self.crippled;
-        pc.on_ice_candidate(Box::new(move |candidate| {
-            // `None` marks end-of-gathering. Preserve that boundary even in
-            // crippled mode so a harness can prove its signal ledger is
-            // complete; crippled mode drops only the actual candidates.
-            let Some(candidate) = candidate else {
-                let _ = events.send(EngineEvent::IceGatheringComplete { peer, generation });
-                return Box::pin(async {});
-            };
-            if crippled {
-                return Box::pin(async {});
-            }
-            match candidate
-                .to_json()
-                .map_err(anyhow::Error::from)
-                .and_then(|init| serde_json::to_string(&init).map_err(anyhow::Error::from))
-            {
-                Ok(candidate_json) => {
-                    let _ = events.send(EngineEvent::LocalCandidate {
-                        peer,
-                        generation,
-                        candidate_json,
-                    });
-                }
-                Err(error) => {
-                    tracing::warn!(%peer, %error, "failed to serialize local ICE candidate");
-                }
-            }
-            Box::pin(async {})
-        }));
-
-        let events = self.events.clone();
-        pc.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
-            // Hand the channel to the orchestrator FIRST so its bookkeeping
-            // exists before any open/message notification for it.
-            let _ = events.send(EngineEvent::RemoteChannel {
-                peer,
-                generation,
-                channel: channel.clone(),
-            });
-            register_channel_handlers_on(&events, peer, generation, &channel);
-            Box::pin(async {})
-        }));
-    }
-
-    /// Wire open/message callbacks on a locally created channel.
-    fn register_channel_handlers(
-        &self,
-        peer: PlayerId,
-        generation: u64,
-        channel: &Arc<RTCDataChannel>,
-    ) {
-        register_channel_handlers_on(&self.events, peer, generation, channel);
+        let report = pc
+            .get_stats(std::time::Instant::now(), StatsSelector::None)
+            .await;
+        let selected_pair_id = &report.transport()?.selected_candidate_pair_id;
+        let RTCStatsReportEntry::IceCandidatePair(pair) = report.get(selected_pair_id)? else {
+            return None;
+        };
+        // rtc 0.20 records raw ICE-agent IDs on the candidate-pair entry but
+        // prefixes the standalone candidate report IDs. Accept the direct ID
+        // first so this remains compatible if that internal mismatch is fixed.
+        let local_id = format!("RTCLocalIceCandidate_{}", pair.local_candidate_id);
+        let remote_id = format!("RTCRemoteIceCandidate_{}", pair.remote_candidate_id);
+        let RTCStatsReportEntry::LocalCandidate(local) = report
+            .get(&pair.local_candidate_id)
+            .or_else(|| report.get(&local_id))?
+        else {
+            return None;
+        };
+        let RTCStatsReportEntry::RemoteCandidate(remote) = report
+            .get(&pair.remote_candidate_id)
+            .or_else(|| report.get(&remote_id))?
+        else {
+            return None;
+        };
+        Some((
+            local.candidate_type.to_string(),
+            remote.candidate_type.to_string(),
+        ))
     }
 }
 
-/// Wire data-channel lifecycle callbacks so they forward to the orchestrator.
+struct PeerHandler {
+    peer: PlayerId,
+    generation: u64,
+    crippled: bool,
+    events: mpsc::UnboundedSender<EngineEvent>,
+    runtime: Arc<dyn Runtime>,
+}
+
+#[async_trait]
+impl PeerConnectionEventHandler for PeerHandler {
+    async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+        if self.crippled {
+            return;
+        }
+        match event
+            .candidate
+            .to_json()
+            .map_err(anyhow::Error::from)
+            .and_then(candidate_to_wire_json)
+        {
+            Ok(candidate_json) => {
+                let _ = self.events.send(EngineEvent::LocalCandidate {
+                    peer: self.peer,
+                    generation: self.generation,
+                    candidate_json,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(peer = %self.peer, %error, "failed to serialize local ICE candidate");
+            }
+        }
+    }
+
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        if state == RTCIceGatheringState::Complete {
+            let _ = self.events.send(EngineEvent::IceGatheringComplete {
+                peer: self.peer,
+                generation: self.generation,
+            });
+        }
+    }
+
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        let _ = self.events.send(EngineEvent::PcState {
+            peer: self.peer,
+            generation: self.generation,
+            state,
+        });
+    }
+
+    async fn on_data_channel(&self, channel: Arc<dyn DataChannel>) {
+        let label = match channel.label().await {
+            Ok(label) => label,
+            Err(error) => {
+                tracing::warn!(peer = %self.peer, %error, "failed to read remote data-channel label");
+                return;
+            }
+        };
+        let _ = self.events.send(EngineEvent::RemoteChannel {
+            peer: self.peer,
+            generation: self.generation,
+            label: label.clone(),
+            channel: channel.clone(),
+        });
+        spawn_channel_event_loop(
+            &self.runtime,
+            &self.events,
+            self.peer,
+            self.generation,
+            label,
+            channel,
+        );
+    }
+}
+
+fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> {
+    // rtc 0.20 adds a local-only `url` provenance extension. It is not part of
+    // the established Matchbox/browser RTCIceCandidateInit signaling shape, so
+    // keep that field inside the local stack and preserve the four-field wire.
+    candidate.url = None;
+    serde_json::to_string(&candidate).context("serialize ICE candidate wire projection")
+}
+
+/// Concrete local addresses for webrtc 0.20's application-owned ICE sockets.
 ///
-/// webrtc-rs invokes an `on_open` handler immediately when the channel is
-/// already open at registration time, so the responder path (registration
-/// inside `on_data_channel`) cannot miss the open edge; `OnOpenHdlrFn` is
-/// `FnOnce`, so the open event fires at most once per channel.
-fn register_channel_handlers_on(
+/// Unlike earlier webrtc-rs releases, 0.20 turns each socket's bound address
+/// directly into a host candidate. A wildcard bind would therefore advertise
+/// `0.0.0.0`, which cannot connect peers on a zero-STUN LAN. Bind every active
+/// interface address instead. IPv6 link-local addresses are omitted because
+/// the ICE candidate grammar cannot carry the local interface's scope ID.
+fn local_udp_addrs(crippled: bool) -> Result<Vec<SocketAddr>> {
+    if crippled {
+        return Ok(Vec::new());
+    }
+
+    let mut addrs = BTreeSet::new();
+    for interface in if_addrs::get_if_addrs().context("enumerate local network interfaces")? {
+        if !interface.is_oper_up() {
+            continue;
+        }
+        let ip = interface.ip();
+        if ip.is_unspecified() || ip.is_multicast() {
+            continue;
+        }
+        let addr = match ip {
+            IpAddr::V6(ip) if ip.is_unicast_link_local() => continue,
+            IpAddr::V6(ip) => SocketAddr::new(IpAddr::V6(ip), 0),
+            IpAddr::V4(ip) => SocketAddr::new(IpAddr::V4(ip), 0),
+        };
+        addrs.insert(addr);
+    }
+
+    if addrs.is_empty() {
+        return Err(anyhow!(
+            "no active concrete network interface is available for ICE"
+        ));
+    }
+    Ok(addrs.into_iter().collect())
+}
+
+fn spawn_channel_event_loop(
+    runtime: &Arc<dyn Runtime>,
     events: &mpsc::UnboundedSender<EngineEvent>,
     peer: PlayerId,
     generation: u64,
-    channel: &Arc<RTCDataChannel>,
+    label: String,
+    channel: Arc<dyn DataChannel>,
 ) {
-    let label = channel.label().to_string();
-
-    let open_events = events.clone();
-    let open_label = label.clone();
-    channel.on_open(Box::new(move || {
-        let _ = open_events.send(EngineEvent::ChannelOpen {
-            peer,
-            generation,
-            label: open_label,
-        });
-        Box::pin(async {})
-    }));
-
-    let message_events = events.clone();
-    let message_label = label.clone();
-    channel.on_message(Box::new(move |message| {
-        let text = String::from_utf8_lossy(&message.data).into_owned();
-        let _ = message_events.send(EngineEvent::ChannelMessage {
-            peer,
-            generation,
-            label: message_label.clone(),
-            text,
-        });
-        Box::pin(async {})
-    }));
-
-    // Application-defined extra channels do not determine this reference
-    // client's pair health. Only the two protocol-required labels are terminal.
-    if label != RELIABLE_LABEL && label != UNRELIABLE_LABEL {
-        return;
-    }
-
-    let close_events = events.clone();
-    let close_label = label.clone();
-    channel.on_close(Box::new(move || {
-        let _ = close_events.send(EngineEvent::ChannelClosed {
-            peer,
-            generation,
-            label: close_label.clone(),
-        });
-        Box::pin(async {})
-    }));
-
-    let error_events = events.clone();
-    channel.on_error(Box::new(move |error| {
-        tracing::warn!(%peer, channel = %label, %error, "data channel became unreadable");
-        let _ = error_events.send(EngineEvent::ChannelClosed {
-            peer,
-            generation,
-            label: label.clone(),
-        });
-        Box::pin(async {})
+    let events = events.clone();
+    runtime.spawn(Box::pin(async move {
+        while let Some(event) = channel.poll().await {
+            match event {
+                DataChannelEvent::OnOpen => {
+                    let _ = events.send(EngineEvent::ChannelOpen {
+                        peer,
+                        generation,
+                        label: label.clone(),
+                    });
+                }
+                DataChannelEvent::OnMessage(message) => {
+                    let text = String::from_utf8_lossy(&message.data).into_owned();
+                    let _ = events.send(EngineEvent::ChannelMessage {
+                        peer,
+                        generation,
+                        label: label.clone(),
+                        text,
+                    });
+                }
+                DataChannelEvent::OnError => {
+                    tracing::warn!(%peer, channel = %label, "data channel became unreadable");
+                    if label == RELIABLE_LABEL || label == UNRELIABLE_LABEL {
+                        let _ = events.send(EngineEvent::ChannelClosed {
+                            peer,
+                            generation,
+                            label: label.clone(),
+                        });
+                    }
+                }
+                DataChannelEvent::OnClose => {
+                    if label == RELIABLE_LABEL || label == UNRELIABLE_LABEL {
+                        let _ = events.send(EngineEvent::ChannelClosed {
+                            peer,
+                            generation,
+                            label: label.clone(),
+                        });
+                    }
+                    break;
+                }
+                DataChannelEvent::OnClosing
+                | DataChannelEvent::OnBufferedAmountLow
+                | DataChannelEvent::OnBufferedAmountHigh => {}
+            }
+        }
     }));
 }
 
@@ -599,6 +673,58 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gathered_host_candidates_never_advertise_wildcard_addresses() {
+        let udp_addrs = local_udp_addrs(false).expect("concrete UDP addresses resolve");
+        assert!(udp_addrs.iter().all(|address| match address {
+            SocketAddr::V4(_) => true,
+            SocketAddr::V6(address) => address.scope_id() == 0,
+        }));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(false, true, false, tx).expect("engine builds");
+        let peer = PlayerId::from_u128(0xd);
+        engine
+            .pair_with(peer, true, &[])
+            .await
+            .expect("initiator pairs")
+            .expect("initiator offer");
+
+        let host_addresses = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut host_addresses = Vec::new();
+            loop {
+                match rx.recv().await.expect("engine event channel stays open") {
+                    EngineEvent::LocalCandidate { candidate_json, .. } => {
+                        let init: RTCIceCandidateInit = serde_json::from_str(&candidate_json)
+                            .expect("candidate wire JSON parses");
+                        let fields = init.candidate.split_whitespace().collect::<Vec<_>>();
+                        if fields.windows(2).any(|pair| pair == ["typ", "host"]) {
+                            let address = fields
+                                .get(4)
+                                .expect("ICE host candidate carries an address")
+                                .parse::<IpAddr>()
+                                .expect("raw host candidate carries an IP address");
+                            host_addresses.push(address);
+                        }
+                    }
+                    EngineEvent::IceGatheringComplete { .. } => break host_addresses,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("ICE gathering completes");
+
+        assert!(
+            !host_addresses.is_empty(),
+            "normal zero-STUN gathering must produce a host candidate"
+        );
+        assert!(host_addresses
+            .iter()
+            .all(|address| !address.is_unspecified() && !address.is_multicast()));
+        engine.remove_peer(peer).await.expect("peer closes");
+    }
 
     #[test]
     fn ice_server_conversion_maps_credentials_and_defaults() {
@@ -620,6 +746,23 @@ mod tests {
         assert_eq!(converted[0].credential, "");
         assert_eq!(converted[1].username, "1700003600:player");
         assert_eq!(converted[1].credential, "secret");
+    }
+
+    #[test]
+    fn ice_candidate_wire_projection_omits_rtc_020_local_url_extension() {
+        let json = candidate_to_wire_json(RTCIceCandidateInit {
+            candidate: "candidate:relay 1 udp 1 192.0.2.1 3478 typ relay".to_string(),
+            sdp_mid: Some("0".to_string()),
+            sdp_mline_index: Some(0),
+            username_fragment: Some("ufrag".to_string()),
+            url: Some("turn:turn.example.com:3478?transport=udp".to_string()),
+        })
+        .expect("candidate serializes");
+
+        assert_eq!(
+            json,
+            r#"{"candidate":"candidate:relay 1 udp 1 192.0.2.1 3478 typ relay","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ufrag"}"#
+        );
     }
 
     #[tokio::test]
@@ -682,6 +825,7 @@ mod tests {
             EngineEvent::RemoteChannel {
                 peer,
                 generation: stale_generation,
+                label: RELIABLE_LABEL.to_string(),
                 channel: stale_channel,
             },
             EngineEvent::ChannelOpen {
@@ -745,6 +889,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             let mut a_connected = false;
             let mut b_connected = false;
+            let mut a_pc_connected = false;
             while !a_connected || !b_connected {
                 tokio::select! {
                     event = a_rx.recv() => match event.expect("A event channel stays open") {
@@ -753,11 +898,14 @@ mod tests {
                                 .await
                                 .expect("B applies A candidate");
                         }
-                        EngineEvent::RemoteChannel { channel, .. } => {
-                            a.store_remote_channel(b_id, channel);
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            a.store_remote_channel(b_id, label, channel);
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
                             a_connected |= a.note_channel_open(b_id, &label);
+                        }
+                        EngineEvent::PcState { state, .. } => {
+                            a_pc_connected |= state == RTCPeerConnectionState::Connected;
                         }
                         _ => {}
                     },
@@ -767,8 +915,8 @@ mod tests {
                                 .await
                                 .expect("A applies B candidate");
                         }
-                        EngineEvent::RemoteChannel { channel, .. } => {
-                            b.store_remote_channel(a_id, channel);
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            b.store_remote_channel(a_id, label, channel);
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
                             b_connected |= b.note_channel_open(a_id, &label);
@@ -777,14 +925,11 @@ mod tests {
                     },
                 }
             }
+            assert!(a_pc_connected, "A peer connection must reach Connected");
         })
         .await
         .expect("local peer pair connects");
 
-        assert_eq!(
-            a.peers[&b_id].pc.connection_state(),
-            RTCPeerConnectionState::Connected
-        );
         a.channel(b_id, RELIABLE_LABEL)
             .expect("required channel exists")
             .close()
@@ -793,13 +938,19 @@ mod tests {
 
         let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let EngineEvent::ChannelClosed {
-                    peer,
-                    generation,
-                    label,
-                } = a_rx.recv().await.expect("A event channel stays open")
-                {
-                    break (peer, generation, label);
+                match a_rx.recv().await.expect("A event channel stays open") {
+                    EngineEvent::ChannelClosed {
+                        peer,
+                        generation,
+                        label,
+                    } => break (peer, generation, label),
+                    EngineEvent::PcState {
+                        state: RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed,
+                        ..
+                    } => {
+                        panic!("peer connection became terminal before channel-close evidence")
+                    }
+                    _ => {}
                 }
             }
         })
@@ -808,12 +959,6 @@ mod tests {
         assert_eq!(closed.0, b_id);
         assert!(a.is_current_generation(closed.0, closed.1));
         assert_eq!(closed.2, RELIABLE_LABEL);
-        assert_eq!(
-            a.peers[&b_id].pc.connection_state(),
-            RTCPeerConnectionState::Connected,
-            "data-channel loss must be observable even while the PC remains connected"
-        );
-
         a.remove_peer(b_id).await.expect("A closes");
         b.remove_peer(a_id).await.expect("B closes");
     }

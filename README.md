@@ -12,7 +12,7 @@
          alt="Documentation">
   </a>
   <a href="rust-toolchain.toml">
-    <img src="https://img.shields.io/badge/MSRV-1.89.0-blue.svg?style=for-the-badge"
+    <img src="https://img.shields.io/badge/MSRV-1.91.0-blue.svg?style=for-the-badge"
          alt="MSRV">
   </a>
   <a href="LICENSE">
@@ -532,7 +532,7 @@ replay buffers, relay counters, and session plans remain process-local. See the
 
 ### Prerequisites
 
-- Rust 1.89.0 or later (see `rust-version` in `Cargo.toml`)
+- Rust 1.91.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
 
 ### Build
@@ -655,7 +655,7 @@ the exact trust boundary.
 
 ## MSRV
 
-The minimum supported Rust version is **1.89.0**.
+The minimum supported Rust version is **1.91.0**.
 
 ## License
 

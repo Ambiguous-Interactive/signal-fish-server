@@ -462,7 +462,7 @@ async fn test_load_sustained_concurrent_connections() {
         handles.push(handle);
 
         // Stagger connections slightly
-        if i % 100 == 0 {
+        if i.is_multiple_of(100) {
             tokio::time::sleep(Duration::from_millis(100)).await;
             println!("{i} clients connected");
         }
@@ -589,7 +589,7 @@ async fn test_load_message_latency_distribution() {
             server.unregister_client(&player_id).await;
         }
 
-        if room_idx % 10 == 0 {
+        if room_idx.is_multiple_of(10) {
             println!("Processed {room_idx} rooms");
         }
     }
@@ -768,7 +768,7 @@ async fn test_load_memory_usage() {
         handles.push(handle);
 
         // Sample memory every 100 connections
-        if i % 100 == 0 {
+        if i.is_multiple_of(100) {
             let current_memory = get_current_memory_mb();
             println!(
                 "   {} connections: {} MB (+{} MB)",

@@ -49,7 +49,7 @@ use signal_fish_server::protocol::{
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::RTCPeerConnectionState;
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
@@ -1164,7 +1164,7 @@ impl Orchestrator<'_> {
                 r#"{{"from":"{}","channel":"{}","seq":0}}"#,
                 self.my_id, label
             );
-            channel.send_text(text.clone()).await.map_err(|error| {
+            channel.send_text(&text).await.map_err(|error| {
                 FatalError::connection(format!("send on {label} to {peer} failed: {error}"))
             })?;
             self.sent_labels
@@ -1563,8 +1563,13 @@ impl Orchestrator<'_> {
                     self.handle_peer_transport_loss(peer).await?;
                 }
             }
-            EngineEvent::RemoteChannel { peer, channel, .. } => {
-                self.engine.store_remote_channel(peer, channel);
+            EngineEvent::RemoteChannel {
+                peer,
+                label,
+                channel,
+                ..
+            } => {
+                self.engine.store_remote_channel(peer, label, channel);
             }
             EngineEvent::ChannelOpen { peer, label, .. } => {
                 emit(&Event::ChannelOpen {
@@ -1860,7 +1865,7 @@ impl Orchestrator<'_> {
             SignalKind::IceCandidate => {
                 let pairwise_drop = self.drop_ice_from == Some(from);
                 if self.cli.cripple_ice || pairwise_drop {
-                    // Belt and braces with the engine's interface filter:
+                    // Belt and braces with the engine's zero-socket cripple mode:
                     // selected inbound candidates are dropped, never applied.
                     tracing::debug!(%from, "fault injection: dropping inbound ICE candidate");
                     if pairwise_drop {
@@ -2338,7 +2343,7 @@ mod tests {
         EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
-    use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+    use webrtc::peer_connection::RTCPeerConnectionState;
 
     #[test]
     fn direct_plan_rejection_is_explicit_with_or_without_endpoint() {

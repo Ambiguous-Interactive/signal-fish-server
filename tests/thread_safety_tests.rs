@@ -747,7 +747,7 @@ async fn test_circuit_breaker_concurrent_calls_safe() {
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 // Even tasks try a successful operation (may be rejected if breaker is open)
                 let _result: Result<i32, anyhow::Error> = breaker.call(async { Ok(42) }).await;
             } else {
