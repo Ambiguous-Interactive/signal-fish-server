@@ -278,7 +278,7 @@ async fn mismatched_turn_secret_fails_p2p_and_uses_websocket_fallback() {
         single_event(events, "fallback_engaged", who);
         assert_relay_floor(&run, index);
         assert!(
-            run.stderr[index].contains("Failed to allocate on turn.Client")
+            run.stderr[index].contains("TURN allocation failed")
                 && run.stderr[index].contains("Allocate error response (error 401:"),
             "{who}: mismatched secret must fail at TURN allocation authentication: {}",
             run.stderr[index]

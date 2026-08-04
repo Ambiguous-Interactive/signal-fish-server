@@ -2746,7 +2746,7 @@ mod tests {
             let mut accountability_failed = false;
             for index in 0..count {
                 let seq = index as u64 + 2;
-                let (class, key) = if index % 2 == 0 {
+                let (class, key) = if index.is_multiple_of(2) {
                     (DeliveryClass::Latest, Some(seq as u32))
                 } else {
                     (DeliveryClass::Volatile, None)

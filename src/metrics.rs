@@ -1883,7 +1883,7 @@ mod tests {
             ];
             for index in 0..10_000 {
                 writer_metrics.record_rate_limit_rejection(kinds[index % kinds.len()]);
-                if index % 32 == 0 {
+                if index.is_multiple_of(32) {
                     tokio::task::yield_now().await;
                 }
             }

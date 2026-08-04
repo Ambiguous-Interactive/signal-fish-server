@@ -6,7 +6,7 @@ license = "MIT"
 authors = ["Ambiguous Interactive <eli@theambiguous.co>"]
 description = "Native Rust reference client for the Signal Fish protocol v3 (real WebRTC stack)"
 repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
-rust-version = "1.89.0"
+rust-version = "1.91.0"
 publish = false
 
 # Matches the server crate: this reference client carries no `unsafe` block.
@@ -18,7 +18,12 @@ unsafe_code = "forbid"
 signal-fish-server = { path = "../.." }
 
 # Real WebRTC stack (peer connections + data channels).
-webrtc = "0.17"
+webrtc = "0.20"
+rtc = "0.20"
+async-trait = "0.1"
+# webrtc 0.20 binds exactly the addresses supplied by the application. Enumerate
+# concrete interfaces so host ICE candidates never advertise a wildcard address.
+if-addrs = "0.15"
 
 # Async runtime & WebSocket wire layer.
 tokio = { version = "1.52", features = [

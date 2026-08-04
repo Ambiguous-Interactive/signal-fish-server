@@ -87,6 +87,8 @@ pub enum Event {
     },
     /// Both channels (`reliable` + `unreliable`) are open toward `peer`.
     P2pPairConnected { peer: PlayerId },
+    /// Both channels reopened for a coordinated PairRetry generation.
+    P2pPairReconnected { peer: PlayerId },
     /// Candidate types selected for the active ICE path.
     SelectedCandidatePair {
         peer: PlayerId,
@@ -96,6 +98,9 @@ pub enum Event {
     /// Every planned pair is open and local ICE gathering is complete, but
     /// `--exchange-release-file` still holds the exact application exchange.
     ExchangeReady,
+    /// Every planned pair has sent and received its exact reliable exchange;
+    /// an optional harness gate still holds the unreliable half.
+    ExchangeReliableReady,
     /// An overall `TransportStatus` state change was sent (Appendix G).
     TransportStatusSent {
         transport: Transport,
@@ -239,6 +244,12 @@ mod tests {
                 "p2p_pair_connected",
             ),
             (
+                Event::P2pPairReconnected {
+                    peer: PlayerId::nil(),
+                },
+                "p2p_pair_reconnected",
+            ),
+            (
                 Event::ChannelClosed {
                     peer: PlayerId::nil(),
                     label: "reliable".to_string(),
@@ -263,6 +274,7 @@ mod tests {
             (Event::GameDataSent, "game_data_sent"),
             (Event::FallbackEngaged, "fallback_engaged"),
             (Event::ExchangeReady, "exchange_ready"),
+            (Event::ExchangeReliableReady, "exchange_reliable_ready"),
             (Event::SuccessCriteriaMet, "success_criteria_met"),
             (Event::Exiting { code: 0 }, "exiting"),
         ];

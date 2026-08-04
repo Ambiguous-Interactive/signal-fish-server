@@ -45,7 +45,7 @@ updates:
       - "dependencies"
       - "rust"
       - "automated"
-    # Keep version-update PRs aligned with the graph and Rust 1.89 MSRV.
+    # Keep version-update PRs aligned with the graph and Rust 1.91 MSRV.
     # Vulnerability alerts and the independent cargo-audit/cargo-deny gates
     # remain active for ignored version lines.
     ignore:
@@ -57,7 +57,7 @@ updates:
       # declaration duplicates the complete WebSocket stack.
       - dependency-name: "tokio-tungstenite"
         versions: ["0.30.x"]
-      # serial_test 4.x requires rustc 1.93.1, above the declared 1.89 MSRV.
+      # serial_test 4.x requires rustc 1.93.1, above the declared 1.91 MSRV.
       - dependency-name: "serial_test"
         versions: ["4.x"]
       # syn 3 removes APIs used by the policy suite while syn 2 remains in the
@@ -225,7 +225,7 @@ updates:
     # ========================================================================
     #
     # MSRV Policy:
-    # - MSRV is defined in Cargo.toml (rust-version = "1.89.0")
+    # - MSRV is defined in Cargo.toml (rust-version = "1.91.0")
     # - CI enforces MSRV compliance via cargo check --locked
     # - Dockerfile Rust version should track MSRV, not latest stable
     #

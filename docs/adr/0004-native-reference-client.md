@@ -2,7 +2,7 @@
 
 ## Status
 
-ADR-0004 - Accepted
+ADR-0004 - Accepted (amended for webrtc-rs 0.20 in session 089)
 
 ## Context
 
@@ -26,7 +26,7 @@ A reference client has to make several structural choices carefully:
 ## Decision
 
 Build an **in-repo native Rust reference client** (`clients/native/`, package `signal-fish-reference-native`) on
-**webrtc-rs 0.17 directly**, exercised by a **multi-process interop harness** that spawns the real server binary
+**webrtc-rs 0.20 directly**, exercised by a **multi-process interop harness** that spawns the real server binary
 plus N (≥ 3) client processes and asserts global properties over their JSONL stdout streams.
 
 ### In-repo standalone crate, not a workspace member
@@ -43,7 +43,7 @@ without compiling it. The client pins the same `rust-version` as the server — 
 
 ### webrtc-rs directly, not a `matchbox_socket` adapter
 
-The client drives `webrtc` 0.17 itself (one `RTCPeerConnection` per planned peer, `reliable` +
+The client drives `webrtc` 0.20 itself (one peer connection per planned peer, `reliable` +
 `unreliable {ordered:false, max_retransmits:0}` data channels, trickle ICE). ADR-0002's compatibility is retained
 **on the wire**: every signal payload is the matchbox `PeerSignal` shape, with `IceCandidate` carrying the JSON
 serialization of webrtc-rs's `RTCIceCandidateInit` — exactly what `matchbox_socket` emits. Going direct rather
@@ -52,8 +52,9 @@ than through `matchbox_socket` is deliberate:
 - the conformance harness needs full control over the v3 surface `matchbox_socket` does not model — Appendix G
   `TransportStatus` reporting, fallback engagement, per-recipient glare assertions, deterministic ICE crippling
   for fallback scenarios, protocol-version downshift to pure v2;
-- `matchbox_socket` 0.14 builds on the same `webrtc` 0.17 major, so the interop pedigree (same ICE/DTLS/SCTP
-  stack) is preserved without inheriting matchbox's socket-level opinions.
+- compatibility with `matchbox_socket` remains a wire contract rather than a
+  dependency-version contract: exact candidate JSON is pinned without inheriting
+  matchbox's socket-level opinions.
 
 ### Protocol types via path dependency
 
@@ -105,8 +106,9 @@ the harness pins `ice_servers_count == 0` to keep it that way.
   `webrtc-interop.yml`).
 - **Path-dep reuse means the client does not re-derive types from the docs:** third-party implementability rests
   on the golden wire tests, the canonical JSONL samples, and `docs/protocol.md` rather than on this client.
-- **webrtc-rs quirks leak into the client** (callback deadlock hazards, sync `to_json`, FnOnce `on_open`); they
-  are isolated in `engine.rs` and documented in the client README.
+- **webrtc-rs quirks leak into the client** (async peer-event dispatch,
+  poll-driven data-channel events, and local-only candidate metadata); they are
+  isolated in `engine.rs` and documented in the client README.
 
 ### Mitigations
 

@@ -1,7 +1,7 @@
 # signal-fish-reference-native
 
 A **native Rust reference client** for the Signal Fish protocol v3 with a **real WebRTC stack**
-([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.17: actual ICE gathering, DTLS handshakes, and SCTP data
+([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.20: actual ICE gathering, DTLS handshakes, and SCTP data
 channels). It exists for **conformance and reference** — executable documentation of the client side of
 [`docs/protocol.md`](../../docs/protocol.md) and the engine of the in-repo multi-process interop suite. It is
 **not a product**: no reconnection logic, no game loop, no API stability promises.
@@ -57,9 +57,11 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--platform <P>` | `reference-native` | `Authenticate.platform` |
 | `--exchange` | off | When a P2P pair fully opens, send exactly one text message per channel and require the symmetric receives (see success criteria) |
 | `--exchange-release-file <PATH>` | — | Test harness only; requires `--exchange`. Establish every planned pair and finish local ICE gathering, emit `exchange_ready`, then hold the exact channel exchange until PATH exists. Normal exchange behavior is unchanged when omitted |
+| `--p2p-rebuild-release-file <PATH>` | — | Loss-harness only; requires `--exchange-release-file` and a nonzero `--p2p-retry-count`. The final retry attempt is reserved: after `exchange_ready`, wait for PATH, then have each pair's designated initiator trigger that coordinated clean-path PairRetry rebuild before exchange release |
+| `--unreliable-exchange-release-file <PATH>` | — | Loss-harness only; requires `--exchange-release-file`. After its first gate opens, send and receive the exact reliable message across every planned pair and emit `exchange_reliable_ready`, then hold the exact unreliable message until PATH exists |
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
-| `--cripple-ice` | off | Deterministically break ICE: reject every interface during gathering AND drop all outbound/inbound `IceCandidate` signals (SDP offer/answer still flows). Forces the relay fallback |
-| `--disable-mdns` | off | Test harness only: expose raw host candidates instead of mDNS names so unicast packet-loss experiments do not fault their discovery control plane. Normal candidate privacy is unchanged when omitted |
+| `--cripple-ice` | off | Deterministically break ICE: bind an isolated dummy UDP transport while allowing only unconfigured TCP candidates in the ICE agent, then drop all outbound/inbound `IceCandidate` signals (SDP offer/answer and gathering completion still flow). Forces the relay fallback |
+| `--disable-mdns` | off | Test harness only: disable resolution of remote `.local` candidates so packet-loss experiments do not fault their mDNS discovery control plane. Native host candidates are raw IPs in either mode; normal mode retains mDNS query support for browser peers |
 | `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
 | `--ice-transport-policy <POLICY>` | `all` | ICE candidate policy: `all` permits every gathered candidate type; `relay` requires a TURN-relayed path. The repository's local coturn gate uses `relay` to prove production-minted TURN credentials rather than a direct host path |
 | `--p2p-release-file <PATH>` | — | Test harness only: keep processing WebSocket traffic but defer peer-connection creation until PATH exists. The TURN gate uses this to prove the relay floor before ICE establishment begins |
@@ -134,8 +136,10 @@ process continues to its normal bounded exit.
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
+| `p2p_pair_reconnected` | `peer` | BOTH channels reopened for a coordinated PairRetry generation |
 | `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay` |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
+| `exchange_reliable_ready` | — | Loss-harness barrier: every planned pair has sent and received its exact reliable exchange, while `--unreliable-exchange-release-file` still holds the unreliable half |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out (Appendix G) |
 | `peer_transport_status` | `peer`, `transport`, `connected` | A same-room peer's reported state changed (server fan-out) |
 | `game_data_sent` | — | The `--relay-payload` GameData was sent |

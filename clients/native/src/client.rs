@@ -49,7 +49,7 @@ use signal_fish_server::protocol::{
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::RTCPeerConnectionState;
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
@@ -113,6 +113,43 @@ fn retryable_missing_peers(
         .copied()
         .filter(|peer| attempts.get(peer).copied().unwrap_or(0) < retry_count)
         .collect()
+}
+
+fn automatic_p2p_retry_count(rebuild_configured: bool, retry_count: u8) -> u8 {
+    retry_count.saturating_sub(u8::from(rebuild_configured))
+}
+
+fn validate_p2p_rebuild_retry_count(
+    rebuild_configured: bool,
+    retry_count: u8,
+) -> Result<(), &'static str> {
+    if rebuild_configured && retry_count == 0 {
+        Err("--p2p-rebuild-release-file requires a nonzero --p2p-retry-count")
+    } else {
+        Ok(())
+    }
+}
+
+fn is_coordinated_p2p_rebuild_attempt(
+    rebuild_configured: bool,
+    attempt: u8,
+    retry_count: u8,
+) -> bool {
+    rebuild_configured && retry_count > 0 && attempt == retry_count
+}
+
+fn exchange_label_complete(
+    expected: &BTreeSet<PlayerId>,
+    sent: &BTreeMap<PlayerId, BTreeSet<String>>,
+    received: &BTreeMap<PlayerId, BTreeSet<String>>,
+    label: &str,
+) -> bool {
+    !expected.is_empty()
+        && expected.iter().all(|peer| {
+            [sent.get(peer), received.get(peer)]
+                .into_iter()
+                .all(|labels| labels.is_some_and(|labels| labels.contains(label)))
+        })
 }
 
 fn note_current_pair_connected(
@@ -218,6 +255,9 @@ pub async fn run(cli: &Cli) -> i32 {
 }
 
 async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
+    validate_p2p_rebuild_retry_count(cli.p2p_rebuild_release_file.is_some(), cli.p2p_retry_count)
+        .map_err(FatalError::protocol)?;
+
     // The soft run window starts at process start, handshake included.
     let run_deadline = checked_deadline(Instant::now(), Duration::from_secs(cli.run_for_secs));
 
@@ -276,6 +316,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         connected_pairs: BTreeSet::new(),
         pair_connected_reported: BTreeSet::new(),
         retrying_pairs: BTreeSet::new(),
+        p2p_reconnected_pairs: BTreeSet::new(),
         ice_gathering_complete: BTreeSet::new(),
         last_ice_servers: Vec::new(),
         transport_status: None,
@@ -283,6 +324,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         p2p_retry_at: None,
         p2p_released: cli.p2p_release_file.is_none(),
         p2p_release_poll_at: cli.p2p_release_file.as_ref().map(|_| Instant::now()),
+        p2p_rebuild_released: cli.p2p_rebuild_release_file.is_none(),
+        p2p_rebuild_release_poll_at: None,
         pending_pair_directives: BTreeMap::new(),
         // Late joiners arm the relay probe on entry (see RELAY_SEND_SETTLE):
         // the GameStarting trigger pre-dates the join and never re-fires.
@@ -296,6 +339,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         exchange_released: cli.exchange_release_file.is_none(),
         exchange_ready_reported: false,
         exchange_release_poll_at: None,
+        unreliable_exchange_released: cli.unreliable_exchange_release_file.is_none(),
+        exchange_reliable_ready_reported: false,
+        unreliable_exchange_release_poll_at: None,
         pending_signals: BTreeMap::new(),
         drop_ice_from: None,
         run_deadline,
@@ -534,6 +580,14 @@ fn should_resolve_connected_pair(
     previous.is_some() || all_expected_pairs_connected
 }
 
+fn should_report_retry_gap(
+    webrtc_plan_seen: bool,
+    transport_status: Option<bool>,
+    coordinated_rebuild: bool,
+) -> bool {
+    webrtc_plan_seen && transport_status.is_some() && !coordinated_rebuild
+}
+
 fn is_terminal_peer_connection_state(state: &RTCPeerConnectionState) -> bool {
     matches!(
         state,
@@ -728,6 +782,8 @@ struct Orchestrator<'a> {
     /// the reconnect gap without turning partial-connectivity fallback into an
     /// all-pairs requirement after the original P2P window expires.
     retrying_pairs: BTreeSet<PlayerId>,
+    /// Peers whose current physical link completed a PairRetry generation.
+    p2p_reconnected_pairs: BTreeSet<PlayerId>,
     /// Peers whose current connection generation emitted the terminal local
     /// ICE gathering callback. Harness-held success uses this as the exact
     /// outbound signal-ledger boundary.
@@ -745,6 +801,10 @@ struct Orchestrator<'a> {
     p2p_released: bool,
     /// Next poll for `--p2p-release-file` while pairing is held.
     p2p_release_poll_at: Option<Instant>,
+    /// Whether the optional harness gate triggered a clean-path full rebuild.
+    p2p_rebuild_released: bool,
+    /// Next poll for `--p2p-rebuild-release-file` while held.
+    p2p_rebuild_release_poll_at: Option<Instant>,
     /// Planned peers accumulated while the harness pairing gate is held.
     pending_pair_directives: BTreeMap<PlayerId, bool>,
     /// When to send the `--relay-payload` GameData (trigger + settle; the
@@ -764,6 +824,12 @@ struct Orchestrator<'a> {
     exchange_ready_reported: bool,
     /// Next poll for `--exchange-release-file` while application traffic is held.
     exchange_release_poll_at: Option<Instant>,
+    /// Whether the optional second gate released the exact unreliable half.
+    unreliable_exchange_released: bool,
+    /// Whether every peer completed the exact reliable half in both directions.
+    exchange_reliable_ready_reported: bool,
+    /// Next poll for `--unreliable-exchange-release-file` while held.
+    unreliable_exchange_release_poll_at: Option<Instant>,
     /// Signals that arrived before their peer was paired (defensive: server
     /// FIFO ordering makes this unreachable in the documented flows).
     pending_signals: BTreeMap<PlayerId, VecDeque<serde_json::Value>>,
@@ -909,6 +975,9 @@ impl Orchestrator<'_> {
         if let Some(at) = self.p2p_release_poll_at {
             wake = wake.min(at);
         }
+        if let Some(at) = self.p2p_rebuild_release_poll_at {
+            wake = wake.min(at);
+        }
         if let Some(at) = self.linger_until {
             wake = wake.min(at);
         }
@@ -916,6 +985,9 @@ impl Orchestrator<'_> {
             wake = wake.min(at);
         }
         if let Some(at) = self.exchange_release_poll_at {
+            wake = wake.min(at);
+        }
+        if let Some(at) = self.unreliable_exchange_release_poll_at {
             wake = wake.min(at);
         }
         wake = wake.min(self.next_ping_at);
@@ -977,7 +1049,9 @@ impl Orchestrator<'_> {
             self.retrying_pairs.clear();
         }
 
+        self.process_p2p_rebuild_gate(now).await?;
         self.process_exchange_gate(now).await?;
+        self.process_unreliable_exchange_gate(now).await?;
 
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
@@ -1059,8 +1133,70 @@ impl Orchestrator<'_> {
         .await
     }
 
+    async fn unreliable_exchange_release_pending(&self) -> Result<bool, FatalError> {
+        Self::release_file_pending(
+            self.cli.unreliable_exchange_release_file.as_deref(),
+            "--unreliable-exchange-release-file",
+        )
+        .await
+    }
+
     async fn p2p_release_pending(&self) -> Result<bool, FatalError> {
         Self::release_file_pending(self.cli.p2p_release_file.as_deref(), "--p2p-release-file").await
+    }
+
+    async fn p2p_rebuild_release_pending(&self) -> Result<bool, FatalError> {
+        Self::release_file_pending(
+            self.cli.p2p_rebuild_release_file.as_deref(),
+            "--p2p-rebuild-release-file",
+        )
+        .await
+    }
+
+    async fn process_p2p_rebuild_gate(&mut self, now: Instant) -> Result<(), FatalError> {
+        if self.p2p_rebuild_released
+            || !self.exchange_ready_reported
+            || self
+                .p2p_rebuild_release_poll_at
+                .is_some_and(|poll_at| now < poll_at)
+        {
+            return Ok(());
+        }
+        if self.p2p_rebuild_release_pending().await? {
+            self.p2p_rebuild_release_poll_at = Some(checked_deadline(now, SUCCESS_RELEASE_POLL));
+            return Ok(());
+        }
+
+        self.p2p_rebuild_released = true;
+        self.p2p_rebuild_release_poll_at = None;
+        // The coordinated generation owns a fresh bounded P2P window even if
+        // the lossy formation consumed the original one. Its reserved final
+        // attempt is never scheduled by the automatic retry timer.
+        self.p2p_deadline = Some(checked_deadline(
+            now,
+            Duration::from_secs(self.cli.p2p_timeout_secs),
+        ));
+        self.p2p_retry_at = None;
+        let initiator_peers: Vec<PlayerId> = self
+            .expected_peers
+            .iter()
+            .copied()
+            .filter(|peer| self.pair_roles.get(peer) == Some(&true))
+            .collect();
+        for peer in initiator_peers {
+            let attempt = self.cli.p2p_retry_count;
+            if self
+                .pair_retry_attempts
+                .get(&peer)
+                .is_some_and(|current| *current >= attempt)
+            {
+                return Err(FatalError::protocol(format!(
+                    "--p2p-rebuild-release-file reserved retry generation was already consumed for {peer}"
+                )));
+            }
+            self.request_pair_retry(peer, attempt).await?;
+        }
+        Ok(())
     }
 
     async fn process_p2p_gate(&mut self, now: Instant) -> Result<(), FatalError> {
@@ -1122,6 +1258,12 @@ impl Orchestrator<'_> {
             emit(&Event::ExchangeReady);
             self.exchange_ready_reported = true;
         }
+        if self.cli.p2p_rebuild_release_file.is_some()
+            && (!self.p2p_rebuild_released
+                || !self.expected_peers.is_subset(&self.p2p_reconnected_pairs))
+        {
+            return Ok(());
+        }
         if self.exchange_release_pending().await? {
             self.exchange_release_poll_at = Some(checked_deadline(now, SUCCESS_RELEASE_POLL));
             return Ok(());
@@ -1130,8 +1272,42 @@ impl Orchestrator<'_> {
         self.exchange_released = true;
         self.exchange_release_poll_at = None;
         let peers: Vec<PlayerId> = self.connected_pairs.iter().copied().collect();
+        let labels = if self.cli.unreliable_exchange_release_file.is_some() {
+            &[RELIABLE_LABEL][..]
+        } else {
+            &[RELIABLE_LABEL, UNRELIABLE_LABEL][..]
+        };
         for peer in peers {
-            self.send_exchange(peer).await?;
+            self.send_exchange(peer, labels).await?;
+        }
+        Ok(())
+    }
+
+    async fn process_unreliable_exchange_gate(&mut self, now: Instant) -> Result<(), FatalError> {
+        if self.unreliable_exchange_released
+            || !self.exchange_released
+            || !self.exchange_reliable_gate_ready()
+            || self
+                .unreliable_exchange_release_poll_at
+                .is_some_and(|poll_at| now < poll_at)
+        {
+            return Ok(());
+        }
+        if !self.exchange_reliable_ready_reported {
+            emit(&Event::ExchangeReliableReady);
+            self.exchange_reliable_ready_reported = true;
+        }
+        if self.unreliable_exchange_release_pending().await? {
+            self.unreliable_exchange_release_poll_at =
+                Some(checked_deadline(now, SUCCESS_RELEASE_POLL));
+            return Ok(());
+        }
+
+        self.unreliable_exchange_released = true;
+        self.unreliable_exchange_release_poll_at = None;
+        let peers: Vec<PlayerId> = self.connected_pairs.iter().copied().collect();
+        for peer in peers {
+            self.send_exchange(peer, &[UNRELIABLE_LABEL]).await?;
         }
         Ok(())
     }
@@ -1146,8 +1322,19 @@ impl Orchestrator<'_> {
             })
     }
 
-    async fn send_exchange(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+    fn exchange_reliable_gate_ready(&self) -> bool {
+        self.cli.unreliable_exchange_release_file.is_some()
+            && self.all_expected_pairs_connected()
+            && exchange_label_complete(
+                &self.expected_peers,
+                &self.sent_labels,
+                &self.received_labels,
+                RELIABLE_LABEL,
+            )
+    }
+
+    async fn send_exchange(&mut self, peer: PlayerId, labels: &[&str]) -> Result<(), FatalError> {
+        for &label in labels {
             if self
                 .sent_labels
                 .get(&peer)
@@ -1164,7 +1351,7 @@ impl Orchestrator<'_> {
                 r#"{{"from":"{}","channel":"{}","seq":0}}"#,
                 self.my_id, label
             );
-            channel.send_text(text.clone()).await.map_err(|error| {
+            channel.send_text(&text).await.map_err(|error| {
                 FatalError::connection(format!("send on {label} to {peer} failed: {error}"))
             })?;
             self.sent_labels
@@ -1563,8 +1750,13 @@ impl Orchestrator<'_> {
                     self.handle_peer_transport_loss(peer).await?;
                 }
             }
-            EngineEvent::RemoteChannel { peer, channel, .. } => {
-                self.engine.store_remote_channel(peer, channel);
+            EngineEvent::RemoteChannel {
+                peer,
+                label,
+                channel,
+                ..
+            } => {
+                self.engine.store_remote_channel(peer, label, channel);
             }
             EngineEvent::ChannelOpen { peer, label, .. } => {
                 emit(&Event::ChannelOpen {
@@ -1595,6 +1787,7 @@ impl Orchestrator<'_> {
     /// Tear down an unusable P2P link while retaining its planned obligation.
     async fn handle_peer_transport_loss(&mut self, peer: PlayerId) -> Result<(), FatalError> {
         self.connected_pairs.remove(&peer);
+        self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.sent_labels.remove(&peer);
         self.received_labels.remove(&peer);
@@ -1618,6 +1811,7 @@ impl Orchestrator<'_> {
     /// peer obligation, not a second gameplay peer.
     async fn prepare_retained_pair_replacement(&mut self, peer: PlayerId) {
         self.connected_pairs.remove(&peer);
+        self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.pair_retry_attempts.remove(&peer);
         self.retrying_pairs.insert(peer);
@@ -1678,7 +1872,10 @@ impl Orchestrator<'_> {
                 &mut self.p2p_deadline,
                 &mut self.p2p_retry_at,
                 generation,
-                self.cli.p2p_retry_count,
+                automatic_p2p_retry_count(
+                    self.cli.p2p_rebuild_release_file.is_some(),
+                    self.cli.p2p_retry_count,
+                ),
                 Duration::from_secs(self.cli.p2p_timeout_secs),
                 Instant::now(),
             );
@@ -1721,7 +1918,12 @@ impl Orchestrator<'_> {
         {
             return Ok(());
         }
-        if self.p2p_deadline.is_none() {
+        let coordinated_rebuild = is_coordinated_p2p_rebuild_attempt(
+            self.cli.p2p_rebuild_release_file.is_some(),
+            attempt,
+            self.cli.p2p_retry_count,
+        );
+        if self.p2p_deadline.is_none() && !coordinated_rebuild {
             tracing::debug!(%peer, attempt, "ignoring pair retry after the original P2P window");
             return Ok(());
         }
@@ -1730,6 +1932,7 @@ impl Orchestrator<'_> {
         })?;
         self.pair_retry_attempts.insert(peer, attempt);
         self.retrying_pairs.insert(peer);
+        self.p2p_reconnected_pairs.remove(&peer);
         self.connected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.sent_labels.remove(&peer);
@@ -1741,7 +1944,11 @@ impl Orchestrator<'_> {
                 "close incomplete peer connection {peer}: {error:#}"
             ))
         })?;
-        if self.webrtc_plan_seen && self.transport_status.is_some() {
+        if should_report_retry_gap(
+            self.webrtc_plan_seen,
+            self.transport_status,
+            coordinated_rebuild,
+        ) {
             self.resolve_transport_status().await?;
         }
         self.establish_pair_link(peer, initiate, PairGeneration::Retry)
@@ -1754,7 +1961,10 @@ impl Orchestrator<'_> {
             &self.expected_peers,
             &self.connected_pairs,
             &self.pair_retry_attempts,
-            self.cli.p2p_retry_count,
+            automatic_p2p_retry_count(
+                self.cli.p2p_rebuild_release_file.is_some(),
+                self.cli.p2p_retry_count,
+            ),
         );
         for peer in retryable {
             let attempt = self
@@ -1769,7 +1979,10 @@ impl Orchestrator<'_> {
             &self.expected_peers,
             &self.connected_pairs,
             &self.pair_retry_attempts,
-            self.cli.p2p_retry_count,
+            automatic_p2p_retry_count(
+                self.cli.p2p_rebuild_release_file.is_some(),
+                self.cli.p2p_retry_count,
+            ),
         )
         .is_empty();
         self.p2p_retry_at = another_retry_possible
@@ -1784,6 +1997,7 @@ impl Orchestrator<'_> {
         self.connected_pairs.remove(&peer);
         self.pair_connected_reported.remove(&peer);
         self.retrying_pairs.remove(&peer);
+        self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
         self.sent_labels.remove(&peer);
@@ -1860,8 +2074,9 @@ impl Orchestrator<'_> {
             SignalKind::IceCandidate => {
                 let pairwise_drop = self.drop_ice_from == Some(from);
                 if self.cli.cripple_ice || pairwise_drop {
-                    // Belt and braces with the engine's interface filter:
-                    // selected inbound candidates are dropped, never applied.
+                    // Belt and braces with the engine's loopback-only cripple
+                    // mode: selected inbound candidates are dropped, never
+                    // applied.
                     tracing::debug!(%from, "fault injection: dropping inbound ICE candidate");
                     if pairwise_drop {
                         emit(&Event::IceCandidateDropped { from });
@@ -1914,6 +2129,14 @@ impl Orchestrator<'_> {
         } else {
             tracing::warn!(%peer, "connected pair has no selected ICE candidate pair");
         }
+        let coordinated_reconnect = self.retrying_pairs.contains(&peer)
+            && self.pair_retry_attempts.get(&peer).is_some_and(|attempt| {
+                is_coordinated_p2p_rebuild_attempt(
+                    self.cli.p2p_rebuild_release_file.is_some(),
+                    *attempt,
+                    self.cli.p2p_retry_count,
+                )
+            });
         if note_current_pair_connected(
             &mut self.connected_pairs,
             &mut self.pair_connected_reported,
@@ -1922,8 +2145,17 @@ impl Orchestrator<'_> {
         ) {
             emit(&Event::P2pPairConnected { peer });
         }
+        if coordinated_reconnect {
+            self.p2p_reconnected_pairs.insert(peer);
+            emit(&Event::P2pPairReconnected { peer });
+        }
         if self.cli.exchange && self.exchange_released {
-            self.send_exchange(peer).await?;
+            let labels = if self.unreliable_exchange_released {
+                &[RELIABLE_LABEL, UNRELIABLE_LABEL][..]
+            } else {
+                &[RELIABLE_LABEL][..]
+            };
+            self.send_exchange(peer, labels).await?;
         }
         // Initial resolution waits for all pairs; after any prior resolution,
         // one late pair is enough to change the overall any-pair state.
@@ -2312,6 +2544,7 @@ fn harness_aware_base_wake(
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+    use clap::Parser;
     use tokio::time::Duration;
 
     use serde_json::json;
@@ -2321,24 +2554,28 @@ mod tests {
     };
 
     use crate::accountability::DeliveryAccountability;
+    use crate::cli::Cli;
     use crate::wire;
 
     use super::{
-        arm_pair_window, authoritative_peer_delta, changed_transport_status,
-        clear_departed_membership_plan, connection_targets_for_generation,
-        consume_join_accountability_preface, direct_plan_rejection_message,
-        harness_aware_base_wake, is_current_session_generation, is_terminal_peer_connection_state,
-        needs_ice_gathering_marker, negotiated_version_from, next_handshake_message,
-        note_current_pair_connected, p2p_retry_delay, reject_unsupported_direct_plan_with,
-        require_finalized_membership_plan, requires_authoritative_finalization_plan,
-        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
-        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
-        should_defer_success_at_run_deadline, should_resolve_connected_pair,
-        try_buffer_planned_signal, validate_json_negotiated_server_message, PairGeneration,
+        arm_pair_window, authoritative_peer_delta, automatic_p2p_retry_count,
+        changed_transport_status, clear_departed_membership_plan,
+        connection_targets_for_generation, consume_join_accountability_preface,
+        direct_plan_rejection_message, exchange_label_complete, harness_aware_base_wake,
+        is_coordinated_p2p_rebuild_attempt, is_current_session_generation,
+        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
+        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
+        reject_unsupported_direct_plan_with, require_finalized_membership_plan,
+        requires_authoritative_finalization_plan, resolve_drop_ice_from,
+        restore_reconnected_member, retryable_missing_peers, session_plan_peer_ids,
+        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
+        should_report_retry_gap, should_resolve_connected_pair, try_buffer_planned_signal,
+        validate_json_negotiated_server_message, validate_p2p_rebuild_retry_count, PairGeneration,
         EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL,
     };
+    use crate::engine::RELIABLE_LABEL;
     use tokio_tungstenite::tungstenite::{Bytes, Message};
-    use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+    use webrtc::peer_connection::RTCPeerConnectionState;
 
     #[test]
     fn direct_plan_rejection_is_explicit_with_or_without_endpoint() {
@@ -2701,6 +2938,36 @@ mod tests {
     }
 
     #[test]
+    fn reliable_exchange_barrier_requires_both_directions_for_every_peer() {
+        let left = PlayerId::from_u128(2);
+        let right = PlayerId::from_u128(3);
+        let expected = BTreeSet::from([left, right]);
+        let reliable = BTreeSet::from([RELIABLE_LABEL.to_string()]);
+        let sent = BTreeMap::from([(left, reliable.clone()), (right, reliable.clone())]);
+        let mut received = BTreeMap::from([(left, reliable.clone())]);
+
+        assert!(!exchange_label_complete(
+            &expected,
+            &sent,
+            &received,
+            RELIABLE_LABEL
+        ));
+        received.insert(right, reliable);
+        assert!(exchange_label_complete(
+            &expected,
+            &sent,
+            &received,
+            RELIABLE_LABEL
+        ));
+        assert!(!exchange_label_complete(
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            RELIABLE_LABEL
+        ));
+    }
+
+    #[test]
     fn retry_reconnects_current_pair_without_duplicate_logical_event() {
         let peer = PlayerId::from_u128(2);
         let mut connected = BTreeSet::new();
@@ -2732,6 +2999,51 @@ mod tests {
             &mut retrying,
             peer
         ));
+    }
+
+    #[test]
+    fn coordinated_rebuild_reserves_the_final_retry_attempt() {
+        assert_eq!(automatic_p2p_retry_count(false, 2), 2);
+        assert_eq!(automatic_p2p_retry_count(true, 2), 1);
+        assert_eq!(automatic_p2p_retry_count(true, 1), 0);
+
+        assert!(validate_p2p_rebuild_retry_count(false, 0).is_ok());
+        assert!(validate_p2p_rebuild_retry_count(true, 1).is_ok());
+        assert!(validate_p2p_rebuild_retry_count(true, 0).is_err());
+
+        assert!(is_coordinated_p2p_rebuild_attempt(true, 2, 2));
+        assert!(!is_coordinated_p2p_rebuild_attempt(true, 1, 2));
+        assert!(!is_coordinated_p2p_rebuild_attempt(false, 2, 2));
+        assert!(!is_coordinated_p2p_rebuild_attempt(true, 0, 0));
+
+        assert!(should_report_retry_gap(true, Some(true), false));
+        assert!(!should_report_retry_gap(true, Some(true), true));
+        assert!(!should_report_retry_gap(false, Some(true), false));
+        assert!(!should_report_retry_gap(true, None, false));
+    }
+
+    #[tokio::test]
+    async fn coordinated_rebuild_rejects_zero_budget_before_connecting() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:1/v3/ws",
+            "--create-room",
+            "--exchange",
+            "--exchange-release-file",
+            "/tmp/signal-fish-exchange-release",
+            "--p2p-rebuild-release-file",
+            "/tmp/signal-fish-p2p-rebuild",
+        ]);
+
+        let error = super::run_inner(&cli)
+            .await
+            .expect_err("zero retry budget must fail before the socket connect");
+        assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
+        assert_eq!(
+            error.message,
+            "--p2p-rebuild-release-file requires a nonzero --p2p-retry-count"
+        );
     }
 
     #[test]

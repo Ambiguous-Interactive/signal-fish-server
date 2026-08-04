@@ -123,7 +123,7 @@ For earlier detection, verify nightly compatibility when upgrading nightly-sensi
 
 ```text
 Production Code (Stable MSRV)
-  → rust-version = "1.89.0" in Cargo.toml
+  → rust-version = "1.91.0" in Cargo.toml
   → Used for: Building binaries, Docker images, production artifacts
 
 CI Analysis Tools (Nightly)

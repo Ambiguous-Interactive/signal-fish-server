@@ -12,7 +12,7 @@ categories = [
     "network-programming",
     "web-programming::websocket",
 ]
-rust-version = "1.89.0"
+rust-version = "1.91.0"
 # Keep the published server crate free of the reference-client tree. Cargo
 # auto-excludes NESTED PACKAGES (clients/native/ has its own Cargo.toml), but
 # plain files directly under clients/ (e.g. clients/README.md) would still be

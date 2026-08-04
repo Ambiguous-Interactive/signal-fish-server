@@ -86,7 +86,7 @@ async fn run_iteration(iteration: u64) {
 
     // Alternate between an empty and an already-full queue so both the
     // try_send fast path and the backpressured send race the close/drop.
-    if iteration % 2 == 0 {
+    if iteration.is_multiple_of(2) {
         sender
             .try_send(test_message())
             .expect("prefill the empty single-slot queue");
