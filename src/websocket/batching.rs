@@ -33,11 +33,13 @@ pub(super) struct MessageBatcher {
 }
 
 impl MessageBatcher {
-    pub(super) fn new(batch_size: usize, _batch_interval_ms: u64) -> Self {
+    pub(super) fn new(_batch_size: usize, _batch_interval_ms: u64) -> Self {
         Self {
-            pending: VecDeque::with_capacity(batch_size),
+            // Do not eagerly allocate from operator-controlled configuration.
+            // The queue grows only as messages actually arrive.
+            pending: VecDeque::new(),
             #[cfg(test)]
-            batch_size,
+            batch_size: _batch_size.min(crate::config::websocket::MAX_BATCH_SIZE),
             #[cfg(test)]
             batch_interval: Duration::from_millis(_batch_interval_ms),
             #[cfg(test)]
@@ -92,15 +94,21 @@ impl MessageBatcher {
 
     pub(super) fn count_by_class(&self) -> [(crate::protocol::DeliveryClass, u64); 3] {
         let mut counts = [
-            (crate::protocol::DeliveryClass::Reliable, 0),
-            (crate::protocol::DeliveryClass::Latest, 0),
-            (crate::protocol::DeliveryClass::Volatile, 0),
+            (crate::protocol::DeliveryClass::Reliable, 0u64),
+            (crate::protocol::DeliveryClass::Latest, 0u64),
+            (crate::protocol::DeliveryClass::Volatile, 0u64),
         ];
         for class in self.pending.iter().filter_map(QueuedOutbound::class) {
             match class {
-                crate::protocol::DeliveryClass::Reliable => counts[0].1 += 1,
-                crate::protocol::DeliveryClass::Latest => counts[1].1 += 1,
-                crate::protocol::DeliveryClass::Volatile => counts[2].1 += 1,
+                crate::protocol::DeliveryClass::Reliable => {
+                    counts[0].1 = counts[0].1.saturating_add(1)
+                }
+                crate::protocol::DeliveryClass::Latest => {
+                    counts[1].1 = counts[1].1.saturating_add(1)
+                }
+                crate::protocol::DeliveryClass::Volatile => {
+                    counts[2].1 = counts[2].1.saturating_add(1)
+                }
             }
         }
         counts
@@ -180,7 +188,7 @@ pub(super) async fn send_batch(
             write_phase,
         )
         .await?;
-        batch_size += 1;
+        batch_size = batch_size.saturating_add(1);
     }
     // Only a real batch (2+ messages) is a "batch"; with batching off the writer
     // drains one message per call, which is a normal send, not a flush.
@@ -217,29 +225,33 @@ fn queued_write_deadline(
         // The reliable payload has already reached its terminal accounted-drop
         // path. Its exact report is control progress, not unresolved reliable
         // delivery, so unrelated reliable queue age must not expire it.
-        return write_started_at + max_sojourn;
+        return checked_deadline(write_started_at, max_sojourn);
     }
     match queued.class() {
-        Some(crate::protocol::DeliveryClass::Reliable) => {
+        Some(crate::protocol::DeliveryClass::Reliable) => checked_deadline(
             receiver
                 .oldest_reliable_enqueued_at()
                 .into_iter()
                 .chain(oldest_reliable_batched)
                 .chain(std::iter::once(queued.enqueued_at))
                 .min()
-                .unwrap_or(write_started_at)
-                + max_sojourn
-        }
+                .unwrap_or(write_started_at),
+            max_sojourn,
+        ),
         // Control traffic owns its queue-age deadline. In particular, a fresh
         // DeliveryReport must not inherit the age of stale lossy data.
-        None => queued.enqueued_at + max_sojourn,
+        None => checked_deadline(queued.enqueued_at, max_sojourn),
         // Latest/volatile queue age is resolved by their explicit loss policy.
         // Once selected, retain a bounded write-progress budget so a peer that
         // stops reading cannot wedge the sole socket writer forever.
         Some(crate::protocol::DeliveryClass::Latest | crate::protocol::DeliveryClass::Volatile) => {
-            write_started_at + max_sojourn
+            checked_deadline(write_started_at, max_sojourn)
         }
     }
+}
+
+fn checked_deadline(start: Instant, duration: Duration) -> Instant {
+    start.checked_add(duration).unwrap_or(start)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -833,6 +845,12 @@ mod tests {
         assert_eq!(batcher.len(), 0);
         assert!(batcher.is_empty());
         assert!(!batcher.should_flush());
+    }
+
+    #[test]
+    fn extreme_batch_size_does_not_panic_during_construction() {
+        let batcher = std::panic::catch_unwind(|| MessageBatcher::new(usize::MAX, 16));
+        assert!(batcher.is_ok());
     }
 
     #[test]

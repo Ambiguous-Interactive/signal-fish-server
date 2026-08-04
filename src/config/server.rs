@@ -10,6 +10,9 @@ use super::defaults::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Operational ceiling for a room's reconnection replay ring.
+pub const MAX_EVENT_BUFFER_SIZE: usize = 65_536;
+
 /// Server configuration for room and player management.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerConfig {

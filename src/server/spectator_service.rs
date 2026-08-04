@@ -509,7 +509,7 @@ impl SpectatorService {
                 .detach(&player_id, SpectatorStateChangeReason::Disconnected)
                 .await
             {
-                detached += 1;
+                detached = detached.saturating_add(1);
             }
         }
         detached

@@ -39,7 +39,7 @@ impl EnhancedGameServer {
                     .remove(&(room_id, player_id))
                     .is_some()
                 {
-                    cleaned += 1;
+                    cleaned = cleaned.saturating_add(1);
                 }
                 continue;
             }
@@ -73,7 +73,7 @@ impl EnhancedGameServer {
                         .remove(&(room_id, player_id))
                         .is_some()
                     {
-                        cleaned += 1;
+                        cleaned = cleaned.saturating_add(1);
                     }
                 }
                 Err(error) => {
@@ -93,13 +93,13 @@ impl EnhancedGameServer {
             .iter()
             .map(|entry| *entry.key())
             .collect();
-        let mut removed = 0;
+        let mut removed = 0usize;
         for room_id in room_ids {
             match self.database.get_room_by_id(&room_id).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     if self.room_applications.remove(&room_id).is_some() {
-                        removed += 1;
+                        removed = removed.saturating_add(1);
                     }
                 }
                 Err(error) => {
@@ -135,7 +135,7 @@ impl EnhancedGameServer {
     /// tick rather than risk clearing a live room's ready set.
     pub(crate) async fn prune_ready_players(&self) -> usize {
         let room_ids = self.room_coordinator.ready_player_room_ids().await;
-        let mut removed = 0;
+        let mut removed = 0usize;
         for room_id in room_ids {
             match self.database.get_room_by_id(&room_id).await {
                 Ok(Some(_)) => {}
@@ -146,7 +146,7 @@ impl EnhancedGameServer {
                         .await
                         .is_ok()
                     {
-                        removed += 1;
+                        removed = removed.saturating_add(1);
                     }
                 }
                 Err(err) => {
@@ -178,7 +178,7 @@ impl EnhancedGameServer {
                         .remove_expired_reconnection(&player_id)
                         .await
                     {
-                        count += 1;
+                        count = count.saturating_add(1);
                     }
                 }
                 Err(error) => {
@@ -336,7 +336,7 @@ impl EnhancedGameServer {
                     );
                 }
 
-                evicted_client_count += 1;
+                evicted_client_count = evicted_client_count.saturating_add(1);
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
                 self.unregister_client(&player_id).await;
             }

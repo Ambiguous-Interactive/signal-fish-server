@@ -9,6 +9,9 @@ use super::defaults::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Operational ceiling for a single WebSocket message batch.
+pub const MAX_BATCH_SIZE: usize = 65_536;
+
 /// WebSocket configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WebSocketConfig {
@@ -122,6 +125,12 @@ impl WebSocketConfig {
     /// choice (aggressive timeouts are useful for tests and hardened
     /// deployments alike).
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.batch_size > MAX_BATCH_SIZE {
+            anyhow::bail!(
+                "websocket.batch_size must not exceed {MAX_BATCH_SIZE} (configured: {})",
+                self.batch_size
+            );
+        }
         // Validate auth timeout: must be between 5 and 60 seconds
         if self.auth_timeout_secs < 5 {
             anyhow::bail!(
@@ -294,6 +303,12 @@ mod tests {
                 mutate: |_config| {},
                 expect_ok: true,
                 expect_error_containing: "",
+            },
+            Case {
+                name: "batch size above allocation ceiling",
+                mutate: |config| config.batch_size = MAX_BATCH_SIZE.saturating_add(1),
+                expect_ok: false,
+                expect_error_containing: "batch_size must not exceed",
             },
             Case {
                 name: "auth timeout below floor",

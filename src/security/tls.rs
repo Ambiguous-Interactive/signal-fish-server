@@ -117,7 +117,7 @@ fn build_client_verifier(tls: &TlsServerConfig) -> Result<Arc<dyn ClientCertVeri
         store
             .add(cert)
             .map_err(|err| anyhow!("invalid client CA certificate in {ca_path}: {err}"))?;
-        loaded += 1;
+        loaded = loaded.saturating_add(1);
     }
 
     if loaded == 0 {

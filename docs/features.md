@@ -401,7 +401,7 @@ Batch outbound messages for improved throughput.
 
 ```
 
-- `batch_size` - Max messages per batch
+- `batch_size` - Max messages per batch (maximum: 65,536)
 - `batch_interval_ms` - Max time to wait before flushing
 
 Batching is transparent to clients.

@@ -150,13 +150,19 @@ struct RoomEventLane {
 
 impl RoomEventLane {
     fn enqueue(self: &Arc<Self>, job: RoomEventJob) -> RoomEventCompletion {
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return Box::pin(async move {
+                    Err(anyhow::anyhow!(
+                        "room event enqueue requires an active Tokio runtime: {error}"
+                    ))
+                });
+            }
+        };
         let (completion, receiver) = tokio::sync::oneshot::channel();
         let should_start = {
             let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
-            debug_assert!(
-                queue.jobs.is_empty(),
-                "guard-coupled room enqueue permits at most one pending job per lane"
-            );
             queue.jobs.push_back(QueuedRoomEvent { job, completion });
             if queue.running {
                 false
@@ -168,7 +174,7 @@ impl RoomEventLane {
 
         if should_start {
             let lane = Arc::clone(self);
-            tokio::spawn(async move { lane.drain().await });
+            runtime.spawn(async move { lane.drain().await });
         }
 
         Box::pin(async move {
@@ -1269,7 +1275,9 @@ pub(crate) fn start_message_delivery_in_room(
         handle: handle.clone(),
         delivery,
         room_id,
-        deadline: tokio::time::Instant::now() + slow_consumer_timeout,
+        deadline: tokio::time::Instant::now()
+            .checked_add(slow_consumer_timeout)
+            .unwrap_or_else(tokio::time::Instant::now),
         timeout: slow_consumer_timeout,
         connection_stats,
         pending_class: offered_class,
@@ -2020,6 +2028,34 @@ mod tests {
             .expect("second task should not panic")
             .expect("second job completes"));
         assert_eq!(*order.lock().await, vec![1, 2]);
+    }
+
+    #[test]
+    fn room_event_enqueue_without_runtime_returns_error_instead_of_panicking() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5702);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+        let guard = runtime.block_on(sequencer.lock(room_id));
+        drop(runtime);
+
+        let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sequencer.enqueue(guard, Box::new(|| Box::pin(async { Ok(true) })))
+        }))
+        .expect("enqueue must not panic without a runtime");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+        let error = runtime
+            .block_on(completion)
+            .expect_err("enqueue must report the missing runtime");
+        assert!(error
+            .to_string()
+            .contains("requires an active Tokio runtime"));
     }
 
     #[tokio::test]

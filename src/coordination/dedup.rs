@@ -70,7 +70,8 @@ pub(crate) struct DedupCacheInsertOutcome {
 impl DedupCache {
     /// Create a new deduplication cache
     pub fn new(capacity: usize, ttl: Duration) -> Self {
-        let effective_capacity = if capacity == 0 { 1 } else { capacity };
+        const MAX_CAPACITY: usize = 65_536;
+        let effective_capacity = capacity.clamp(1, MAX_CAPACITY);
         let cache =
             LruCache::new(NonZeroUsize::new(effective_capacity).unwrap_or(NonZeroUsize::MIN));
 
@@ -97,7 +98,7 @@ impl DedupCache {
         sweep_interval: Duration,
         metrics: Arc<ServerMetrics>,
         capacity: usize,
-    ) {
+    ) -> Result<tokio::task::JoinHandle<()>, tokio::runtime::TryCurrentError> {
         let cache = self.clone();
         let interval_duration = if sweep_interval.is_zero() {
             Duration::from_secs(1)
@@ -105,7 +106,8 @@ impl DedupCache {
             sweep_interval
         };
 
-        tokio::spawn(async move {
+        let runtime = tokio::runtime::Handle::try_current()?;
+        Ok(runtime.spawn(async move {
             let mut ticker = interval(interval_duration);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -129,7 +131,7 @@ impl DedupCache {
                     }
                 }
             }
-        });
+        }))
     }
 
     /// Clean up expired entries and return (expired_count, current_size)
@@ -152,7 +154,7 @@ impl DedupCacheInner {
                 true
             } else {
                 self.cache.pop(key);
-                evicted += 1;
+                evicted = evicted.saturating_add(1);
                 false
             }
         } else {
@@ -168,7 +170,7 @@ impl DedupCacheInner {
         let mut evicted = self.evict_expired(now);
 
         if self.cache.len() == self.cache.cap().get() && self.cache.pop_lru().is_some() {
-            evicted += 1;
+            evicted = evicted.saturating_add(1);
         }
 
         self.cache.put(key, now);
@@ -178,11 +180,11 @@ impl DedupCacheInner {
 
     /// Evict all expired entries
     fn evict_expired(&mut self, now: Instant) -> usize {
-        let mut evicted = 0;
+        let mut evicted = 0usize;
         while let Some((_, stored_at)) = self.cache.peek_lru() {
             if now.duration_since(*stored_at) > self.ttl {
                 self.cache.pop_lru();
-                evicted += 1;
+                evicted = evicted.saturating_add(1);
             } else {
                 break;
             }
@@ -241,6 +243,24 @@ mod tests {
 
         let second_lookup = cache.check(&second_key).await;
         assert!(second_lookup.hit);
+    }
+
+    #[test]
+    fn extreme_capacity_is_bounded_without_panicking() {
+        let cache =
+            std::panic::catch_unwind(|| DedupCache::new(usize::MAX, Duration::from_secs(1)));
+        assert!(cache.is_ok());
+    }
+
+    #[test]
+    fn maintenance_without_runtime_returns_error_instead_of_panicking() {
+        let cache = DedupCache::new(8, Duration::from_secs(1));
+        let metrics = Arc::new(ServerMetrics::new());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.spawn_maintenance(Duration::from_secs(1), metrics, 8)
+        }));
+        assert!(result.is_ok());
+        assert!(result.ok().is_some_and(|task| task.is_err()));
     }
 
     #[tokio::test]

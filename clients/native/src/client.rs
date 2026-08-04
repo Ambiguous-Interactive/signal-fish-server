@@ -77,6 +77,10 @@ pub const EXIT_HARD_TIMEOUT: i32 = 4;
 /// re-sent, so waiting for it would never fire the probe).
 const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 
+fn checked_deadline(start: Instant, duration: Duration) -> Instant {
+    start.checked_add(duration).unwrap_or(start)
+}
+
 /// Grace period between meeting all success criteria and exiting, so the last
 /// unreliable-channel sends are not torn down mid-flight for slower siblings.
 const EXIT_LINGER: Duration = Duration::from_millis(250);
@@ -145,10 +149,10 @@ fn arm_pair_window(
     if !generation.arms_p2p_window() {
         return;
     }
-    let fresh_deadline = now + timeout;
+    let fresh_deadline = checked_deadline(now, timeout);
     *deadline = Some(fresh_deadline);
     *retry_at = (retry_count > 0)
-        .then(|| now + p2p_retry_delay(timeout.as_secs()))
+        .then(|| checked_deadline(now, p2p_retry_delay(timeout.as_secs())))
         .filter(|candidate| *candidate < fresh_deadline);
 }
 
@@ -215,7 +219,7 @@ pub async fn run(cli: &Cli) -> i32 {
 
 async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     // The soft run window starts at process start, handshake included.
-    let run_deadline = Instant::now() + Duration::from_secs(cli.run_for_secs);
+    let run_deadline = checked_deadline(Instant::now(), Duration::from_secs(cli.run_for_secs));
 
     let mut ws = wire::connect(&cli.server_url)
         .await
@@ -283,7 +287,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         // Late joiners arm the relay probe on entry (see RELAY_SEND_SETTLE):
         // the GameStarting trigger pre-dates the join and never re-fires.
         relay_send_at: (cli.relay_payload.is_some() && lobby_state == LobbyState::Finalized)
-            .then(|| Instant::now() + RELAY_SEND_SETTLE),
+            .then(|| checked_deadline(Instant::now(), RELAY_SEND_SETTLE)),
         relay_sent: false,
         relay_received_from: BTreeSet::new(),
         peer_status_from: BTreeSet::new(),
@@ -298,7 +302,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         linger_until: None,
         success_criteria_reported: false,
         success_release_poll_at: None,
-        next_ping_at: Instant::now() + PING_INTERVAL,
+        next_ping_at: checked_deadline(Instant::now(), PING_INTERVAL),
         pong_deadline: None,
         pong_grace_applied: false,
     };
@@ -945,13 +949,13 @@ impl Orchestrator<'_> {
                     "server did not answer Ping within {PONG_TIMEOUT:?} (+{PONG_DRAIN_GRACE:?} drain grace)"
                 )));
             }
-            self.pong_deadline = Some(now + PONG_DRAIN_GRACE);
+            self.pong_deadline = Some(checked_deadline(now, PONG_DRAIN_GRACE));
             self.pong_grace_applied = true;
         }
         if now >= self.next_ping_at && self.pong_deadline.is_none() {
             self.send_message(&ClientMessage::Ping).await?;
-            self.next_ping_at = now + PING_INTERVAL;
-            self.pong_deadline = Some(now + PONG_TIMEOUT);
+            self.next_ping_at = checked_deadline(now, PING_INTERVAL);
+            self.pong_deadline = Some(checked_deadline(now, PONG_TIMEOUT));
             self.pong_grace_applied = false;
         }
 
@@ -1019,7 +1023,8 @@ impl Orchestrator<'_> {
         if !self.criteria_met() {
             let release_pending =
                 self.success_criteria_reported && self.success_release_pending().await?;
-            self.success_release_poll_at = release_pending.then_some(now + SUCCESS_RELEASE_POLL);
+            self.success_release_poll_at =
+                release_pending.then_some(checked_deadline(now, SUCCESS_RELEASE_POLL));
             return Ok(());
         }
         if self.cli.success_release_file.is_some() && !self.success_criteria_reported {
@@ -1028,11 +1033,11 @@ impl Orchestrator<'_> {
         }
         if self.success_release_pending().await? {
             self.linger_until = None;
-            self.success_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
+            self.success_release_poll_at = Some(checked_deadline(now, SUCCESS_RELEASE_POLL));
         } else {
             self.success_release_poll_at = None;
             if self.linger_until.is_none() {
-                self.linger_until = Some(now + EXIT_LINGER);
+                self.linger_until = Some(checked_deadline(now, EXIT_LINGER));
             }
         }
         Ok(())
@@ -1067,7 +1072,7 @@ impl Orchestrator<'_> {
             return Ok(());
         }
         if self.p2p_release_pending().await? {
-            self.p2p_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
+            self.p2p_release_poll_at = Some(checked_deadline(now, SUCCESS_RELEASE_POLL));
             return Ok(());
         }
 
@@ -1118,7 +1123,7 @@ impl Orchestrator<'_> {
             self.exchange_ready_reported = true;
         }
         if self.exchange_release_pending().await? {
-            self.exchange_release_poll_at = Some(now + SUCCESS_RELEASE_POLL);
+            self.exchange_release_poll_at = Some(checked_deadline(now, SUCCESS_RELEASE_POLL));
             return Ok(());
         }
 
@@ -1269,7 +1274,7 @@ impl Orchestrator<'_> {
                     .unwrap_or(false);
                 emit(&Event::GameStarting { is_authority });
                 if self.cli.relay_payload.is_some() && !self.relay_sent {
-                    self.relay_send_at = Some(Instant::now() + RELAY_SEND_SETTLE);
+                    self.relay_send_at = Some(checked_deadline(Instant::now(), RELAY_SEND_SETTLE));
                 }
             }
             ServerMessage::SessionPlan(plan) => {
@@ -1767,8 +1772,8 @@ impl Orchestrator<'_> {
             self.cli.p2p_retry_count,
         )
         .is_empty();
-        self.p2p_retry_at =
-            another_retry_possible.then(|| now + p2p_retry_delay(self.cli.p2p_timeout_secs));
+        self.p2p_retry_at = another_retry_possible
+            .then(|| checked_deadline(now, p2p_retry_delay(self.cli.p2p_timeout_secs)));
         Ok(())
     }
 
@@ -2168,11 +2173,13 @@ impl Orchestrator<'_> {
             // at send time and is never replayed, so payloads sent before
             // this client's entry are unobservable and waiting for them
             // would hang. The late joiner's own send stays required.
-            if !self.late_joined && self.relay_received_from.len() + 1 < self.cli.peers {
+            if !self.late_joined
+                && self.relay_received_from.len().saturating_add(1) < self.cli.peers
+            {
                 unmet.push(format!(
                     "relay payloads observed from {} of {} peers",
                     self.relay_received_from.len(),
-                    self.cli.peers - 1
+                    self.cli.peers.saturating_sub(1)
                 ));
             }
         }

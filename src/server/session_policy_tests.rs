@@ -1177,6 +1177,16 @@ fn plan_for_host_filters_peers_to_session_capable_members_on_both_sides() {
         Some(host_id),
         "the host field stays as elected (informational)"
     );
+
+    let stale_host = stored.decision_with(vec![
+        relay_only_member(host_id, "DowngradedHost"),
+        v3_full(client, "Client"),
+    ]);
+    let client_plan = stale_host.plan_for(client, Vec::new());
+    assert!(
+        client_plan.peers.is_empty(),
+        "a stale unpairable host must fail closed instead of being advertised"
+    );
 }
 
 #[test]

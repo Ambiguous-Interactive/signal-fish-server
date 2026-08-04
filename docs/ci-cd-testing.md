@@ -443,16 +443,24 @@ local CI, and CI.
 # Run only clippy panic-related lints
 ./scripts/check-no-panics.sh clippy
 
-# Run only grep-based pattern scanning
+# Run only syntax-aware pattern scanning
 ./scripts/check-no-panics.sh patterns
 ```
 
 **What it checks:**
 
-- `panic!()`, `todo!()`, `unimplemented!()`, `unreachable!()` macros
+- `panic!()`, `todo!()`, `unimplemented!()`, `unreachable!()`, and all
+  `assert!` / `debug_assert!` macro families via a syn-based production-source scan
 - `.unwrap()` and `.expect()` calls (via clippy lints)
 - Unchecked array/slice indexing (`vec[i]`) via `clippy::indexing_slicing`
-- Explicit panic patterns in `src/` via grep scanning
+- Byte-indexed string slicing and unchecked arithmetic/deadline operations
+- Both the server targets and standalone native-client targets, including the
+  independently locked native Cargo graph
+- Source-level aliases and lint suppressions that would bypass the policy
+
+The scanner is a fail-closed syntactic baseline for first-party production
+code. Miri and sanitizer jobs provide complementary runtime coverage; the gate
+does not claim that dependencies or allocation failure can never panic.
 
 **CI integration:** The `panic-policy` job in `ci.yml` runs this script
 on every push and pull request to `main`. The job uses `ubuntu-latest`
@@ -712,10 +720,9 @@ cannot catch.
 
 ### Failure and Branch-Protection Status
 
-Miri is staged with `continue-on-error: true`; AddressSanitizer propagates
-failures to the workflow. Neither job is currently a branch-protection required
-check. Both upload actionable diagnostic artifacts so Miri can build an
-operational history while sanitizer regressions still make the workflow red.
+Miri and AddressSanitizer both propagate failures to the workflow. Neither job
+is currently a branch-protection required check, but a finding makes the
+Advanced Safety workflow red. Both upload actionable diagnostic artifacts.
 
 ### Jobs
 
@@ -738,21 +745,21 @@ reproducibility). The nightly pin follows the same strategy as
 
 ### Miri Scope
 
-Miri runs only on library unit tests (`--lib`). Integration tests are
+Miri runs on server library unit tests (`--lib`). Integration tests are
 excluded because they use networking, async runtimes, and OS-level I/O
 that Miri cannot interpret.
 
 ### Viewing Results
 
-Output artifacts are uploaded even when Miri reports findings under its staged
-`continue-on-error` policy, and when AddressSanitizer succeeds:
+Output artifacts are uploaded even when either gating analyzer reports a
+finding:
 
 - `miri-output` — Miri analysis output
 - `asan-output` — AddressSanitizer analysis output
 
 Download these from the workflow run's Artifacts section in GitHub Actions.
 
-### Promotion to Required
+### Promotion to Required Branch Protection
 
 These checks will be promoted to required branch-protection checks when:
 
@@ -760,7 +767,8 @@ These checks will be promoted to required branch-protection checks when:
 - No nightly toolchain incidents during that window
 - Median runtime stays within the timeout budget
 
-Until promotion, Miri findings are informational and should be triaged weekly.
+Until repository settings promote these names to required checks, the workflow
+still propagates both analyzers' failures and reports red.
 AddressSanitizer failures already make the workflow fail even though the check
 is not yet required by branch protection.
 
@@ -769,7 +777,7 @@ is not yet required by branch protection.
 | Test | What It Validates |
 |------|-------------------|
 | `test_ci_safety_workflow_has_required_jobs` | Both `miri` and `asan` jobs exist |
-| `test_ci_safety_workflow_failure_policy_is_explicit` | Miri is staged and AddressSanitizer is gating |
+| `test_ci_safety_workflow_failure_policy_is_explicit` | Miri and AddressSanitizer are gating |
 | `test_ci_safety_workflow_uses_pinned_nightly` | Pinned nightly toolchain is used |
 | `test_ci_safety_workflow_has_required_triggers` | All four trigger types are present |
 | `test_ci_safety_workflow_uploads_artifacts` | Output artifacts are uploaded |

@@ -13,8 +13,8 @@
 # all-jobs-run-on-schedule
 #
 # Failure Policy / Branch Protection:
-#   Miri remains staged with continue-on-error: true. AddressSanitizer failures
-#   propagate to the workflow so a memory-safety regression cannot look green.
+#   Miri and AddressSanitizer failures propagate to the workflow so a
+#   memory-safety regression cannot look green.
 #   Neither job is currently a branch-protection required check; that repository
 #   setting is independent of whether a workflow reports its own failure.
 #
@@ -55,14 +55,6 @@
 #
 #   See also: .llm/skills/msrv-management/SKILL.md (Nightly-Only CI Tools section)
 #
-# Promotion Criteria:
-#   Miri should become gating, and both jobs should become required
-#   branch-protection checks, when:
-#     - Failure rate < 2% over a 2-4 week observation window
-#     - No nightly toolchain incidents (breakage, unavailability) during that window
-#     - Median runtime stays within the timeout budget (45 min Miri, 30 min ASan)
-#   Until promotion, Miri failures are informational and should be triaged weekly.
-
 name: Advanced Safety
 
 on:
@@ -75,6 +67,9 @@ on:
       - 'build.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'clients/native/src/**'
+      - 'clients/native/Cargo.toml'
+      - 'clients/native/Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/ci-safety.yml'
   pull_request:
@@ -86,6 +81,9 @@ on:
       - 'build.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'clients/native/src/**'
+      - 'clients/native/Cargo.toml'
+      - 'clients/native/Cargo.lock'
       - 'rust-toolchain.toml'
       - '.github/workflows/ci-safety.yml'
   schedule:
@@ -111,8 +109,6 @@ jobs:
     # Miri interprets code rather than compiling it natively, which is
     # significantly slower — 10-50x depending on the test suite size.
     timeout-minutes: 45
-    # Staged: non-blocking until promoted to a gating job.
-    continue-on-error: true
     env:
       CARGO_TARGET_DIR: target/miri
     steps:
@@ -277,6 +273,11 @@ jobs:
           RUSTFLAGS="-Z sanitizer=address" \
             cargo +nightly-2026-08-01 test --locked --target x86_64-unknown-linux-gnu \
             --all-features --no-fail-fast 2>&1 | tee asan-output.txt
+          RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly-2026-08-01 test --locked \
+            --manifest-path clients/native/Cargo.toml \
+            --target x86_64-unknown-linux-gnu --lib --all-features --no-fail-fast \
+            2>&1 | tee -a asan-output.txt
           echo "AddressSanitizer analysis complete."
 
       - name: Diagnose AddressSanitizer failures

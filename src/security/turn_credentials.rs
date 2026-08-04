@@ -54,14 +54,10 @@ pub struct TurnCredentials {
 /// ([`TurnConfig::validate`](crate::config::TurnConfig::validate) rejects an empty
 /// secret when TURN is enabled), never here.
 #[must_use]
-fn hmac_sha1_base64(key: &[u8], msg: &[u8]) -> String {
-    // SAFETY: `new_from_slice` only errors for fixed-size MACs; HMAC accepts a key
-    // of any length, so this is infallible. The empty-key degenerate case is guarded
-    // at the config layer ([`TurnConfig::validate`]), never here.
-    #[allow(clippy::expect_used)]
-    let mut mac = HmacSha1::new_from_slice(key).expect("HMAC accepts a key of any length");
+fn hmac_sha1_base64(key: &[u8], msg: &[u8]) -> Option<String> {
+    let mut mac = HmacSha1::new_from_slice(key).ok()?;
     mac.update(msg);
-    BASE64.encode(mac.finalize().into_bytes())
+    Some(BASE64.encode(mac.finalize().into_bytes()))
 }
 
 /// Mint a coturn REST TURN credential pair for `player_id`, valid until
@@ -79,7 +75,8 @@ pub fn mint_turn_credentials(
     expiry_unix: i64,
 ) -> TurnCredentials {
     let username = format!("{expiry_unix}:{player_id}");
-    let credential = hmac_sha1_base64(static_auth_secret.as_bytes(), username.as_bytes());
+    let credential =
+        hmac_sha1_base64(static_auth_secret.as_bytes(), username.as_bytes()).unwrap_or_default();
     TurnCredentials {
         username,
         credential,
@@ -162,11 +159,13 @@ mod tests {
     #[test]
     fn hmac_sha1_base64_matches_rfc2202_case2() {
         let got = hmac_sha1_base64(b"Jefe", b"what do ya want for nothing?");
-        assert_eq!(got, "7/zfauXrL6LSdBbV8YTfnCWafHk=");
+        assert_eq!(got.as_deref(), Some("7/zfauXrL6LSdBbV8YTfnCWafHk="));
 
         // Cross-check the base64 against the canonical hex digest, so the literal
         // above is provably the same 20 bytes RFC 2202 publishes.
-        let raw = BASE64.decode(&got).expect("our own base64 decodes");
+        let raw = BASE64
+            .decode(got.unwrap_or_default())
+            .expect("our own base64 decodes");
         let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
     }

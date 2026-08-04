@@ -106,7 +106,7 @@ impl InMemoryDistributedLock {
         let now = chrono::Utc::now();
         let initial_count = locks.len();
         locks.retain(|_, entry| entry.expires_at > now);
-        initial_count - locks.len()
+        initial_count.saturating_sub(locks.len())
     }
 }
 
@@ -149,7 +149,10 @@ impl DistributedLock for InMemoryDistributedLock {
             anyhow::bail!("injected lock acquisition failure for {key}");
         }
         let handle = LockHandle::new(key.to_string(), ttl);
-        let expires_at = handle.acquired_at + chrono::Duration::from_std(ttl)?;
+        let expires_at = handle
+            .acquired_at
+            .checked_add_signed(chrono::Duration::from_std(ttl)?)
+            .ok_or_else(|| anyhow::anyhow!("lock TTL exceeds the supported date range"))?;
 
         // Single write lock acquisition: cleanup expired entries and check/insert atomically
         // to prevent TOCTOU race where another task acquires the same lock between cleanup and insert
@@ -174,7 +177,9 @@ impl DistributedLock for InMemoryDistributedLock {
     }
 
     async fn extend(&self, handle: &LockHandle, ttl: Duration) -> Result<bool> {
-        let new_expires_at = chrono::Utc::now() + chrono::Duration::from_std(ttl)?;
+        let new_expires_at = chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::from_std(ttl)?)
+            .ok_or_else(|| anyhow::anyhow!("lock TTL exceeds the supported date range"))?;
 
         // Single write lock acquisition: cleanup and extend atomically
         let mut locks = self.locks.write().await;
@@ -333,7 +338,7 @@ impl CircuitBreaker {
             }
             Err(error) => {
                 let mut inner = self.inner.lock().await;
-                inner.failure_count += 1;
+                inner.failure_count = inner.failure_count.saturating_add(1);
 
                 if inner.failure_count >= self.failure_threshold {
                     inner.state = CircuitState::Open;

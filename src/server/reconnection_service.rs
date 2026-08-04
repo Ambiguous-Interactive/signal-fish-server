@@ -264,7 +264,7 @@ impl EnhancedGameServer {
             %player_id,
             %room_id,
             %was_authority,
-            reconnection_token = %token[..8].to_string(),
+            reconnection_token = %token.get(..8).unwrap_or("<invalid>"),
             "Player disconnection registered for reconnection"
         );
     }

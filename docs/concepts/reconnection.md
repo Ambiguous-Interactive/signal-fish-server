@@ -314,8 +314,9 @@ Reconnection is enabled by default. Relevant server settings:
   to disable reconnection entirely.
 - `reconnection_window` -- Seconds before a disconnected player's token
   expires. Default: `300` (5 minutes).
-- `event_buffer_size` -- Maximum number of control events buffered per
-  room (the replay ring). Default: `100`. Set to `0` to disable event
+- `event_buffer_size` -- Maximum number of control events buffered per room
+  (the replay ring). Default: `100`; maximum: `65,536`. Values above the
+  ceiling are rejected at startup. Set to `0` to disable event
   replay entirely; v3 clients are then told `replay: "unavailable"`.
 
 ```json

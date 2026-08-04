@@ -136,7 +136,7 @@ impl EnhancedGameServer {
                 .try_send_to_player(&player_id, Arc::clone(&message))
                 .await
             {
-                Ok(true) => enqueued += 1,
+                Ok(true) => enqueued = enqueued.saturating_add(1),
                 Ok(false) => {
                     tracing::debug!(
                         %player_id,
@@ -163,7 +163,7 @@ impl EnhancedGameServer {
                 .connection_manager
                 .request_close_for(&player_id, CloseReason::Shutdown)
             {
-                requested += 1;
+                requested = requested.saturating_add(1);
             }
         }
         requested
@@ -186,7 +186,9 @@ impl EnhancedGameServer {
         max_wait: Duration,
         mut after_active_check: impl FnMut(),
     ) -> usize {
-        let deadline = tokio::time::Instant::now() + max_wait;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(max_wait)
+            .unwrap_or_else(tokio::time::Instant::now);
         loop {
             let notified = self.active_socket_tasks_notify.notified();
             tokio::pin!(notified);

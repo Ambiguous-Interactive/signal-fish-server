@@ -392,9 +392,10 @@ pub(crate) fn ice_pregather_eligible(
 /// Every other combination (e.g. `Mesh + Direct`, `Host + Relay`) is illegal and
 /// must never reach a client: downstream consumers — late-join WebRTC pairing, ICE
 /// emission, the relay-floor short-circuit — rely on this topology/transport
-/// coupling. Backs the `debug_assert!` in [`choose_session_plan`] and the
-/// exhaustive `selection_only_ever_yields_a_legal_pair` invariant test.
+/// coupling. The exhaustive `selection_only_ever_yields_a_legal_pair`
+/// invariant test protects the ladder and fallback constants.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn is_valid_pair(topology: Topology, transport: Transport) -> bool {
     UPGRADE_LADDER
         .into_iter()
@@ -446,11 +447,6 @@ pub(crate) fn choose_session_plan(
                 && rung_is_executable(&members, topology, transport)
         })
         .unwrap_or(RELAY_FLOOR);
-
-    debug_assert!(
-        is_valid_pair(topology, transport),
-        "choose_session_plan must yield a legal (topology, transport) pair"
-    );
 
     let host = if topology == Topology::Host {
         let electable: Vec<_> = members
@@ -662,21 +658,8 @@ impl SessionPlanDecision {
             // Each pairable client connects only to the host and offers to it.
             self.members
                 .iter()
-                .find(|member| member.player_id == host)
+                .find(|member| member.player_id == host && self.pairable(member))
                 .map(|host_member| {
-                    // Invariant (structurally unfireable): an elected host
-                    // always satisfies the session capability predicate —
-                    // finalize election runs under `all_support`, failover/heal
-                    // re-election (`replan_host_session`) elects from a
-                    // pre-filtered slice, and every stored-plan rehydration
-                    // repairs a host that fails the predicate before building
-                    // plans ([`ActiveSessionPlan::host_invalid`] treats a
-                    // seated-but-downgraded host as invalid), so no path can
-                    // reach this closure with a non-pairable host.
-                    debug_assert!(
-                        self.pairable(host_member),
-                        "elected host must satisfy the session capability predicate"
-                    );
                     vec![SessionPeer {
                         player_id: host_member.player_id,
                         player_name: host_member.player_name.clone(),
@@ -770,7 +753,7 @@ impl EnhancedGameServer {
             let now_unix = decision
                 .uses_webrtc_signaling()
                 .then(|| chrono::Utc::now().timestamp());
-            let mut turn_credentials_issued = 0;
+            let mut turn_credentials_issued = 0u64;
             let recipient_messages = finalized
                 .members
                 .iter()
@@ -791,7 +774,7 @@ impl EnhancedGameServer {
                                 )
                             },
                         );
-                        turn_credentials_issued += minted;
+                        turn_credentials_issued = turn_credentials_issued.saturating_add(minted);
                         messages.push(Arc::new(ServerMessage::SessionPlan(Box::new(
                             decision.plan_for(member.id, ice_servers),
                         ))));
@@ -924,13 +907,13 @@ impl EnhancedGameServer {
             .map(|entry| *entry.key())
             .collect();
 
-        let mut removed = 0;
+        let mut removed = 0usize;
         for room_id in room_ids {
             match self.database.get_room_by_id(&room_id).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     if self.active_session_plans.remove(&room_id).is_some() {
-                        removed += 1;
+                        removed = removed.saturating_add(1);
                     }
                 }
                 // Transient storage error: keep the entry and retry next tick.

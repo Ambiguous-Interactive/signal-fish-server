@@ -182,10 +182,8 @@ let guard = state.lock().unwrap_or_else(|poisoned| {
     poisoned.into_inner()
 });
 
-// ✅ Fail-closed when data integrity is critical
-// SAFETY: Intentional — if credentials are corrupted, we must not proceed
-#[allow(clippy::expect_used)]
-let guard = credentials.lock().expect("credentials lock poisoned");
+// ✅ Propagate poisoned shared state as a typed error
+let guard = credentials.lock().map_err(|_| Error::StatePoisoned)?;
 ```
 
 ---
@@ -200,8 +198,12 @@ let s = String::from_utf8(bytes)
 // ✅ Safe slicing (byte-index slicing panics on invalid boundary)
 let sub = s.get(0..4).ok_or(Error::InvalidSlice)?;
 
-// ✅ floor_char_boundary() for safe truncation (Rust 1.80+)
-let truncated = &s[..s.floor_char_boundary(max_len)];
+// ✅ MSRV-safe UTF-8 boundary search plus get()
+let mut boundary = max_len.min(s.len());
+while boundary > 0 && !s.is_char_boundary(boundary) {
+    boundary = boundary.saturating_sub(1);
+}
+let truncated = s.get(..boundary).unwrap_or_default();
 ```
 
 ---
@@ -219,12 +221,22 @@ fn average(total: u32, count: NonZeroU32) -> u32 { total / count.get() }
 
 ---
 
-## `unreachable!()` vs `debug_assert!()`
+## Runtime Invariants Without Assertion Panics
 
 ```rust
-// ✅ debug_assert!() — invariants checked only in debug builds
-debug_assert!(index < self.len(), "index out of bounds: {index}");
-// Compiled out in release builds — zero runtime cost
+// ✅ Encode an invalid state out of the API when practical
+fn at<T>(items: &[T], index: usize) -> Option<&T> {
+    items.get(index)
+}
+
+// ✅ Otherwise fail closed or choose an explicit safe fallback
+let Some(item) = items.get(index) else {
+    tracing::error!(index, len = items.len(), "Invalid item index rejected");
+    return Err(Error::InvalidIndex);
+};
+
+// ❌ Production assert!/debug_assert! calls can still panic in supported builds
+debug_assert!(index < items.len());
 
 // ❌ Don't use unreachable!() as substitute for proper error handling on user input
 match user_input.parse::<u8>() {

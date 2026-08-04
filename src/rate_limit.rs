@@ -84,8 +84,8 @@ impl RateLimitEntry {
             return Err(RoomCreationLimit::Joins);
         }
 
-        self.room_creations += 1;
-        self.join_attempts += 1;
+        self.room_creations = self.room_creations.saturating_add(1);
+        self.join_attempts = self.join_attempts.saturating_add(1);
         Ok(())
     }
 
@@ -93,7 +93,7 @@ impl RateLimitEntry {
     fn try_join_attempt(&mut self, config: &RateLimitConfig) -> bool {
         self.maybe_reset_window(config);
         if self.join_attempts < config.max_join_attempts {
-            self.join_attempts += 1;
+            self.join_attempts = self.join_attempts.saturating_add(1);
             true
         } else {
             false
@@ -104,7 +104,7 @@ impl RateLimitEntry {
     fn try_signal(&mut self, config: &RateLimitConfig) -> bool {
         self.maybe_reset_window(config);
         if self.signals < config.max_signals {
-            self.signals += 1;
+            self.signals = self.signals.saturating_add(1);
             true
         } else {
             false
@@ -121,7 +121,7 @@ impl RateLimitEntry {
     fn try_signal_error(&mut self, config: &RateLimitConfig) -> bool {
         self.maybe_reset_window(config);
         if self.signal_errors < config.max_signal_errors {
-            self.signal_errors += 1;
+            self.signal_errors = self.signal_errors.saturating_add(1);
             true
         } else {
             false
@@ -303,10 +303,13 @@ impl RoomRateLimiter {
     }
 
     /// Start a background task to periodically clean up old entries
-    pub fn start_cleanup_task(self: Arc<Self>) {
+    pub fn start_cleanup_task(
+        self: Arc<Self>,
+    ) -> Result<tokio::task::JoinHandle<()>, tokio::runtime::TryCurrentError> {
         let cleanup_interval = self.cleanup_interval();
         let rate_limiter = Arc::downgrade(&self);
-        tokio::spawn(async move {
+        let runtime = tokio::runtime::Handle::try_current()?;
+        Ok(runtime.spawn(async move {
             let mut interval = tokio::time::interval(cleanup_interval);
             loop {
                 interval.tick().await;
@@ -315,7 +318,7 @@ impl RoomRateLimiter {
                 };
                 rate_limiter.cleanup_old_entries().await;
             }
-        });
+        }))
     }
 
     /// Get current stats for a player (for debugging/monitoring)
@@ -754,6 +757,16 @@ mod tests {
             !limiter.cleanup_interval().is_zero(),
             "a zero rate-limit window must clamp to a non-zero cleanup interval"
         );
+    }
+
+    #[test]
+    fn cleanup_task_without_runtime_returns_error_instead_of_panicking() {
+        let limiter = Arc::new(RoomRateLimiter::new(create_test_config()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            limiter.start_cleanup_task()
+        }));
+        assert!(result.is_ok());
+        assert!(result.ok().is_some_and(|task| task.is_err()));
     }
 
     #[tokio::test]

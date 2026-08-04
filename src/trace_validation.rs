@@ -495,7 +495,7 @@ fn push_event(
     delivery_id: Option<u64>,
     detail: Option<&'static str>,
 ) {
-    let seq = state.events.len() as u64 + 1;
+    let seq = (state.events.len() as u64).saturating_add(1);
     state.events.push(DeliveryTraceEvent {
         seq,
         action,

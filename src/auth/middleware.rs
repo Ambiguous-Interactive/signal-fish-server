@@ -57,13 +57,19 @@ const DEFAULT_RATE_LIMIT_PER_DAY: u32 = 100_000;
 fn deterministic_uuid(key: &str) -> Uuid {
     let hash = Sha256::digest(key.as_bytes());
     let mut bytes = [0u8; 16];
-    // SAFETY: SHA-256 always produces exactly 32 bytes, so [..16] is always in bounds.
-    #[allow(clippy::indexing_slicing)]
-    bytes.copy_from_slice(&hash[..16]);
+    let Some(prefix) = hash.get(..16) else {
+        tracing::error!("SHA-256 produced an invalid digest length");
+        return Uuid::nil();
+    };
+    bytes.copy_from_slice(prefix);
     // Set version to 4 (bits 48..51)
-    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    if let Some(version) = bytes.get_mut(6) {
+        *version = (*version & 0x0F) | 0x40;
+    }
     // Set variant to RFC 4122 (bits 64..65)
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    if let Some(variant) = bytes.get_mut(8) {
+        *variant = (*variant & 0x3F) | 0x80;
+    }
     Uuid::from_bytes(bytes)
 }
 
@@ -135,8 +141,10 @@ impl AuthMiddleware {
 
         let rate_limiter = Arc::new(InMemoryRateLimiter::new(Duration::from_secs(60)));
 
-        if has_rate_limited_app && tokio::runtime::Handle::try_current().is_ok() {
-            let _cleanup_handle = rate_limiter.clone().start_cleanup_task();
+        if has_rate_limited_app {
+            if let Err(error) = rate_limiter.clone().start_cleanup_task() {
+                tracing::warn!(%error, "Auth rate-limit cleanup requires an active Tokio runtime");
+            }
         }
 
         Self {

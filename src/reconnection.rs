@@ -88,7 +88,7 @@ impl ReconnectionToken {
             player_id,
             room_id,
             created_at: now,
-            expires_at: now + Duration::seconds(validity_seconds),
+            expires_at: expiration_from(now, validity_seconds),
         }
     }
 
@@ -101,6 +101,12 @@ impl ReconnectionToken {
     pub fn is_valid(&self, player_id: &PlayerId, room_id: &RoomId) -> bool {
         !self.is_expired() && self.player_id == *player_id && self.room_id == *room_id
     }
+}
+
+fn expiration_from(now: DateTime<Utc>, validity_seconds: i64) -> DateTime<Utc> {
+    Duration::try_seconds(validity_seconds)
+        .and_then(|validity| now.checked_add_signed(validity))
+        .unwrap_or(now)
 }
 
 /// Event buffer for a room
@@ -135,10 +141,13 @@ pub struct BufferedEvent {
 impl EventBuffer {
     /// Create a new event buffer
     pub fn new(room_id: RoomId, max_size: usize) -> Self {
+        let max_size = max_size.min(crate::config::server::MAX_EVENT_BUFFER_SIZE);
         Self {
             room_id,
             max_size,
-            events: VecDeque::with_capacity(max_size),
+            // Avoid allocating from an untrusted public/configuration value.
+            // The bounded ring grows only as replayable events arrive.
+            events: VecDeque::new(),
             evicted_watermark: None,
         }
     }
@@ -157,14 +166,14 @@ impl EventBuffer {
         self.events.push_back(event);
 
         // Remove oldest events if buffer is full
-        let mut evicted = 0;
+        let mut evicted = 0usize;
         while self.events.len() > self.max_size {
             if let Some(oldest) = self.events.pop_front() {
                 self.evicted_watermark = Some(
                     self.evicted_watermark
                         .map_or(oldest.sequence, |watermark| watermark.max(oldest.sequence)),
                 );
-                evicted += 1;
+                evicted = evicted.saturating_add(1);
             }
         }
         evicted
@@ -236,7 +245,7 @@ struct PreservedPending {
 impl DisconnectedPlayer {
     /// Check if reconnection window has expired
     pub fn is_expired(&self, window_seconds: i64) -> bool {
-        let expiry = self.disconnected_at + Duration::seconds(window_seconds);
+        let expiry = expiration_from(self.disconnected_at, window_seconds);
         Utc::now() > expiry
     }
 }
@@ -503,7 +512,7 @@ impl ReconnectionManager {
                     player_id,
                     room_id,
                     created_at: existing.token_created_at,
-                    expires_at: now + Duration::seconds(self.reconnection_window),
+                    expires_at: expiration_from(now, self.reconnection_window),
                 },
                 false,
             ),
@@ -514,7 +523,7 @@ impl ReconnectionManager {
                         player_id,
                         room_id,
                         created_at: pre_issued.created_at,
-                        expires_at: now + Duration::seconds(self.reconnection_window),
+                        expires_at: expiration_from(now, self.reconnection_window),
                     },
                     false,
                 ),
@@ -1016,7 +1025,7 @@ impl ReconnectionManager {
             }
             !expired
         });
-        let removed = initial_count - state.disconnected_players.len();
+        let removed = initial_count.saturating_sub(state.disconnected_players.len());
         let remaining = state.disconnected_players.len();
         let rooms_still_pending: std::collections::HashSet<RoomId> = state
             .disconnected_players
@@ -1193,6 +1202,12 @@ mod tests {
         assert_eq!(buffer.events.len(), 3);
         assert_eq!(buffer.events[0].sequence, 2); // Oldest kept
         assert_eq!(buffer.events[2].sequence, 4); // Newest
+    }
+
+    #[test]
+    fn extreme_event_buffer_size_does_not_panic_during_construction() {
+        let buffer = std::panic::catch_unwind(|| EventBuffer::new(Uuid::new_v4(), usize::MAX));
+        assert!(buffer.is_ok());
     }
 
     #[test]
