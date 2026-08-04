@@ -71,9 +71,23 @@ pub(crate) struct ClientConnection {
     pub protocol: NegotiatedProtocol,
     /// Last data-path transport state this client reported via
     /// [`ClientMessage::TransportStatus`](crate::protocol::ClientMessage::TransportStatus)
-    /// (v3 only). `None` until the client reports — the relay floor is the implicit
-    /// default and never closes regardless of what is (or is not) reported.
-    pub transport_status: Option<(Transport, bool)>,
+    /// (v3 only), tagged with the room/spectator membership generation in which
+    /// it was observed. `None` until the client reports — the relay floor is the
+    /// implicit default and never closes regardless of what is (or is not)
+    /// reported. A status from an older generation is retained only so a failed
+    /// prepared transition can roll back without losing its dedup baseline.
+    pub transport_status: Option<(Uuid, Transport, bool)>,
+    /// Opaque room/spectator membership token for transport-status
+    /// deduplication. Every committed or prepared role transition replaces it
+    /// with a fresh token; a failed prepared transition restores the exact
+    /// prior token. This is deliberately
+    /// independent of `game_data_epoch`, which models seated sender
+    /// incarnations only and does not advance for spectators.
+    pub membership_generation: Uuid,
+    /// Exact rollback state for the latest prepared membership transition.
+    /// A later transition supersedes it; replacements are collision-resistant
+    /// UUIDs explicitly distinct from the current and retained-status tokens.
+    pub prior_membership_generation: Option<Uuid>,
     /// Last relay sequence number stamped on this client's outbound game data
     /// (protocol v3): the per-(sender, room) counter behind
     /// [`ServerMessage::GameData::seq`](crate::protocol::ServerMessage). `0`
@@ -200,6 +214,34 @@ pub(crate) struct ConnectionManager {
 }
 
 impl ConnectionManager {
+    fn fresh_membership_generation(
+        current: Uuid,
+        retained_status: Option<(Uuid, Transport, bool)>,
+    ) -> Uuid {
+        loop {
+            let candidate = Uuid::new_v4();
+            if candidate != current
+                && retained_status.is_none_or(|(generation, _, _)| candidate != generation)
+            {
+                return candidate;
+            }
+        }
+    }
+
+    fn advance_membership_generation(client: &mut ClientConnection) {
+        client.prior_membership_generation = Some(client.membership_generation);
+        client.membership_generation = Self::fresh_membership_generation(
+            client.membership_generation,
+            client.transport_status,
+        );
+    }
+
+    fn rollback_membership_generation(client: &mut ClientConnection) {
+        if let Some(prior) = client.prior_membership_generation.take() {
+            client.membership_generation = prior;
+        }
+    }
+
     pub fn new(
         max_connections_per_ip: usize,
         metrics: Arc<ServerMetrics>,
@@ -272,6 +314,8 @@ impl ConnectionManager {
             app_info: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
+            membership_generation: Uuid::nil(),
+            prior_membership_generation: None,
             game_data_seq: 0,
             game_data_epoch: 0,
         };
@@ -314,6 +358,8 @@ impl ConnectionManager {
             app_info: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
+            membership_generation: Uuid::nil(),
+            prior_membership_generation: None,
             game_data_seq: 0,
             game_data_epoch: 0,
         };
@@ -362,6 +408,7 @@ impl ConnectionManager {
     ) -> Option<(ClientDeliveryHandle, RelayStamp)> {
         let mut client = self.clients.get_mut(player_id)?;
         client.room_id = Some(room_id);
+        Self::advance_membership_generation(&mut client);
         // Fresh room membership => fresh per-(sender, room) relay stamp stream.
         client.game_data_seq = 0;
         // Saturation cannot regress an epoch, unlike wrapping at u32::MAX.
@@ -388,6 +435,7 @@ impl ConnectionManager {
             return None;
         }
         client.room_id = None;
+        Self::rollback_membership_generation(&mut client);
         client.game_data_seq = 0;
         client.sender = client.sender.previous_generation();
         Some(client.delivery_handle())
@@ -447,7 +495,7 @@ impl ConnectionManager {
                 return TransportStatusUpdate::UnsupportedTransport;
             }
 
-            let new_status = Some((transport, connected));
+            let new_status = Some((connection.membership_generation, transport, connected));
             if connection.transport_status == new_status {
                 return TransportStatusUpdate::Duplicate;
             }
@@ -467,7 +515,14 @@ impl ConnectionManager {
     pub fn transport_status(&self, player_id: &PlayerId) -> Option<(Transport, bool)> {
         self.clients
             .get(player_id)
-            .and_then(|conn| conn.transport_status)
+            .and_then(|conn| match conn.transport_status {
+                Some((generation, transport, connected))
+                    if generation == conn.membership_generation =>
+                {
+                    Some((transport, connected))
+                }
+                _ => None,
+            })
     }
 
     /// Whether the client negotiated protocol v3+ (the single unshipped
@@ -520,6 +575,7 @@ impl ConnectionManager {
                 epoch: client.game_data_epoch,
             };
             client.room_id = None;
+            Self::advance_membership_generation(&mut client);
             // Membership ended: the next room (same or different) starts a
             // fresh stamp stream (see the `game_data_seq` field doc).
             client.game_data_seq = 0;
@@ -535,6 +591,7 @@ impl ConnectionManager {
 
     pub async fn advance_delivery_generation(&self, player_id: &PlayerId) {
         let delivery = self.clients.get_mut(player_id).map(|mut client| {
+            Self::advance_membership_generation(&mut client);
             client.sender = client.sender.next_generation();
             client.delivery_handle()
         });
@@ -553,6 +610,7 @@ impl ConnectionManager {
     /// generation to the coordinator.
     pub async fn rollback_delivery_generation(&self, player_id: &PlayerId) {
         let delivery = self.clients.get_mut(player_id).map(|mut client| {
+            Self::rollback_membership_generation(&mut client);
             client.sender = client.sender.previous_generation();
             client.delivery_handle()
         });
@@ -708,6 +766,11 @@ impl ConnectionManager {
         if let Some((_, old_connection)) = self.clients.remove(current_player_id) {
             let mut delivery = old_connection.delivery_handle();
             delivery.sender = delivery.sender.next_generation();
+            let prior_membership_generation = old_connection.membership_generation;
+            let membership_generation = Self::fresh_membership_generation(
+                prior_membership_generation,
+                old_connection.transport_status,
+            );
             let new_client = ClientConnection {
                 room_id: Some(room_id),
                 lifecycle: Arc::clone(&old_connection.lifecycle),
@@ -719,11 +782,13 @@ impl ConnectionManager {
                 game_data_format: old_connection.game_data_format,
                 app_info: old_connection.app_info,
                 protocol: old_connection.protocol,
-                // The negotiated protocol survives a reconnect, but the reported
-                // data-path transport state does not: a reconnecting client must
-                // re-establish (and re-report) its P2P path, so the stale status is
-                // cleared rather than carried over.
-                transport_status: None,
+                // Preserve any roomless transient-socket status only as rollback
+                // state. Advancing the membership generation below makes it
+                // ineligible for reconnect deduplication, so the restored player
+                // must establish and report its P2P path afresh.
+                transport_status: old_connection.transport_status,
+                membership_generation,
+                prior_membership_generation: Some(prior_membership_generation),
                 // Restart-on-rejoin: a reconnecting sender's relay stamp
                 // stream starts over at 1; recipients treat its
                 // `PlayerReconnected` as a seq reset (field doc above).
@@ -773,6 +838,9 @@ impl ConnectionManager {
 
         let mut delivery = reassigned_connection.delivery_handle();
         delivery.sender = delivery.sender.previous_generation();
+        let membership_generation = reassigned_connection
+            .prior_membership_generation
+            .unwrap_or(reassigned_connection.membership_generation);
         let restored_client = ClientConnection {
             room_id: None,
             lifecycle: Arc::clone(&reassigned_connection.lifecycle),
@@ -784,7 +852,9 @@ impl ConnectionManager {
             game_data_format: reassigned_connection.game_data_format,
             app_info: reassigned_connection.app_info,
             protocol: reassigned_connection.protocol,
-            transport_status: None,
+            transport_status: reassigned_connection.transport_status,
+            membership_generation,
+            prior_membership_generation: None,
             game_data_seq: 0,
             game_data_epoch: 0,
         };
