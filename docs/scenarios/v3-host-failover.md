@@ -77,6 +77,7 @@ The new host, Carol, receives a plan listing the remaining client(s) — here ju
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "00000000-0000-0000-0000-00000000000e",
     "topology": "host",
     "transport": "webrtc",
     "host": "00000000-0000-0000-0000-00000000000c",
@@ -108,6 +109,7 @@ The remaining client, Dave, receives a plan whose single peer is the **new** hos
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "00000000-0000-0000-0000-00000000000e",
     "topology": "host",
     "transport": "webrtc",
     "host": "00000000-0000-0000-0000-00000000000c",
@@ -132,9 +134,11 @@ The remaining client, Dave, receives a plan whose single peer is the **new** hos
 }
 ```
 
-Next: Dave tears down its dead connection to the old host and offers to the new host Carol (`Signal{to: Carol,
-Offer}`); Carol answers. The exchange is identical in shape to the [host topology](v3-host-topology.md) step 2,
-just with Carol as the host. ICE trickle and `TransportStatus` reporting proceed as before.
+Next: Dave tears down its dead connection to the old host and offers to the new
+host Carol (`Signal{to: Carol, generation: G, Offer}`); Carol answers using the
+same new generation. The exchange is identical in shape to the
+[host topology](v3-host-topology.md) step 2, just with Carol as the host. ICE
+trickle and `TransportStatus` reporting proceed as before.
 
 ## Notes
 

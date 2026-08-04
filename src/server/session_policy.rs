@@ -50,7 +50,7 @@ use crate::coordination::{
 };
 use crate::protocol::{
     ConnectionInfo, DirectEndpoint, IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId,
-    ServerMessage, SessionPeer, SessionPlanPayload, Topology, Transport,
+    ServerMessage, SessionGeneration, SessionPeer, SessionPlanPayload, Topology, Transport,
 };
 
 use super::signaling::local_initiates;
@@ -83,6 +83,7 @@ impl ActiveSessionPlan {
     /// joins, reconnects, and departure re-planning.
     pub(crate) fn decision_with(self, members: Vec<SessionMember>) -> SessionPlanDecision {
         SessionPlanDecision {
+            generation: SessionGeneration::new_v4(),
             topology: self.topology,
             transport: self.transport,
             host: self.host,
@@ -184,6 +185,7 @@ impl SessionMember {
 /// own freshly minted TURN credentials), so the emit site builds them and passes
 /// them into [`SessionPlanDecision::plan_for`].
 pub(crate) struct SessionPlanDecision {
+    pub generation: SessionGeneration,
     pub topology: Topology,
     pub transport: Transport,
     pub host: Option<PlayerId>,
@@ -209,6 +211,7 @@ pub(crate) fn membership_session_decision(
     let Some(stored) = stored else {
         return MembershipSessionDecision {
             decision: SessionPlanDecision {
+                generation: SessionGeneration::new_v4(),
                 topology: Topology::Relay,
                 transport: Transport::Relay,
                 host: None,
@@ -245,6 +248,7 @@ pub(crate) fn membership_session_decision(
     } else {
         MembershipSessionDecision {
             decision: SessionPlanDecision {
+                generation: SessionGeneration::new_v4(),
                 topology: Topology::Relay,
                 transport: Transport::Relay,
                 host: None,
@@ -460,6 +464,7 @@ pub(crate) fn choose_session_plan(
     };
 
     SessionPlanDecision {
+        generation: SessionGeneration::new_v4(),
         topology,
         transport,
         host,
@@ -606,6 +611,7 @@ impl SessionPlanDecision {
         };
 
         SessionPlanPayload {
+            generation: self.generation,
             topology: self.topology,
             transport: self.transport,
             host: self.host,

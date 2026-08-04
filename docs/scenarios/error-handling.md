@@ -87,6 +87,7 @@ The client sends an oversized signal:
   "type": "Signal",
   "data": {
     "to": "00000000-0000-0000-0000-00000000000b",
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "signal": { "Offer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n... (a very large SDP) ..." }
   }
 }
@@ -130,7 +131,7 @@ an explicit relay-floor reset:
 ```text
 v3 member's inbox at finalization:
   GameStarting       { peer_connections: [...] }
-  SessionPlan        { topology: relay, transport: relay, peers: [], fallback: relay }
+  SessionPlan        { generation: G, topology: relay, transport: relay, peers: [], fallback: relay }
 ```
 
 Next: the v3 client applies the latest plan, tears down any stale P2P links, and

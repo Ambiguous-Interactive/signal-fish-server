@@ -803,8 +803,8 @@ Game is starting with legacy peer metadata.
 `peer_connections` carries player identity, authority, relay type, and optional
 self-declared `connection_info` from `ProvideConnectionInfo`. It is kept for
 v2/back-compat and does not prove direct or WebRTC reachability. v3 clients use
-the negotiated `SessionPlan` for topology, transport, peers, ICE servers, and
-relay fallback.
+the negotiated `SessionPlan` for its generation fence, topology, transport,
+peers, ICE servers, and relay fallback.
 
 ### Error
 
@@ -1248,6 +1248,10 @@ These eight messages exist only on a negotiated v3 connection.
 #### Signal
 
 `Signal` carries an **opaque** payload that the server never parses — it is forwarded verbatim to the target peer.
+Every signal also carries the `generation` UUID from the sender's latest
+`SessionPlan`. Recipients accept it only when that UUID equals their current
+plan generation; delayed offers, answers, and candidates from older connection
+attempts are discarded.
 By convention the payload is matchbox-compatible: one of `{"Offer": "..."}`, `{"Answer": "..."}`, or
 `{"IceCandidate": "..."}`. The server validates only the envelope (payload size cap, same room, negotiated WebRTC,
 rate limit, v3 target); it never inspects the SDP or ICE strings. A payload whose serialized JSON exceeds
@@ -1258,7 +1262,7 @@ Client → server (`to` names the target peer):
 ```json
 {
   "type": "Signal",
-  "data": { "to": "<player-uuid>", "signal": { "Offer": "<sdp>" } }
+  "data": { "to": "<player-uuid>", "generation": "<session-generation-uuid>", "signal": { "Offer": "<sdp>" } }
 }
 ```
 
@@ -1267,7 +1271,7 @@ Server → client (`from` names the originating peer):
 ```json
 {
   "type": "Signal",
-  "data": { "from": "<player-uuid>", "signal": { "Answer": "<sdp>" } }
+  "data": { "from": "<player-uuid>", "generation": "<session-generation-uuid>", "signal": { "Answer": "<sdp>" } }
 }
 ```
 
@@ -1297,7 +1301,8 @@ sent after the unchanged `GameStarting`, and only to v3-capable members. Every v
 upgrade rung fits, the server emits an explicit `topology: "relay"`, `transport: "relay"`, empty-peers reset.
 Protocol-v2 members never observe it. Each recipient gets its own tailored `peers` list, `initiate` flags, and, for
 WebRTC transports, ICE servers with freshly minted TURN credentials. It carries topology, transport, peers, ICE
-servers, and relay fallback. For `host + direct`, it also carries
+servers, a required opaque `generation` UUID, and relay fallback. All plans in
+one authoritative publication share that generation. For `host + direct`, it also carries
 `direct_endpoint: { host, port }`, projected from the elected host's validated
 self-declared `ConnectionInfo::Direct`. Other plans omit the field. Validation
 proves only that the host/port is syntactically connectable (non-zero port;
@@ -1341,8 +1346,11 @@ transport: a v3 member that did not (e.g. a relay-only seat-filler, or one with 
 session's topology) still receives its plan, but with an **empty** `peers` list — it has no P2P peers and
 participates via the relay floor (`host` stays as elected, informational) — and never appears in other members'
 `peers`. At finalization this filter is vacuous for non-relay decisions, because an upgrade is selected only when
-every member supports it. The client contract is uniform: **the latest `SessionPlan` wins** — tear down peers absent
-from the new list, retain or rebuild those still present, and initiate only where `peers[].initiate` is true.
+every member supports it. The client contract is uniform: **the latest
+`SessionPlan` wins**. A changed generation is a connection-attempt barrier:
+tear down and rebuild even retained WebRTC pairs with the new ICE credentials,
+reject signals from every other generation, remove peers absent from the new
+list, and initiate only where `peers[].initiate` is true.
 
 The relay-floor reset has this exact shape:
 
@@ -1350,6 +1358,7 @@ The relay-floor reset has this exact shape:
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "<session-generation-uuid>",
     "topology": "relay",
     "transport": "relay",
     "peers": [],
@@ -1362,6 +1371,7 @@ The relay-floor reset has this exact shape:
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "<session-generation-uuid>",
     "topology": "mesh",
     "transport": "webrtc",
     "peers": [
@@ -1595,11 +1605,11 @@ A                         server                          B
 |--------------------------------->|<----------------------|  Authenticate (v3, mesh+webrtc)
 |  (both ready → finalize)         |                       |
 |<--- GameStarting ----------------|---- GameStarting ---->|
-|<--- SessionPlan(mesh,webrtc) ----|---- SessionPlan ----->|   per-recipient: A.peers=[B initiate=true],
+|<--- SessionPlan(mesh,webrtc,generation=G) - SessionPlan(generation=G) ->| per-recipient: A.peers=[B initiate=true],
 |                                  |                       |                  B.peers=[A initiate=false]
-|  Signal{to:B, Offer} ----------->|---- Signal{from:A} -->|
-|<-- Signal{from:B} ---------------|<--- Signal{to:A,Answer}|
-|  Signal{to:B, IceCandidate} ---->|---- Signal{from:A} -->|   (ICE trickle, both directions)
+|  Signal{to:B, generation:G, Offer} ->|-- Signal{from:A, generation:G} ->|
+|<- Signal{from:B, generation:G} --|<- Signal{to:A, generation:G, Answer}|
+|  Signal{to:B, generation:G, ICE} ->|-- Signal{from:A, generation:G} ->| (ICE trickle, both directions)
 |  == WebRTC data channel open ==  |                       |
 |  TransportStatus{webrtc, true} ->|<-- TransportStatus{webrtc, true}
 |                                  |                       |
@@ -1612,12 +1622,12 @@ A                         server                          B
 
 ```text
 C1                        server                          H (host)            C2
-|  SessionPlan(host,webrtc,host=H) |                       |                   |
+|  SessionPlan(host,webrtc,host=H,generation=G)             |                   |
 |<--- (C1.peers=[H initiate=true]) |-- SessionPlan ------->|-- SessionPlan --->|  (C2.peers=[H initiate=true];
 |                                  |   H.peers=[C1,C2 initiate=false]          |   each client offers to H)
-|  Signal{to:H, Offer} ----------->|---- Signal{from:C1} ->|                   |
-|<-- Signal{from:H, Answer} -------|<--- Signal{to:C1} ----|                   |
-|                                  |<--- Signal{from:C2} --|<-- Signal{to:H,Offer} (C2 offers to H)
+|  Signal{to:H,generation:G,Offer}->|-- Signal{from:C1,generation:G} ->|        |
+|<- Signal{from:H,generation:G,Answer} <- Signal{to:C1,generation:G} --|        |
+|                                  |<- Signal{from:C2,generation:G} <- Signal{to:H,generation:G,Offer}
 |  == C1⇄H channel open ==         |    == C2⇄H channel open ==                |
 |  (C1 and C2 never signal each other in a star topology)                     |
 |  (on failure: each client falls back to GameData over the relay floor)      |

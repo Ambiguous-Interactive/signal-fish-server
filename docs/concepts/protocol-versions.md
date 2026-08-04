@@ -119,10 +119,12 @@ for every finalized session, including an explicit relay-floor reset. `Signal`
 is WebRTC-transport-gated between same-room v3 peers; status, reliability, and
 shutdown messages are independently gated by their features:
 
-- `SessionPlan` (server → client) — your per-recipient session directive: `topology`, `transport`, the `peers`
+- `SessionPlan` (server → client) — your per-recipient session directive:
+  opaque `generation`, `topology`, `transport`, the `peers`
   to connect to (each with an `initiate` flag), `ice_servers`, optional `host`, and `fallback: "relay"`.
-- `Signal` (client ⇄ server) — opaque WebRTC signaling (`Offer` / `Answer` / `IceCandidate`) relayed verbatim to
-  or from a named peer. Required only for the `webrtc` transport.
+- `Signal` (client ⇄ server) — generation-scoped opaque WebRTC signaling
+  (`Offer` / `Answer` / `IceCandidate`) relayed verbatim to or from a named
+  peer. Required only for the `webrtc` transport.
 - `NewPeer` (server → client) — compatibility shape for an additive WebRTC peer
   directive. Current finalized membership changes use complete `SessionPlan`
   refreshes instead.
@@ -189,7 +191,8 @@ counters. Always resynchronize application state after recipient absence.
 
 Two rules keep the client simple across finalization, late joins, reconnects, and host failover:
 
-- **The latest `SessionPlan` wins.** On every `SessionPlan`, (re)configure the session and connect per
+- **The latest `SessionPlan` wins.** On every changed plan `generation`, rebuild
+  retained WebRTC pairs, reject signals from other generations, and connect per
   `peers[].initiate`, tearing down peer connections no longer listed (for example a departed host). A plan can be
   re-issued mid-session — its topology and transport never change, only membership-derived fields (`peers`,
   `host`, `ice_servers`).

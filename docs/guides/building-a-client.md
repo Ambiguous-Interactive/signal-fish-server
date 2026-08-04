@@ -137,7 +137,7 @@ even on the `/v3/ws` endpoint. The server echoes the negotiated
 (`["websocket"]` today) in `ProtocolInfo`.
 
 After `GameStarting`, every v3 member receives a per-recipient
-**`SessionPlan`** describing the chosen `topology`, `transport`, optional
+**`SessionPlan`** describing its opaque `generation`, chosen `topology`, `transport`, optional
 `host`, optional validated `direct_endpoint`, `peers` with per-peer `initiate`
 flags, `ice_servers`, and universal `fallback`. Relay-resolved rooms send
 `relay`/`relay` with an empty peer list, which is an authoritative instruction
@@ -149,15 +149,17 @@ proof, so failure still transitions to the relay floor.
 The signaling rules you must follow:
 
 - **Latest `SessionPlan` wins.** A new `SessionPlan` supersedes the previous one
-  (e.g. on host failover, join, or reconnect). Apply the most recent one,
-  remove peers no longer listed, and use its latest ICE credentials.
+  (e.g. on host failover, join, or reconnect). When `generation` changes,
+  rebuild retained WebRTC pairs with its latest ICE credentials and discard
+  signals from every other generation; also remove peers no longer listed.
 - **The glare rule is server-driven.** Each `SessionPlan` peer's `initiate`
   tells you whether _you_ send the WebRTC offer.
   Exactly one side of every pair is the offerer. **Do not recompute this
   yourself** from UUID ordering or topology — just obey the flag.
-- **Relay `Signal` verbatim.** Send `{ "type": "Signal", "data": { "to": <peer>,
+- **Relay `Signal` verbatim.** Copy the current plan's generation when sending
+  `{ "type": "Signal", "data": { "to": <peer>, "generation": <generation>,
   "signal": <opaque> } }`; you receive the peer's signal as
-  `{ "type": "Signal", "data": { "from": <peer>, "signal": <opaque> } }`. The
+  `{ "type": "Signal", "data": { "from": <peer>, "generation": <generation>, "signal": <opaque> } }`. The
   server never inspects `signal`; by convention it is matchbox-compatible
   (`{"Offer":..}` / `{"Answer":..}` / `{"IceCandidate":..}`).
 - **Report transport state (optional).** Send `TransportStatus` when your WebRTC

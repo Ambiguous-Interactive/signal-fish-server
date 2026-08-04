@@ -96,4 +96,9 @@ The final worktree passed the complete local matrix:
 - `scripts/run-turn-interop.sh` (TURN-only positive and mismatched-secret
   fallback controls)
 
-Exact-head hosted CI and the post-push reviewer loop remain pending.
+Exact-head hosted CI completed on
+`27642721b2264b57b68a1cdb286c4d5cd5f2d785`: all 18 applicable workflows
+succeeded and the Dependabot-only workflow was intentionally skipped. Cursor
+Bugbot reviewed that exact head with no findings or inline threads. Copilot was
+requested after each push but returned its account-quota notice. PR #259 merged
+to `main` as `f2311b8f6c205a8c29b667157e75d236fa5b2f1b`, completing P41.

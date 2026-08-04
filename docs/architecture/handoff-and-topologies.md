@@ -53,7 +53,8 @@ every current player is ready, and the server broadcasts the unchanged
    breaking ties by the smaller UUID for determinism. Direct hosts must have a
    validated self-declared endpoint.
 4. **Emit per-recipient `SessionPlan`s.** Each v3 member receives a plan tailored
-   to it — its own `peers` list, per-recipient `initiate` flags, and ICE servers
+   to it — one shared publication `generation`, its own `peers` list,
+   per-recipient `initiate` flags, and ICE servers
    only when the selected transport is WebRTC. A Direct plan instead repeats the
    elected host's validated `direct_endpoint`. A relay-floor plan has no host,
    endpoint, peers, or ICE and explicitly resets stale P2P state.
@@ -110,8 +111,9 @@ still receives an empty-peer plan and participates through relay. Protocol-v2
 members receive only their frozen lifecycle traffic.
 
 The full refresh replaces the old additive `NewPeer` membership delta. It gives
-incumbents and the joining actor one authoritative peer set and removes stale
-links in the same transition. See the
+incumbents and the joining actor one authoritative peer set and a shared new
+generation. Clients rebuild even retained WebRTC links with the refreshed ICE
+credentials and reject delayed signals from the prior generation. See the
 [late-join decision table](../protocol.md#late-join-decision-table).
 
 ICE can also arrive **before** any plan: an eligible v3 client — one that
@@ -185,8 +187,9 @@ validated endpoint. Non-host Direct clients need no endpoint.
 - **The last member departs** (or the room is cleaned up): the stored plan is
   dropped.
 
-The client contract stays uniform: **the latest `SessionPlan` wins** — on
-receipt, (re)configure the session and connect per `peers[].initiate`.
+The client contract stays uniform: **the latest `SessionPlan` wins** — on a
+changed generation, rebuild retained WebRTC pairs, reject other-generation
+signals, and connect per `peers[].initiate`.
 
 ## Fallback to the floor
 

@@ -42,6 +42,7 @@ Carol's plan lists a single peer — the host, Alice — with `initiate: true` (
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "00000000-0000-0000-0000-00000000000d",
     "topology": "host",
     "transport": "webrtc",
     "host": "00000000-0000-0000-0000-00000000000a",
@@ -73,6 +74,7 @@ TURN credential:
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "00000000-0000-0000-0000-00000000000d",
     "topology": "host",
     "transport": "webrtc",
     "host": "00000000-0000-0000-0000-00000000000a",
@@ -104,6 +106,7 @@ client) and `is_authority: false` (the clients are not the host):
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "00000000-0000-0000-0000-00000000000d",
     "topology": "host",
     "transport": "webrtc",
     "host": "00000000-0000-0000-0000-00000000000a",
@@ -149,6 +152,7 @@ Carol sends:
   "type": "Signal",
   "data": {
     "to": "00000000-0000-0000-0000-00000000000a",
+    "generation": "00000000-0000-0000-0000-00000000000d",
     "signal": { "Offer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }
@@ -161,6 +165,7 @@ Alice (host) receives:
   "type": "Signal",
   "data": {
     "from": "00000000-0000-0000-0000-00000000000c",
+    "generation": "00000000-0000-0000-0000-00000000000d",
     "signal": { "Offer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }
@@ -173,6 +178,7 @@ Alice answers Carol:
   "type": "Signal",
   "data": {
     "to": "00000000-0000-0000-0000-00000000000c",
+    "generation": "00000000-0000-0000-0000-00000000000d",
     "signal": { "Answer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }
@@ -185,6 +191,7 @@ Carol receives:
   "type": "Signal",
   "data": {
     "from": "00000000-0000-0000-0000-00000000000a",
+    "generation": "00000000-0000-0000-0000-00000000000d",
     "signal": { "Answer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }

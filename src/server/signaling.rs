@@ -24,7 +24,8 @@ use crate::coordination::{
     RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 use crate::protocol::{
-    room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage, Transport,
+    room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage,
+    SessionGeneration, Transport,
 };
 
 use super::session_policy::membership_session_decision;
@@ -69,7 +70,26 @@ impl EnhancedGameServer {
     /// Relay an opaque WebRTC signal from `from` to `to`, enforcing the P2
     /// security invariants (payload size cap, same room, negotiated WebRTC,
     /// rate limit, v3 target).
+    #[cfg(test)]
     pub async fn handle_signal(&self, from: &PlayerId, to: PlayerId, signal: serde_json::Value) {
+        self.handle_signal_in_generation(from, to, SessionGeneration::nil(), signal)
+            .await;
+    }
+
+    /// Relay one generation-fenced opaque WebRTC signal.
+    ///
+    /// The server deliberately does not interpret or topology-gate the
+    /// generation: it preserves the same room-ordered dumb-plumbing contract
+    /// as the opaque signal body. Recipients compare it with their latest
+    /// authoritative `SessionPlan`, which safely drops both delayed traffic
+    /// and frames from endpoints that have not applied the same plan yet.
+    pub async fn handle_signal_in_generation(
+        &self,
+        from: &PlayerId,
+        to: PlayerId,
+        generation: SessionGeneration,
+        signal: serde_json::Value,
+    ) {
         let Some(lifecycle) = self.connection_manager.client_lifecycle(from) else {
             return;
         };
@@ -294,6 +314,7 @@ impl EnhancedGameServer {
                 &from_room,
                 Arc::new(ServerMessage::Signal {
                     from: *from,
+                    generation,
                     signal,
                 }),
             )

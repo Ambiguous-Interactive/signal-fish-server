@@ -44,7 +44,7 @@ use std::future::Future;
 use serde_json::json;
 use signal_fish_server::protocol::{
     ClientMessage, DirectEndpoint, ErrorCode, GameDataEncoding, IceServer, LobbyState, PlayerId,
-    PlayerInfo, ServerMessage, Transport,
+    PlayerInfo, ServerMessage, SessionGeneration, Transport,
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -82,6 +82,13 @@ const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 const EXIT_LINGER: Duration = Duration::from_millis(250);
 /// Poll cadence for an optional harness-controlled success release file.
 const SUCCESS_RELEASE_POLL: Duration = Duration::from_millis(100);
+
+/// Defensive bounds for signals that legitimately race a held/current planned
+/// peer's local engine creation. Authoritative plan-before-signal ordering
+/// makes buffering rare; bounds keep a malicious same-room endpoint from
+/// turning that race seam into unbounded memory growth.
+const MAX_PENDING_SIGNALS_PER_PEER: usize = 32;
+const MAX_PENDING_SIGNALS_TOTAL: usize = 128;
 
 /// Retry early enough to leave the original P2P window useful, while allowing
 /// ordinary ICE/DTLS/SCTP setup to settle first. The 15-second ceiling is also
@@ -258,6 +265,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
             && lobby_state == LobbyState::Finalized,
         pending_membership_plans: BTreeMap::new(),
         webrtc_plan_seen: false,
+        current_session_generation: None,
         expected_peers: BTreeSet::new(),
         pair_roles: BTreeMap::new(),
         pair_retry_attempts: BTreeMap::new(),
@@ -534,7 +542,31 @@ fn should_buffer_signal_for_unpaired_peer(
     held_by_p2p_gate: bool,
     peer: PlayerId,
 ) -> bool {
-    held_by_p2p_gate || !expected_peers.contains(&peer)
+    held_by_p2p_gate || expected_peers.contains(&peer)
+}
+
+fn is_current_session_generation(
+    current: Option<SessionGeneration>,
+    incoming: SessionGeneration,
+) -> bool {
+    current == Some(incoming)
+}
+
+fn try_buffer_planned_signal(
+    pending: &mut BTreeMap<PlayerId, VecDeque<serde_json::Value>>,
+    peer: PlayerId,
+    signal: serde_json::Value,
+) -> bool {
+    let total = pending.values().map(VecDeque::len).sum::<usize>();
+    if total >= MAX_PENDING_SIGNALS_TOTAL
+        || pending
+            .get(&peer)
+            .is_some_and(|signals| signals.len() >= MAX_PENDING_SIGNALS_PER_PEER)
+    {
+        return false;
+    }
+    pending.entry(peer).or_default().push_back(signal);
+    true
 }
 
 fn requires_authoritative_finalization_plan(negotiated_version: u16) -> bool {
@@ -559,18 +591,14 @@ fn authoritative_peer_delta(
     }
 }
 
-fn connection_targets_for_plan(
+fn connection_targets_for_generation(
     delta: &AuthoritativePeerDelta,
-    mut is_paired: impl FnMut(PlayerId) -> bool,
+    rebuild_retained: bool,
 ) -> BTreeSet<PlayerId> {
     let mut targets = delta.added.clone();
-    targets.extend(
-        delta
-            .retained
-            .iter()
-            .copied()
-            .filter(|peer| !is_paired(*peer)),
-    );
+    if rebuild_retained {
+        targets.extend(delta.retained.iter().copied());
+    }
     targets
 }
 
@@ -673,6 +701,9 @@ struct Orchestrator<'a> {
     pending_membership_plans: BTreeMap<PlayerId, u32>,
     /// A WebRTC `SessionPlan` was received (gates the transport-status criterion).
     webrtc_plan_seen: bool,
+    /// Opaque generation from the latest authoritative `SessionPlan`. Every
+    /// inbound/outbound signal must match it.
+    current_session_generation: Option<SessionGeneration>,
     /// Peers the authoritative plan names (plus compatible `NewPeer` deltas).
     expected_peers: BTreeSet<PlayerId>,
     /// Server-authored glare role for each planned peer; retained so a
@@ -1167,6 +1198,8 @@ impl Orchestrator<'_> {
                 self.initial_session_plan_pending = false;
                 self.pending_membership_plans.clear();
                 self.lobby_state = None;
+                self.current_session_generation = None;
+                self.pending_signals.clear();
             }
             ServerMessage::PlayerJoined { player } => {
                 self.accountability
@@ -1242,6 +1275,11 @@ impl Orchestrator<'_> {
             ServerMessage::SessionPlan(plan) => {
                 self.initial_session_plan_pending = false;
                 self.pending_membership_plans.clear();
+                let generation_changed = self.current_session_generation != Some(plan.generation);
+                self.current_session_generation = Some(plan.generation);
+                if generation_changed {
+                    self.pending_signals.clear();
+                }
                 self.drop_ice_from =
                     resolve_drop_ice_from(self.cli.drop_ice_from, self.my_id, &plan.peers)
                         .map_err(FatalError::protocol)?;
@@ -1273,10 +1311,18 @@ impl Orchestrator<'_> {
                 }
                 let planned_peers = session_plan_peer_ids(plan.transport, &plan.peers, self.my_id);
                 let delta = authoritative_peer_delta(&self.expected_peers, &planned_peers);
-                let mut added =
-                    connection_targets_for_plan(&delta, |peer| self.engine.is_paired(peer));
+                let rebuild_retained = generation_changed && plan.transport == Transport::WebRtc;
+                let mut added = connection_targets_for_generation(&delta, rebuild_retained);
                 for peer in delta.removed {
                     self.remove_pair_obligation(peer).await;
+                }
+                if rebuild_retained {
+                    for peer in delta.retained {
+                        self.prepare_retained_pair_replacement(peer).await;
+                    }
+                    if self.webrtc_plan_seen && self.transport_status.is_some() {
+                        self.resolve_transport_status().await?;
+                    }
                 }
                 for peer in &plan.peers {
                     if plan.transport == Transport::WebRtc && peer.player_id != self.my_id {
@@ -1319,8 +1365,12 @@ impl Orchestrator<'_> {
                     self.pending_pair_directives.insert(peer_id, you_initiate);
                 }
             }
-            ServerMessage::Signal { from, signal } => {
-                self.handle_signal(from, signal).await?;
+            ServerMessage::Signal {
+                from,
+                generation,
+                signal,
+            } => {
+                self.handle_signal(from, generation, signal).await?;
             }
             ServerMessage::GameData {
                 from_player,
@@ -1557,6 +1607,26 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
+    /// Retire one retained physical link before applying a newer authoritative
+    /// wire generation. Logical pair/exchange observations deliberately stay
+    /// intact: the replacement is a transport generation of the same planned
+    /// peer obligation, not a second gameplay peer.
+    async fn prepare_retained_pair_replacement(&mut self, peer: PlayerId) {
+        self.connected_pairs.remove(&peer);
+        self.ice_gathering_complete.remove(&peer);
+        self.pair_retry_attempts.remove(&peer);
+        self.retrying_pairs.insert(peer);
+        self.pending_pair_directives.remove(&peer);
+        self.pending_signals.remove(&peer);
+        if let Err(error) = self.engine.remove_peer(peer).await {
+            let message = format!(
+                "failed to close superseded peer connection {peer}; continuing on relay: {error:#}"
+            );
+            tracing::warn!(%peer, %error, "peer cleanup failed during authoritative replacement");
+            emit(&Event::Error { message });
+        }
+    }
+
     /// Pair with `peer` per the server's directive: create the connection,
     /// offer when told to, then drain any defensively buffered signals.
     async fn establish_pair(&mut self, peer: PlayerId, initiate: bool) -> Result<(), FatalError> {
@@ -1724,8 +1794,18 @@ impl Orchestrator<'_> {
     async fn handle_signal(
         &mut self,
         from: PlayerId,
+        generation: SessionGeneration,
         signal: serde_json::Value,
     ) -> Result<(), FatalError> {
+        if !is_current_session_generation(self.current_session_generation, generation) {
+            tracing::debug!(
+                %from,
+                %generation,
+                current_generation = ?self.current_session_generation,
+                "discarding signal outside the current authoritative generation"
+            );
+            return Ok(());
+        }
         let kind = SignalKind::classify(&signal);
         emit(&Event::SignalReceived { from, kind });
         if kind == SignalKind::PairRetry {
@@ -1737,12 +1817,11 @@ impl Orchestrator<'_> {
                 self.pending_pair_directives.contains_key(&from),
                 from,
             ) {
-                self.pending_signals
-                    .entry(from)
-                    .or_default()
-                    .push_back(signal);
+                if !try_buffer_planned_signal(&mut self.pending_signals, from, signal) {
+                    tracing::warn!(%from, "dropping planned-peer signal because the defensive buffer is full");
+                }
             } else {
-                tracing::debug!(%from, "discarding stale signal from terminal expected peer");
+                tracing::debug!(%from, "discarding signal from a peer absent from the authoritative plan");
             }
             return Ok(());
         }
@@ -1968,8 +2047,17 @@ impl Orchestrator<'_> {
         kind: SignalKind,
         signal: serde_json::Value,
     ) -> Result<(), FatalError> {
-        self.send_message(&ClientMessage::Signal { to, signal })
-            .await?;
+        let generation = self.current_session_generation.ok_or_else(|| {
+            FatalError::protocol(format!(
+                "cannot signal peer {to} before an authoritative SessionPlan"
+            ))
+        })?;
+        self.send_message(&ClientMessage::Signal {
+            to,
+            generation,
+            signal,
+        })
+        .await?;
         emit(&Event::SignalSent { to, kind });
         Ok(())
     }
@@ -2215,7 +2303,7 @@ fn harness_aware_base_wake(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     use tokio::time::Duration;
 
@@ -2230,16 +2318,17 @@ mod tests {
 
     use super::{
         arm_pair_window, authoritative_peer_delta, changed_transport_status,
-        clear_departed_membership_plan, connection_targets_for_plan,
+        clear_departed_membership_plan, connection_targets_for_generation,
         consume_join_accountability_preface, direct_plan_rejection_message,
-        harness_aware_base_wake, is_terminal_peer_connection_state, needs_ice_gathering_marker,
-        negotiated_version_from, next_handshake_message, note_current_pair_connected,
-        p2p_retry_delay, reject_unsupported_direct_plan_with, require_finalized_membership_plan,
-        requires_authoritative_finalization_plan, resolve_drop_ice_from,
-        restore_reconnected_member, retryable_missing_peers, session_plan_peer_ids,
-        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
-        should_resolve_connected_pair, validate_json_negotiated_server_message, PairGeneration,
-        EXIT_PROTOCOL_ERROR,
+        harness_aware_base_wake, is_current_session_generation, is_terminal_peer_connection_state,
+        needs_ice_gathering_marker, negotiated_version_from, next_handshake_message,
+        note_current_pair_connected, p2p_retry_delay, reject_unsupported_direct_plan_with,
+        require_finalized_membership_plan, requires_authoritative_finalization_plan,
+        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
+        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
+        should_defer_success_at_run_deadline, should_resolve_connected_pair,
+        try_buffer_planned_signal, validate_json_negotiated_server_message, PairGeneration,
+        EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL,
     };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -2477,16 +2566,30 @@ mod tests {
     }
 
     #[test]
-    fn fresh_plan_retries_retained_obligation_with_absent_engine_link() {
-        let retained = PlayerId::from_u128(2);
-        let peers = BTreeSet::from([retained]);
+    fn changed_generation_rebuilds_both_asymmetric_pair_endpoints() {
+        let peer = PlayerId::from_u128(2);
+        let peers = BTreeSet::from([peer]);
         let delta = authoritative_peer_delta(&peers, &peers);
-        assert_eq!(
-            connection_targets_for_plan(&delta, |_| false),
-            peers,
-            "a fresh plan must retry an absent retained link"
-        );
-        assert!(connection_targets_for_plan(&delta, |_| true).is_empty());
+
+        for (scenario, initiator_paired, responder_paired) in [
+            ("initiator retains, responder missing", true, false),
+            ("initiator missing, responder retains", false, true),
+        ] {
+            for (role, paired) in [
+                ("initiator", initiator_paired),
+                ("responder", responder_paired),
+            ] {
+                assert_eq!(
+                    connection_targets_for_generation(&delta, true),
+                    peers,
+                    "{scenario}: {role} must install the new physical generation"
+                );
+                assert!(
+                    connection_targets_for_generation(&delta, false).is_empty(),
+                    "{scenario}: duplicate generation must not let {role} rebuild unilaterally (paired={paired})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2504,12 +2607,12 @@ mod tests {
         }
         assert_eq!(changed_transport_status(Some(true), 0), Some(false));
         let peer = PlayerId::from_u128(2);
-        assert!(should_buffer_signal_for_unpaired_peer(
+        assert!(!should_buffer_signal_for_unpaired_peer(
             &BTreeSet::new(),
             false,
             peer
         ));
-        assert!(!should_buffer_signal_for_unpaired_peer(
+        assert!(should_buffer_signal_for_unpaired_peer(
             &BTreeSet::from([peer]),
             false,
             peer
@@ -2519,6 +2622,53 @@ mod tests {
             true,
             peer
         ));
+    }
+
+    #[test]
+    fn planned_signal_buffer_has_per_peer_and_aggregate_bounds() {
+        let mut pending = BTreeMap::new();
+        let first = PlayerId::from_u128(1);
+        for index in 0..MAX_PENDING_SIGNALS_PER_PEER {
+            assert!(try_buffer_planned_signal(
+                &mut pending,
+                first,
+                json!({ "IceCandidate": index })
+            ));
+        }
+        assert!(!try_buffer_planned_signal(
+            &mut pending,
+            first,
+            json!({ "IceCandidate": "per-peer overflow" })
+        ));
+
+        for peer_index in 2_u128..=4 {
+            let peer = PlayerId::from_u128(peer_index);
+            for signal_index in 0..MAX_PENDING_SIGNALS_PER_PEER {
+                assert!(try_buffer_planned_signal(
+                    &mut pending,
+                    peer,
+                    json!({ "IceCandidate": signal_index })
+                ));
+            }
+        }
+        assert_eq!(
+            pending.values().map(VecDeque::len).sum::<usize>(),
+            MAX_PENDING_SIGNALS_TOTAL
+        );
+        assert!(!try_buffer_planned_signal(
+            &mut pending,
+            PlayerId::from_u128(5),
+            json!({ "Offer": "aggregate overflow" })
+        ));
+    }
+
+    #[test]
+    fn wire_session_generation_rejects_stale_and_pre_plan_signals() {
+        let current = uuid::Uuid::from_u128(1);
+        let stale = uuid::Uuid::from_u128(2);
+        assert!(is_current_session_generation(Some(current), current));
+        assert!(!is_current_session_generation(Some(current), stale));
+        assert!(!is_current_session_generation(None, current));
     }
 
     #[test]

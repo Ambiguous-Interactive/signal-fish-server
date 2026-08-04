@@ -135,6 +135,7 @@ async fn expect_signal_rejection(ws: &mut WsStream, target: PlayerId) {
         ws,
         &ClientMessage::Signal {
             to: target,
+            generation: uuid::Uuid::nil(),
             signal: json!({"Offer": "cross-instance-offer"}),
         },
     )

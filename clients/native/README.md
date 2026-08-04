@@ -177,6 +177,11 @@ The `IceCandidate` payload this client SENDS is the JSON serialization of webrtc
 On receive it tolerates a payload that is not valid `RTCIceCandidateInit` JSON by treating it as a bare candidate
 string (interop with minimal clients).
 
+Every wire `Signal` also carries the UUID from the latest
+`SessionPlan.generation`. A changed plan generation rebuilds retained physical
+peer connections with the new ICE configuration; signals from any older or
+unknown generation are discarded.
+
 ## Transport-status semantics
 
 - Before status resolution, an incomplete pair is rebuilt at most

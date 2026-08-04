@@ -85,11 +85,13 @@ gracefully degrades back to relay on failure, timeout, or capability mismatch.
 ### 4. Opaque signals (the server never parses SDP or ICE)
 
 The `signal` field carried by `ClientMessage::Signal` / `ServerMessage::Signal`
-is opaque to the server (`serde_json::Value`). The server routes purely by
-`to` / `from` `PlayerId` and **never parses SDP or ICE**, mirroring the matchbox
-pattern: the server forwards, clients interpret. This keeps the signaling server
-zero-dependency for the WebRTC media plane and payload-agnostic. Same-room
-enforcement is applied on every relay hop.
+is opaque to the server (`serde_json::Value`). The server routes by `to` / `from`
+`PlayerId`, forwards the required opaque `generation` fence unchanged, and
+**never parses SDP or ICE**, mirroring the matchbox pattern: the server forwards,
+clients interpret. Clients accept a signal only for their current authoritative
+`SessionPlan.generation`. This keeps the signaling server zero-dependency for the
+WebRTC media plane and payload-agnostic. Same-room enforcement is applied on
+every relay hop.
 
 ### 5. Deterministic glare avoidance (offerer designation)
 

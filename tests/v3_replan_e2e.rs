@@ -359,6 +359,8 @@ async fn host_disconnect_reelects_host_and_reissues_session_plans() {
     let host_plan = expect_finalize_plan(&mut host, "host").await;
     let plan_a = expect_finalize_plan(&mut peer_a, "peer_a").await;
     let plan_b = expect_finalize_plan(&mut peer_b, "peer_b").await;
+    assert_eq!(host_plan.generation, plan_a.generation);
+    assert_eq!(host_plan.generation, plan_b.generation);
     for plan in [&host_plan, &plan_a, &plan_b] {
         assert_eq!(plan.topology, Topology::Host);
         assert_eq!(plan.transport, Transport::WebRtc);
@@ -396,6 +398,15 @@ async fn host_disconnect_reelects_host_and_reissues_session_plans() {
         },
     )
     .await;
+
+    assert_eq!(
+        replan_a.generation, replan_b.generation,
+        "one room publication must share one signaling generation"
+    );
+    assert_ne!(
+        replan_a.generation, host_plan.generation,
+        "a failover plan must fence the superseded physical generation"
+    );
 
     for plan in [&replan_a, &replan_b] {
         assert_eq!(plan.topology, Topology::Host, "topology is sticky");
@@ -570,7 +581,8 @@ async fn mesh_late_join_refreshes_joiner_and_existing_member_plans() {
 
     let plan_a = expect_finalize_plan(&mut peer_a, "peer_a").await;
     assert_eq!(plan_a.topology, Topology::Mesh);
-    let _plan_b = expect_finalize_plan(&mut peer_b, "peer_b").await;
+    let plan_b = expect_finalize_plan(&mut peer_b, "peer_b").await;
+    assert_eq!(plan_a.generation, plan_b.generation);
 
     // peer_b departs the live session; a mesh member departure re-plans nothing.
     peer_b.close(None).await.expect("close peer_b socket");
@@ -638,6 +650,14 @@ async fn mesh_late_join_refreshes_joiner_and_existing_member_plans() {
         },
     )
     .await;
+    assert_eq!(
+        incumbent_plan.generation, joiner_plan.generation,
+        "joiner and incumbent plans must share one generation"
+    );
+    assert_ne!(
+        incumbent_plan.generation, plan_a.generation,
+        "late membership refresh must fence the retained physical pair"
+    );
     assert_eq!(incumbent_plan.topology, Topology::Mesh);
     assert_eq!(incumbent_plan.transport, Transport::WebRtc);
     assert_eq!(incumbent_plan.peers.len(), 1);

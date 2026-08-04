@@ -238,8 +238,10 @@ fn sample_signal() -> serde_json::Value {
 #[test]
 fn client_signal_round_trips_json_and_msgpack() {
     let to = PlayerId::new_v4();
+    let generation = uuid::Uuid::new_v4();
     let msg = ClientMessage::Signal {
         to,
+        generation,
         signal: sample_signal(),
     };
 
@@ -247,14 +249,20 @@ fn client_signal_round_trips_json_and_msgpack() {
     let value = serde_json::to_value(&msg).unwrap();
     assert_eq!(value["type"], json!("Signal"));
     assert_eq!(value["data"]["to"], json!(to.to_string()));
+    assert_eq!(value["data"]["generation"], json!(generation.to_string()));
     assert_eq!(value["data"]["signal"], sample_signal());
 
     // JSON round-trip preserves the opaque payload byte-for-byte.
     let parsed: ClientMessage =
         serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
     match parsed {
-        ClientMessage::Signal { to: rt_to, signal } => {
+        ClientMessage::Signal {
+            to: rt_to,
+            generation: rt_generation,
+            signal,
+        } => {
             assert_eq!(rt_to, to);
+            assert_eq!(rt_generation, generation);
             assert_eq!(signal, sample_signal());
         }
         other => panic!("expected Signal, got {other:?}"),
@@ -264,8 +272,13 @@ fn client_signal_round_trips_json_and_msgpack() {
     let mp = rmp_serde::to_vec_named(&msg).unwrap();
     let parsed_mp: ClientMessage = rmp_serde::from_slice(&mp).unwrap();
     match parsed_mp {
-        ClientMessage::Signal { to: rt_to, signal } => {
+        ClientMessage::Signal {
+            to: rt_to,
+            generation: rt_generation,
+            signal,
+        } => {
             assert_eq!(rt_to, to);
+            assert_eq!(rt_generation, generation);
             assert_eq!(signal, sample_signal());
         }
         other => panic!("expected Signal, got {other:?}"),
@@ -329,14 +342,17 @@ fn client_transport_status_round_trips_json_and_msgpack() {
 #[test]
 fn server_signal_round_trips_json_and_msgpack() {
     let from = PlayerId::new_v4();
+    let generation = uuid::Uuid::new_v4();
     let msg = ServerMessage::Signal {
         from,
+        generation,
         signal: sample_signal(),
     };
 
     let value = serde_json::to_value(&msg).unwrap();
     assert_eq!(value["type"], json!("Signal"));
     assert_eq!(value["data"]["from"], json!(from.to_string()));
+    assert_eq!(value["data"]["generation"], json!(generation.to_string()));
     assert_eq!(value["data"]["signal"], sample_signal());
 
     let parsed: ServerMessage =
@@ -344,9 +360,11 @@ fn server_signal_round_trips_json_and_msgpack() {
     match parsed {
         ServerMessage::Signal {
             from: rt_from,
+            generation: rt_generation,
             signal,
         } => {
             assert_eq!(rt_from, from);
+            assert_eq!(rt_generation, generation);
             assert_eq!(signal, sample_signal());
         }
         other => panic!("expected Signal, got {other:?}"),
@@ -357,9 +375,11 @@ fn server_signal_round_trips_json_and_msgpack() {
     match parsed_mp {
         ServerMessage::Signal {
             from: rt_from,
+            generation: rt_generation,
             signal,
         } => {
             assert_eq!(rt_from, from);
+            assert_eq!(rt_generation, generation);
             assert_eq!(signal, sample_signal());
         }
         other => panic!("expected Signal, got {other:?}"),
@@ -477,6 +497,7 @@ fn server_peer_transport_status_round_trips_json_and_msgpack() {
 fn session_plan_mesh_wire_shape_and_tokens() {
     let peer = PlayerId::new_v4();
     let msg = ServerMessage::SessionPlan(Box::new(SessionPlanPayload {
+        generation: uuid::Uuid::new_v4(),
         topology: Topology::Mesh,
         transport: Transport::WebRtc,
         host: None,
@@ -533,6 +554,7 @@ fn session_plan_mesh_wire_shape_and_tokens() {
 fn session_plan_host_some_is_present_on_wire() {
     let host = PlayerId::new_v4();
     let msg = ServerMessage::SessionPlan(Box::new(SessionPlanPayload {
+        generation: uuid::Uuid::new_v4(),
         topology: Topology::Host,
         transport: Transport::Direct,
         host: Some(host),
@@ -584,6 +606,7 @@ fn session_plan_round_trips_json_and_msgpack() {
     let host = PlayerId::new_v4();
     let peer = PlayerId::new_v4();
     let original = SessionPlanPayload {
+        generation: uuid::Uuid::new_v4(),
         topology: Topology::Host,
         transport: Transport::WebRtc,
         host: Some(host),
@@ -618,8 +641,9 @@ fn session_plan_round_trips_json_and_msgpack() {
 fn session_plan_default_ice_servers_when_field_absent() {
     // ice_servers has #[serde(default)] so an absent field deserializes to empty.
     let host = PlayerId::new_v4();
+    let generation = uuid::Uuid::new_v4();
     let json = format!(
-        r#"{{"type":"SessionPlan","data":{{"topology":"host","transport":"webrtc","host":"{host}","peers":[],"fallback":"relay"}}}}"#
+        r#"{{"type":"SessionPlan","data":{{"generation":"{generation}","topology":"host","transport":"webrtc","host":"{host}","peers":[],"fallback":"relay"}}}}"#
     );
     let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
     match parsed {

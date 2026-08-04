@@ -242,7 +242,7 @@ lobby (`max_players` is a ceiling, so the room need not be full; the room's
 authority starts it if it has one, else any member). The lobby then
 transitions to `Finalized` and the server sends a `GameStarting` event with
 legacy peer metadata. Every negotiated v3 member then receives a per-recipient
-`SessionPlan` with topology, transport, peers, relay fallback, and ICE only when
+`SessionPlan` with an opaque generation, topology, transport, peers, relay fallback, and ICE only when
 the selected transport is WebRTC. A relay-floor result is explicit
 `relay`/`relay` with no peers or ICE; v2 members receive no plan.
 
@@ -304,7 +304,9 @@ Game is starting!
 At this point the server has done its job: players are matched and ready. V2
 clients receive the legacy handoff. Negotiated v3 clients treat the latest
 `SessionPlan` as authoritative, including a relay plan that clears prior peer
-state after a finalized membership change.
+state after a finalized membership change. When its generation changes, they
+rebuild retained WebRTC pairs with the new ICE credentials and discard signals
+from older generations.
 
 ## What's Next
 

@@ -84,6 +84,7 @@ Alice receives a plan whose single peer is Bob, with `initiate: true` (Alice is 
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "topology": "mesh",
     "transport": "webrtc",
     "peers": [
@@ -114,6 +115,7 @@ for **his** id:
 {
   "type": "SessionPlan",
   "data": {
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "topology": "mesh",
     "transport": "webrtc",
     "peers": [
@@ -152,6 +154,7 @@ Alice sends (`to` names the target peer):
   "type": "Signal",
   "data": {
     "to": "00000000-0000-0000-0000-00000000000b",
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "signal": { "Offer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }
@@ -164,6 +167,7 @@ Bob receives the same opaque payload, now stamped with `from`:
   "type": "Signal",
   "data": {
     "from": "00000000-0000-0000-0000-00000000000a",
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "signal": { "Offer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }
@@ -176,6 +180,7 @@ Bob sets the remote description, creates an answer, and signals it back:
   "type": "Signal",
   "data": {
     "to": "00000000-0000-0000-0000-00000000000a",
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "signal": { "Answer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }
@@ -188,6 +193,7 @@ Alice receives:
   "type": "Signal",
   "data": {
     "from": "00000000-0000-0000-0000-00000000000b",
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "signal": { "Answer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..." }
   }
 }
@@ -207,6 +213,7 @@ Alice sends a candidate:
   "type": "Signal",
   "data": {
     "to": "00000000-0000-0000-0000-00000000000b",
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "signal": { "IceCandidate": "candidate:1 1 UDP 2130706431 10.0.0.5 54321 typ host" }
   }
 }
@@ -219,6 +226,7 @@ Bob receives:
   "type": "Signal",
   "data": {
     "from": "00000000-0000-0000-0000-00000000000a",
+    "generation": "00000000-0000-0000-0000-00000000000c",
     "signal": { "IceCandidate": "candidate:1 1 UDP 2130706431 10.0.0.5 54321 typ host" }
   }
 }

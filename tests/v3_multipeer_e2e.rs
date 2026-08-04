@@ -1036,6 +1036,7 @@ async fn mesh_n3_seat_fill_late_join() {
         &mut joiner,
         &ClientMessage::Signal {
             to: id_a,
+            generation: joiner_plan.generation,
             signal: signal_to_a.clone(),
         },
     )
@@ -1049,6 +1050,7 @@ async fn mesh_n3_seat_fill_late_join() {
         &mut peer_a,
         &ClientMessage::Signal {
             to: joiner_id,
+            generation: joiner_plan.generation,
             signal: answer_to_joiner.clone(),
         },
     )
@@ -1230,6 +1232,7 @@ async fn mesh_n3_reconnect_full_flow() {
         &mut reconnector,
         &ClientMessage::Signal {
             to: id_a,
+            generation: reconnect_plan.generation,
             signal: offer.clone(),
         },
     )
@@ -1246,6 +1249,7 @@ async fn mesh_n3_reconnect_full_flow() {
         &mut peer_a,
         &ClientMessage::Signal {
             to: dropper_id,
+            generation: reconnect_plan.generation,
             signal: answer.clone(),
         },
     )

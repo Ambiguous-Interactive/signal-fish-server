@@ -672,10 +672,15 @@ parse failure, or unrelated violation fails CI.
   Actual scheduler timing, end-to-end pipeline capacity, and
   deployment-specific arrival curves remain external assumptions rather than
   model constants inferred from defaults.
-- **`Signal` payload relay** — `handle_signal` is transport-only plumbing over opaque
-  payloads (deliberately weaker than the session predicate, see
-  `src/server/signaling.rs`); its gates are direct conditionals with no state evolution,
-  exhaustively covered by `signaling_tests.rs` and the wire/fuzz property suites.
+- **`Signal` payload relay and wire generation** — `handle_signal` is
+  transport-only plumbing over opaque payloads and their generation UUID
+  (deliberately weaker than the session predicate, see
+  `src/server/signaling.rs`). The TLA+ plan view abstracts away the fresh UUID
+  because it does not affect plan selection or membership; executable replan
+  tests prove one publication shares a generation and later publications differ,
+  while reference-client tests prove stale/pre-plan signals fail closed. The
+  relay gates remain direct conditionals with no state evolution and are covered
+  by `signaling_tests.rs` plus the wire/fuzz property suites.
 - **Reconnection tokens / auth** — orthogonal subsystems; a reconnect is modeled as
   depart-then-join of the same player. One real difference is deliberately not
   captured: a reconnect restores the disconnect-time `PlayerInfo` snapshot with the

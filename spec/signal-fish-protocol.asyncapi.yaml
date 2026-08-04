@@ -223,7 +223,7 @@ components:
       payload: { $ref: '#/components/schemas/ClientGameData' }
     ClientSignal:
       title: Signal
-      summary: 'v3: relay an opaque WebRTC signal to a specific peer. Forwarded verbatim.'
+      summary: 'v3: relay a generation-scoped opaque WebRTC signal to a specific peer.'
       payload: { $ref: '#/components/schemas/ClientSignal' }
     AuthorityRequest:
       title: AuthorityRequest
@@ -327,7 +327,7 @@ components:
       payload: { $ref: '#/components/schemas/GameStarting' }
     ServerSignal:
       title: Signal
-      summary: 'v3: relayed opaque WebRTC signal from another peer. Verbatim.'
+      summary: 'v3: generation-scoped opaque WebRTC signal relayed from another peer.'
       payload: { $ref: '#/components/schemas/ServerSignal' }
     NewPeer:
       title: NewPeer
@@ -339,8 +339,9 @@ components:
       title: SessionPlan
       summary: >-
         v3: per-recipient authoritative session directive at lobby finalization
-        and finalized membership refreshes. Latest SessionPlan wins. The relay
-        floor is an explicit relay/relay plan with no peers.
+        and finalized membership refreshes. Latest SessionPlan generation wins
+        and fences Signal traffic. The relay floor is an explicit relay/relay
+        plan with no peers.
       payload: { $ref: '#/components/schemas/SessionPlan' }
     Pong:
       title: Pong
@@ -443,6 +444,13 @@ components:
       type: string
       format: uuid
       description: Player UUID.
+    SessionGeneration:
+      type: string
+      format: uuid
+      description: >-
+        Opaque generation fence shared by one authoritative SessionPlan
+        publication. Clients send and accept Signal messages only for the
+        generation in their latest SessionPlan.
     BinaryPlayerId:
       type: string
       contentEncoding: binary
@@ -853,14 +861,15 @@ components:
       required: [type, data]
     ClientSignal:
       type: object
-      description: 'v3 only.'
+      description: 'v3 only. Scoped to the latest authoritative SessionPlan generation.'
       properties:
         type: { const: Signal }
         data:
           type: object
-          required: [to, signal]
+          required: [to, generation, signal]
           properties:
             to: { $ref: '#/components/schemas/PlayerId' }
+            generation: { $ref: '#/components/schemas/SessionGeneration' }
             signal:
               description: >-
                 Opaque, forwarded verbatim. By convention matchbox-compatible:
@@ -1288,14 +1297,15 @@ components:
       required: [type, data]
     ServerSignal:
       type: object
-      description: 'v3 only.'
+      description: 'v3 only. Scoped to the authoritative SessionPlan generation.'
       properties:
         type: { const: Signal }
         data:
           type: object
-          required: [from, signal]
+          required: [from, generation, signal]
           properties:
             from: { $ref: '#/components/schemas/PlayerId' }
+            generation: { $ref: '#/components/schemas/SessionGeneration' }
             signal:
               description: Opaque WebRTC signal forwarded verbatim from a peer.
       required: [type, data]
@@ -1330,8 +1340,9 @@ components:
           oneOf:
             - type: object
               additionalProperties: false
-              required: [topology, transport, peers, fallback]
+              required: [generation, topology, transport, peers, fallback]
               properties:
+                generation: { $ref: '#/components/schemas/SessionGeneration' }
                 topology: { const: relay }
                 transport: { const: relay }
                 peers:
@@ -1345,8 +1356,9 @@ components:
                 fallback: { const: relay }
             - type: object
               additionalProperties: false
-              required: [topology, transport, host, direct_endpoint, peers, fallback]
+              required: [generation, topology, transport, host, direct_endpoint, peers, fallback]
               properties:
+                generation: { $ref: '#/components/schemas/SessionGeneration' }
                 topology: { const: host }
                 transport: { const: direct }
                 host: { $ref: '#/components/schemas/PlayerId' }
@@ -1361,8 +1373,9 @@ components:
                 fallback: { const: relay }
             - type: object
               additionalProperties: false
-              required: [topology, transport, host, peers, fallback]
+              required: [generation, topology, transport, host, peers, fallback]
               properties:
+                generation: { $ref: '#/components/schemas/SessionGeneration' }
                 topology: { const: host }
                 transport: { const: webrtc }
                 host: { $ref: '#/components/schemas/PlayerId' }
@@ -1375,8 +1388,9 @@ components:
                 fallback: { const: relay }
             - type: object
               additionalProperties: false
-              required: [topology, transport, peers, fallback]
+              required: [generation, topology, transport, peers, fallback]
               properties:
+                generation: { $ref: '#/components/schemas/SessionGeneration' }
                 topology: { const: mesh }
                 transport: { const: webrtc }
                 peers:

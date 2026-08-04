@@ -1108,21 +1108,21 @@ async fn signal_delivered_to_same_room_peer_preserving_payload() {
     server.handle_signal(&alice, bob, ice.clone()).await;
 
     match recv(&mut bob_rx).await.as_ref() {
-        ServerMessage::Signal { from, signal } => {
+        ServerMessage::Signal { from, signal, .. } => {
             assert_eq!(*from, alice);
             assert_eq!(*signal, offer);
         }
         other => panic!("expected Signal(offer), got {other:?}"),
     }
     match recv(&mut alice_rx).await.as_ref() {
-        ServerMessage::Signal { from, signal } => {
+        ServerMessage::Signal { from, signal, .. } => {
             assert_eq!(*from, bob);
             assert_eq!(*signal, answer);
         }
         other => panic!("expected Signal(answer), got {other:?}"),
     }
     match recv(&mut bob_rx).await.as_ref() {
-        ServerMessage::Signal { from, signal } => {
+        ServerMessage::Signal { from, signal, .. } => {
             assert_eq!(*from, alice);
             assert_eq!(*signal, ice);
         }
@@ -1564,7 +1564,7 @@ async fn signal_exactly_at_size_cap_is_relayed() {
     server.handle_signal(&alice, bob, payload.clone()).await;
 
     match recv(&mut bob_rx).await.as_ref() {
-        ServerMessage::Signal { from, signal } => {
+        ServerMessage::Signal { from, signal, .. } => {
             assert_eq!(*from, alice);
             assert_eq!(*signal, payload, "at-cap payload must relay byte-preserved");
         }
@@ -1679,7 +1679,7 @@ async fn signal_dispatch_waits_for_room_plan_publication_gate() {
 
     assert!(matches!(
         recv(&mut bob_rx).await.as_ref(),
-        ServerMessage::Signal { from, signal }
+        ServerMessage::Signal { from, signal, .. }
             if *from == alice && signal == &json!({ "Offer": "plan-gated" })
     ));
     assert_silent(&mut alice_rx).await;
