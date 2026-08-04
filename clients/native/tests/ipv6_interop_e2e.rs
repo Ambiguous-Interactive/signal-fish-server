@@ -8,10 +8,10 @@
 //! live transport.
 //!
 //! This cell pins it: two real client processes run with `--ip-family ipv6`,
-//! so `::1` is the only host candidate either side can advertise, and the pair
-//! must connect and exchange the exact payload on BOTH data-channel labels.
-//! The selected candidate pair is asserted to be host/host with concrete IPv6
-//! addresses on both sides.
+//! so an IPv6 host candidate is the only thing either side can advertise, and
+//! the pair must connect and exchange the exact payload on BOTH data-channel
+//! labels. The selected candidate pair is asserted to be host/host with
+//! concrete, dialable IPv6 addresses on both sides.
 //!
 //! **Scope of the proof.** Signaling still runs over the harness server's IPv4
 //! loopback listener (the server binds `0.0.0.0`); what this cell proves is the
@@ -38,7 +38,7 @@ const CLIENT_NAMES: [&str; 2] = ["c0", "c1"];
 const RELIABLE: &str = "reliable";
 const UNRELIABLE: &str = "unreliable";
 /// Both clients bind IPv6 only and keep mDNS obfuscation off, so every host
-/// candidate is a raw `::1` address the assertions can read.
+/// candidate is a raw IPv6 address the assertions can read.
 const IPV6_ARGS: [&str; 3] = ["--ip-family", "ipv6", "--disable-mdns"];
 
 /// Fail loudly (never skip) when the runner cannot provide IPv6 loopback.
@@ -93,8 +93,15 @@ fn selected_ipv6_address(event: &Value, field: &str, who: &str) -> Ipv6Addr {
     }
 }
 
-/// Assert this client's single selected pair is host/host over IPv6 loopback,
+/// Assert this client's single selected pair is host/host over concrete IPv6,
 /// toward the expected peer.
+///
+/// The address is not pinned to `::1`: a runner that also has a global IPv6
+/// interface binds it too, and either host candidate is a legitimate IPv6
+/// proof. What must hold is that the path is IPv6, direct (host/host, since no
+/// STUN or TURN is configured), and carried by an address a peer could
+/// actually dial — never unspecified, multicast, or link-local, whose scope ID
+/// the candidate wire cannot carry.
 fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str) {
     let selected = single_event(events, "selected_candidate_pair", who);
     assert_eq!(
@@ -111,10 +118,11 @@ fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str) {
     }
     for field in ["local_candidate_address", "remote_candidate_address"] {
         let address = selected_ipv6_address(selected, field, who);
-        assert_eq!(
-            address,
-            Ipv6Addr::LOCALHOST,
-            "{who}: {field} must be the IPv6 loopback address the client bound"
+        assert!(
+            !address.is_unspecified()
+                && !address.is_multicast()
+                && !address.is_unicast_link_local(),
+            "{who}: {field} must be a concrete dialable IPv6 address, got {address}"
         );
     }
 }

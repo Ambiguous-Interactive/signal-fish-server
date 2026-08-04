@@ -138,7 +138,7 @@ process continues to its normal bounded exit.
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
 | `p2p_pair_reconnected` | `peer` | BOTH channels reopened for a coordinated PairRetry generation |
-| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay`, and the IPv6 cell requires both addresses to be the bound IPv6 loopback. Either address is `null` when the stack redacts or omits it — a harness asserting on the family must treat that as a failure |
+| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay`, and the IPv6 cell requires both addresses to be concrete dialable IPv6. Either address is `null` when the stack redacts or omits it — a harness asserting on the family must treat that as a failure |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `exchange_reliable_ready` | — | Loss-harness barrier: every planned pair has sent and received its exact reliable exchange, while `--unreliable-exchange-release-file` still holds the unreliable half |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out (Appendix G) |
@@ -234,8 +234,8 @@ The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop
 `SIGNAL_FISH_BROWSER_CLI` pointing at the built [browser client](../browser/README.md) bundle).
 
 The IPv6 cell lives in [`tests/ipv6_interop_e2e.rs`](tests/ipv6_interop_e2e.rs): both clients run with
-`--ip-family ipv6`, so `::1` is the only host candidate either side can advertise, and the assertions require a
-host/host IPv6 pair plus the exact exchange on both channel labels. Signaling still runs over the harness
+`--ip-family ipv6`, so only IPv6 host candidates can be advertised, and the assertions require a host/host pair
+of concrete dialable IPv6 addresses plus the exact exchange on both channel labels. Signaling still runs over the harness
 server's IPv4 loopback listener, so the IPv6 claim is about the WebRTC data path (ICE, DTLS, SCTP), not the
 WebSocket. A runner without IPv6 loopback fails the cell with an actionable message; it is never skipped.
 

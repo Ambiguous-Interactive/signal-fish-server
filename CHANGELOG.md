@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and unit-tests `clients/native` on the exact repository MSRV — neither the
   root CI matrix nor the interop cells built that standalone crate off Linux. A
   new interoperability cell drives two real client processes with the new
-  `--ip-family ipv6` selector, so `::1` is the only host candidate either side
-  can advertise, and requires a host/host IPv6 pair plus the exact reliable and
-  unreliable exchange. The client now reports each selected candidate's address
+  `--ip-family ipv6` selector, so only IPv6 host candidates can be advertised,
+  and requires a host/host pair of concrete dialable IPv6 addresses plus the
+  exact reliable and unreliable exchange. The client now reports each selected candidate's address
   alongside its type, and a runner without IPv6 loopback fails the cell with an
   actionable message instead of skipping it. Live WebRTC transport remains
   proved on Linux only; Windows and macOS are compile-verified.
