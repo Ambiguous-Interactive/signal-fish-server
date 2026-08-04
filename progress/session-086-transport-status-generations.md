@@ -62,4 +62,8 @@ The definitive local gauntlet passed:
   hook-readiness, pre-commit, and pre-push checks
 
 Two independent adversarial review loops finished with zero actionable findings.
-Hosted exact-head CI and GitHub reviewer evidence remain pending publication.
+Cursor Bugbot also found no issues at implementation commit `ef1c867`; Copilot
+terminated without findings because the requester's review quota was exhausted.
+PR #263's final evidence comment is the canonical exact-head record for hosted
+CI, reviewer state, and unresolved-thread count: committing that attestation
+here would change the head it is meant to identify.
