@@ -86,6 +86,12 @@ pub struct Cli {
     #[arg(long, requires = "exchange")]
     pub exchange_release_file: Option<PathBuf>,
 
+    /// Test-harness coordination for loss recovery: after the reliable half
+    /// of --exchange has completed in both directions, wait until this path
+    /// exists before sending the exact unreliable half.
+    #[arg(long, requires = "exchange_release_file")]
+    pub unreliable_exchange_release_file: Option<PathBuf>,
+
     /// After GameStarting (plus a short settle), send one GameData message with
     /// payload {"relay_msg": <text>} over the WebSocket relay floor.
     #[arg(long)]
@@ -480,11 +486,17 @@ mod tests {
             "--exchange",
             "--exchange-release-file",
             "/tmp/signal-fish-exchange-release",
+            "--unreliable-exchange-release-file",
+            "/tmp/signal-fish-unreliable-release",
         ]);
         assert!(cli.exchange);
         assert_eq!(
             cli.exchange_release_file.as_deref(),
             Some(std::path::Path::new("/tmp/signal-fish-exchange-release"))
+        );
+        assert_eq!(
+            cli.unreliable_exchange_release_file.as_deref(),
+            Some(std::path::Path::new("/tmp/signal-fish-unreliable-release"))
         );
 
         let without_exchange = Cli::try_parse_from([
@@ -498,6 +510,20 @@ mod tests {
         assert!(
             without_exchange.is_err(),
             "the exchange gate is meaningless without --exchange"
+        );
+
+        let without_reliable_gate = Cli::try_parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--exchange",
+            "--unreliable-exchange-release-file",
+            "/tmp/signal-fish-unreliable-release",
+        ]);
+        assert!(
+            without_reliable_gate.is_err(),
+            "the unreliable gate requires the reliable exchange gate"
         );
     }
 

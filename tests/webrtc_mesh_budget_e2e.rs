@@ -218,6 +218,7 @@ fn client_args(
     room_code: Option<&str>,
     success_release_file: &Path,
     exchange_release_file: Option<&Path>,
+    unreliable_exchange_release_file: Option<&Path>,
     scenario: WebRtcScenario,
     ordinal: usize,
 ) -> Vec<String> {
@@ -269,6 +270,12 @@ fn client_args(
     if let Some(path) = exchange_release_file {
         args.extend([
             "--exchange-release-file".to_string(),
+            path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if let Some(path) = unreliable_exchange_release_file {
+        args.extend([
+            "--unreliable-exchange-release-file".to_string(),
             path.to_string_lossy().into_owned(),
         ]);
     }
@@ -1135,11 +1142,22 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let exchange_release_file = scenario
         .uses_netem()
         .then(|| workdir.path().join("release-exchange-after-netem"));
+    let unreliable_exchange_release_file = scenario.uses_netem().then(|| {
+        workdir
+            .path()
+            .join("release-unreliable-after-reliable-proof")
+    });
     assert!(
         exchange_release_file
             .as_ref()
             .is_none_or(|path| !path.exists()),
         "exchange fault-release path must start absent"
+    );
+    assert!(
+        unreliable_exchange_release_file
+            .as_ref()
+            .is_none_or(|path| !path.exists()),
+        "unreliable exchange release path must start absent"
     );
     let mut netem_guard = scenario.uses_netem().then(NetemGuard::activate);
     let mut creator = spawn_native_client(
@@ -1150,6 +1168,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             None,
             &success_release_files[0],
             exchange_release_file.as_deref(),
+            unreliable_exchange_release_file.as_deref(),
             scenario,
             0,
         ),
@@ -1170,6 +1189,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
                 Some(&room_code),
                 success_release_file,
                 exchange_release_file.as_deref(),
+                unreliable_exchange_release_file.as_deref(),
                 scenario,
                 ordinal,
             ),
@@ -1232,7 +1252,22 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
                 .expect("netem scenario owns an exchange release file"),
             b"release",
         )
-        .expect("release exact data-channel exchange after lifting netem");
+        .expect("release exact reliable exchange after lifting netem");
+        join_all(clients.iter_mut().map(|client| {
+            client.await_event_count(
+                "exchange_reliable_ready",
+                1,
+                barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+        }))
+        .await;
+        std::fs::write(
+            unreliable_exchange_release_file
+                .as_ref()
+                .expect("netem scenario owns an unreliable exchange release file"),
+            b"release",
+        )
+        .expect("release exact unreliable exchange after reliable recovery proof");
         Some(drops)
     } else {
         None

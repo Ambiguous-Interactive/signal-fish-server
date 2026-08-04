@@ -115,6 +115,20 @@ fn retryable_missing_peers(
         .collect()
 }
 
+fn exchange_label_complete(
+    expected: &BTreeSet<PlayerId>,
+    sent: &BTreeMap<PlayerId, BTreeSet<String>>,
+    received: &BTreeMap<PlayerId, BTreeSet<String>>,
+    label: &str,
+) -> bool {
+    !expected.is_empty()
+        && expected.iter().all(|peer| {
+            [sent.get(peer), received.get(peer)]
+                .into_iter()
+                .all(|labels| labels.is_some_and(|labels| labels.contains(label)))
+        })
+}
+
 fn note_current_pair_connected(
     connected: &mut BTreeSet<PlayerId>,
     reported: &mut BTreeSet<PlayerId>,
@@ -296,6 +310,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         exchange_released: cli.exchange_release_file.is_none(),
         exchange_ready_reported: false,
         exchange_release_poll_at: None,
+        unreliable_exchange_released: cli.unreliable_exchange_release_file.is_none(),
+        exchange_reliable_ready_reported: false,
+        unreliable_exchange_release_poll_at: None,
         pending_signals: BTreeMap::new(),
         drop_ice_from: None,
         run_deadline,
@@ -764,6 +781,12 @@ struct Orchestrator<'a> {
     exchange_ready_reported: bool,
     /// Next poll for `--exchange-release-file` while application traffic is held.
     exchange_release_poll_at: Option<Instant>,
+    /// Whether the optional second gate released the exact unreliable half.
+    unreliable_exchange_released: bool,
+    /// Whether every peer completed the exact reliable half in both directions.
+    exchange_reliable_ready_reported: bool,
+    /// Next poll for `--unreliable-exchange-release-file` while held.
+    unreliable_exchange_release_poll_at: Option<Instant>,
     /// Signals that arrived before their peer was paired (defensive: server
     /// FIFO ordering makes this unreachable in the documented flows).
     pending_signals: BTreeMap<PlayerId, VecDeque<serde_json::Value>>,
@@ -918,6 +941,9 @@ impl Orchestrator<'_> {
         if let Some(at) = self.exchange_release_poll_at {
             wake = wake.min(at);
         }
+        if let Some(at) = self.unreliable_exchange_release_poll_at {
+            wake = wake.min(at);
+        }
         wake = wake.min(self.next_ping_at);
         if let Some(at) = self.pong_deadline {
             wake = wake.min(at);
@@ -978,6 +1004,7 @@ impl Orchestrator<'_> {
         }
 
         self.process_exchange_gate(now).await?;
+        self.process_unreliable_exchange_gate(now).await?;
 
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
@@ -1059,6 +1086,14 @@ impl Orchestrator<'_> {
         .await
     }
 
+    async fn unreliable_exchange_release_pending(&self) -> Result<bool, FatalError> {
+        Self::release_file_pending(
+            self.cli.unreliable_exchange_release_file.as_deref(),
+            "--unreliable-exchange-release-file",
+        )
+        .await
+    }
+
     async fn p2p_release_pending(&self) -> Result<bool, FatalError> {
         Self::release_file_pending(self.cli.p2p_release_file.as_deref(), "--p2p-release-file").await
     }
@@ -1130,8 +1165,42 @@ impl Orchestrator<'_> {
         self.exchange_released = true;
         self.exchange_release_poll_at = None;
         let peers: Vec<PlayerId> = self.connected_pairs.iter().copied().collect();
+        let labels = if self.cli.unreliable_exchange_release_file.is_some() {
+            &[RELIABLE_LABEL][..]
+        } else {
+            &[RELIABLE_LABEL, UNRELIABLE_LABEL][..]
+        };
         for peer in peers {
-            self.send_exchange(peer).await?;
+            self.send_exchange(peer, labels).await?;
+        }
+        Ok(())
+    }
+
+    async fn process_unreliable_exchange_gate(&mut self, now: Instant) -> Result<(), FatalError> {
+        if self.unreliable_exchange_released
+            || !self.exchange_released
+            || !self.exchange_reliable_gate_ready()
+            || self
+                .unreliable_exchange_release_poll_at
+                .is_some_and(|poll_at| now < poll_at)
+        {
+            return Ok(());
+        }
+        if !self.exchange_reliable_ready_reported {
+            emit(&Event::ExchangeReliableReady);
+            self.exchange_reliable_ready_reported = true;
+        }
+        if self.unreliable_exchange_release_pending().await? {
+            self.unreliable_exchange_release_poll_at =
+                Some(checked_deadline(now, SUCCESS_RELEASE_POLL));
+            return Ok(());
+        }
+
+        self.unreliable_exchange_released = true;
+        self.unreliable_exchange_release_poll_at = None;
+        let peers: Vec<PlayerId> = self.connected_pairs.iter().copied().collect();
+        for peer in peers {
+            self.send_exchange(peer, &[UNRELIABLE_LABEL]).await?;
         }
         Ok(())
     }
@@ -1146,8 +1215,19 @@ impl Orchestrator<'_> {
             })
     }
 
-    async fn send_exchange(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+    fn exchange_reliable_gate_ready(&self) -> bool {
+        self.cli.unreliable_exchange_release_file.is_some()
+            && self.all_expected_pairs_connected()
+            && exchange_label_complete(
+                &self.expected_peers,
+                &self.sent_labels,
+                &self.received_labels,
+                RELIABLE_LABEL,
+            )
+    }
+
+    async fn send_exchange(&mut self, peer: PlayerId, labels: &[&str]) -> Result<(), FatalError> {
+        for &label in labels {
             if self
                 .sent_labels
                 .get(&peer)
@@ -1929,7 +2009,12 @@ impl Orchestrator<'_> {
             emit(&Event::P2pPairConnected { peer });
         }
         if self.cli.exchange && self.exchange_released {
-            self.send_exchange(peer).await?;
+            let labels = if self.unreliable_exchange_released {
+                &[RELIABLE_LABEL, UNRELIABLE_LABEL][..]
+            } else {
+                &[RELIABLE_LABEL][..]
+            };
+            self.send_exchange(peer, labels).await?;
         }
         // Initial resolution waits for all pairs; after any prior resolution,
         // one late pair is enough to change the overall any-pair state.
@@ -2333,16 +2418,18 @@ mod tests {
         arm_pair_window, authoritative_peer_delta, changed_transport_status,
         clear_departed_membership_plan, connection_targets_for_generation,
         consume_join_accountability_preface, direct_plan_rejection_message,
-        harness_aware_base_wake, is_current_session_generation, is_terminal_peer_connection_state,
-        needs_ice_gathering_marker, negotiated_version_from, next_handshake_message,
-        note_current_pair_connected, p2p_retry_delay, reject_unsupported_direct_plan_with,
-        require_finalized_membership_plan, requires_authoritative_finalization_plan,
-        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
-        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
-        should_defer_success_at_run_deadline, should_resolve_connected_pair,
-        try_buffer_planned_signal, validate_json_negotiated_server_message, PairGeneration,
-        EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL,
+        exchange_label_complete, harness_aware_base_wake, is_current_session_generation,
+        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
+        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
+        reject_unsupported_direct_plan_with, require_finalized_membership_plan,
+        requires_authoritative_finalization_plan, resolve_drop_ice_from,
+        restore_reconnected_member, retryable_missing_peers, session_plan_peer_ids,
+        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
+        should_resolve_connected_pair, try_buffer_planned_signal,
+        validate_json_negotiated_server_message, PairGeneration, EXIT_PROTOCOL_ERROR,
+        MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL,
     };
+    use crate::engine::RELIABLE_LABEL;
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::RTCPeerConnectionState;
 
@@ -2704,6 +2791,36 @@ mod tests {
             vec![retryable]
         );
         assert!(retryable_missing_peers(&expected, &connected_pairs, &attempts, 0).is_empty());
+    }
+
+    #[test]
+    fn reliable_exchange_barrier_requires_both_directions_for_every_peer() {
+        let left = PlayerId::from_u128(2);
+        let right = PlayerId::from_u128(3);
+        let expected = BTreeSet::from([left, right]);
+        let reliable = BTreeSet::from([RELIABLE_LABEL.to_string()]);
+        let sent = BTreeMap::from([(left, reliable.clone()), (right, reliable.clone())]);
+        let mut received = BTreeMap::from([(left, reliable.clone())]);
+
+        assert!(!exchange_label_complete(
+            &expected,
+            &sent,
+            &received,
+            RELIABLE_LABEL
+        ));
+        received.insert(right, reliable);
+        assert!(exchange_label_complete(
+            &expected,
+            &sent,
+            &received,
+            RELIABLE_LABEL
+        ));
+        assert!(!exchange_label_complete(
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            RELIABLE_LABEL
+        ));
     }
 
     #[test]
