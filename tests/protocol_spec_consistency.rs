@@ -227,6 +227,179 @@ fn resolve_local_reference<'doc, 'input>(
     Some(node)
 }
 
+/// Validate the JSON value-shape keywords used by the protocol's versioned
+/// envelope schemas. This deliberately covers the object-union contract under
+/// test (`$ref`, `oneOf`/`anyOf`/`allOf`, `not`, `const`, `type`, `required`,
+/// `properties`, `additionalProperties`, and array `items`) rather than
+/// pretending to be a general-purpose JSON Schema implementation.
+fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -> bool {
+    if let Some(reference) = schema.as_mapping_get("$ref").and_then(Yaml::as_str) {
+        return resolve_local_reference(root, reference)
+            .is_some_and(|resolved| schema_shape_matches(root, resolved, value));
+    }
+
+    if value.is_null() && schema.as_mapping_get("nullable").and_then(Yaml::as_bool) == Some(true) {
+        return true;
+    }
+
+    if let Some(branches) = schema.as_mapping_get("oneOf").and_then(Yaml::as_sequence) {
+        if branches
+            .iter()
+            .filter(|branch| schema_shape_matches(root, branch, value))
+            .count()
+            != 1
+        {
+            return false;
+        }
+    }
+    if let Some(branches) = schema.as_mapping_get("anyOf").and_then(Yaml::as_sequence) {
+        if !branches
+            .iter()
+            .any(|branch| schema_shape_matches(root, branch, value))
+        {
+            return false;
+        }
+    }
+    if let Some(branches) = schema.as_mapping_get("allOf").and_then(Yaml::as_sequence) {
+        if !branches
+            .iter()
+            .all(|branch| schema_shape_matches(root, branch, value))
+        {
+            return false;
+        }
+    }
+    if let Some(forbidden) = schema.as_mapping_get("not") {
+        if schema_shape_matches(root, forbidden, value) {
+            return false;
+        }
+    }
+    if let Some(condition) = schema.as_mapping_get("if") {
+        let consequence = if schema_shape_matches(root, condition, value) {
+            schema.as_mapping_get("then")
+        } else {
+            schema.as_mapping_get("else")
+        };
+        if consequence.is_some_and(|branch| !schema_shape_matches(root, branch, value)) {
+            return false;
+        }
+    }
+
+    if let Some(expected) = schema.as_mapping_get("const") {
+        let matches = expected
+            .as_str()
+            .is_some_and(|expected| value.as_str() == Some(expected))
+            || expected
+                .as_integer()
+                .is_some_and(|expected| value.as_i64() == Some(expected))
+            || expected
+                .as_bool()
+                .is_some_and(|expected| value.as_bool() == Some(expected));
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(allowed) = schema.as_mapping_get("enum").and_then(Yaml::as_sequence) {
+        let matches = allowed.iter().any(|expected| {
+            expected
+                .as_str()
+                .is_some_and(|expected| value.as_str() == Some(expected))
+                || expected
+                    .as_integer()
+                    .is_some_and(|expected| value.as_i64() == Some(expected))
+                || expected
+                    .as_bool()
+                    .is_some_and(|expected| value.as_bool() == Some(expected))
+        });
+        if !matches {
+            return false;
+        }
+    }
+
+    let schema_type = schema.as_mapping_get("type").and_then(Yaml::as_str);
+    let has_object_keywords = schema.as_mapping_get("required").is_some()
+        || schema.as_mapping_get("properties").is_some()
+        || schema.as_mapping_get("additionalProperties").is_some();
+    if schema_type == Some("object") || has_object_keywords {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        let required: BTreeSet<_> = schema
+            .as_mapping_get("required")
+            .and_then(Yaml::as_sequence)
+            .into_iter()
+            .flatten()
+            .filter_map(Yaml::as_str)
+            .collect();
+        if required.iter().any(|field| !object.contains_key(*field)) {
+            return false;
+        }
+
+        let properties = schema
+            .as_mapping_get("properties")
+            .and_then(Yaml::as_mapping);
+        if schema
+            .as_mapping_get("additionalProperties")
+            .and_then(Yaml::as_bool)
+            == Some(false)
+            && object.keys().any(|field| {
+                properties.is_none_or(|properties| {
+                    !properties
+                        .keys()
+                        .filter_map(Yaml::as_str)
+                        .any(|property| property == field)
+                })
+            })
+        {
+            return false;
+        }
+
+        if let Some(properties) = properties {
+            for (key, property_schema) in properties.iter() {
+                if let Some((_, field_value)) =
+                    key.as_str().and_then(|key| object.get_key_value(key))
+                {
+                    if !schema_shape_matches(root, property_schema, field_value) {
+                        return false;
+                    }
+                }
+            }
+        }
+    } else if schema_type == Some("array") || schema.as_mapping_get("items").is_some() {
+        let Some(items) = value.as_array() else {
+            return false;
+        };
+        if schema
+            .as_mapping_get("minItems")
+            .and_then(Yaml::as_integer)
+            .is_some_and(|minimum| items.len() < minimum as usize)
+            || schema
+                .as_mapping_get("maxItems")
+                .and_then(Yaml::as_integer)
+                .is_some_and(|maximum| items.len() > maximum as usize)
+        {
+            return false;
+        }
+        if let Some(item_schema) = schema.as_mapping_get("items") {
+            if !items
+                .iter()
+                .all(|item| schema_shape_matches(root, item_schema, item))
+            {
+                return false;
+            }
+        }
+    } else {
+        match schema_type {
+            Some("string") if !value.is_string() => return false,
+            Some("integer") if !value.is_i64() && !value.is_u64() => return false,
+            Some("boolean") if !value.is_boolean() => return false,
+            Some("number") if !value.is_number() => return false,
+            _ => {}
+        }
+    }
+
+    true
+}
+
 #[test]
 fn spec_has_no_dangling_local_references() {
     let text = spec_text();
@@ -567,6 +740,46 @@ fn spec_delivery_report_gap_bound_matches_protocol_constant() {
 }
 
 #[test]
+fn accountability_component_objects_reject_unknown_fields() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    for path in [
+        &["components", "schemas", "ReliableDeliveryCounters"][..],
+        &["components", "schemas", "LatestDeliveryCounters"],
+        &["components", "schemas", "VolatileDeliveryCounters"],
+        &["components", "schemas", "DeliveryCountersByClass"],
+        &["components", "schemas", "DeliveryGap"],
+        &["components", "schemas", "SenderWatermark"],
+        &["components", "schemas", "RelayStats"],
+        &["components", "schemas", "RelayStats", "properties", "data"],
+        &["components", "schemas", "DeliveryReport"],
+        &[
+            "components",
+            "schemas",
+            "DeliveryReport",
+            "properties",
+            "data",
+        ],
+    ] {
+        let schema = mapping_path(root, path)
+            .unwrap_or_else(|| panic!("missing accountability schema at {}", path.join(".")));
+        assert_eq!(
+            schema
+                .as_mapping_get("additionalProperties")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{} must reject unknown fields",
+            path.join(".")
+        );
+    }
+}
+
+#[test]
 fn spec_models_disjoint_v2_and_v3_physical_binary_envelopes() {
     let text = spec_text();
     let docs = Yaml::load_from_str(&text)
@@ -788,6 +1001,437 @@ fn spec_player_snapshots_have_disjoint_versioned_relay_baselines() {
         mapping_path(v3, &["properties", "seq", "minimum"]).and_then(Yaml::as_integer),
         Some(0)
     );
+}
+
+#[test]
+fn accountability_message_envelopes_use_closed_versioned_branches() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    let envelopes = [
+        ("RoomJoined", &["V2RoomJoined", "V3RoomJoined"][..]),
+        ("PlayerJoined", &["V2PlayerJoined", "V3PlayerJoined"][..]),
+        ("PlayerLeft", &["V2PlayerLeft", "V3PlayerLeft"][..]),
+        (
+            "ServerGameData",
+            &["V2ServerGameData", "V3ServerGameData"][..],
+        ),
+        ("Reconnected", &["V2Reconnected", "V3Reconnected"][..]),
+        (
+            "PlayerReconnected",
+            &["V2PlayerReconnected", "V3PlayerReconnected"][..],
+        ),
+        (
+            "SpectatorJoined",
+            &[
+                "V2SpectatorJoined",
+                "V3SpectatorJoined",
+                "EmptySpectatorJoined",
+            ][..],
+        ),
+    ];
+
+    for (public_name, branch_names) in envelopes {
+        let public_schema = mapping_path(root, &["components", "schemas", public_name])
+            .unwrap_or_else(|| panic!("spec must define {public_name}"));
+        let references: Vec<_> = public_schema
+            .as_mapping_get("oneOf")
+            .and_then(Yaml::as_sequence)
+            .unwrap_or_else(|| panic!("{public_name} must be an exact versioned oneOf"))
+            .iter()
+            .map(|branch| {
+                branch
+                    .as_mapping_get("$ref")
+                    .and_then(Yaml::as_str)
+                    .unwrap_or_else(|| panic!("{public_name} branches must be local references"))
+            })
+            .collect();
+        assert_eq!(
+            references,
+            branch_names
+                .iter()
+                .map(|name| format!("#/components/schemas/{name}"))
+                .collect::<Vec<_>>(),
+            "{public_name} branch order or version coverage drifted"
+        );
+
+        for branch_name in branch_names {
+            let branch = mapping_path(root, &["components", "schemas", branch_name])
+                .unwrap_or_else(|| panic!("spec must define {branch_name}"));
+            assert_eq!(
+                branch
+                    .as_mapping_get("additionalProperties")
+                    .and_then(Yaml::as_bool),
+                Some(false),
+                "{branch_name} must reject unknown outer-envelope fields"
+            );
+            let required: BTreeSet<_> = branch
+                .as_mapping_get("required")
+                .and_then(Yaml::as_sequence)
+                .unwrap_or_else(|| panic!("{branch_name} must list required envelope fields"))
+                .iter()
+                .map(|field| field.as_str().expect("required field must be a string"))
+                .collect();
+            assert_eq!(required, BTreeSet::from(["type", "data"]));
+
+            let data = mapping_path(branch, &["properties", "data"])
+                .unwrap_or_else(|| panic!("{branch_name} must define data"));
+            assert_eq!(
+                data.as_mapping_get("additionalProperties")
+                    .and_then(Yaml::as_bool),
+                Some(false),
+                "{branch_name}.data must reject unknown and cross-version fields"
+            );
+        }
+    }
+}
+
+#[test]
+fn reconnect_replay_uses_exact_versioned_control_message_unions() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    for (version, versioned) in [
+        (
+            "V2",
+            ["V2PlayerJoined", "V2PlayerLeft", "V2PlayerReconnected"],
+        ),
+        (
+            "V3",
+            ["V3PlayerJoined", "V3PlayerLeft", "V3PlayerReconnected"],
+        ),
+    ] {
+        let union_name = format!("{version}ReplayableServerMessageEnvelope");
+        let union = mapping_path(root, &["components", "schemas", &union_name])
+            .unwrap_or_else(|| panic!("spec must define {union_name}"));
+        let references: Vec<_> = union
+            .as_mapping_get("oneOf")
+            .and_then(Yaml::as_sequence)
+            .unwrap_or_else(|| panic!("{union_name} must be an exact oneOf"))
+            .iter()
+            .map(|branch| {
+                branch
+                    .as_mapping_get("$ref")
+                    .and_then(Yaml::as_str)
+                    .unwrap_or_else(|| panic!("{union_name} branches must be references"))
+            })
+            .collect();
+        let expected: Vec<_> = versioned
+            .iter()
+            .chain(
+                [
+                    "NewSpectatorJoined",
+                    "SpectatorDisconnected",
+                    "LobbyStateChanged",
+                    "AuthorityChanged",
+                ]
+                .iter(),
+            )
+            .map(|name| format!("#/components/schemas/{name}"))
+            .collect();
+        assert_eq!(references, expected, "{union_name} replay coverage drifted");
+    }
+
+    for shared in [
+        "NewSpectatorJoined",
+        "SpectatorDisconnected",
+        "LobbyStateChanged",
+        "AuthorityChanged",
+    ] {
+        let envelope = mapping_path(root, &["components", "schemas", shared])
+            .unwrap_or_else(|| panic!("spec must define {shared}"));
+        assert_eq!(
+            envelope
+                .as_mapping_get("additionalProperties")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{shared} must be closed before it enters the replay union"
+        );
+        assert_eq!(
+            mapping_path(envelope, &["properties", "data", "additionalProperties"])
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{shared}.data must be closed before it enters the replay union"
+        );
+    }
+}
+
+#[test]
+fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
+    use signal_fish_server::protocol::{
+        LobbyState, PlayerInfo, ReconnectedPayload, ReplayStatus, RoomJoinedPayload,
+        SenderWatermark, ServerMessage, SpectatorJoinedPayload,
+    };
+    use uuid::Uuid;
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+    let player_id = Uuid::from_u128(1);
+    let room_id = Uuid::from_u128(2);
+    let connected_at = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
+        .expect("valid timestamp fixture")
+        .with_timezone(&chrono::Utc);
+    let player = |accountable: bool| PlayerInfo {
+        id: player_id,
+        name: "Alice".to_string(),
+        is_authority: true,
+        is_ready: false,
+        connected_at,
+        connection_info: None,
+        epoch: accountable.then_some(3),
+        seq: accountable.then_some(7),
+        region_id: String::new(),
+    };
+    let room_joined = |accountable: bool| {
+        ServerMessage::RoomJoined(Box::new(RoomJoinedPayload {
+            room_id,
+            room_code: "ABC123".to_string(),
+            player_id,
+            game_name: "game".to_string(),
+            max_players: 4,
+            supports_authority: true,
+            current_players: vec![player(accountable)],
+            is_authority: true,
+            lobby_state: LobbyState::Waiting,
+            ready_players: Vec::new(),
+            relay_type: "WebSocket".to_string(),
+            current_spectators: Vec::new(),
+            ice_servers: Vec::new(),
+            reconnection_token: accountable.then(|| "join-token".to_string()),
+        }))
+    };
+    let reconnected = |accountable: bool| {
+        ServerMessage::Reconnected(Box::new(ReconnectedPayload {
+            room_id,
+            room_code: "ABC123".to_string(),
+            player_id,
+            game_name: "game".to_string(),
+            max_players: 4,
+            supports_authority: true,
+            current_players: vec![player(accountable)],
+            is_authority: true,
+            lobby_state: LobbyState::Waiting,
+            ready_players: Vec::new(),
+            relay_type: "WebSocket".to_string(),
+            current_spectators: Vec::new(),
+            ice_servers: Vec::new(),
+            missed_events: vec![ServerMessage::PlayerLeft {
+                player_id: Uuid::from_u128(4),
+                epoch: accountable.then_some(2),
+                final_seq: accountable.then_some(5),
+            }],
+            replay: accountable.then_some(ReplayStatus::Complete),
+            sender_watermarks: accountable
+                .then_some(vec![SenderWatermark {
+                    player_id,
+                    epoch: 3,
+                    seq: 7,
+                }])
+                .unwrap_or_default(),
+            reconnection_token: accountable.then(|| "next-token".to_string()),
+        }))
+    };
+    let spectator_joined = |accountable: bool| {
+        ServerMessage::SpectatorJoined(Box::new(SpectatorJoinedPayload {
+            room_id,
+            room_code: "ABC123".to_string(),
+            spectator_id: Uuid::from_u128(3),
+            game_name: "game".to_string(),
+            current_players: vec![player(accountable)],
+            current_spectators: Vec::new(),
+            lobby_state: LobbyState::Waiting,
+            reason: None,
+        }))
+    };
+
+    let mut empty_spectator =
+        serde_json::to_value(spectator_joined(false)).expect("serialize SpectatorJoined");
+    empty_spectator["data"]["current_players"] = serde_json::json!([]);
+
+    let valid_cases = [
+        ("RoomJoined", serde_json::to_value(room_joined(false))),
+        ("RoomJoined", serde_json::to_value(room_joined(true))),
+        (
+            "PlayerJoined",
+            serde_json::to_value(ServerMessage::PlayerJoined {
+                player: player(false),
+            }),
+        ),
+        (
+            "PlayerJoined",
+            serde_json::to_value(ServerMessage::PlayerJoined {
+                player: player(true),
+            }),
+        ),
+        (
+            "PlayerLeft",
+            serde_json::to_value(ServerMessage::PlayerLeft {
+                player_id,
+                epoch: None,
+                final_seq: None,
+            }),
+        ),
+        (
+            "PlayerLeft",
+            serde_json::to_value(ServerMessage::PlayerLeft {
+                player_id,
+                epoch: Some(3),
+                final_seq: Some(7),
+            }),
+        ),
+        (
+            "ServerGameData",
+            serde_json::to_value(ServerMessage::GameData {
+                from_player: player_id,
+                data: serde_json::json!({"move": "up"}),
+                seq: None,
+                epoch: None,
+                class: None,
+                key: None,
+            }),
+        ),
+        (
+            "ServerGameData",
+            serde_json::to_value(ServerMessage::GameData {
+                from_player: player_id,
+                data: serde_json::json!({"state": "fresh"}),
+                seq: Some(8),
+                epoch: Some(3),
+                class: Some(signal_fish_server::protocol::DeliveryClass::Latest),
+                key: Some(9),
+            }),
+        ),
+        ("Reconnected", serde_json::to_value(reconnected(false))),
+        ("Reconnected", serde_json::to_value(reconnected(true))),
+        (
+            "PlayerReconnected",
+            serde_json::to_value(ServerMessage::PlayerReconnected {
+                player_id,
+                epoch: None,
+            }),
+        ),
+        (
+            "PlayerReconnected",
+            serde_json::to_value(ServerMessage::PlayerReconnected {
+                player_id,
+                epoch: Some(3),
+            }),
+        ),
+        (
+            "SpectatorJoined",
+            serde_json::to_value(spectator_joined(false)),
+        ),
+        (
+            "SpectatorJoined",
+            serde_json::to_value(spectator_joined(true)),
+        ),
+        ("SpectatorJoined", Ok(empty_spectator)),
+    ];
+
+    for (schema_name, serialized) in valid_cases {
+        let value = serialized.unwrap_or_else(|error| {
+            panic!("failed to serialize representative {schema_name}: {error}")
+        });
+        let schema = mapping_path(root, &["components", "schemas", schema_name])
+            .unwrap_or_else(|| panic!("spec must define {schema_name}"));
+        assert!(
+            schema_shape_matches(root, schema, &value),
+            "{schema_name} rejected an actual Rust wire shape: {value}"
+        );
+    }
+
+    let mut invalid_cases = Vec::new();
+
+    let mut extra_outer = serde_json::to_value(room_joined(false)).expect("serialize RoomJoined");
+    extra_outer["unexpected"] = serde_json::json!(true);
+    invalid_cases.push(("RoomJoined", "unknown outer field", extra_outer));
+
+    let mut mixed_room = serde_json::to_value(room_joined(false)).expect("serialize RoomJoined");
+    mixed_room["data"]["current_players"] = serde_json::json!([player(false), player(true)]);
+    invalid_cases.push(("RoomJoined", "mixed snapshot versions", mixed_room));
+
+    let mut mixed_player = serde_json::to_value(ServerMessage::PlayerJoined {
+        player: player(false),
+    })
+    .expect("serialize PlayerJoined");
+    mixed_player["data"]["player"]["epoch"] = serde_json::json!(3);
+    invalid_cases.push(("PlayerJoined", "unpaired player epoch", mixed_player));
+
+    let mut partial_left = serde_json::to_value(ServerMessage::PlayerLeft {
+        player_id,
+        epoch: None,
+        final_seq: None,
+    })
+    .expect("serialize PlayerLeft");
+    partial_left["data"]["epoch"] = serde_json::json!(3);
+    invalid_cases.push(("PlayerLeft", "unpaired terminal epoch", partial_left));
+
+    let mut partial_data = serde_json::to_value(ServerMessage::GameData {
+        from_player: player_id,
+        data: serde_json::json!(null),
+        seq: None,
+        epoch: None,
+        class: None,
+        key: None,
+    })
+    .expect("serialize GameData");
+    partial_data["data"]["seq"] = serde_json::json!(1);
+    invalid_cases.push(("ServerGameData", "unpaired sequence", partial_data));
+
+    let mut class_without_stamp = serde_json::to_value(ServerMessage::GameData {
+        from_player: player_id,
+        data: serde_json::json!(null),
+        seq: None,
+        epoch: None,
+        class: None,
+        key: None,
+    })
+    .expect("serialize GameData");
+    class_without_stamp["data"]["class"] = serde_json::json!("volatile");
+    invalid_cases.push((
+        "ServerGameData",
+        "v3 class on a v2 envelope",
+        class_without_stamp,
+    ));
+
+    let mut reconnect_hybrid =
+        serde_json::to_value(reconnected(false)).expect("serialize Reconnected");
+    reconnect_hybrid["data"]["replay"] = serde_json::json!("complete");
+    invalid_cases.push((
+        "Reconnected",
+        "partial v3 reconnect state",
+        reconnect_hybrid,
+    ));
+
+    let mut mixed_spectator =
+        serde_json::to_value(spectator_joined(false)).expect("serialize SpectatorJoined");
+    mixed_spectator["data"]["current_players"] = serde_json::json!([player(false), player(true)]);
+    invalid_cases.push((
+        "SpectatorJoined",
+        "mixed snapshot versions",
+        mixed_spectator,
+    ));
+
+    for (schema_name, case, value) in invalid_cases {
+        let schema = mapping_path(root, &["components", "schemas", schema_name])
+            .unwrap_or_else(|| panic!("spec must define {schema_name}"));
+        assert!(
+            !schema_shape_matches(root, schema, &value),
+            "{schema_name} accepted {case}: {value}"
+        );
+    }
 }
 
 #[test]

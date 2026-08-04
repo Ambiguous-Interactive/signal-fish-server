@@ -314,6 +314,15 @@ and error codes. A Rust test
 ([`tests/protocol_spec_consistency.rs`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/tests/protocol_spec_consistency.rs))
 fails the build if it drifts from the Rust source, so you can trust it.
 
+Accountability-bearing server messages use closed wire-shape unions. Generated
+models therefore distinguish the v2 forms from v3 snapshots, sequence/epoch
+pairs, terminal watermarks, and reconnect replay state instead of accepting a
+single bag of optional fields. `SpectatorJoined` also has a shared branch for an
+empty `current_players` snapshot: in a spectator-only room that payload has no
+wire-visible version field and is valid for either negotiated version.
+`Reconnected.missed_events` is limited to the exact replayable control-message
+subset and uses the matching v2 or v3 lifecycle shapes.
+
 Generate models or a client scaffold with the AsyncAPI generator:
 
 ```bash

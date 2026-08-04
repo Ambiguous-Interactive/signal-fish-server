@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix the codegen-facing AsyncAPI accountability envelopes (issue #261).
+  Room snapshots, relayed game data, lifecycle watermarks, and reconnect replay
+  now expose closed protocol-v2/protocol-v3 wire unions that reject impossible
+  mixed or partial shapes while preserving the frozen protocol-v2 wire.
 - Fix protocol-v3 peer transport health after room changes (issue #260). The
   first `TransportStatus` report in each seated membership now fans out even
   when it matches prior room or spectator state. Spectator entry and leave also
