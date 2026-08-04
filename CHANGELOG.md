@@ -80,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the WebRTC loss-recovery proof observable in two phases: every pair
   must complete its exact reliable exchange after fault lift before the
   harness releases the exact unreliable exchange.
+- Hold late-join WebRTC clients at a shared success barrier and compare each
+  peer-status fan-out against its reporter's exact pre-teardown transition
+  sequence, avoiding autonomous-exit races without weakening the oracle.
 - Fix the codegen-facing AsyncAPI accountability envelopes (issue #261).
   Room snapshots, relayed game data, lifecycle watermarks, and reconnect replay
   now expose closed protocol-v2/protocol-v3 wire unions that reject impossible

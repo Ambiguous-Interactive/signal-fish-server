@@ -174,6 +174,17 @@ async fn drain_expect_success(client: &mut ClientProcess) {
     );
 }
 
+async fn await_event_count(
+    client: &mut ClientProcess,
+    event_name: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    while events_named(&client.events, event_name).len() < expected {
+        client.await_event(event_name, timeout).await;
+    }
+}
+
 /// Spawn the server with the given default topology, run the 3-client flow
 /// (creator + 2 joiners by room code, per-client [`ClientConfig`]) to
 /// completion, assert every process exits 0, and return the event logs.
@@ -443,18 +454,7 @@ fn assert_exchange_sent_to(events: &[Value], who: &str, recipients: &BTreeSet<&s
 /// before this process drains; teardown ordering is not part of the session
 /// success contract.
 fn assert_transport_status_true(full_log: &[Value], who: &str) {
-    let statuses = events_named(full_log, "transport_status_sent");
-    assert!(!statuses.is_empty(), "{who}: no transport status was sent");
-    let connected: Vec<bool> = statuses
-        .iter()
-        .map(|status| {
-            assert_eq!(str_field(status, "transport"), "webrtc", "{who} transport");
-            status
-                .get("connected")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| panic!("{who}: status lacks connected flag: {status}"))
-        })
-        .collect();
+    let connected = transport_status_sequence(full_log, who);
     assert_eq!(
         connected.first(),
         Some(&true),
@@ -469,6 +469,36 @@ fn assert_transport_status_true(full_log: &[Value], who: &str) {
         connected.iter().filter(|&&state| !state).count(),
         "{who}: every disconnected transition must engage the relay fallback"
     );
+}
+
+fn transport_status_sequence(full_log: &[Value], who: &str) -> Vec<bool> {
+    let statuses = events_named(full_log, "transport_status_sent");
+    assert!(!statuses.is_empty(), "{who}: no transport status was sent");
+    statuses
+        .iter()
+        .map(|status| {
+            assert_eq!(str_field(status, "transport"), "webrtc", "{who} transport");
+            status
+                .get("connected")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| panic!("{who}: status lacks connected flag: {status}"))
+        })
+        .collect()
+}
+
+fn before_nth_event<'a>(events: &'a [Value], event_name: &str, occurrence: usize) -> &'a [Value] {
+    assert!(occurrence > 0, "event occurrence is one-indexed");
+    let mut seen = 0;
+    let end = events
+        .iter()
+        .position(|event| {
+            if event.get("event").and_then(Value::as_str) == Some(event_name) {
+                seen += 1;
+            }
+            seen == occurrence
+        })
+        .unwrap_or(events.len());
+    &events[..end]
 }
 
 /// Assert exactly one `peer_transport_status{webrtc, <flag>}` per expected
@@ -866,6 +896,14 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
     let server_url = server.v3_ws_url();
     let workdir = tempfile::tempdir().expect("create client workdir");
     let game_name = "interop-latejoin3";
+    let success_release_file = workdir.path().join("release-late-join-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
+    assert!(
+        !success_release_file.exists(),
+        "success release path must start absent"
+    );
 
     // The server only finalizes FULL rooms, so a late join is always a seat
     // fill: a 3-seat room finalizes with the two incumbents plus a
@@ -882,7 +920,13 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
     // the joiner's payload is part of the incumbents' exit criteria
     // (`--peers 3` => two distinct senders: the other incumbent + the
     // joiner), which makes its receipt deterministic, not merely likely.
-    const INCUMBENT_ARGS: &[&str] = &["--expect-total-peers", "4"];
+    let incumbent_args = [
+        "--expect-total-peers",
+        "4",
+        "--success-release-file",
+        success_release_path,
+    ];
+    let joiner_args = ["--success-release-file", success_release_path];
     let inc_relays = [relay_payload_for("inc0"), relay_payload_for("inc1")];
     let joiner_relay = relay_payload_for("joiner");
     let mut inc0 = spawn_client(
@@ -894,7 +938,7 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
             peers: 3,
             exchange: true,
             relay_payload: Some(&inc_relays[0]),
-            extra_args: INCUMBENT_ARGS,
+            extra_args: &incumbent_args,
         },
         workdir.path(),
     );
@@ -910,7 +954,7 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
             peers: 3,
             exchange: true,
             relay_payload: Some(&inc_relays[1]),
-            extra_args: INCUMBENT_ARGS,
+            extra_args: &incumbent_args,
         },
         workdir.path(),
     );
@@ -970,6 +1014,10 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
                 .await;
         }
     }
+    let pre_join_status_counts = [
+        events_named(&inc0.events, "transport_status_sent").len(),
+        events_named(&inc1.events, "transport_status_sent").len(),
+    ];
 
     // The late joiner fills the freed seat of the running session. Its
     // `--relay-payload` exercises the late-join probe arming (and the waiver
@@ -983,11 +1031,76 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
             peers: 3,
             exchange: true,
             relay_payload: Some(&joiner_relay),
-            extra_args: &[],
+            extra_args: &joiner_args,
         },
         workdir.path(),
     );
 
+    // Hold all three live clients after their complete success criteria so no
+    // sibling teardown can race the status-fan-out oracle below. Once every
+    // process has reported the barrier, release them together; assertions use
+    // each log's pre-PlayerLeft scenario window.
+    for client in [&mut inc0, &mut inc1, &mut joiner] {
+        client
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+    }
+    let held_incumbent_statuses = [
+        transport_status_sequence(&inc0.events, "inc0"),
+        transport_status_sequence(&inc1.events, "inc1"),
+    ];
+    let held_joiner_statuses = transport_status_sequence(&joiner.events, "joiner");
+    for (who, statuses) in [
+        ("inc0", &held_incumbent_statuses[0]),
+        ("inc1", &held_incumbent_statuses[1]),
+        ("joiner", &held_joiner_statuses),
+    ] {
+        assert_eq!(
+            statuses.last(),
+            Some(&true),
+            "{who}: the held success barrier requires final connected status: {statuses:?}"
+        );
+    }
+    await_event_count(
+        &mut inc0,
+        "peer_transport_status",
+        held_incumbent_statuses[1].len() + held_joiner_statuses.len(),
+        EVENT_TIMEOUT,
+    )
+    .await;
+    await_event_count(
+        &mut inc1,
+        "peer_transport_status",
+        held_incumbent_statuses[0].len() + held_joiner_statuses.len(),
+        EVENT_TIMEOUT,
+    )
+    .await;
+    await_event_count(
+        &mut joiner,
+        "peer_transport_status",
+        held_incumbent_statuses[0].len() - pre_join_status_counts[0]
+            + held_incumbent_statuses[1].len()
+            - pre_join_status_counts[1],
+        EVENT_TIMEOUT,
+    )
+    .await;
+    assert_eq!(
+        transport_status_sequence(&inc0.events, "inc0"),
+        held_incumbent_statuses[0],
+        "inc0: transport status changed while the success gate held"
+    );
+    assert_eq!(
+        transport_status_sequence(&inc1.events, "inc1"),
+        held_incumbent_statuses[1],
+        "inc1: transport status changed while the success gate held"
+    );
+    assert_eq!(
+        transport_status_sequence(&joiner.events, "joiner"),
+        held_joiner_statuses,
+        "joiner: transport status changed while the success gate held"
+    );
+    std::fs::write(&success_release_file, b"release")
+        .expect("release late-join clients after every success barrier");
     for client in [&mut inc0, &mut inc1, &mut joiner] {
         drain_expect_success(client).await;
     }
@@ -998,6 +1111,27 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
     ];
     let leaver_id = player_id_of(&leaver.events, "leaver");
     let joiner_id = player_id_of(&joiner.events, "joiner");
+    // The incumbents' first PlayerLeft is the deliberate pre-join seat-holder
+    // departure; their second is live-session teardown. The late joiner never
+    // saw the seat-holder, so its first PlayerLeft is teardown.
+    let incumbent_windows = [
+        before_nth_event(&inc0.events, "player_left", 2),
+        before_nth_event(&inc1.events, "player_left", 2),
+    ];
+    let joiner_window = before_nth_event(&joiner.events, "player_left", 1);
+    let incumbent_transport_statuses = [
+        transport_status_sequence(incumbent_windows[0], "inc0"),
+        transport_status_sequence(incumbent_windows[1], "inc1"),
+    ];
+    let joiner_transport_statuses = transport_status_sequence(joiner_window, "joiner");
+    assert_eq!(
+        incumbent_transport_statuses, held_incumbent_statuses,
+        "incumbent transport status must stay stable through the pre-teardown window"
+    );
+    assert_eq!(
+        joiner_transport_statuses, held_joiner_statuses,
+        "joiner transport status must stay stable through the pre-teardown window"
+    );
     let distinct: BTreeSet<&str> = [
         inc_ids[0].as_str(),
         inc_ids[1].as_str(),
@@ -1069,14 +1203,32 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
     }
     // Pre-join reports are never replayed. The generation-fenced authoritative
     // refresh does, however, rebuild each incumbent's retained pair and emits
-    // one real false/true transition after the joiner is present.
-    let joiner_statuses: BTreeMap<&str, Vec<bool>> = incumbent_ids
-        .iter()
-        .copied()
-        .map(|peer| (peer, vec![false, true]))
-        .collect();
-    assert_peer_status_sequences(&joiner.events, "joiner", &joiner_statuses);
-    assert_transport_status_true(&joiner.events, "joiner");
+    // at least one real false/true transition after the joiner is present.
+    // The joiner must observe every reporter-local transition after the
+    // pre-join initial `true`; this exact correlation permits legitimate
+    // teardown ordering without hiding a dropped server fan-out.
+    let mut joiner_statuses = BTreeMap::new();
+    for (index, peer) in inc_ids.iter().map(String::as_str).enumerate() {
+        let reporter_statuses = &incumbent_transport_statuses[index];
+        assert!(
+            reporter_statuses.len() >= pre_join_status_counts[index] + 2,
+            "inc{index}: the retained pair rebuild must add false/true after the captured pre-join prefix: {reporter_statuses:?}"
+        );
+        let post_join = &reporter_statuses[pre_join_status_counts[index]..];
+        assert_eq!(
+            post_join.first(),
+            Some(&false),
+            "inc{index}: retained-pair replacement must first report disconnected: {post_join:?}"
+        );
+        assert_eq!(
+            post_join.last(),
+            Some(&true),
+            "inc{index}: retained-pair replacement must converge connected: {post_join:?}"
+        );
+        joiner_statuses.insert(peer, post_join.to_vec());
+    }
+    assert_peer_status_sequences(joiner_window, "joiner", &joiner_statuses);
+    assert_transport_status_true(joiner_window, "joiner");
     assert_pair_connected_exactly(&joiner.events, "joiner", &incumbent_ids);
     assert_exchange_received_from(&joiner.events, "joiner", &incumbent_ids);
     assert_exchange_sent_to(&joiner.events, "joiner", &incumbent_ids);
@@ -1095,8 +1247,10 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
     // Incumbents: one finalize-time plan and one authoritative late-join
     // replacement plan (never an additive NewPeer), then pairs + the full
     // matrix with {other incumbent, joiner} only. The retained-pair rebuild
-    // produces one local true/false/true sequence and the same post-join
-    // false/true fan-out from the other incumbent.
+    // produces a local true/false/true sequence and the same post-join
+    // false/true fan-out from the other incumbent. Each observer's expected
+    // sequence is derived from the reporter's local sequence so legitimate
+    // teardown transitions remain exact rather than being ignored.
     for (index, incumbent) in [(0_usize, &inc0), (1_usize, &inc1)] {
         let who = ["inc0", "inc1"][index];
         let my_id = inc_ids[index].as_str();
@@ -1161,12 +1315,12 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
         assert_pair_connected_exactly(&incumbent.events, who, &live_pairs);
         assert_exchange_received_from(&incumbent.events, who, &live_pairs);
         assert_exchange_sent_to(&incumbent.events, who, &live_pairs);
-        assert_transport_status_true(&incumbent.events, who);
+        assert_transport_status_true(incumbent_windows[index], who);
         let expected_reports: BTreeMap<&str, Vec<bool>> = BTreeMap::from([
-            (other_id, vec![true, false, true]),
-            (joiner_id.as_str(), vec![true]),
+            (other_id, incumbent_transport_statuses[1 - index].clone()),
+            (joiner_id.as_str(), joiner_transport_statuses.clone()),
         ]);
-        assert_peer_status_sequences(&incumbent.events, who, &expected_reports);
+        assert_peer_status_sequences(incumbent_windows[index], who, &expected_reports);
 
         // Relay floor across the join boundary: one send, and exactly the
         // other incumbent's payload (pre-join) plus the late joiner's
