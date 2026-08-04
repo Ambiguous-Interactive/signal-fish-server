@@ -44,6 +44,7 @@ const CLIENT_EXIT_DEADLINE: Duration = Duration::from_secs(30);
 const METRIC_QUIESCENCE_DEADLINE: Duration = Duration::from_secs(30);
 const CLIENT_MAX_RUNTIME_SECS: u64 = 540;
 const CHANNEL_LABELS: [&str; 2] = ["reliable", "unreliable"];
+type ChannelEventCounts = BTreeMap<(String, String), usize>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MatrixTopology {
@@ -55,6 +56,12 @@ enum MatrixTopology {
 struct ConnectivityFault<'a> {
     crippled_id: Option<&'a str>,
     partition_pair: Option<(&'a str, &'a str)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GenerationOracle<'a> {
+    connectivity_fault: ConnectivityFault<'a>,
+    pre_rebuild_opens: Option<&'a ChannelEventCounts>,
 }
 
 impl MatrixTopology {
@@ -212,13 +219,19 @@ fn held_window<'a>(events: &'a [Value], who: &str) -> &'a [Value] {
     events
 }
 
+#[derive(Clone, Copy)]
+struct ExchangeGateFiles<'a> {
+    exchange: Option<&'a Path>,
+    p2p_rebuild: Option<&'a Path>,
+    unreliable: Option<&'a Path>,
+}
+
 fn client_args(
     server: &ServerProcess,
     name: &str,
     room_code: Option<&str>,
     success_release_file: &Path,
-    exchange_release_file: Option<&Path>,
-    unreliable_exchange_release_file: Option<&Path>,
+    exchange_gates: ExchangeGateFiles<'_>,
     scenario: WebRtcScenario,
     ordinal: usize,
 ) -> Vec<String> {
@@ -250,7 +263,9 @@ fn client_args(
     }
     if scenario.uses_netem() {
         args.push("--disable-mdns".to_string());
-        args.extend(["--p2p-retry-count".to_string(), "1".to_string()]);
+        // Attempt 1 remains available for an incomplete lossy formation;
+        // attempt 2 is reserved for the coordinated post-lift rebuild.
+        args.extend(["--p2p-retry-count".to_string(), "2".to_string()]);
     }
     if scenario.crippled_ordinal().is_some() || scenario.partition_pair().is_some() {
         args.extend(["--p2p-retry-count".to_string(), "0".to_string()]);
@@ -267,13 +282,19 @@ fn client_args(
             args.extend(["--drop-ice-from".to_string(), target.to_string()]);
         }
     }
-    if let Some(path) = exchange_release_file {
+    if let Some(path) = exchange_gates.exchange {
         args.extend([
             "--exchange-release-file".to_string(),
             path.to_string_lossy().into_owned(),
         ]);
     }
-    if let Some(path) = unreliable_exchange_release_file {
+    if let Some(path) = exchange_gates.p2p_rebuild {
+        args.extend([
+            "--p2p-rebuild-release-file".to_string(),
+            path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if let Some(path) = exchange_gates.unreliable {
         args.extend([
             "--unreliable-exchange-release-file".to_string(),
             path.to_string_lossy().into_owned(),
@@ -540,6 +561,7 @@ fn assert_exact_channel_ledger(
     retried_peers: &BTreeSet<&str>,
     player_id: &str,
     who: &str,
+    pre_rebuild_opens: Option<&ChannelEventCounts>,
 ) {
     let mut counts = BTreeMap::<(&str, &str), usize>::new();
     for item in events_named(events, event) {
@@ -590,10 +612,23 @@ fn assert_exact_channel_ledger(
         for label in CHANNEL_LABELS {
             let count = counts.get(&(*peer, label)).copied().unwrap_or_default();
             let retried = retried_peers.contains(peer);
-            let max_generations = usize::from(retried) + 1;
-            assert!(
-                channel_generation_count_is_valid(count, retried),
-                "{who}: expected 1..={max_generations} {event} generations for ({peer}, {label}); got {count}; ledger={counts:?}"
+            let expected_count = if event == "channel_open" {
+                pre_rebuild_opens.map_or_else(
+                    || expected_channel_event_count(event, retried),
+                    |baseline| {
+                        baseline
+                            .get(&((*peer).to_string(), label.to_string()))
+                            .copied()
+                            .unwrap_or_default()
+                            + 1
+                    },
+                )
+            } else {
+                expected_channel_event_count(event, retried)
+            };
+            assert_eq!(
+                count, expected_count,
+                "{who}: expected exactly {expected_count} {event} events for ({peer}, {label}); ledger={counts:?}"
             );
         }
     }
@@ -604,18 +639,33 @@ fn assert_exact_channel_ledger(
     );
 }
 
-fn channel_generation_count_is_valid(count: usize, retried: bool) -> bool {
-    (1..=usize::from(retried) + 1).contains(&count)
+fn channel_event_counts(events: &[Value], event: &str, who: &str) -> ChannelEventCounts {
+    let mut counts = ChannelEventCounts::new();
+    for item in events_named(events, event) {
+        let peer = string_field(item, "peer", who).to_string();
+        let label = string_field(item, "label", who).to_string();
+        *counts.entry((peer, label)).or_default() += 1;
+    }
+    counts
+}
+
+fn expected_channel_event_count(event: &str, retried: bool) -> usize {
+    if event == "channel_open" && retried {
+        2
+    } else {
+        1
+    }
 }
 
 #[test]
 fn channel_generation_ledger_expands_only_for_observed_retry_markers() {
-    assert!(channel_generation_count_is_valid(1, false));
-    assert!(!channel_generation_count_is_valid(0, false));
-    assert!(!channel_generation_count_is_valid(2, false));
-    assert!(channel_generation_count_is_valid(1, true));
-    assert!(channel_generation_count_is_valid(2, true));
-    assert!(!channel_generation_count_is_valid(3, true));
+    assert_eq!(expected_channel_event_count("channel_open", false), 1);
+    assert_eq!(expected_channel_event_count("channel_open", true), 2);
+    assert_eq!(
+        expected_channel_event_count("channel_message_sent", true),
+        1
+    );
+    assert_eq!(expected_channel_event_count("channel_message", true), 1);
 }
 
 fn assert_exact_signal_ledger(
@@ -818,8 +868,10 @@ fn assert_client_barrier(
     signal_budget: usize,
     host_id: &str,
     scenario: WebRtcScenario,
-    fault: ConnectivityFault<'_>,
+    generation_oracle: GenerationOracle<'_>,
 ) -> usize {
+    let fault = generation_oracle.connectivity_fault;
+    let pre_rebuild_opens = generation_oracle.pre_rebuild_opens;
     let who = &client.name;
     let window = held_window(&client.events, who);
     let room_peers: BTreeSet<&str> = all_ids
@@ -847,6 +899,11 @@ fn assert_client_barrier(
         events_named(window, "exchange_ready").len(),
         usize::from(scenario.uses_netem()),
         "{who}: fault-gated exchange barrier count"
+    );
+    assert_eq!(
+        events_named(window, "exchange_reliable_ready").len(),
+        usize::from(scenario.uses_netem()),
+        "{who}: fault-gated reliable exchange barrier count"
     );
     let plan = single_event(window, "session_plan", who);
     assert_eq!(
@@ -923,6 +980,18 @@ fn assert_client_barrier(
         &expected_connections,
         who,
     );
+    let expected_reconnections = if scenario.uses_netem() {
+        expected_connections.clone()
+    } else {
+        BTreeSet::new()
+    };
+    assert_exact_peer_events(
+        window,
+        "p2p_pair_reconnected",
+        "peer",
+        &expected_reconnections,
+        who,
+    );
     assert_exact_channel_ledger(
         window,
         "channel_open",
@@ -930,6 +999,7 @@ fn assert_client_barrier(
         &retried_peers,
         player_id,
         who,
+        pre_rebuild_opens,
     );
     assert_exact_channel_ledger(
         window,
@@ -938,6 +1008,7 @@ fn assert_client_barrier(
         &retried_peers,
         player_id,
         who,
+        None,
     );
     assert_exact_channel_ledger(
         window,
@@ -946,6 +1017,7 @@ fn assert_client_barrier(
         &retried_peers,
         player_id,
         who,
+        None,
     );
 
     let statuses = events_named(window, "transport_status_sent");
@@ -1142,6 +1214,9 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let exchange_release_file = scenario
         .uses_netem()
         .then(|| workdir.path().join("release-exchange-after-netem"));
+    let p2p_rebuild_release_file = scenario
+        .uses_netem()
+        .then(|| workdir.path().join("rebuild-pairs-after-netem"));
     let unreliable_exchange_release_file = scenario.uses_netem().then(|| {
         workdir
             .path()
@@ -1159,6 +1234,12 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             .is_none_or(|path| !path.exists()),
         "unreliable exchange release path must start absent"
     );
+    assert!(
+        p2p_rebuild_release_file
+            .as_ref()
+            .is_none_or(|path| !path.exists()),
+        "P2P rebuild release path must start absent"
+    );
     let mut netem_guard = scenario.uses_netem().then(NetemGuard::activate);
     let mut creator = spawn_native_client(
         "c00",
@@ -1167,8 +1248,11 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             "c00",
             None,
             &success_release_files[0],
-            exchange_release_file.as_deref(),
-            unreliable_exchange_release_file.as_deref(),
+            ExchangeGateFiles {
+                exchange: exchange_release_file.as_deref(),
+                p2p_rebuild: p2p_rebuild_release_file.as_deref(),
+                unreliable: unreliable_exchange_release_file.as_deref(),
+            },
             scenario,
             0,
         ),
@@ -1188,8 +1272,11 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
                 &name,
                 Some(&room_code),
                 success_release_file,
-                exchange_release_file.as_deref(),
-                unreliable_exchange_release_file.as_deref(),
+                ExchangeGateFiles {
+                    exchange: exchange_release_file.as_deref(),
+                    p2p_rebuild: p2p_rebuild_release_file.as_deref(),
+                    unreliable: unreliable_exchange_release_file.as_deref(),
+                },
                 scenario,
                 ordinal,
             ),
@@ -1204,6 +1291,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     let rss_task = tokio::spawn(sample_peak_rss(pids, stop_rx));
     let barrier_started = tokio::time::Instant::now();
     let barrier_deadline = barrier_started + SUCCESS_BARRIER_DEADLINE;
+    let mut pre_rebuild_channel_opens: Option<Vec<ChannelEventCounts>> = None;
     let netem_drops = if scenario.uses_netem() {
         // Exercise ICE/DTLS/SCTP formation under real random loss for longer
         // than the historical clean/loss barriers, then test the transition
@@ -1242,6 +1330,79 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             client.await_event_count(
                 "exchange_ready",
                 1,
+                barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+        }))
+        .await;
+
+        // `exchange_ready` freezes each sender's old-generation signal
+        // ledger. Settle every one of those signals at its exact destination
+        // before PairRetry can replace the receiver-side engine, so a delayed
+        // old candidate cannot cross into the reserved clean generation.
+        let player_ids: Vec<String> = clients
+            .iter()
+            .map(|client| {
+                string_field(
+                    single_event(&client.events, "room_joined", &client.name),
+                    "player_id",
+                    &client.name,
+                )
+                .to_string()
+            })
+            .collect();
+        let player_indexes: BTreeMap<&str, usize> = player_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.as_str(), index))
+            .collect();
+        let mut expected_initial_signals = vec![0; clients.len()];
+        for client in &clients {
+            for event in events_named(&client.events, "signal_sent") {
+                let target = string_field(event, "to", &client.name);
+                let target_index = player_indexes.get(target).copied().unwrap_or_else(|| {
+                    panic!(
+                        "{}: pre-rebuild signal target {target} is outside the room",
+                        client.name
+                    )
+                });
+                expected_initial_signals[target_index] += 1;
+            }
+        }
+        join_all(
+            clients
+                .iter_mut()
+                .zip(expected_initial_signals)
+                .map(|(client, expected)| {
+                    client.await_event_count(
+                        "signal_received",
+                        expected,
+                        barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
+                }),
+        )
+        .await;
+        pre_rebuild_channel_opens = Some(
+            clients
+                .iter()
+                .map(|client| channel_event_counts(&client.events, "channel_open", &client.name))
+                .collect(),
+        );
+        std::fs::write(
+            p2p_rebuild_release_file
+                .as_ref()
+                .expect("netem scenario owns a P2P rebuild release file"),
+            b"rebuild",
+        )
+        .expect("trigger coordinated clean-path pair rebuild after lifting netem");
+        join_all(clients.iter_mut().enumerate().map(|(ordinal, client)| {
+            let expected_pairs = match scenario.topology {
+                MatrixTopology::Mesh => scenario.players - 1,
+                MatrixTopology::Host if ordinal == 0 => scenario.players - 1,
+                MatrixTopology::Host => 1,
+            };
+            client.await_event_count(
+                "p2p_pair_reconnected",
+                expected_pairs,
                 barrier_deadline.saturating_duration_since(tokio::time::Instant::now()),
             )
         }))
@@ -1365,7 +1526,7 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
     );
 
     let mut per_client_signals = Vec::with_capacity(scenario.players);
-    for (client, id) in clients.iter().zip(&ids) {
+    for (index, (client, id)) in clients.iter().zip(&ids).enumerate() {
         per_client_signals.push(assert_client_barrier(
             client,
             id,
@@ -1374,7 +1535,12 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             signal_budget,
             host_id,
             scenario,
-            fault,
+            GenerationOracle {
+                connectivity_fault: fault,
+                pre_rebuild_opens: pre_rebuild_channel_opens
+                    .as_ref()
+                    .map(|counts| &counts[index]),
+            },
         ));
     }
     assert_eq!(

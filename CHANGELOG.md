@@ -77,9 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve deterministic `--cripple-ice` fallback on webrtc-rs 0.20 by keeping
   offer/answer and gathering lifecycles live while preventing both local and
   SDP-embedded remote candidates from forming an ICE pair.
-- Make the WebRTC loss-recovery proof observable in two phases: every pair
-  must complete its exact reliable exchange after fault lift before the
-  harness releases the exact unreliable exchange.
+- Make the WebRTC loss-recovery proof observable: after fault lift, every pair
+  is rebuilt through the bounded PairRetry protocol, every peer must complete
+  its exact reliable exchange on that clean generation, and only then does the
+  harness release the exact unreliable exchange.
 - Hold late-join WebRTC clients at a shared success barrier and compare each
   peer-status fan-out against its reporter's exact pre-teardown transition
   sequence, avoiding autonomous-exit races without weakening the oracle.

@@ -86,6 +86,12 @@ pub struct Cli {
     #[arg(long, requires = "exchange")]
     pub exchange_release_file: Option<PathBuf>,
 
+    /// Test-harness coordination for loss recovery: once this path exists,
+    /// initiators rebuild every planned pair through the bounded PairRetry
+    /// protocol before the held exchange is released.
+    #[arg(long, requires = "exchange_release_file")]
+    pub p2p_rebuild_release_file: Option<PathBuf>,
+
     /// Test-harness coordination for loss recovery: after the reliable half
     /// of --exchange has completed in both directions, wait until this path
     /// exists before sending the exact unreliable half.
@@ -486,6 +492,10 @@ mod tests {
             "--exchange",
             "--exchange-release-file",
             "/tmp/signal-fish-exchange-release",
+            "--p2p-rebuild-release-file",
+            "/tmp/signal-fish-p2p-rebuild",
+            "--p2p-retry-count",
+            "1",
             "--unreliable-exchange-release-file",
             "/tmp/signal-fish-unreliable-release",
         ]);
@@ -497,6 +507,10 @@ mod tests {
         assert_eq!(
             cli.unreliable_exchange_release_file.as_deref(),
             Some(std::path::Path::new("/tmp/signal-fish-unreliable-release"))
+        );
+        assert_eq!(
+            cli.p2p_rebuild_release_file.as_deref(),
+            Some(std::path::Path::new("/tmp/signal-fish-p2p-rebuild"))
         );
 
         let without_exchange = Cli::try_parse_from([
@@ -524,6 +538,22 @@ mod tests {
         assert!(
             without_reliable_gate.is_err(),
             "the unreliable gate requires the reliable exchange gate"
+        );
+
+        let rebuild_without_exchange_gate = Cli::try_parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--exchange",
+            "--p2p-rebuild-release-file",
+            "/tmp/signal-fish-p2p-rebuild",
+            "--p2p-retry-count",
+            "1",
+        ]);
+        assert!(
+            rebuild_without_exchange_gate.is_err(),
+            "the P2P rebuild gate requires the held exchange gate"
         );
     }
 

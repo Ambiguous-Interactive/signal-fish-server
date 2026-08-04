@@ -87,6 +87,8 @@ pub enum Event {
     },
     /// Both channels (`reliable` + `unreliable`) are open toward `peer`.
     P2pPairConnected { peer: PlayerId },
+    /// Both channels reopened for a coordinated PairRetry generation.
+    P2pPairReconnected { peer: PlayerId },
     /// Candidate types selected for the active ICE path.
     SelectedCandidatePair {
         peer: PlayerId,
@@ -240,6 +242,12 @@ mod tests {
                     peer: PlayerId::nil(),
                 },
                 "p2p_pair_connected",
+            ),
+            (
+                Event::P2pPairReconnected {
+                    peer: PlayerId::nil(),
+                },
+                "p2p_pair_reconnected",
             ),
             (
                 Event::ChannelClosed {
