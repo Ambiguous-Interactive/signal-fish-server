@@ -18,23 +18,30 @@
 //!    byte-identical duplicate fans out nothing.
 //! 4. `state_transitions_each_fan_out_once` — `{webrtc,true}` -> `{webrtc,false}`
 //!    -> `{webrtc,true}` yields exactly three ordered `PeerTransportStatus`.
-//! 5. `reconnect_clears_stored_transport_status` — a re-report of the same state
+//! 5. `room_change_resets_transport_status_generation` — leaving and rejoining
+//!    the same room, then changing rooms on one socket, lets the same first
+//!    state fan out in every seated membership.
+//! 6. `spectator_transitions_reset_status_without_room_fan_out` — real
+//!    spectator entry/leave resets accepted state while remaining roomless;
+//!    a later seated join starts fresh and fans out.
+//! 7. `reconnect_clears_stored_transport_status` — a re-report of the same state
 //!    after a drop+reconnect fans out AGAIN (reconnect cleared stored state).
-//! 6. `peer_transport_status_v3_gated_not_capability_gated` — in a mixed room a
+//! 8. `peer_transport_status_v3_gated_not_capability_gated` — in a mixed room a
 //!    v3 reporter's accepted report reaches a relay-only v3 member but NOT the
 //!    v2 member.
-//! 7. `reporter_excluded_and_roomless_report_is_noop` — the reporter never
+//! 9. `reporter_excluded_and_roomless_report_is_noop` — the reporter never
 //!    receives its own status; a client not in a room records but fans out
 //!    nothing (no panic).
-//! 8. `finalization_race_single_plan_per_member` — both members of a 2-seat
-//!    room send `PlayerReady` concurrently; finalization happens exactly once
-//!    and both receive identical (mirrored) `SessionPlan`s.
+//! 10. `finalization_race_single_plan_per_member` — both members of a 2-seat
+//!     room send `PlayerReady` concurrently; finalization happens exactly once
+//!     and both receive identical (mirrored) `SessionPlan`s.
 
 mod test_helpers;
 mod v3_conformance_helpers;
 mod websocket_test_helpers;
 
 use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
@@ -265,6 +272,16 @@ async fn report_transport_status(ws: &mut WsStream, transport: Transport, connec
     .await;
 }
 
+/// Put a protocol `Ping` behind the preceding client frame and wait for its
+/// `Pong`, proving the server processed that frame before state is inspected.
+async fn await_client_message_barrier(ws: &mut WsStream) {
+    send(ws, &ClientMessage::Ping).await;
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "Pong barrier", |message| {
+        matches!(message, ServerMessage::Pong).then_some(())
+    })
+    .await;
+}
+
 /// Await a `PeerTransportStatus` naming exactly `(peer, transport, connected)`,
 /// skipping unrelated join-phase backlog.
 async fn expect_peer_transport_status(
@@ -321,8 +338,8 @@ async fn drain_until_player_joined(ws: &mut WsStream, last_joiner: PlayerId, who
 
     // The room-full `PlayerJoined` is followed by a `LobbyStateChanged`
     // room-full transition; sweep it (and any trailing lobby updates) so the
-    // stream sits exactly at the post-fill baseline. Bounded: a v3-only fan-out
-    // would NOT match and is left in place to trip the strict silence check.
+    // stream sits exactly at the post-fill baseline. The helper consumes every
+    // frame it inspects, so a v3-only fan-out is rejected explicitly above.
     while maybe_next_matching_server_message_within(
         ws,
         SILENCE_WINDOW,
@@ -605,7 +622,283 @@ async fn state_transitions_each_fan_out_once() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. A reconnect clears stored transport status -> a re-report fans out again.
+// 5. A room-membership change resets deduplication for the new generation.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn room_change_resets_transport_status_generation() {
+    // Issue #260: one physical socket reports {webrtc,true} in room A, leaves,
+    // then joins room B under the same player id. Room B must not inherit room
+    // A's dedup state: its first identical report is a fresh observation and
+    // fans out. The room-B observer must also receive no old-room report before
+    // that fresh report, pinning the lifecycle/room-event ordering boundary.
+    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
+
+    let mut reporter = connect(addr).await;
+    authenticate_v3_full(&mut reporter).await;
+    let joined_a = join_room(&mut reporter, "tstatus-room-a", None, "Reporter", 2).await;
+    let reporter_id = joined_a.player_id;
+    let room_a_code = joined_a.room_code.clone();
+
+    let mut observer_a = connect(addr).await;
+    authenticate_v3_full(&mut observer_a).await;
+    join_room(
+        &mut observer_a,
+        "tstatus-room-a",
+        Some(room_a_code.clone()),
+        "ObserverA",
+        2,
+    )
+    .await;
+
+    report_transport_status(&mut reporter, Transport::WebRtc, true).await;
+    expect_peer_transport_status(
+        &mut observer_a,
+        "observer_a initial membership",
+        reporter_id,
+        Transport::WebRtc,
+        true,
+    )
+    .await;
+
+    send(&mut reporter, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut reporter,
+        SERVER_MESSAGE_TIMEOUT,
+        "RoomLeft(room A)",
+        |message| matches!(message, ServerMessage::RoomLeft).then_some(()),
+    )
+    .await;
+    next_matching_server_message_within(
+        &mut observer_a,
+        SERVER_MESSAGE_TIMEOUT,
+        "PlayerLeft(reporter from room A)",
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == reporter_id => Some(()),
+            _ => None,
+        },
+    )
+    .await;
+
+    let rejoined_a = join_room(
+        &mut reporter,
+        "tstatus-room-a",
+        Some(room_a_code),
+        "Reporter",
+        2,
+    )
+    .await;
+    assert_eq!(rejoined_a.player_id, reporter_id);
+    drain_until_player_joined(&mut observer_a, reporter_id, "observer_a rejoin").await;
+    report_transport_status(&mut reporter, Transport::WebRtc, true).await;
+    expect_peer_transport_status(
+        &mut observer_a,
+        "observer_a after same-room rejoin",
+        reporter_id,
+        Transport::WebRtc,
+        true,
+    )
+    .await;
+
+    send(&mut reporter, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut reporter,
+        SERVER_MESSAGE_TIMEOUT,
+        "RoomLeft(room A after rejoin)",
+        |message| matches!(message, ServerMessage::RoomLeft).then_some(()),
+    )
+    .await;
+    next_matching_server_message_within(
+        &mut observer_a,
+        SERVER_MESSAGE_TIMEOUT,
+        "PlayerLeft(reporter after room A rejoin)",
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == reporter_id => Some(()),
+            _ => None,
+        },
+    )
+    .await;
+
+    let mut observer_b = connect(addr).await;
+    authenticate_v3_full(&mut observer_b).await;
+    let joined_b = join_room(&mut observer_b, "tstatus-room-b", None, "ObserverB", 2).await;
+    let rejoined = join_room(
+        &mut reporter,
+        "tstatus-room-b",
+        Some(joined_b.room_code),
+        "Reporter",
+        2,
+    )
+    .await;
+    assert_eq!(
+        rejoined.player_id, reporter_id,
+        "changing rooms on one socket must preserve the connection identity"
+    );
+    drain_until_player_joined(&mut observer_b, reporter_id, "observer_b").await;
+
+    expect_no_server_message_within(
+        &mut observer_b,
+        SILENCE_WINDOW,
+        "observer_b before its generation's first TransportStatus",
+    )
+    .await;
+
+    report_transport_status(&mut reporter, Transport::WebRtc, true).await;
+    expect_peer_transport_status(
+        &mut observer_b,
+        "observer_b",
+        reporter_id,
+        Transport::WebRtc,
+        true,
+    )
+    .await;
+
+    // A new-room report must never be attributed to peers left behind in A.
+    expect_no_server_message_within(
+        &mut observer_a,
+        SILENCE_WINDOW,
+        "observer_a after reporter joined room B",
+    )
+    .await;
+    running_server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// 6. Spectator role changes reset accepted state but remain roomless for fan-out.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spectator_transitions_reset_status_without_room_fan_out() {
+    let (running_server, server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
+
+    let mut seated = connect(addr).await;
+    authenticate_v3_full(&mut seated).await;
+    let room = join_room(&mut seated, "tstatus-spectator", None, "Seated", 2).await;
+
+    let mut spectator = connect(addr).await;
+    authenticate_v3_full(&mut spectator).await;
+
+    // Establish an identical roomless baseline before the real spectator
+    // workflow. Each subsequent accepted report increments this counter once.
+    report_transport_status(&mut spectator, Transport::WebRtc, true).await;
+    await_client_message_barrier(&mut spectator).await;
+    assert_eq!(server.metrics().p2p_established.load(Ordering::Relaxed), 1);
+
+    send(
+        &mut spectator,
+        &ClientMessage::JoinAsSpectator {
+            game_name: "tstatus-spectator".to_string(),
+            room_code: room.room_code.clone(),
+            spectator_name: "Watcher".to_string(),
+        },
+    )
+    .await;
+    let spectator_id = next_matching_server_message_within(
+        &mut spectator,
+        SERVER_MESSAGE_TIMEOUT,
+        "SpectatorJoined",
+        |message| match message {
+            ServerMessage::SpectatorJoined(payload) => Some(payload.spectator_id),
+            ServerMessage::SpectatorJoinFailed { reason, error_code } => {
+                panic!("spectator join failed: {reason} ({error_code:?})")
+            }
+            _ => None,
+        },
+    )
+    .await;
+    next_matching_server_message_within(
+        &mut seated,
+        SERVER_MESSAGE_TIMEOUT,
+        "NewSpectatorJoined",
+        |message| matches!(message, ServerMessage::NewSpectatorJoined { .. }).then_some(()),
+    )
+    .await;
+
+    report_transport_status(&mut spectator, Transport::WebRtc, true).await;
+    await_client_message_barrier(&mut spectator).await;
+    assert_eq!(
+        server.metrics().p2p_established.load(Ordering::Relaxed),
+        2,
+        "successful spectator entry starts a fresh accepted-status generation"
+    );
+    report_transport_status(&mut spectator, Transport::WebRtc, true).await;
+    await_client_message_barrier(&mut spectator).await;
+    assert_eq!(
+        server.metrics().p2p_established.load(Ordering::Relaxed),
+        2,
+        "same-spectator-generation duplicates remain suppressed"
+    );
+    expect_no_server_message_within(
+        &mut seated,
+        SILENCE_WINDOW,
+        "seated member after spectator TransportStatus",
+    )
+    .await;
+
+    send(&mut spectator, &ClientMessage::LeaveSpectator).await;
+    next_matching_server_message_within(
+        &mut spectator,
+        SERVER_MESSAGE_TIMEOUT,
+        "SpectatorLeft",
+        |message| matches!(message, ServerMessage::SpectatorLeft { .. }).then_some(()),
+    )
+    .await;
+    next_matching_server_message_within(
+        &mut seated,
+        SERVER_MESSAGE_TIMEOUT,
+        "SpectatorDisconnected",
+        |message| match message {
+            ServerMessage::SpectatorDisconnected {
+                spectator_id: departed,
+                ..
+            } if departed == spectator_id => Some(()),
+            _ => None,
+        },
+    )
+    .await;
+
+    report_transport_status(&mut spectator, Transport::WebRtc, true).await;
+    await_client_message_barrier(&mut spectator).await;
+    assert_eq!(
+        server.metrics().p2p_established.load(Ordering::Relaxed),
+        3,
+        "successful spectator departure starts a fresh roomless generation"
+    );
+    expect_no_server_message_within(
+        &mut seated,
+        SILENCE_WINDOW,
+        "seated member after roomless TransportStatus",
+    )
+    .await;
+
+    let seated_join = join_room(
+        &mut spectator,
+        "tstatus-spectator",
+        Some(room.room_code),
+        "FormerWatcher",
+        2,
+    )
+    .await;
+    assert_eq!(seated_join.player_id, spectator_id);
+    drain_until_player_joined(&mut seated, spectator_id, "seated observer").await;
+    report_transport_status(&mut spectator, Transport::WebRtc, true).await;
+    expect_peer_transport_status(
+        &mut seated,
+        "seated observer after former spectator joins",
+        spectator_id,
+        Transport::WebRtc,
+        true,
+    )
+    .await;
+    assert_eq!(server.metrics().p2p_established.load(Ordering::Relaxed), 4);
+
+    running_server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// 7. A reconnect clears stored transport status -> a re-report fans out again.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -613,9 +906,8 @@ async fn reconnect_clears_stored_transport_status() {
     // The reporter establishes {webrtc,true} (fans out), then its socket drops
     // and it reconnects as the SAME player via the wire `Reconnect` flow. A
     // re-report of the very same {webrtc,true} must fan out AGAIN, because the
-    // reconnect cleared the stored per-connection state
-    // (`connection_manager::reassign_connection` sets `transport_status: None`).
-    // If suppressed, the dedup gate is leaking pre-reconnect state -> RED.
+    // reconnect advanced the membership generation. If suppressed, the dedup
+    // gate is leaking pre-reconnect state -> RED.
     let (running_server, server) = start_server_with_session(mesh_session_config()).await;
     let addr = running_server.addr();
     let game = "tstatus-reconnect";
@@ -753,7 +1045,7 @@ async fn reconnect_clears_stored_transport_status() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. PeerTransportStatus is v3-gated per recipient but NOT capability-gated:
+// 8. PeerTransportStatus is v3-gated per recipient but NOT capability-gated:
 //    a relay-only v3 member still receives it; a v2 member never does.
 // ---------------------------------------------------------------------------
 
@@ -821,7 +1113,7 @@ async fn peer_transport_status_v3_gated_not_capability_gated() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. The reporter is excluded from its own fan-out; a room-less report is a
+// 9. The reporter is excluded from its own fan-out; a room-less report is a
 //    recorded no-op (fans out nothing, no panic).
 // ---------------------------------------------------------------------------
 
@@ -888,7 +1180,7 @@ async fn reporter_excluded_and_roomless_report_is_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Finalization race: both members ready concurrently -> finalize exactly
+// 10. Finalization race: both members ready concurrently -> finalize exactly
 //    once, identical (mirrored) plans.
 // ---------------------------------------------------------------------------
 

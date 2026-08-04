@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix protocol-v3 peer transport health after room changes (issue #260). The
+  first `TransportStatus` report in each seated membership now fans out even
+  when it matches prior room or spectator state. Spectator entry and leave also
+  reset deduplication so the next accepted report is counted again, but remain
+  roomless and do not fan out;
+  same-generation duplicates stay suppressed and protocol-v2 bytes unchanged.
 - Reject clients whose declared protocol maximum is below the deployment
   minimum instead of silently upgrading them (issue #257). The authentication
   response now uses `UNSUPPORTED_PROTOCOL_VERSION`, including auth-disabled

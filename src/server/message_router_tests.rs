@@ -3,7 +3,7 @@ use crate::config::{
     TransportSecurityConfig, TurnConfig,
 };
 use crate::database::DatabaseConfig;
-use crate::protocol::{ClientMessage, PlayerId, ServerMessage, Topology, Transport};
+use crate::protocol::{ClientMessage, PlayerId, RoomId, ServerMessage, Topology, Transport};
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig, TransportStatusUpdate};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -26,6 +26,33 @@ async fn create_test_server() -> Arc<EnhancedGameServer> {
     )
     .await
     .expect("failed to construct test server")
+}
+
+async fn next_routed_test_message(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    context: &str,
+) -> Arc<ServerMessage> {
+    timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {context}"))
+        .unwrap_or_else(|| panic!("channel closed waiting for {context}"))
+}
+
+async fn drain_until_routed_player_joined(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    player_id: PlayerId,
+    context: &str,
+) {
+    loop {
+        let message = next_routed_test_message(receiver, context).await;
+        match message.as_ref() {
+            ServerMessage::PlayerJoined { player } if player.id == player_id => return,
+            ServerMessage::PeerTransportStatus { .. } => {
+                panic!("unexpected PeerTransportStatus while waiting for {context}: {message:?}")
+            }
+            _ => {}
+        }
+    }
 }
 
 #[tokio::test]
@@ -345,6 +372,231 @@ async fn transport_status_update_results_are_distinct() {
         server.set_client_transport_status(&player_id, Transport::WebRtc, false),
         TransportStatusUpdate::Changed
     );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_dedup_is_scoped_to_membership_generation() {
+    let server = create_test_server().await;
+    let (sender, _receiver) = mpsc::channel(4);
+    let addr: SocketAddr = "127.0.0.1:50063".parse().unwrap();
+    let player_id = server
+        .connection_manager
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
+        .await
+        .expect("client registration succeeds");
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::WebRtc],
+            topologies: vec![Topology::Relay, Topology::Mesh],
+        },
+    );
+
+    let status = (Transport::WebRtc, true);
+    assert_eq!(
+        server.set_client_transport_status(&player_id, status.0, status.1),
+        TransportStatusUpdate::Changed
+    );
+    assert_eq!(
+        server.set_client_transport_status(&player_id, status.0, status.1),
+        TransportStatusUpdate::Duplicate,
+        "same-generation duplicate must remain suppressed"
+    );
+
+    let room_a = RoomId::new_v4();
+    let (_, prepared_stamp) = server
+        .connection_manager
+        .prepare_client_to_room(&player_id, room_a)
+        .expect("prepare room A membership");
+    assert_eq!(
+        server.client_transport_status(&player_id),
+        None,
+        "a prepared membership must not expose the prior generation's status"
+    );
+    server
+        .connection_manager
+        .rollback_prepared_room_assignment(&player_id, room_a, prepared_stamp.epoch)
+        .expect("roll back unpublished room A membership");
+    assert_eq!(
+        server.client_transport_status(&player_id),
+        Some(status),
+        "a failed prepared membership must restore the prior dedup generation"
+    );
+    assert_eq!(
+        server.set_client_transport_status(&player_id, status.0, status.1),
+        TransportStatusUpdate::Duplicate
+    );
+
+    server
+        .connection_manager
+        .assign_client_to_room(&player_id, room_a)
+        .await;
+    assert_eq!(
+        server.set_client_transport_status(&player_id, status.0, status.1),
+        TransportStatusUpdate::Changed,
+        "room A's first report must be fresh"
+    );
+    assert_eq!(
+        server.set_client_transport_status(&player_id, status.0, status.1),
+        TransportStatusUpdate::Duplicate
+    );
+
+    server
+        .connection_manager
+        .clear_room_assignment(&player_id)
+        .expect("leave room A");
+    assert_eq!(server.client_transport_status(&player_id), None);
+    assert_eq!(
+        server.set_client_transport_status(&player_id, status.0, status.1),
+        TransportStatusUpdate::Changed,
+        "roomless membership generation starts with no dedup baseline"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_is_ordered_before_concurrent_leave() {
+    let server = create_test_server().await;
+    let protocol = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc],
+        topologies: vec![Topology::Relay, Topology::Mesh],
+    };
+
+    let (observer_sender, mut observer_rx) = mpsc::channel(16);
+    let observer = server
+        .connection_manager
+        .register_client(
+            observer_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:50064".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("observer registration succeeds");
+    server.set_client_protocol(&observer, protocol.clone());
+    server
+        .handle_client_message(
+            &observer,
+            ClientMessage::JoinRoom {
+                game_name: "transport-ordering".to_string(),
+                room_code: None,
+                player_name: "Observer".to_string(),
+                max_players: Some(3),
+                supports_authority: Some(false),
+                relay_transport: None,
+            },
+        )
+        .await;
+    let room_code = match next_routed_test_message(&mut observer_rx, "observer RoomJoined")
+        .await
+        .as_ref()
+    {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        message => panic!("expected observer RoomJoined, got {message:?}"),
+    };
+
+    let (reporter_sender, mut reporter_rx) = mpsc::channel(16);
+    let reporter = server
+        .connection_manager
+        .register_client(
+            reporter_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:50065".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("reporter registration succeeds");
+    server.set_client_protocol(&reporter, protocol);
+    let join_message = || ClientMessage::JoinRoom {
+        game_name: "transport-ordering".to_string(),
+        room_code: Some(room_code.clone()),
+        player_name: "Reporter".to_string(),
+        max_players: Some(3),
+        supports_authority: Some(false),
+        relay_transport: None,
+    };
+    server
+        .handle_client_message(&reporter, join_message())
+        .await;
+    assert!(matches!(
+        next_routed_test_message(&mut reporter_rx, "reporter RoomJoined")
+            .await
+            .as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    drain_until_routed_player_joined(&mut observer_rx, reporter, "observer PlayerJoined").await;
+    server
+        .handle_client_message(
+            &reporter,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: true,
+            },
+        )
+        .await;
+    assert!(matches!(
+        next_routed_test_message(&mut observer_rx, "initial PeerTransportStatus").await.as_ref(),
+        ServerMessage::PeerTransportStatus { peer_id, connected: true, .. } if *peer_id == reporter
+    ));
+
+    // Poll both production handlers to their lifecycle wait point in a known
+    // order while the gate is held. Tokio's FIFO mutex then makes the oracle
+    // independent of executor scheduling: status must publish before leave can
+    // clear membership.
+    let lifecycle = server
+        .connection_manager
+        .client_lifecycle(&reporter)
+        .expect("reporter lifecycle");
+    let lifecycle_probe = super::message_router::arm_transport_status_lifecycle_probe(reporter);
+    let lifecycle_guard = lifecycle.lock().await;
+    let status_before_leave = server.handle_client_message(
+        &reporter,
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: false,
+        },
+    );
+    tokio::pin!(status_before_leave);
+    assert!(matches!(
+        futures_util::poll!(&mut status_before_leave),
+        std::task::Poll::Pending
+    ));
+    assert!(
+        lifecycle_probe.load(Ordering::Acquire),
+        "status handler must reach its lifecycle-lock request before leave is polled"
+    );
+    let leave_after_status = server.handle_client_message(&reporter, ClientMessage::LeaveRoom);
+    tokio::pin!(leave_after_status);
+    assert!(matches!(
+        futures_util::poll!(&mut leave_after_status),
+        std::task::Poll::Pending
+    ));
+    drop(lifecycle_guard);
+    tokio::join!(status_before_leave, leave_after_status);
+    super::message_router::disarm_transport_status_lifecycle_probe(&reporter);
+
+    assert!(matches!(
+        next_routed_test_message(&mut observer_rx, "ordered PeerTransportStatus").await.as_ref(),
+        ServerMessage::PeerTransportStatus { peer_id, connected: false, .. } if *peer_id == reporter
+    ));
+    assert!(matches!(
+        next_routed_test_message(&mut observer_rx, "ordered PlayerLeft").await.as_ref(),
+        ServerMessage::PlayerLeft { player_id, .. } if *player_id == reporter
+    ));
+    assert!(matches!(
+        next_routed_test_message(&mut reporter_rx, "ordered RoomLeft")
+            .await
+            .as_ref(),
+        ServerMessage::RoomLeft
+    ));
 }
 
 #[tokio::test]

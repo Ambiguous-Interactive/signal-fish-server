@@ -1408,11 +1408,12 @@ Fields:
 
 `TransportStatus` lets a client report its current data-path transport state, so the server can distinguish
 P2P-connected peers from relay-fallback peers (this drives metrics). It is **purely informational**: the relay
-floor never closes regardless of what is reported. Metrics count the first report for a connection and real
-per-connection state transitions; duplicate `(transport, connected)` reports do not move counters. The server
-accepts a report only from a negotiated v3 connection and only when `transport` is in that connection's
-negotiated transport set. Reports from non-v3 clients or for unnegotiated transports are ignored and do not
-update per-connection state or metrics.
+floor never closes regardless of what is reported. Metrics count the first report in a room/spectator membership
+generation and real state transitions within that generation; duplicate `(transport, connected)`
+reports in that generation do not move counters. Room joins, leaves, same-room rejoins, spectator-role changes,
+and reconnects start fresh generations. The server accepts a report only from a negotiated v3 connection and
+only when `transport` is in that connection's negotiated transport set. Reports from non-v3 clients or for
+unnegotiated transports are ignored and do not update stored state or metrics.
 
 ```json
 {
@@ -1440,12 +1441,15 @@ message's fields, plus the reporting peer's id:
 
 Semantics:
 
-- **Deduplicated.** A fan-out fires only when the report records a real per-connection state change — the first
-  report on a connection, or a `(transport, connected)` transition. A duplicate report is dropped at the server
-  and fans out nothing. (A reconnect clears the stored state, so a reconnected client's first re-report fans out
-  again.)
+- **Deduplicated per membership generation.** Accepted state and metrics move only for the first report after a
+  room or spectator membership transition or reconnect, or for a later `(transport, connected)` transition in
+  that generation. When the reporter has a seated room, that accepted change fans out. A same-generation duplicate
+  is dropped and fans out nothing. Leaving and rejoining the same room still creates a fresh generation.
 - **Sender excluded; room scoped.** Only the reporter's current room members hear it, never the reporter itself.
-  A report from a client that is not in a room is still recorded but fans out nothing.
+  A report from a client that is not seated in a room is still recorded but fans out nothing. This includes a
+  spectator: spectator entry and leave reset deduplication, so the next accepted report is counted again, but
+  reports made while spectating have no seated-room fan-out. The next seated join starts a fresh generation, so
+  roomless or spectator state cannot suppress the first report seen by new peers.
 - **v3-gated per recipient.** Like every v3-only message, it is delivered only to members that negotiated v3
   (Appendix K); a v2 member observes nothing. Deliberately, delivery is **not** gated on the recipient's own
   transport capabilities (unlike `NewPeer` / plan-peer pairing, which apply the full session predicate): this is

@@ -143,9 +143,11 @@ transport reports are ignored and do not update stored state or metrics. It is
 purely informational and never causes the relay floor to close.
 
 Server-side interpretation (drives the metrics below): duplicate reports of the
-same `(transport, connected)` state are ignored; they leave stored
-per-connection state unchanged and do not move counters. Counters move on the
-first report for a connection and on later real per-connection state transitions.
+same `(transport, connected)` state in one room/spectator membership generation
+are ignored; they leave stored state unchanged and do not move counters. A room
+join, leave, same-room rejoin, spectator-role transition, or reconnect starts a
+fresh generation. Counters move on the first report for that generation and on
+later real state transitions within it.
 
 - `connected: true` with a P2P transport (`direct` or `webrtc`) — a peer-to-peer
   data path came up; counts as **P2P established** when it is a first report or a
@@ -159,9 +161,10 @@ first report for a connection and on later real per-connection state transitions
 
 ## `PeerTransportStatus` peer fan-out (v3 only)
 
-When an accepted report records a **real state change** (the first report on a
-connection, or a `(transport, connected)` transition — the same dedup gate the
-metrics use), the server fans it out to the reporter's current room as
+When an accepted report records a **real state change** (the first report in a
+membership generation, or a `(transport, connected)` transition — the same
+dedup gate the metrics use), the server fans it out to the reporter's current
+room as
 
 ```json
 { "type": "PeerTransportStatus", "data": { "peer_id": "<player-uuid>", "transport": "webrtc", "connected": true } }
@@ -170,7 +173,11 @@ metrics use), the server fans it out to the reporter's current room as
 so peers learn, for example, that the host's WebRTC path died and relay-path
 traffic from it should be expected. The reporter itself is excluded; a duplicate
 report fans out nothing; a report from a room-less client is recorded but fans
-out nothing. Delivery is per-recipient v3-gated (a v2 member never observes it,
+out nothing. Spectators are roomless in connection routing: spectator entry and
+leave reset deduplication, so the next accepted report is counted again, but
+reports made while spectating do not produce `PeerTransportStatus`. A later seated join starts another fresh
+generation, so prior roomless or spectator state never suppresses the first
+in-room report. Delivery is per-recipient v3-gated (a v2 member never observes it,
 Appendix K) but deliberately **not** gated on the recipient's own transport
 capabilities — it is informational status about a _peer_, useful to any v3
 client, not an instruction to use that transport. Like the report it relays, it

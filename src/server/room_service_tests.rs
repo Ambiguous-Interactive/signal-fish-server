@@ -557,6 +557,7 @@ enum DrainTrigger {
     PlayerLeftBroadcast,
     FirstFarewellTrySend,
     MissingTerminalTail,
+    SpectatorRoutingLookupFailure,
 }
 
 struct DrainTriggerCoordinator {
@@ -877,6 +878,19 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         }
         self.clients.write().await.insert(player_id, delivery);
         Ok(())
+    }
+
+    async fn routed_player_ids(&self, room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {
+        if self.trigger == DrainTrigger::SpectatorRoutingLookupFailure {
+            anyhow::bail!("injected spectator routing lookup failure");
+        }
+        let room_players = self.room_players.read().await;
+        Ok(Some(
+            room_players
+                .get(room_id)
+                .map(|players| players.iter().copied().collect())
+                .unwrap_or_default(),
+        ))
     }
 
     async fn unroute_local_client_with_tail<'a>(
@@ -1295,6 +1309,94 @@ async fn spectator_join_waits_for_one_slot_baseline_capacity() {
         Some(ServerMessage::NewSpectatorJoined { .. })
     ));
     assert!(server.spectator_service.is_spectating(&spectator));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn failed_spectator_publication_restores_transport_status_generation() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::SpectatorRoutingLookupFailure,
+    ));
+    let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
+            .await;
+
+    let (creator, _creator_rx) = register_client(&server, "127.0.0.1:47988".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "spectator-rollback".to_string(),
+            Some("SPRLBK".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&creator, room.id)
+        .await;
+
+    let (spectator, _spectator_rx) =
+        register_client(&server, "127.0.0.1:47989".parse().unwrap()).await;
+    server.set_client_protocol(
+        &spectator,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![
+                crate::protocol::Transport::Relay,
+                crate::protocol::Transport::WebRtc,
+            ],
+            topologies: vec![
+                crate::protocol::Topology::Relay,
+                crate::protocol::Topology::Mesh,
+            ],
+        },
+    );
+    let status = (crate::protocol::Transport::WebRtc, true);
+    assert_eq!(
+        server.set_client_transport_status(&spectator, status.0, status.1),
+        TransportStatusUpdate::Changed
+    );
+
+    let result = server
+        .spectator_service
+        .join(
+            &spectator,
+            room.game_name.clone(),
+            room.code.clone(),
+            "rollback-watcher".to_string(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "injected routed-member lookup must fail admission"
+    );
+    assert!(!server.spectator_service.is_spectating(&spectator));
+    assert!(
+        server
+            .database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("spectator roster remains readable")
+            .is_empty(),
+        "failed publication must remove the provisional spectator"
+    );
+    assert_eq!(
+        server.client_transport_status(&spectator),
+        Some(status),
+        "failed spectator publication restores the prior dedup baseline"
+    );
+    assert_eq!(
+        server.set_client_transport_status(&spectator, status.0, status.1),
+        TransportStatusUpdate::Duplicate
+    );
 }
 
 #[tokio::test]

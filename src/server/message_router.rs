@@ -1,8 +1,32 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::LazyLock;
+
 use crate::protocol::{ClientMessage, PlayerId, ServerMessage};
 
 use super::{EnhancedGameServer, TransportStatusUpdate};
+
+#[cfg(test)]
+static TRANSPORT_STATUS_LIFECYCLE_PROBES: LazyLock<
+    dashmap::DashMap<crate::protocol::PlayerId, Arc<AtomicBool>>,
+> = LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(test)]
+pub(super) fn arm_transport_status_lifecycle_probe(
+    player_id: crate::protocol::PlayerId,
+) -> Arc<AtomicBool> {
+    let probe = Arc::new(AtomicBool::new(false));
+    TRANSPORT_STATUS_LIFECYCLE_PROBES.insert(player_id, Arc::clone(&probe));
+    probe
+}
+
+#[cfg(test)]
+pub(super) fn disarm_transport_status_lifecycle_probe(player_id: &crate::protocol::PlayerId) {
+    TRANSPORT_STATUS_LIFECYCLE_PROBES.remove(player_id);
+}
 
 impl EnhancedGameServer {
     /// Handle incoming client message with enhanced coordination.
@@ -122,10 +146,10 @@ impl EnhancedGameServer {
     /// — this only drives observability and, in future, targeted relay for stuck
     /// peers.
     ///
-    /// Duplicate reports of the same `(transport, connected)` pair update no
-    /// counters and fan nothing out; the metrics and the `PeerTransportStatus`
-    /// fan-out below are emitted only for the first report or a real
-    /// per-connection state transition.
+    /// Duplicate reports of the same `(transport, connected)` pair in one
+    /// membership generation update no counters and fan nothing out; the
+    /// metrics and the `PeerTransportStatus` fan-out below are emitted only for
+    /// the generation's first report or a real state transition.
     ///
     /// Metric interpretation:
     /// - `connected == true` AND a P2P transport (`Direct` / `WebRtc`) ⇒
@@ -134,19 +158,21 @@ impl EnhancedGameServer {
     ///   the relay floor), regardless of which transport it names.
     /// - `connected == true` with `transport: relay` is just "I am on the floor":
     ///   it is not a P2P establishment and not a fallback event, so it moves no
-    ///   counter — only the per-connection state is updated. (Documented here and in
-    ///   `docs/architecture/transport-fallback.md`.)
+    ///   counter — only the current generation's stored state is updated.
+    ///   (Documented here and in `docs/architecture/transport-fallback.md`.)
     async fn handle_transport_status(
         &self,
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
     ) {
-        use crate::protocol::Transport;
-
         let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
             return;
         };
+        #[cfg(test)]
+        if let Some(probe) = TRANSPORT_STATUS_LIFECYCLE_PROBES.get(player_id) {
+            probe.store(true, Ordering::Release);
+        }
         let _lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *player_id
             || !self
@@ -155,6 +181,20 @@ impl EnhancedGameServer {
         {
             return;
         }
+
+        self.handle_transport_status_under_lifecycle(player_id, transport, connected)
+            .await;
+    }
+
+    /// Process a transport report after the caller has fixed the connection
+    /// identity and membership with its lifecycle guard.
+    async fn handle_transport_status_under_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        transport: crate::protocol::Transport,
+        connected: bool,
+    ) {
+        use crate::protocol::Transport;
 
         match self.set_client_transport_status(player_id, transport, connected) {
             TransportStatusUpdate::Changed => {}
@@ -211,9 +251,9 @@ impl EnhancedGameServer {
         // `PeerTransportStatus`, so peers learn e.g. that
         // the host's WebRTC path died and relay-path traffic should be
         // expected. Duplicate reports returned early above, so a fan-out fires
-        // once per real per-connection state change (including the first
-        // report). No room ⇒ nothing to fan out — the per-connection state was
-        // still recorded above.
+        // once per real state change in the current membership generation
+        // (including its first report). No room ⇒ nothing to fan out — the
+        // generation-scoped state was still recorded above.
         let Some(room_id) = self.get_client_room(player_id).await else {
             return;
         };
