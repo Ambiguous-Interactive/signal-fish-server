@@ -18,7 +18,7 @@ unsafe_code = "forbid"
 signal-fish-server = { path = "../.." }
 
 # Real WebRTC stack (peer connections + data channels).
-webrtc = "0.17"
+webrtc = "0.20"
 
 # Async runtime & WebSocket wire layer.
 tokio = { version = "1.52", features = [
