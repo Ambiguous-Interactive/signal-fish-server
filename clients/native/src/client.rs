@@ -580,6 +580,14 @@ fn should_resolve_connected_pair(
     previous.is_some() || all_expected_pairs_connected
 }
 
+fn should_report_retry_gap(
+    webrtc_plan_seen: bool,
+    transport_status: Option<bool>,
+    coordinated_rebuild: bool,
+) -> bool {
+    webrtc_plan_seen && transport_status.is_some() && !coordinated_rebuild
+}
+
 fn is_terminal_peer_connection_state(state: &RTCPeerConnectionState) -> bool {
     matches!(
         state,
@@ -1936,7 +1944,11 @@ impl Orchestrator<'_> {
                 "close incomplete peer connection {peer}: {error:#}"
             ))
         })?;
-        if self.webrtc_plan_seen && self.transport_status.is_some() {
+        if should_report_retry_gap(
+            self.webrtc_plan_seen,
+            self.transport_status,
+            coordinated_rebuild,
+        ) {
             self.resolve_transport_status().await?;
         }
         self.establish_pair_link(peer, initiate, PairGeneration::Retry)
@@ -2557,7 +2569,7 @@ mod tests {
         requires_authoritative_finalization_plan, resolve_drop_ice_from,
         restore_reconnected_member, retryable_missing_peers, session_plan_peer_ids,
         should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
-        should_resolve_connected_pair, try_buffer_planned_signal,
+        should_report_retry_gap, should_resolve_connected_pair, try_buffer_planned_signal,
         validate_json_negotiated_server_message, validate_p2p_rebuild_retry_count, PairGeneration,
         EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL,
     };
@@ -3003,6 +3015,11 @@ mod tests {
         assert!(!is_coordinated_p2p_rebuild_attempt(true, 1, 2));
         assert!(!is_coordinated_p2p_rebuild_attempt(false, 2, 2));
         assert!(!is_coordinated_p2p_rebuild_attempt(true, 0, 0));
+
+        assert!(should_report_retry_gap(true, Some(true), false));
+        assert!(!should_report_retry_gap(true, Some(true), true));
+        assert!(!should_report_retry_gap(false, Some(true), false));
+        assert!(!should_report_retry_gap(true, None, false));
     }
 
     #[tokio::test]
