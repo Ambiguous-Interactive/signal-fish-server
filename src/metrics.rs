@@ -634,11 +634,7 @@ impl ServerMetrics {
         let _ =
             self.active_connections
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    if current > 0 {
-                        Some(current - 1)
-                    } else {
-                        None
-                    }
+                    current.checked_sub(1)
                 });
         self.disconnections.fetch_add(1, Ordering::Relaxed);
     }
@@ -1047,13 +1043,7 @@ impl ServerMetrics {
         let _ = self.reconnection_sessions_active.fetch_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
-            |current| {
-                if current > 0 {
-                    Some(current - 1)
-                } else {
-                    None
-                }
-            },
+            |current| current.checked_sub(1),
         );
     }
 
@@ -1279,7 +1269,9 @@ impl ServerMetrics {
         let validation_errors = self.validation_errors.load(Ordering::Relaxed);
         let internal_errors = self.internal_errors.load(Ordering::Relaxed);
         let websocket_errors = self.websocket_errors.load(Ordering::Relaxed);
-        let total_errors = validation_errors + internal_errors + websocket_errors;
+        let total_errors = validation_errors
+            .saturating_add(internal_errors)
+            .saturating_add(websocket_errors);
 
         MetricsSnapshot {
             timestamp: chrono::Utc::now(),
@@ -1485,9 +1477,14 @@ impl ServerMetrics {
         let mut warnings = Vec::new();
 
         // Check error rates
-        let total_operations = snapshot.rooms.rooms_created + snapshot.rooms.rooms_joined;
-        let total_failures =
-            snapshot.rooms.room_creation_failures + snapshot.rooms.room_join_failures;
+        let total_operations = snapshot
+            .rooms
+            .rooms_created
+            .saturating_add(snapshot.rooms.rooms_joined);
+        let total_failures = snapshot
+            .rooms
+            .room_creation_failures
+            .saturating_add(snapshot.rooms.room_join_failures);
 
         if total_operations > 0 {
             let failure_rate = (total_failures as f64) / (total_operations as f64);

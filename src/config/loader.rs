@@ -218,38 +218,31 @@ fn set_nested_value(target: &mut Value, segments: &[String], value: Value) {
         return;
     }
 
-    if segments.len() == 1 {
+    let Some((first, rest)) = segments.split_first() else {
+        return;
+    };
+
+    if rest.is_empty() {
         let map = ensure_object(target);
-        // SAFETY: Length is checked to be exactly 1 on the line above.
-        #[allow(clippy::indexing_slicing)]
-        map.insert(segments[0].clone(), value);
+        map.insert(first.clone(), value);
         return;
     }
 
     let map = ensure_object(target);
-    // SAFETY: segments.len() > 1 (len 0 and len 1 are handled above), so
-    // index 0 and the [1..] slice are both in bounds.
-    #[allow(clippy::indexing_slicing)]
-    let key = segments[0].clone();
     let entry = map
-        .entry(key)
+        .entry(first.clone())
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    #[allow(clippy::indexing_slicing)]
-    let rest = &segments[1..];
     set_nested_value(entry, rest, value);
 }
 
 fn ensure_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
-    if !value.is_object() {
-        *value = Value::Object(serde_json::Map::new());
+    match value {
+        Value::Object(map) => map,
+        other => {
+            *other = Value::Object(serde_json::Map::new());
+            ensure_object(other)
+        }
     }
-
-    // SAFETY: The branch above guarantees `value` is a `Value::Object`, so
-    // `as_object_mut()` will always return `Some`.
-    #[allow(clippy::expect_used)]
-    value
-        .as_object_mut()
-        .expect("value should be coerced into an object")
 }
 
 #[cfg(test)]

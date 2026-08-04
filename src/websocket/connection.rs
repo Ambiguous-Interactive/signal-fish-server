@@ -29,6 +29,10 @@ use super::{complete_before_deadline, CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WR
 
 const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
+fn checked_deadline(start: Instant, duration: Duration) -> Instant {
+    start.checked_add(duration).unwrap_or(start)
+}
+
 fn random_ping_nonce() -> u64 {
     let mut rng = rand::rng();
     loop {
@@ -206,7 +210,7 @@ impl InboundDeadline {
     ) -> Self {
         if authenticated {
             Self {
-                at: idle_timeout.map(|window| Instant::now() + window),
+                at: idle_timeout.map(|window| checked_deadline(Instant::now(), window)),
                 kind: InboundDeadlineKind::Idle,
                 timeout_secs: idle_timeout_secs,
             }
@@ -284,7 +288,7 @@ async fn complete_ping_write<F, E>(
 where
     F: Future<Output = Result<(), E>>,
 {
-    match complete_before_deadline(write_started_at + timeout, write).await {
+    match complete_before_deadline(checked_deadline(write_started_at, timeout), write).await {
         Ok(Ok(())) => Ok(PingWriteTiming {
             completed_at: Instant::now(),
             outbound_generation: probe_state.borrow().outbound_generation,
@@ -663,7 +667,7 @@ async fn finalize_closed_connection(
             // in-flight write leaves everything unsent inside the batcher;
             // the count below misses at most the single message that was
             // actively (partially) on the wire when the close fired.
-            let abandoned = rx.len() + batcher.len();
+            let abandoned = rx.len().saturating_add(batcher.len());
             record_abandoned_by_class(rx, batcher);
             server
                 .metrics()
@@ -769,7 +773,7 @@ async fn finalize_closed_connection(
                     // connection. `SendAccounting::drop` already accounts for
                     // the one item owned by an interrupted socket write; this
                     // snapshot covers only the queued and batched remainder.
-                    let abandoned = rx.len() + batcher.len();
+                    let abandoned = rx.len().saturating_add(batcher.len());
                     record_abandoned_by_class(rx, batcher);
                     server
                         .metrics()
@@ -1241,7 +1245,7 @@ pub(super) async fn handle_socket(
                     continue;
                 }
 
-                let deadline_at = write_timing.completed_at + pong_timeout;
+                let deadline_at = checked_deadline(write_timing.completed_at, pong_timeout);
                 let deadline = tokio::time::sleep_until(deadline_at);
                 tokio::pin!(deadline);
                 let resolution = loop {
@@ -1356,7 +1360,7 @@ pub(super) async fn handle_socket(
                             continue;
                         };
                         let message = ServerMessage::RelayStats {
-                            interval_ms: delivery_stats_interval_secs * 1_000,
+                            interval_ms: delivery_stats_interval_secs.saturating_mul(1_000),
                             sent_to_you: stats.sent_to_you.load(Ordering::Relaxed),
                             dropped_for_you: stats.dropped_for_you.load(Ordering::Relaxed),
                             backpressure_events: stats
@@ -1672,7 +1676,7 @@ pub(super) async fn handle_socket(
         let mut active_player_id = player_id;
         let token_binding = token_binding_for_receive;
         let close_signal = close_signal_for_receive;
-        let auth_deadline = connection_start + auth_timeout;
+        let auth_deadline = checked_deadline(connection_start, auth_timeout);
 
         // Post-auth idle timeout (0 = disabled). Wrapping each `receiver.next()`
         // means ANY inbound frame — Text, Binary, Ping, Pong, Close — counts as

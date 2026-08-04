@@ -197,7 +197,7 @@ impl RetryExecutor {
 
                     delay = bounded_next_delay(&self.config, delay, fastrand::f64());
 
-                    attempt += 1;
+                    attempt = attempt.saturating_add(1);
                 }
             }
         }
@@ -280,7 +280,7 @@ impl RetryExecutor {
 
                     delay = bounded_next_delay(&self.config, delay, fastrand::f64());
 
-                    attempt += 1;
+                    attempt = attempt.saturating_add(1);
                 }
             }
         }

@@ -641,7 +641,11 @@ impl ConnectionManager {
         if client.room_id != Some(*expected_room) {
             return None;
         }
-        client.game_data_seq += 1;
+        let Some(next_seq) = client.game_data_seq.checked_add(1) else {
+            tracing::error!(%player_id, %expected_room, "Relay sequence exhausted; canceling delivery");
+            return None;
+        };
+        client.game_data_seq = next_seq;
         Some(RelayStamp {
             seq: client.game_data_seq,
             epoch: client.game_data_epoch,
@@ -981,7 +985,7 @@ impl ConnectionManager {
                     Err(current)
                 } else {
                     let count = entry.get_mut();
-                    *count += 1;
+                    *count = count.saturating_add(1);
                     Ok(*count)
                 }
             }
@@ -1001,7 +1005,8 @@ impl ConnectionManager {
         // both see the key as absent and both insert 1 instead of 2
         match self.connections_per_ip.entry(ip) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                *entry.get_mut() += 1;
+                let count = entry.get_mut();
+                *count = count.saturating_add(1);
                 *entry.get()
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
@@ -1019,7 +1024,8 @@ impl ConnectionManager {
             self.connections_per_ip.entry(ip)
         {
             if *entry.get() > 1 {
-                *entry.get_mut() -= 1;
+                let count = entry.get_mut();
+                *count = count.saturating_sub(1);
             } else {
                 entry.remove();
             }

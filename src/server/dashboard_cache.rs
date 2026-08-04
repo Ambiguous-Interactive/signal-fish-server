@@ -56,7 +56,7 @@ impl DashboardMetricsCacheState {
         let entry = DashboardHistoryEntry::from_snapshot(snapshot, fields);
         self.history.push(entry);
         if self.history.len() > self.history_capacity {
-            let overflow = self.history.len() - self.history_capacity;
+            let overflow = self.history.len().saturating_sub(self.history_capacity);
             self.history.drain(0..overflow);
         }
     }

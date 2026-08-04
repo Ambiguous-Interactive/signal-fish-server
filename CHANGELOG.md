@@ -132,6 +132,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup also reconciles any removed room with the process-local spectator
   role during maintenance so the client can join again.
 
+### Security
+
+- Prevent first-party production panic paths in the server and native reference
+  client (issue #255). Invalid queue and host invariants fail closed, oversized
+  batch/replay/serialization inputs are bounded or rejected, and runtime-less
+  task starts return errors. The fail-closed repository gate covers both Cargo
+  graphs, first-party unsafe Rust remains forbidden, Miri is gating, and
+  AddressSanitizer covers both root and native libraries.
+
 ## [0.5.2] - 2026-07-31
 
 ### Added

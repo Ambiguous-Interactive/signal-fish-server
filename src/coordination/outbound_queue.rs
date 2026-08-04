@@ -305,6 +305,23 @@ enum Lane {
     Data,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataLane {
+    Legacy,
+    Classified,
+}
+
+fn decrement_counter(counter: &mut usize, counter_name: &'static str) {
+    if let Some(next) = counter.checked_sub(1) {
+        *counter = next;
+    } else {
+        tracing::error!(
+            counter = counter_name,
+            "Outbound queue counter underflow avoided"
+        );
+    }
+}
+
 #[derive(Debug)]
 struct QueueState {
     legacy: VecDeque<QueuedOutbound>,
@@ -368,7 +385,10 @@ impl PendingUnsupported {
     }
 
     fn len(&self) -> usize {
-        self.reliable.len() + self.latest.len() + self.volatile.len()
+        self.reliable
+            .len()
+            .saturating_add(self.latest.len())
+            .saturating_add(self.volatile.len())
     }
 
     fn is_empty(&self) -> bool {
@@ -398,7 +418,7 @@ impl PendingUnsupported {
     /// written.
     fn flush_deadline(&self) -> Option<Instant> {
         self.since
-            .map(|since| since + PENDING_UNSUPPORTED_FLUSH_INTERVAL)
+            .and_then(|since| since.checked_add(PENDING_UNSUPPORTED_FLUSH_INTERVAL))
     }
 
     /// Build the report these ranges would produce, **without** consuming them.
@@ -441,7 +461,7 @@ impl PendingUnsupported {
         for bucket in [&mut self.reliable, &mut self.latest, &mut self.volatile] {
             let taken = remaining.min(bucket.len());
             bucket.drain(..taken);
-            remaining -= taken;
+            remaining = remaining.saturating_sub(taken);
             if remaining == 0 {
                 break;
             }
@@ -476,7 +496,11 @@ impl QueueState {
     }
 
     fn len(&self) -> usize {
-        self.legacy.len() + self.control.len() + self.data.len() + self.barriers.len()
+        self.legacy
+            .len()
+            .saturating_add(self.control.len())
+            .saturating_add(self.data.len())
+            .saturating_add(self.barriers.len())
     }
 
     fn accepting(&self) -> bool {
@@ -489,17 +513,21 @@ impl QueueState {
 
     fn lane_len_with_reservations(&self, lane: Lane) -> usize {
         match lane {
-            Lane::Legacy => self.legacy.len() + self.reserved_legacy,
-            Lane::Control => self.control.len() + self.barriers.len() + self.reserved_control,
-            Lane::Data => self.data.len() + self.reserved_data,
+            Lane::Legacy => self.legacy.len().saturating_add(self.reserved_legacy),
+            Lane::Control => self
+                .control
+                .len()
+                .saturating_add(self.barriers.len())
+                .saturating_add(self.reserved_control),
+            Lane::Data => self.data.len().saturating_add(self.reserved_data),
         }
     }
 
     fn reserve(&mut self, lane: Lane) {
         match lane {
-            Lane::Legacy => self.reserved_legacy += 1,
-            Lane::Control => self.reserved_control += 1,
-            Lane::Data => self.reserved_data += 1,
+            Lane::Legacy => self.reserved_legacy = self.reserved_legacy.saturating_add(1),
+            Lane::Control => self.reserved_control = self.reserved_control.saturating_add(1),
+            Lane::Data => self.reserved_data = self.reserved_data.saturating_add(1),
         }
     }
 
@@ -509,8 +537,7 @@ impl QueueState {
             Lane::Control => &mut self.reserved_control,
             Lane::Data => &mut self.reserved_data,
         };
-        debug_assert!(*reserved > 0);
-        *reserved = reserved.saturating_sub(1);
+        decrement_counter(reserved, "lane_reservation");
     }
 }
 
@@ -654,7 +681,9 @@ pub struct OutboundSender {
 
 impl Clone for OutboundSender {
     fn clone(&self) -> Self {
-        self.shared.state().sender_count += 1;
+        let mut state = self.shared.state();
+        state.sender_count = state.sender_count.saturating_add(1);
+        drop(state);
         Self {
             shared: Arc::clone(&self.shared),
         }
@@ -665,8 +694,7 @@ impl Drop for OutboundSender {
     fn drop(&mut self) {
         let no_producers = {
             let mut state = self.shared.state();
-            debug_assert!(state.sender_count > 0);
-            state.sender_count = state.sender_count.saturating_sub(1);
+            decrement_counter(&mut state.sender_count, "sender_count");
             !state.producers_open()
         };
         if no_producers {
@@ -689,8 +717,8 @@ impl Drop for OutboundReceiver {
     }
 }
 
-/// Create one bounded outbound queue. Both capacities must be nonzero; config
-/// validation enforces that invariant before production reaches this function.
+/// Create one bounded outbound queue. Zero capacities are normalized to one;
+/// production config validation supplies larger values before reaching here.
 #[cfg(test)]
 pub fn channel(
     data_capacity: usize,
@@ -712,11 +740,8 @@ fn channel_inner(
     control_capacity: usize,
     metrics: Option<Arc<crate::metrics::ServerMetrics>>,
 ) -> (OutboundSender, OutboundReceiver) {
-    assert!(data_capacity > 0, "outbound data capacity must be nonzero");
-    assert!(
-        control_capacity > 0,
-        "outbound control capacity must be nonzero"
-    );
+    let data_capacity = data_capacity.max(1);
+    let control_capacity = control_capacity.max(1);
     let shared = Arc::new(SharedQueue {
         state: Mutex::new(QueueState::new()),
         item_available: Notify::new(),
@@ -922,7 +947,7 @@ impl OutboundSender {
         if !self.shared.has_capacity(&state, Lane::Legacy) {
             return Err(TryEnqueueError::Full(data));
         }
-        push_data(&mut state, Lane::Legacy, data, DeliveryClass::Reliable);
+        push_data(&mut state, DataLane::Legacy, data, DeliveryClass::Reliable);
         self.shared.record_attempted(DeliveryClass::Reliable);
         drop(state);
         self.shared.item_available.notify_one();
@@ -946,7 +971,12 @@ impl OutboundSender {
         if !self.shared.has_capacity(&state, Lane::Data) {
             return Err(TryEnqueueError::Full(data));
         }
-        push_data(&mut state, Lane::Data, data, DeliveryClass::Reliable);
+        push_data(
+            &mut state,
+            DataLane::Classified,
+            data,
+            DeliveryClass::Reliable,
+        );
         self.shared.record_attempted(DeliveryClass::Reliable);
         drop(state);
         self.shared.item_available.notify_one();
@@ -994,7 +1024,12 @@ impl OutboundSender {
             state.counters.latest.superseded = state.counters.latest.superseded.saturating_add(1);
             self.shared.record_superseded();
             enqueue_gap_report(&mut state, gap);
-            push_data(&mut state, Lane::Data, data, DeliveryClass::Latest);
+            push_data(
+                &mut state,
+                DataLane::Classified,
+                data,
+                DeliveryClass::Latest,
+            );
             self.shared.record_attempted(DeliveryClass::Latest);
             drop(state);
             self.shared.item_available.notify_waiters();
@@ -1005,7 +1040,12 @@ impl OutboundSender {
         }
 
         if self.shared.has_capacity(&state, Lane::Data) {
-            push_data(&mut state, Lane::Data, data, DeliveryClass::Latest);
+            push_data(
+                &mut state,
+                DataLane::Classified,
+                data,
+                DeliveryClass::Latest,
+            );
             self.shared.record_attempted(DeliveryClass::Latest);
             drop(state);
             self.shared.item_available.notify_one();
@@ -1028,7 +1068,12 @@ impl OutboundSender {
             state.counters.volatile.dropped = state.counters.volatile.dropped.saturating_add(1);
             self.shared.record_dropped(DeliveryClass::Volatile);
             enqueue_gap_report(&mut state, gap);
-            push_data(&mut state, Lane::Data, data, DeliveryClass::Latest);
+            push_data(
+                &mut state,
+                DataLane::Classified,
+                data,
+                DeliveryClass::Latest,
+            );
             self.shared.record_attempted(DeliveryClass::Latest);
             drop(state);
             self.shared.item_available.notify_waiters();
@@ -1073,7 +1118,12 @@ impl OutboundSender {
             return Ok(EnqueueOutcome::CANCELED);
         }
         if self.shared.has_capacity(&state, Lane::Data) {
-            push_data(&mut state, Lane::Data, data, DeliveryClass::Volatile);
+            push_data(
+                &mut state,
+                DataLane::Classified,
+                data,
+                DeliveryClass::Volatile,
+            );
             self.shared.record_attempted(DeliveryClass::Volatile);
             drop(state);
             self.shared.item_available.notify_one();
@@ -1100,7 +1150,12 @@ impl OutboundSender {
         if let Some(position) = volatile_position {
             state.data.remove(position);
             enqueue_gap_report(&mut state, gap);
-            push_data(&mut state, Lane::Data, data, DeliveryClass::Volatile);
+            push_data(
+                &mut state,
+                DataLane::Classified,
+                data,
+                DeliveryClass::Volatile,
+            );
             drop(state);
             self.shared.item_available.notify_waiters();
             Ok(EnqueueOutcome {
@@ -1234,7 +1289,7 @@ impl OutboundSender {
             return Err(ReserveError::Full);
         }
         state.reserve(lane);
-        state.permit_count += 1;
+        state.permit_count = state.permit_count.saturating_add(1);
         Ok(OutboundPermit {
             shared: Arc::clone(&self.shared),
             lane,
@@ -1390,8 +1445,7 @@ impl OutboundPermit {
         }
         let mut state = self.shared.state();
         state.release_reservation(self.lane);
-        debug_assert!(state.permit_count > 0);
-        state.permit_count = state.permit_count.saturating_sub(1);
+        decrement_counter(&mut state.permit_count, "permit_count");
         self.active = false;
         if !state.accepting() {
             let no_producers = !state.producers_open();
@@ -1451,8 +1505,7 @@ impl Drop for OutboundPermit {
             {
                 let mut state = self.shared.state();
                 state.release_reservation(self.lane);
-                debug_assert!(state.permit_count > 0);
-                state.permit_count = state.permit_count.saturating_sub(1);
+                decrement_counter(&mut state.permit_count, "permit_count");
             }
             self.shared.item_available.notify_waiters();
             self.shared.capacity_available.notify_waiters();
@@ -1643,10 +1696,13 @@ impl OutboundReceiver {
             let ready = front.class() != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || state.legacy.len() >= batch_size
-                || now >= front.enqueued_at + batch_interval;
+                || front
+                    .enqueued_at
+                    .checked_add(batch_interval)
+                    .is_none_or(|deadline| now >= deadline);
             if !ready {
                 return Err(BatchedPopState::WaitUntil(
-                    front.enqueued_at + batch_interval,
+                    front.enqueued_at.checked_add(batch_interval).unwrap_or(now),
                 ));
             }
             if front.class() == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
@@ -1687,10 +1743,12 @@ impl OutboundReceiver {
             let ready = front_class != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || phase_len >= batch_size
-                || now >= front_enqueued_at + batch_interval;
+                || front_enqueued_at
+                    .checked_add(batch_interval)
+                    .is_none_or(|deadline| now >= deadline);
             if !ready {
                 return Err(BatchedPopState::WaitUntil(
-                    front_enqueued_at + batch_interval,
+                    front_enqueued_at.checked_add(batch_interval).unwrap_or(now),
                 ));
             }
             if front_class == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
@@ -1915,9 +1973,9 @@ impl OutboundReceiver {
     pub fn count_by_class(&self) -> [(DeliveryClass, u64); 3] {
         let state = self.shared.state();
         let mut counts = [
-            (DeliveryClass::Reliable, 0),
-            (DeliveryClass::Latest, 0),
-            (DeliveryClass::Volatile, 0),
+            (DeliveryClass::Reliable, 0u64),
+            (DeliveryClass::Latest, 0u64),
+            (DeliveryClass::Volatile, 0u64),
         ];
         for class in state
             .legacy
@@ -1926,9 +1984,9 @@ impl OutboundReceiver {
             .filter_map(|queued| queued.delivery_class)
         {
             match class {
-                DeliveryClass::Reliable => counts[0].1 += 1,
-                DeliveryClass::Latest => counts[1].1 += 1,
-                DeliveryClass::Volatile => counts[2].1 += 1,
+                DeliveryClass::Reliable => counts[0].1 = counts[0].1.saturating_add(1),
+                DeliveryClass::Latest => counts[1].1 = counts[1].1.saturating_add(1),
+                DeliveryClass::Volatile => counts[2].1 = counts[2].1.saturating_add(1),
             }
         }
         counts
@@ -2027,8 +2085,11 @@ fn push_message(
                     && matches!(&trailing.payload, OutboundPayload::DeliveryReport(_))
             });
             if trailing_current_report {
-                let position = state.control.len() - 1;
-                state.control.insert(position, queued);
+                if let Some(position) = state.control.len().checked_sub(1) {
+                    state.control.insert(position, queued);
+                } else {
+                    state.control.push_back(queued);
+                }
             } else {
                 state.control.push_back(queued);
             }
@@ -2039,16 +2100,15 @@ fn push_message(
 
 fn push_data(
     state: &mut QueueState,
-    lane: Lane,
+    lane: DataLane,
     data: OutboundData,
     effective_class: DeliveryClass,
 ) {
-    let payload = if data.delivery.relay_frame_cache().is_some() {
-        OutboundPayload::Data(data.delivery)
-    } else {
-        let (message, relay_frame_cache) = data.delivery.into_parts();
-        debug_assert!(relay_frame_cache.is_none());
-        OutboundPayload::Message(message)
+    let payload = match data.delivery.into_parts() {
+        (message, None) => OutboundPayload::Message(message),
+        (message, relay_frame_cache @ Some(_)) => {
+            OutboundPayload::Data(DeliveryMessage::from_parts(message, relay_frame_cache))
+        }
     };
     let queued = QueuedOutbound {
         payload,
@@ -2058,14 +2118,9 @@ fn push_data(
         generation: state.enqueue_generation,
         transition_barrier: false,
     };
-    debug_assert_ne!(
-        lane,
-        Lane::Control,
-        "game data cannot enter the control lane"
-    );
     match lane {
-        Lane::Legacy => state.legacy.push_back(queued),
-        Lane::Control | Lane::Data => state.data.push_back(queued),
+        DataLane::Legacy => state.legacy.push_back(queued),
+        DataLane::Classified => state.data.push_back(queued),
     }
 }
 
@@ -2102,7 +2157,12 @@ fn can_record_gap(state: &QueueState, control_capacity: usize, gap: &DeliveryGap
             )
     });
     can_append
-        || state.control.len() + state.barriers.len() + state.reserved_control < control_capacity
+        || state
+            .control
+            .len()
+            .saturating_add(state.barriers.len())
+            .saturating_add(state.reserved_control)
+            < control_capacity
 }
 
 fn report_can_append(report: &DeliveryReportPayload, gap: &DeliveryGap) -> bool {
@@ -2245,6 +2305,28 @@ mod tests {
             dropped_for_you: 0,
             backpressure_events: 0,
         })
+    }
+
+    #[tokio::test]
+    async fn zero_capacities_are_normalized_to_one_slot_per_lane() {
+        let (tx, mut rx) = channel(0, 0);
+        assert_eq!(rx.shared.data_capacity, 1);
+        assert_eq!(rx.shared.control_capacity, 1);
+
+        tx.try_enqueue_control(message(1)).unwrap();
+        assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 1);
+
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(2, DeliveryClass::Reliable, None, 1))
+            .unwrap();
+        assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 2);
+    }
+
+    #[test]
+    fn counter_underflow_is_contained_at_zero() {
+        let mut counter = 0;
+        decrement_counter(&mut counter, "test_counter");
+        assert_eq!(counter, 0);
     }
 
     fn data(id: u64, class: DeliveryClass, key: Option<u32>, seq: u64) -> OutboundData {
@@ -3070,6 +3152,7 @@ mod tests {
             .expect("the reserved control and reused report leave exact gap capacity");
         let state = rx.shared.state();
         assert_eq!(state.reserved_control, 0);
+        assert_eq!(state.permit_count, 0);
         assert_eq!(state.control.len(), 2);
         let OutboundPayload::DeliveryReport(report) = &state.control.back().unwrap().payload else {
             panic!("expected trailing report")
@@ -3293,6 +3376,11 @@ mod tests {
             Err(TryEnqueueError::Full(_))
         ));
         drop(permit);
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 0);
+            assert_eq!(state.permit_count, 0);
+        }
         tx.try_enqueue_control(message(2)).unwrap();
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 2);
         drop(tx);
@@ -3310,7 +3398,24 @@ mod tests {
             .expect_err("reserved capacity keeps the queue empty");
         assert_eq!(receive_error, TryReceiveError::Empty);
         permit.send_control(message(4)).unwrap();
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 0);
+            assert_eq!(state.permit_count, 0);
+        }
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 4);
+        assert!(rx.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cloned_sender_keeps_receiver_open_until_last_sender_drops() {
+        let (tx, mut rx) = channel(1, 1);
+        let clone = tx.clone();
+        drop(tx);
+        let result = rx.try_recv();
+        assert_eq!(result.unwrap_err(), TryReceiveError::Empty);
+
+        drop(clone);
         assert!(rx.recv().await.unwrap().is_none());
     }
 

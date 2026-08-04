@@ -68,13 +68,16 @@ impl InMemoryRateLimiter {
     /// the rate-limit map so memory usage stays bounded.
     ///
     /// Returns the `JoinHandle` so callers can abort the task during shutdown.
-    pub fn start_cleanup_task(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub fn start_cleanup_task(
+        self: Arc<Self>,
+    ) -> Result<tokio::task::JoinHandle<()>, tokio::runtime::TryCurrentError> {
         // The limiter is public and may be embedded without the binary's
         // configuration validation. Keep that path from silently killing its
         // maintenance task on Tokio's zero-period panic.
         let interval = self.cleanup_interval.max(Duration::from_secs(1));
         let limiter = Arc::downgrade(&self);
-        tokio::spawn(async move {
+        let runtime = tokio::runtime::Handle::try_current()?;
+        Ok(runtime.spawn(async move {
             let mut tick = tokio::time::interval(interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -84,7 +87,7 @@ impl InMemoryRateLimiter {
                 };
                 limiter.cleanup();
             }
-        })
+        }))
     }
 
     /// Remove entries whose sliding windows are completely empty (all
@@ -214,7 +217,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn zero_cleanup_interval_does_not_kill_the_background_task() {
         let limiter = Arc::new(InMemoryRateLimiter::new(Duration::ZERO));
-        let handle = Arc::clone(&limiter).start_cleanup_task();
+        let handle = Arc::clone(&limiter)
+            .start_cleanup_task()
+            .unwrap_or_else(|error| panic!("test runtime must be available: {error}"));
 
         tokio::task::yield_now().await;
         assert!(
@@ -229,7 +234,9 @@ mod tests {
     async fn cleanup_task_does_not_keep_limiter_alive() {
         let limiter = Arc::new(InMemoryRateLimiter::new(Duration::from_secs(1)));
         let weak = Arc::downgrade(&limiter);
-        let handle = Arc::clone(&limiter).start_cleanup_task();
+        let handle = Arc::clone(&limiter)
+            .start_cleanup_task()
+            .unwrap_or_else(|error| panic!("test runtime must be available: {error}"));
 
         drop(limiter);
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -237,5 +244,15 @@ mod tests {
 
         assert!(weak.upgrade().is_none());
         assert!(handle.is_finished());
+    }
+
+    #[test]
+    fn cleanup_task_without_runtime_returns_error_instead_of_panicking() {
+        let limiter = Arc::new(InMemoryRateLimiter::new(Duration::from_secs(1)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            limiter.start_cleanup_task()
+        }));
+        assert!(result.is_ok());
+        assert!(result.ok().is_some_and(|task| task.is_err()));
     }
 }

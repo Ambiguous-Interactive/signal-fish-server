@@ -8,6 +8,14 @@ use std::path::Path;
 pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     let is_prod = is_production_mode();
 
+    if config.server.event_buffer_size > super::server::MAX_EVENT_BUFFER_SIZE {
+        anyhow::bail!(
+            "server.event_buffer_size must not exceed {} (configured: {})",
+            super::server::MAX_EVENT_BUFFER_SIZE,
+            config.server.event_buffer_size
+        );
+    }
+
     // Validate metrics authentication
     if config.security.require_metrics_auth {
         let token_present = config
@@ -581,5 +589,18 @@ mod tests {
             validate_config_security(&config).is_ok(),
             "zero batch_interval_ms is harmless when batching is disabled"
         );
+    }
+
+    #[test]
+    fn extreme_event_buffer_size_is_rejected_before_server_startup() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.server.event_buffer_size = usize::MAX;
+
+        let error = validate_config_security(&config)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(error.contains("server.event_buffer_size must not exceed"));
     }
 }

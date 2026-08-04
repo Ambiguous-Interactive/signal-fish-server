@@ -9,11 +9,11 @@ pub fn generate_room_code_with_config(config: &ProtocolConfig) -> String {
     (0..config.room_code_length)
         .map(|_| {
             let idx = rng.random_range(0..ALPHANUMERIC_CHARS.len());
-            // SAFETY: `idx` is produced by `random_range(0..len)`, so it is
-            // always within [0, len).
-            #[allow(clippy::indexing_slicing)]
-            let ch = ALPHANUMERIC_CHARS[idx] as char;
-            ch
+            ALPHANUMERIC_CHARS
+                .get(idx)
+                .copied()
+                .map(char::from)
+                .unwrap_or('X')
         })
         .collect()
 }
@@ -33,11 +33,7 @@ pub fn generate_clean_room_code_of_length(length: usize) -> String {
     (0..length)
         .map(|_| {
             let idx = rng.random_range(0..CLEAN_CHARS.len());
-            // SAFETY: `idx` is produced by `random_range(0..len)`, so it is
-            // always within [0, len).
-            #[allow(clippy::indexing_slicing)]
-            let ch = CLEAN_CHARS[idx] as char;
-            ch
+            CLEAN_CHARS.get(idx).copied().map(char::from).unwrap_or('X')
         })
         .collect()
 }
@@ -59,7 +55,7 @@ pub fn generate_region_room_code(config: &ProtocolConfig, region_prefix: Option<
             return generate_clean_room_code_with_config(config);
         }
 
-        let random_len = config.room_code_length - prefix_len;
+        let random_len = config.room_code_length.saturating_sub(prefix_len);
         let random_segment = generate_clean_room_code_of_length(random_len);
         format!("{prefix}{random_segment}")
     } else {

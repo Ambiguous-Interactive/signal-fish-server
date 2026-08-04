@@ -98,7 +98,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
     dashboard_metrics_cache.spawn(Arc::clone(&database));
 
     let rate_limiter = Arc::new(RoomRateLimiter::new(config.rate_limit_config.clone()));
-    Arc::clone(&rate_limiter).start_cleanup_task();
+    let _cleanup_task = Arc::clone(&rate_limiter).start_cleanup_task();
 
     let connection_manager = Arc::new(ConnectionManager::new(
         config.max_connections_per_ip,

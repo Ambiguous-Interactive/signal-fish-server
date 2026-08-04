@@ -479,7 +479,10 @@ impl DeliveryAccountability {
                     3
                 }
             };
-            causal_counts[index] = causal_counts[index].checked_add(count).ok_or_else(|| {
+            let causal_count = causal_counts.get_mut(index).ok_or_else(|| {
+                "delivery accountability violation: unknown causal gap reason".to_string()
+            })?;
+            *causal_count = causal_count.checked_add(count).ok_or_else(|| {
                 "delivery accountability violation: causal gap count overflowed".to_string()
             })?;
             let ranges = report_ranges
@@ -496,7 +499,7 @@ impl DeliveryAccountability {
             }
             ranges.push((gap.from_seq, gap.to_seq));
         }
-        let delta = |next: u64, prior: u64| next - prior;
+        let delta = |next: u64, prior: u64| next.saturating_sub(prior);
         let unsupported_delta = delta(
             report.per_class.reliable.unsupported_format,
             previous.reliable.unsupported_format,
@@ -796,7 +799,7 @@ impl DeliveryAccountability {
                     key.0, key.1
                 )
             })?;
-            consumed += 1;
+            consumed = consumed.saturating_add(1);
             if next == received {
                 break;
             }
@@ -806,7 +809,7 @@ impl DeliveryAccountability {
                 "delivery accountability violation: prior exact reports do not cover {} epoch {} gap {expected}..={}",
                 key.0,
                 key.1,
-                received - 1
+                received.saturating_sub(1)
             ));
         }
         gaps.drain(..consumed);
@@ -832,7 +835,7 @@ impl DeliveryAccountability {
                 self.retire_departed(player_id, epoch);
                 return Ok(());
             }
-            last_seq + 1
+            last_seq.saturating_add(1)
         } else {
             return Err(format!(
                 "delivery accountability violation: sender {player_id} advanced beyond its unresolved PlayerLeft epoch {}",
@@ -855,19 +858,24 @@ impl DeliveryAccountability {
             if gap.from_seq != next || gap.to_seq > terminal.final_seq {
                 return Ok(());
             }
-            consumed += 1;
+            consumed = consumed.saturating_add(1);
             if gap.to_seq == terminal.final_seq {
                 covered = true;
                 break;
             }
-            next = gap.to_seq + 1;
+            next = gap.to_seq.saturating_add(1);
         }
         if !covered {
             return Ok(());
         }
         if consumed > 0 {
             let remove_key = {
-                let gaps = self.pending_gaps.get_mut(&key).expect("gaps read above");
+                let Some(gaps) = self.pending_gaps.get_mut(&key) else {
+                    return Err(
+                        "delivery accountability violation: pending gap state disappeared"
+                            .to_string(),
+                    );
+                };
                 gaps.drain(..consumed);
                 gaps.is_empty()
             };

@@ -31,7 +31,18 @@ use tokio::time::Duration;
 use uuid::Uuid;
 
 fn chrono_duration_from_std(duration: Duration) -> chrono::Duration {
-    chrono::Duration::from_std(duration).unwrap_or_else(|_| chrono::Duration::seconds(i64::MAX))
+    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+}
+
+#[cfg(test)]
+mod duration_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn extreme_std_duration_saturates_without_panicking() {
+        let converted = std::panic::catch_unwind(|| chrono_duration_from_std(Duration::MAX));
+        assert_eq!(converted.ok(), Some(chrono::Duration::MAX));
+    }
 }
 
 mod admin;
@@ -292,7 +303,7 @@ impl EnhancedGameServer {
             config.rate_limit_config.clone(),
             metrics.clone(),
         ));
-        rate_limiter.clone().start_cleanup_task();
+        let _rate_limit_cleanup = rate_limiter.clone().start_cleanup_task()?;
 
         let cache_refresh_interval =
             Duration::from_secs(metrics_config.dashboard_cache_refresh_interval_secs.max(1));
@@ -627,9 +638,7 @@ impl EnhancedGameServer {
         player_id: PlayerId,
         sender: mpsc::Sender<Arc<ServerMessage>>,
     ) {
-        // SAFETY: Parsing a valid string literal — this can never fail.
-        #[allow(clippy::unwrap_used)]
-        let addr = "127.0.0.1:0".parse().unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         self.connection_manager
             .connect_test_client(player_id, sender, addr)
             .await;
@@ -1343,7 +1352,9 @@ impl InMemoryMessageCoordinator {
             Err(DeliveryReserveError::Full) => {}
         }
 
-        let deadline = tokio::time::Instant::now() + self.slow_consumer_timeout;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.slow_consumer_timeout)
+            .unwrap_or_else(tokio::time::Instant::now);
         self.metrics.increment_websocket_backpressure_events();
         if let Some(stats) = &stats {
             stats
@@ -1470,7 +1481,9 @@ impl InMemoryMessageCoordinator {
                 ));
             }
         };
-        let deadline = tokio::time::Instant::now() + self.slow_consumer_timeout;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.slow_consumer_timeout)
+            .unwrap_or_else(tokio::time::Instant::now);
         let (message, _) = message.into_parts();
 
         self.metrics.increment_websocket_backpressure_events();
@@ -1548,12 +1561,11 @@ impl InMemoryMessageCoordinator {
                             return Some(DeliveryOutcome::ChannelClosed);
                         }
                     };
-                    debug_assert_eq!(outcome.losses, 0);
-                    self.metrics.increment_websocket_deliveries_enqueued();
-                    if let Some(stats) = &connection_stats {
-                        stats.sent_to_you.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    Some(DeliveryOutcome::Delivered)
+                    Some(crate::coordination::record_queue_outcome(
+                        &self.metrics,
+                        connection_stats.as_ref(),
+                        outcome,
+                    ))
                 }
                 Err(DeliveryReserveError::Closed | DeliveryReserveError::Full) => {
                     self.metrics.increment_websocket_deliveries_channel_closed();
@@ -1603,7 +1615,9 @@ impl InMemoryMessageCoordinator {
                 ConditionalDeliveryReservation::Canceled
             }
             Err(DeliveryReserveError::Full) => {
-                let deadline = tokio::time::Instant::now() + self.slow_consumer_timeout;
+                let deadline = tokio::time::Instant::now()
+                    .checked_add(self.slow_consumer_timeout)
+                    .unwrap_or_else(tokio::time::Instant::now);
                 self.metrics.increment_websocket_backpressure_events();
                 if let Some(stats) = &stats {
                     stats
@@ -2532,7 +2546,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     };
                     let Some(batch) = messages_by_player.get(player_id) else {
                         let skipped = permits.iter_mut().filter_map(Option::take).count();
-                        failed_frames += skipped;
+                        failed_frames = failed_frames.saturating_add(skipped);
                         for _ in 0..skipped {
                             self.record_canceled_delivery(*player_id);
                         }
@@ -2547,9 +2561,20 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     let Some(message) = batch.message_in_phase(phase) else {
                         continue;
                     };
-                    let permit_index = phase - batch.first_phase;
+                    let Some(permit_index) = phase.checked_sub(batch.first_phase) else {
+                        failed_frames = failed_frames.saturating_add(1);
+                        self.record_canceled_delivery(*player_id);
+                        tracing::error!(
+                            %room_id,
+                            %player_id,
+                            phase,
+                            first_phase = batch.first_phase,
+                            "Room transaction phase preceded its batch origin"
+                        );
+                        continue;
+                    };
                     let Some(permit) = permits.get_mut(permit_index).and_then(Option::take) else {
-                        failed_frames += 1;
+                        failed_frames = failed_frames.saturating_add(1);
                         self.record_canceled_delivery(*player_id);
                         tracing::error!(
                             %room_id,
@@ -2569,7 +2594,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                             }
                         }
                         Ok(_) => {
-                            failed_frames += 1;
+                            failed_frames = failed_frames.saturating_add(1);
                             self.record_canceled_delivery(*player_id);
                             tracing::warn!(
                                 %room_id,
@@ -2579,7 +2604,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                             );
                         }
                         Err(_) => {
-                            failed_frames += 1;
+                            failed_frames = failed_frames.saturating_add(1);
                             self.metrics.increment_websocket_deliveries_channel_closed();
                             tracing::warn!(
                                 %room_id,
@@ -2593,7 +2618,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 if phase == 0 {
                     let continue_publication = match after_first_phase.take() {
                         Some(after_first_phase) => {
-                            after_first_phase(failed_frames - failed_before_phase)
+                            after_first_phase(failed_frames.saturating_sub(failed_before_phase))
                         }
                         None => {
                             tracing::error!(
@@ -2612,7 +2637,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                                 continue;
                             };
                             let skipped = permits.iter().filter(|permit| permit.is_some()).count();
-                            failed_frames += skipped;
+                            failed_frames = failed_frames.saturating_add(skipped);
                             for _ in 0..skipped {
                                 self.record_canceled_delivery(*player_id);
                             }

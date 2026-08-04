@@ -188,7 +188,9 @@ pub fn is_aligned<T>(bytes: &[u8]) -> bool {
 /// Returns `RkyvError::InvalidAlignment` if the buffer is not properly aligned.
 pub fn validate_alignment<T>(bytes: &[u8]) -> Result<(), RkyvError> {
     let alignment = std::mem::align_of::<T>();
-    let actual = bytes.as_ptr() as usize % alignment;
+    let actual = (bytes.as_ptr() as usize)
+        .checked_rem(alignment)
+        .unwrap_or_default();
 
     if actual != 0 {
         return Err(RkyvError::InvalidAlignment {

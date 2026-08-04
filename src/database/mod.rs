@@ -46,7 +46,8 @@ impl FinalizeRoomGameExpectation {
 impl RoomCleanupOutcome {
     /// Total rooms removed (empty + inactive).
     pub fn total_cleaned(&self) -> usize {
-        self.empty_rooms_cleaned + self.inactive_rooms_cleaned
+        self.empty_rooms_cleaned
+            .saturating_add(self.inactive_rooms_cleaned)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -619,7 +620,7 @@ impl GameDatabase for InMemoryDatabase {
             let mut id = uuid::Uuid::new_v4();
             let mut attempts = 0u8;
             while rooms.contains_key(&id) {
-                attempts += 1;
+                attempts = attempts.saturating_add(1);
                 if attempts >= 16 {
                     anyhow::bail!("Failed to generate unique room ID after {attempts} attempts");
                 }
@@ -932,7 +933,9 @@ impl GameDatabase for InMemoryDatabase {
         } else {
             empty_timeout
         };
-        let cutoff = chrono::Utc::now() - effective_timeout;
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(effective_timeout)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
@@ -980,9 +983,9 @@ impl GameDatabase for InMemoryDatabase {
             room_codes.remove(&(game_name, room_code));
 
             if was_empty {
-                outcome.empty_rooms_cleaned += 1;
+                outcome.empty_rooms_cleaned = outcome.empty_rooms_cleaned.saturating_add(1);
             } else {
-                outcome.inactive_rooms_cleaned += 1;
+                outcome.inactive_rooms_cleaned = outcome.inactive_rooms_cleaned.saturating_add(1);
             }
         }
 
@@ -1059,7 +1062,8 @@ impl GameDatabase for InMemoryDatabase {
         let mut game_counts = HashMap::new();
 
         for room in rooms.values() {
-            *game_counts.entry(room.game_name.clone()).or_insert(0) += 1;
+            let count = game_counts.entry(room.game_name.clone()).or_insert(0usize);
+            *count = count.saturating_add(1);
         }
 
         Ok(game_counts)
@@ -1325,11 +1329,13 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn cleanup_old_room_cleanup_events(&self) -> Result<u64> {
         let mut cleanup_events = self.cleanup_events.write().await;
-        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(1))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
 
         let initial_count = cleanup_events.len();
         cleanup_events.retain(|_, entry| entry.processed_at > cutoff);
-        let deleted_count = initial_count - cleanup_events.len();
+        let deleted_count = initial_count.saturating_sub(cleanup_events.len());
 
         Ok(deleted_count as u64)
     }
@@ -1348,11 +1354,12 @@ fn percentile(sorted_values: &[usize], p: f64) -> f64 {
         return 0.0;
     }
 
-    let index = (p * (sorted_values.len() - 1) as f64).round() as usize;
-    // SAFETY: The early return guarantees len >= 1, so `len - 1` does not
-    // underflow and `.min(len - 1)` clamps `index` to a valid bound.
-    #[allow(clippy::indexing_slicing)]
-    let value = sorted_values[index.min(sorted_values.len() - 1)];
+    let max_index = sorted_values.len().saturating_sub(1);
+    let index = p.mul_add(max_index as f64, 0.0).round() as usize;
+    let value = sorted_values
+        .get(index.min(max_index))
+        .copied()
+        .unwrap_or_default();
     value as f64
 }
 

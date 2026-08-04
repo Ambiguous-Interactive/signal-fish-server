@@ -257,7 +257,7 @@ complete reference.
 | `SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT`         | `server.empty_room_timeout`        | `300`     | Seconds before an empty room is removed             |
 | `SIGNAL_FISH__SERVER__INACTIVE_ROOM_TIMEOUT`      | `server.inactive_room_timeout`     | `3600`    | Seconds before an inactive room is removed          |
 | `SIGNAL_FISH__SERVER__RECONNECTION_WINDOW`        | `server.reconnection_window`       | `300`     | Seconds a reconnection token stays valid            |
-| `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE`          | `server.event_buffer_size`         | `100`     | Max events buffered for reconnection replay         |
+| `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE`          | `server.event_buffer_size`         | `100`     | Max events buffered for replay (ceiling: 65,536)    |
 | `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION`        | `server.enable_reconnection`       | `true`    | Enable reconnection support                         |
 | `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS`    | `server.heartbeat_throttle_secs`   | `30`      | Min seconds between `last_seen` heartbeat writes    |
 | `SIGNAL_FISH__SERVER__REGION_ID`                  | `server.region_id`                 | `default` | Region identifier for metrics                       |
@@ -283,7 +283,7 @@ complete reference.
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES`         | `security.max_signal_bytes`        | `16384`   | Max serialized size of a v3 `Signal` payload        |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `24`      | Max concurrent connections from one IP              |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `false`   | Opt-in outbound batching (off keeps relay latency low) |
-| `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch                              |
+| `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch (ceiling: 65,536)            |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Exclusive auth-input deadline after connect         |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Exclusive post-auth idle deadline (`0` disables)    |

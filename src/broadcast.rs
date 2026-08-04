@@ -233,14 +233,20 @@ pub struct SerializationBuffer {
     default_capacity: usize,
 }
 
+const MAX_SERIALIZATION_BUFFER_INITIAL_CAPACITY: usize = 65_536;
+
 impl SerializationBuffer {
     /// Create a new serialization buffer with default capacity
     pub fn new() -> Self {
         Self::with_capacity(512)
     }
 
-    /// Create with specified capacity
+    /// Create with a bounded initial capacity.
+    ///
+    /// Requests above 64 KiB are clamped so this infallible public constructor
+    /// cannot panic while reserving an attacker- or caller-controlled value.
     pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.min(MAX_SERIALIZATION_BUFFER_INITIAL_CAPACITY);
         Self {
             buffer: BytesMut::with_capacity(capacity),
             default_capacity: capacity,
@@ -436,6 +442,13 @@ mod tests {
         let json2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
         assert!(json1.is_object());
         assert!(json2.is_object());
+    }
+
+    #[test]
+    fn extreme_serialization_capacity_is_safely_bounded() {
+        let buffer = std::panic::catch_unwind(|| SerializationBuffer::with_capacity(usize::MAX));
+        assert!(buffer.is_ok());
+        assert!(buffer.unwrap().capacity() <= 64 * 1024);
     }
 
     #[test]

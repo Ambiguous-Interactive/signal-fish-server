@@ -117,7 +117,8 @@ pub async fn next_server_message<S>(
 where
     S: Stream<Item = std::result::Result<Message, WebSocketError>> + Unpin,
 {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let now = tokio::time::Instant::now();
+    let deadline = now.checked_add(timeout).unwrap_or(now);
     loop {
         let frame = tokio::time::timeout_at(deadline, ws.next())
             .await

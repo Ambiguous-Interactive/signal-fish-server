@@ -3,7 +3,7 @@
 #
 # This script enforces zero-panic production code by:
 # 1. Running clippy with strict panic-related lints
-# 2. Scanning for explicit panic patterns in source code
+# 2. Scanning for explicit panic and assertion macros in source code
 #
 # Exit codes:
 #   0 - No panic-prone patterns found
@@ -69,8 +69,8 @@ check_clippy() {
     log "Running clippy with panic-related lints as errors..."
 
     if ! command -v cargo >/dev/null 2>&1; then
-        warn "cargo not found; skipping clippy checks"
-        return 0
+        error "cargo not found; panic-policy Clippy checks cannot run"
+        return 1
     fi
 
     # Run clippy with strict panic-prevention lints on library and binary code.
@@ -84,7 +84,9 @@ check_clippy() {
     # - clippy::unimplemented: unimplemented!() macros
     # - clippy::unreachable: unreachable!() macros
     # - clippy::indexing_slicing: unchecked array/slice indexing
-    if run_nested_cargo clippy --locked --lib --bins --all-features -- \
+    # - clippy::string_slice: byte-indexed string slicing
+    # - clippy::arithmetic_side_effects: unchecked overflow/division/deadlines
+    if ! run_nested_cargo clippy --locked --lib --bins --all-features -- \
         -D clippy::panic \
         -D clippy::unwrap_used \
         -D clippy::expect_used \
@@ -92,25 +94,46 @@ check_clippy() {
         -D clippy::unimplemented \
         -D clippy::unreachable \
         -D clippy::indexing_slicing \
+        -D clippy::string_slice \
+        -D clippy::arithmetic_side_effects \
         2>&1; then
-        log "Clippy panic checks passed"
-        return 0
-    else
-        error "Clippy detected panic-prone patterns"
+        error "Clippy detected panic-prone patterns in the server crate"
         return 1
     fi
+
+    # clients/native is a standalone package, so the root command cannot lint
+    # its production targets. Keep both independently locked graphs under the
+    # same panic policy.
+    if ! run_nested_cargo clippy --locked --manifest-path clients/native/Cargo.toml \
+        --lib --bins --all-features -- \
+        -D clippy::panic \
+        -D clippy::unwrap_used \
+        -D clippy::expect_used \
+        -D clippy::todo \
+        -D clippy::unimplemented \
+        -D clippy::unreachable \
+        -D clippy::indexing_slicing \
+        -D clippy::string_slice \
+        -D clippy::arithmetic_side_effects \
+        2>&1; then
+        error "Clippy detected panic-prone patterns in the native client crate"
+        return 1
+    fi
+
+    log "Clippy panic checks passed for server and native production targets"
+    return 0
 }
 
 # ============================================================================
-# PATTERN SCANNING - Quick grep-based checks
+# PATTERN SCANNING - Syntax-aware production macro checks
 # ============================================================================
 
 check_patterns() {
     log "Running syn-based panic-prone macro scan for production Rust..."
 
     if ! command -v cargo >/dev/null 2>&1; then
-        warn "cargo not found; skipping syn-based pattern scan"
-        return 0
+        error "cargo not found; syn-based panic-policy scan cannot run"
+        return 1
     fi
 
     if ! run_nested_cargo test --locked --test no_panic_policy_scan --quiet; then
@@ -133,7 +156,7 @@ print_summary() {
     if [ "$FAILED" -eq 0 ]; then
         echo "Status: PASSED"
         echo ""
-        echo "Your code is free of panic-prone patterns."
+        echo "No configured first-party panic-prone patterns were found."
     else
         echo "Status: FAILED"
         echo ""
@@ -143,7 +166,10 @@ print_summary() {
         echo "  - Replace .unwrap() with .ok_or()? or .unwrap_or_default()"
         echo "  - Replace .expect() with proper error handling"
         echo "  - Remove todo!(), unimplemented!(), panic!() macros"
+        echo "  - Replace assert!/debug_assert! families with validation or safe fallback"
         echo "  - Use .get() instead of [index] for array access"
+        echo "  - Use .get(range) instead of byte-indexed string slicing"
+        echo "  - Use checked/saturating arithmetic and checked time deadlines"
         echo ""
         echo "See .llm/context.md 'Defensive Programming' section for patterns."
     fi

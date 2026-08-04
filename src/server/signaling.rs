@@ -567,7 +567,8 @@ impl EnhancedGameServer {
                                         now_unix,
                                     )
                                     .map(|(message, minted)| {
-                                        turn_credentials_issued += minted;
+                                        turn_credentials_issued =
+                                            turn_credentials_issued.saturating_add(minted);
                                         message
                                     });
                                 if member.player_id == joiner {
