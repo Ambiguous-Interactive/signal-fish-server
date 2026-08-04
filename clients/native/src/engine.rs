@@ -25,11 +25,12 @@
 //! they forward through an unbounded [`EngineEvent`] channel back to the orchestrator.
 
 use std::collections::{BTreeSet, HashMap};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use clap::ValueEnum;
 use rtc::ice::{mdns::MulticastDnsMode, network_type::NetworkType};
 use signal_fish_server::protocol::{IceServer, PlayerId};
 use tokio::sync::mpsc;
@@ -135,37 +136,93 @@ struct PeerLink {
     pair_connected: bool,
 }
 
+/// Address families this client may bind for ICE, and therefore the families
+/// its host candidates can advertise.
+///
+/// webrtc 0.20 turns each application-supplied socket directly into a host
+/// candidate, so restricting the bind set is the only way to pin the family of
+/// the negotiated path. Derives `ValueEnum` because it *is* the `--ip-family`
+/// CLI surface; a separate mirror enum would only be a second thing to keep in
+/// sync.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum IpFamily {
+    /// Bind every usable interface address (the production default).
+    #[default]
+    Any,
+    /// Bind IPv4 addresses only.
+    Ipv4,
+    /// Bind IPv6 addresses only.
+    Ipv6,
+}
+
+impl IpFamily {
+    /// Whether an interface address belongs to this family.
+    fn admits(self, ip: IpAddr) -> bool {
+        matches!(
+            (self, ip),
+            (Self::Any, _) | (Self::Ipv4, IpAddr::V4(_)) | (Self::Ipv6, IpAddr::V6(_))
+        )
+    }
+
+    /// The loopback address of this family (`Any` keeps the IPv4 loopback,
+    /// which every supported platform provides).
+    fn loopback(self) -> IpAddr {
+        match self {
+            Self::Any | Self::Ipv4 => IpAddr::from(Ipv4Addr::LOCALHOST),
+            Self::Ipv6 => IpAddr::from(Ipv6Addr::LOCALHOST),
+        }
+    }
+
+    /// Stable lowercase token for diagnostics (matches the CLI token).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
+}
+
+/// Everything the engine needs to know about how this process was invoked.
+/// Grouped so adding a knob does not add another positional flag argument to
+/// every call site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EngineSettings {
+    /// Deterministic ICE failure (`--cripple-ice`).
+    pub crippled: bool,
+    /// Disable multicast-DNS candidate obfuscation (`--disable-mdns`).
+    pub disable_mdns: bool,
+    /// Permit only TURN-relayed candidates (`--ice-transport-policy relay`).
+    pub relay_only: bool,
+    /// Restrict the bound ICE sockets to one address family (`--ip-family`).
+    pub ip_family: IpFamily,
+}
+
 /// The per-client WebRTC engine. Owned by the orchestrator task; all methods
 /// are called from that single task, so no interior locking is needed.
 pub struct Engine {
-    crippled: bool,
-    disable_mdns: bool,
+    settings: EngineSettings,
     runtime: Arc<dyn Runtime>,
     events: mpsc::UnboundedSender<EngineEvent>,
     peers: HashMap<PlayerId, PeerLink>,
     next_generation: u64,
-    relay_only: bool,
 }
 
 impl Engine {
-    /// Build the engine with the default runtime and settings unless a harness
-    /// requests deterministic ICE failure or disables remote mDNS resolution.
+    /// Build the engine with the default runtime and the invocation's
+    /// [`EngineSettings`].
     pub fn new(
-        crippled: bool,
-        disable_mdns: bool,
-        relay_only: bool,
+        settings: EngineSettings,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Result<Self> {
         let runtime = default_runtime()
             .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
         Ok(Self {
-            crippled,
-            disable_mdns,
+            settings,
             runtime,
             events,
             peers: HashMap::new(),
             next_generation: 0,
-            relay_only,
         })
     }
 
@@ -227,17 +284,17 @@ impl Engine {
 
         let config = RTCConfigurationBuilder::new()
             .with_ice_servers(convert_ice_servers(ice_servers))
-            .with_ice_transport_policy(if self.relay_only {
+            .with_ice_transport_policy(if self.settings.relay_only {
                 RTCIceTransportPolicy::Relay
             } else {
                 RTCIceTransportPolicy::All
             })
             .build();
         let mut setting_engine = SettingEngine::default();
-        if self.disable_mdns {
+        if self.settings.disable_mdns {
             setting_engine.set_multicast_dns_mode(MulticastDnsMode::Disabled);
         }
-        if self.crippled {
+        if self.settings.crippled {
             // The 0.20 driver requires at least one socket, but the ICE agent
             // must never register that dummy UDP socket as a usable local
             // candidate. Permit only TCP4 candidates while supplying no TCP
@@ -248,11 +305,11 @@ impl Engine {
         let handler = Arc::new(PeerHandler {
             peer,
             generation,
-            crippled: self.crippled,
+            crippled: self.settings.crippled,
             events: self.events.clone(),
             runtime: self.runtime.clone(),
         });
-        let udp_addrs = local_udp_addrs(self.crippled)?;
+        let udp_addrs = local_udp_addrs(self.settings)?;
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
                 .with_configuration(config)
@@ -456,8 +513,11 @@ impl Engine {
             .cloned()
     }
 
-    /// Candidate types of the selected ICE path for a connected peer.
-    pub async fn selected_candidate_types(&self, peer: PlayerId) -> Option<(String, String)> {
+    /// The selected ICE candidate pair for a connected peer: candidate types
+    /// (`host`/`srflx`/`prflx`/`relay`) plus each side's reported address, so a
+    /// harness can prove which family and which concrete address actually
+    /// carried the data channels.
+    pub async fn selected_candidate_pair(&self, peer: PlayerId) -> Option<SelectedCandidatePair> {
         let pc = self.peers.get(&peer)?.pc.clone();
         let report = pc
             .get_stats(std::time::Instant::now(), StatsSelector::None)
@@ -483,11 +543,26 @@ impl Engine {
         else {
             return None;
         };
-        Some((
-            local.candidate_type.to_string(),
-            remote.candidate_type.to_string(),
-        ))
+        Some(SelectedCandidatePair {
+            local_candidate_type: local.candidate_type.to_string(),
+            remote_candidate_type: remote.candidate_type.to_string(),
+            local_candidate_address: local.address.clone(),
+            remote_candidate_address: remote.address.clone(),
+        })
     }
+}
+
+/// The ICE candidate pair that carries a connected peer's data channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedCandidatePair {
+    pub local_candidate_type: String,
+    pub remote_candidate_type: String,
+    /// Address the local stack reports for its side of the pair. `None` when
+    /// the stack redacts or omits it; the harness treats that as a failure
+    /// rather than a pass.
+    pub local_candidate_address: Option<String>,
+    /// Address reported for the remote side of the pair.
+    pub remote_candidate_address: Option<String>,
 }
 
 struct PeerHandler {
@@ -578,10 +653,12 @@ fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> 
 /// Unlike earlier webrtc-rs releases, 0.20 turns each socket's bound address
 /// directly into a host candidate. A wildcard bind would therefore advertise
 /// `0.0.0.0`, which cannot connect peers on a zero-STUN LAN. Bind every active
-/// interface address instead. IPv6 link-local addresses are omitted because
-/// the ICE candidate grammar cannot carry the local interface's scope ID.
-fn local_udp_addrs(crippled: bool) -> Result<Vec<SocketAddr>> {
-    if crippled {
+/// interface address instead, restricted to [`EngineSettings::ip_family`].
+/// IPv6 link-local addresses are omitted because the ICE candidate grammar
+/// cannot carry the local interface's scope ID.
+fn local_udp_addrs(settings: EngineSettings) -> Result<Vec<SocketAddr>> {
+    let family = settings.ip_family;
+    if settings.crippled {
         // rtc/webrtc 0.20 rejects a peer connection with no sockets or
         // listeners. Keep the fault deterministic with a loopback-only
         // transport. Crippled SettingEngine accepts only TCP4 candidates while
@@ -590,29 +667,46 @@ fn local_udp_addrs(crippled: bool) -> Result<Vec<SocketAddr>> {
         // client retain outbound/inbound signaling filters as defense in
         // depth while offer/answer and gathering completion still follow the
         // real peer-connection lifecycle.
-        return Ok(vec![SocketAddr::from(([127, 0, 0, 1], 0))]);
+        return Ok(vec![SocketAddr::new(family.loopback(), 0)]);
     }
 
+    let active = if_addrs::get_if_addrs()
+        .context("enumerate local network interfaces")?
+        .into_iter()
+        .filter(if_addrs::Interface::is_oper_up)
+        .map(|interface| interface.ip());
+    select_udp_addrs(active, family)
+}
+
+/// The pure selection rule behind [`local_udp_addrs`]: keep the concrete,
+/// bindable addresses of `family`, sorted and deduplicated.
+///
+/// Unusable addresses are dropped regardless of family — unspecified (a
+/// wildcard host candidate connects no one), multicast, and IPv6 link-local
+/// (the ICE candidate grammar cannot carry the interface scope ID the local
+/// socket key needs). An empty result is an error, never a silent fallback to
+/// another family.
+fn select_udp_addrs(
+    addresses: impl IntoIterator<Item = IpAddr>,
+    family: IpFamily,
+) -> Result<Vec<SocketAddr>> {
     let mut addrs = BTreeSet::new();
-    for interface in if_addrs::get_if_addrs().context("enumerate local network interfaces")? {
-        if !interface.is_oper_up() {
+    for ip in addresses {
+        if ip.is_unspecified() || ip.is_multicast() || !family.admits(ip) {
             continue;
         }
-        let ip = interface.ip();
-        if ip.is_unspecified() || ip.is_multicast() {
+        if matches!(ip, IpAddr::V6(ip) if ip.is_unicast_link_local()) {
             continue;
         }
-        let addr = match ip {
-            IpAddr::V6(ip) if ip.is_unicast_link_local() => continue,
-            IpAddr::V6(ip) => SocketAddr::new(IpAddr::V6(ip), 0),
-            IpAddr::V4(ip) => SocketAddr::new(IpAddr::V4(ip), 0),
-        };
-        addrs.insert(addr);
+        // Port 0 and scope 0: the driver keys its sockets by the exact address
+        // it was handed, and a scoped IPv6 bind would not match.
+        addrs.insert(SocketAddr::new(ip, 0));
     }
 
     if addrs.is_empty() {
         return Err(anyhow!(
-            "no active concrete network interface is available for ICE"
+            "no active concrete {} network interface is available for ICE",
+            family.as_str()
         ));
     }
     Ok(addrs.into_iter().collect())
@@ -690,17 +784,44 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 mod tests {
     use super::*;
 
+    /// Deterministic ICE failure in the given family.
+    fn crippled_settings(ip_family: IpFamily) -> EngineSettings {
+        EngineSettings {
+            crippled: true,
+            disable_mdns: true,
+            ip_family,
+            ..EngineSettings::default()
+        }
+    }
+
+    /// A healthy engine with mDNS obfuscation off (what every interop cell
+    /// runs, so candidates are raw IPs).
+    fn mdns_disabled_settings() -> EngineSettings {
+        EngineSettings {
+            disable_mdns: true,
+            ..EngineSettings::default()
+        }
+    }
+
     #[tokio::test]
     async fn crippled_engine_builds_full_mesh_links_without_candidate_leakage() {
         const REMOTE_PEERS: u128 = 15;
 
         assert_eq!(
-            local_udp_addrs(true).expect("crippled transport address resolves"),
+            local_udp_addrs(crippled_settings(IpFamily::Any))
+                .expect("crippled transport address resolves"),
             vec![SocketAddr::from(([127, 0, 0, 1], 0))]
+        );
+        assert_eq!(
+            local_udp_addrs(crippled_settings(IpFamily::Ipv6))
+                .expect("crippled IPv6 transport address resolves"),
+            vec![SocketAddr::new(IpAddr::from(Ipv6Addr::LOCALHOST), 0)],
+            "an IPv6-only crippled run must not fall back to an IPv4 socket"
         );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(true, true, false, tx).expect("crippled engine builds");
+        let mut engine =
+            Engine::new(crippled_settings(IpFamily::Any), tx).expect("crippled engine builds");
         for ordinal in 1..=REMOTE_PEERS {
             let peer = PlayerId::from_u128(ordinal);
             engine
@@ -756,8 +877,10 @@ mod tests {
         let crippled_id = PlayerId::from_u128(2);
         let (healthy_tx, mut healthy_rx) = mpsc::unbounded_channel();
         let (crippled_tx, mut crippled_rx) = mpsc::unbounded_channel();
-        let mut healthy = Engine::new(false, true, false, healthy_tx).expect("healthy engine");
-        let mut crippled = Engine::new(true, true, false, crippled_tx).expect("crippled engine");
+        let mut healthy =
+            Engine::new(mdns_disabled_settings(), healthy_tx).expect("healthy engine");
+        let mut crippled =
+            Engine::new(crippled_settings(IpFamily::Any), crippled_tx).expect("crippled engine");
 
         let offer = healthy
             .pair_with(crippled_id, true, &[])
@@ -834,16 +957,89 @@ mod tests {
             .expect("crippled peer closes");
     }
 
+    /// One mixed interface set covering every rejection reason plus both
+    /// families, so the selection rule is proved independently of the host.
+    fn interface_sample() -> Vec<IpAddr> {
+        vec![
+            IpAddr::from(Ipv4Addr::LOCALHOST),
+            IpAddr::from([192, 168, 7, 5]),
+            IpAddr::from(Ipv4Addr::UNSPECIFIED),
+            IpAddr::from([224, 0, 0, 251]),
+            IpAddr::from(Ipv6Addr::LOCALHOST),
+            IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]),
+            // Link-local: unusable without the scope ID the wire cannot carry.
+            IpAddr::from([0xfe80, 0, 0, 0, 0, 0, 0, 1]),
+            IpAddr::from(Ipv6Addr::UNSPECIFIED),
+            IpAddr::from([0xff02, 0, 0, 0, 0, 0, 0, 0xfb]),
+        ]
+    }
+
+    #[test]
+    fn ip_family_selects_exactly_the_concrete_addresses_of_that_family() {
+        let v4 = SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), 0);
+        let v4_lan = SocketAddr::new(IpAddr::from([192, 168, 7, 5]), 0);
+        let v6 = SocketAddr::new(IpAddr::from(Ipv6Addr::LOCALHOST), 0);
+        let v6_global = SocketAddr::new(IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]), 0);
+
+        assert_eq!(
+            select_udp_addrs(interface_sample(), IpFamily::Any).expect("mixed host selects"),
+            vec![v4, v4_lan, v6, v6_global],
+            "the default binds every concrete address of both families"
+        );
+        assert_eq!(
+            select_udp_addrs(interface_sample(), IpFamily::Ipv4).expect("IPv4 host selects"),
+            vec![v4, v4_lan]
+        );
+        assert_eq!(
+            select_udp_addrs(interface_sample(), IpFamily::Ipv6).expect("IPv6 host selects"),
+            vec![v6, v6_global]
+        );
+    }
+
+    #[test]
+    fn selected_ipv6_binds_are_concrete_and_scope_free() {
+        for address in
+            select_udp_addrs(interface_sample(), IpFamily::Ipv6).expect("IPv6 host selects")
+        {
+            let SocketAddr::V6(address) = address else {
+                panic!("IPv6-only selection returned {address}");
+            };
+            assert_eq!(
+                address.scope_id(),
+                0,
+                "the driver keys sockets by exact address; a scoped bind cannot be matched"
+            );
+            assert!(!address.ip().is_unicast_link_local());
+            assert!(!address.ip().is_unspecified() && !address.ip().is_multicast());
+        }
+    }
+
+    #[test]
+    fn a_family_the_host_cannot_serve_fails_loudly_instead_of_falling_back() {
+        let ipv4_only = vec![
+            IpAddr::from(Ipv4Addr::LOCALHOST),
+            IpAddr::from([0xfe80, 0, 0, 0, 0, 0, 0, 1]),
+        ];
+        let error = select_udp_addrs(ipv4_only, IpFamily::Ipv6)
+            .expect_err("an IPv6-only run on an IPv4-only host must fail");
+        assert!(
+            error.to_string().contains("ipv6"),
+            "the failure must name the requested family: {error}"
+        );
+        assert!(select_udp_addrs(Vec::new(), IpFamily::Any).is_err());
+    }
+
     #[tokio::test]
     async fn gathered_host_candidates_never_advertise_wildcard_addresses() {
-        let udp_addrs = local_udp_addrs(false).expect("concrete UDP addresses resolve");
+        let udp_addrs =
+            local_udp_addrs(EngineSettings::default()).expect("concrete UDP addresses resolve");
         assert!(udp_addrs.iter().all(|address| match address {
             SocketAddr::V4(_) => true,
             SocketAddr::V6(address) => address.scope_id() == 0,
         }));
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(false, true, false, tx).expect("engine builds");
+        let mut engine = Engine::new(mdns_disabled_settings(), tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xd);
         engine
             .pair_with(peer, true, &[])
@@ -928,7 +1124,7 @@ mod tests {
     #[tokio::test]
     async fn pairing_is_idempotent_and_initiator_offers() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(false, false, false, tx).expect("engine builds");
+        let mut engine = Engine::new(EngineSettings::default(), tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xb);
 
         let offer = tokio::time::timeout(
@@ -1018,7 +1214,7 @@ mod tests {
     #[test]
     fn note_channel_open_fires_pair_connected_exactly_once() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(false, false, false, tx).expect("engine builds");
+        let mut engine = Engine::new(EngineSettings::default(), tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xc);
         // Unknown peer: never connected.
         assert!(!engine.note_channel_open(peer, RELIABLE_LABEL));
@@ -1028,8 +1224,8 @@ mod tests {
     async fn closing_a_live_required_channel_emits_current_channel_closed() {
         let (a_tx, mut a_rx) = mpsc::unbounded_channel();
         let (b_tx, mut b_rx) = mpsc::unbounded_channel();
-        let mut a = Engine::new(false, true, false, a_tx).expect("engine A builds");
-        let mut b = Engine::new(false, true, false, b_tx).expect("engine B builds");
+        let mut a = Engine::new(mdns_disabled_settings(), a_tx).expect("engine A builds");
+        let mut b = Engine::new(mdns_disabled_settings(), b_tx).expect("engine B builds");
         let a_id = PlayerId::from_u128(0xa);
         let b_id = PlayerId::from_u128(0xb);
 

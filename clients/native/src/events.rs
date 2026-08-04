@@ -89,11 +89,16 @@ pub enum Event {
     P2pPairConnected { peer: PlayerId },
     /// Both channels reopened for a coordinated PairRetry generation.
     P2pPairReconnected { peer: PlayerId },
-    /// Candidate types selected for the active ICE path.
+    /// Candidate types and addresses selected for the active ICE path. The
+    /// addresses are `null` when the local stack redacts or omits them; a
+    /// harness that asserts on the negotiated address family treats that as a
+    /// failure rather than a pass.
     SelectedCandidatePair {
         peer: PlayerId,
         local_candidate_type: String,
         remote_candidate_type: String,
+        local_candidate_address: Option<String>,
+        remote_candidate_address: Option<String>,
     },
     /// Every planned pair is open and local ICE gathering is complete, but
     /// `--exchange-release-file` still holds the exact application exchange.
@@ -261,6 +266,8 @@ mod tests {
                     peer: PlayerId::nil(),
                     local_candidate_type: "relay".to_string(),
                     remote_candidate_type: "relay".to_string(),
+                    local_candidate_address: None,
+                    remote_candidate_address: None,
                 },
                 "selected_candidate_pair",
             ),
@@ -342,6 +349,39 @@ mod tests {
         assert_eq!(value["host"], serde_json::Value::Null);
         assert_eq!(value["peers"][0]["initiate"], true);
         assert_eq!(value["ice_servers_count"], 1);
+    }
+
+    #[test]
+    fn selected_candidate_pair_event_carries_addresses_for_family_assertions() {
+        let peer = PlayerId::new_v4();
+        let value = serde_json::to_value(Event::SelectedCandidatePair {
+            peer,
+            local_candidate_type: "host".to_string(),
+            remote_candidate_type: "host".to_string(),
+            local_candidate_address: Some("::1".to_string()),
+            remote_candidate_address: Some("::1".to_string()),
+        })
+        .expect("event serializes");
+        assert_eq!(value["event"], "selected_candidate_pair");
+        assert_eq!(value["peer"], peer.to_string());
+        assert_eq!(value["local_candidate_address"], "::1");
+        assert_eq!(value["remote_candidate_address"], "::1");
+
+        // A redacted or absent address is reported as null, never as a
+        // plausible-looking empty string a harness could mistake for a pass.
+        let redacted = serde_json::to_value(Event::SelectedCandidatePair {
+            peer,
+            local_candidate_type: "relay".to_string(),
+            remote_candidate_type: "relay".to_string(),
+            local_candidate_address: None,
+            remote_candidate_address: None,
+        })
+        .expect("event serializes");
+        assert_eq!(redacted["local_candidate_address"], serde_json::Value::Null);
+        assert_eq!(
+            redacted["remote_candidate_address"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

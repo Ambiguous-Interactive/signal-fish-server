@@ -62,6 +62,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
 | `--cripple-ice` | off | Deterministically break ICE: bind an isolated dummy UDP transport while allowing only unconfigured TCP candidates in the ICE agent, then drop all outbound/inbound `IceCandidate` signals (SDP offer/answer and gathering completion still flow). Forces the relay fallback |
 | `--disable-mdns` | off | Test harness only: disable resolution of remote `.local` candidates so packet-loss experiments do not fault their mDNS discovery control plane. Native host candidates are raw IPs in either mode; normal mode retains mDNS query support for browser peers |
+| `--ip-family <FAMILY>` | `any` | Restrict the ICE sockets this client binds — and therefore the family of every host candidate it advertises — to `ipv4` or `ipv6`. `any` binds every usable interface address. webrtc 0.20 turns each supplied bind directly into a host candidate, so this is what pins the negotiated path's family; a requested family the host cannot serve fails loudly instead of falling back to the other one |
 | `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
 | `--ice-transport-policy <POLICY>` | `all` | ICE candidate policy: `all` permits every gathered candidate type; `relay` requires a TURN-relayed path. The repository's local coturn gate uses `relay` to prove production-minted TURN credentials rather than a direct host path |
 | `--p2p-release-file <PATH>` | — | Test harness only: keep processing WebSocket traffic but defer peer-connection creation until PATH exists. The TURN gate uses this to prove the relay floor before ICE establishment begins |
@@ -137,7 +138,7 @@ process continues to its normal bounded exit.
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
 | `p2p_pair_reconnected` | `peer` | BOTH channels reopened for a coordinated PairRetry generation |
-| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay` |
+| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay`, and the IPv6 cell requires both addresses to be the bound IPv6 loopback. Either address is `null` when the stack redacts or omits it — a harness asserting on the family must treat that as a failure |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `exchange_reliable_ready` | — | Loss-harness barrier: every planned pair has sent and received its exact reliable exchange, while `--unreliable-exchange-release-file` still holds the unreliable half |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out (Appendix G) |
@@ -226,10 +227,17 @@ client processes (loopback only; the interop server config disables TURN with ze
 | Mid-handshake close → one `error` + prompt exit 3 | n/a | ✅ `browser_cli_mid_handshake_close_single_error_exit_3` |
 | SIGTERM/SIGKILL Chromium teardown (orphan reaper) | n/a | ✅ `browser_cli_signal_teardown_reaps_chromium` |
 | TURN-only pair + mismatched-secret fallback controls | ✅ `turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live`; `mismatched_turn_secret_fails_p2p_and_uses_websocket_fallback` | — |
+| IPv6-only host path (both channels over `::1`) | ✅ `ipv6_loopback_mesh_pair_exchanges_on_a_host_ipv6_path` | — |
 
 The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop_e2e.rs) behind the
 `browser-interop` cargo feature (this crate's default suite never compiles them; they additionally need
 `SIGNAL_FISH_BROWSER_CLI` pointing at the built [browser client](../browser/README.md) bundle).
+
+The IPv6 cell lives in [`tests/ipv6_interop_e2e.rs`](tests/ipv6_interop_e2e.rs): both clients run with
+`--ip-family ipv6`, so `::1` is the only host candidate either side can advertise, and the assertions require a
+host/host IPv6 pair plus the exact exchange on both channel labels. Signaling still runs over the harness
+server's IPv4 loopback listener, so the IPv6 claim is about the WebRTC data path (ICE, DTLS, SCTP), not the
+WebSocket. A runner without IPv6 loopback fails the cell with an actionable message; it is never skipped.
 
 CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
 `.github/workflows/webrtc-interop.yml`, and the browser cells via
@@ -238,6 +246,23 @@ CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run
 [`scripts/run-turn-interop.sh`](../../scripts/run-turn-interop.sh) in
 `.github/workflows/turn-interop.yml`; they start a digest-pinned local coturn
 container and never depend on a public STUN/TURN service.
+
+## Platform coverage
+
+The two kinds of evidence this crate carries are deliberately distinct — a green lane means only what its column
+says:
+
+| Platform | Compile + unit suite | Live WebRTC transport |
+|----------|----------------------|-----------------------|
+| Linux (`ubuntu-latest`) | ✅ `Native Client Build (ubuntu-latest)` | ✅ every native, browser, TURN-only, and IPv6 cell |
+| Windows (`windows-latest`) | ✅ `Native Client Build (windows-latest)` | ❌ not proved |
+| macOS (`macos-latest`) | ✅ `Native Client Build (macos-latest)` | ❌ not proved |
+
+The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs `cargo metadata --locked`,
+`cargo fmt --check`, `cargo clippy --locked --all-targets -D warnings`, and `cargo test --locked --lib --bins`
+on the repository MSRV for all three. It compiles the multi-process cells (via `--all-targets`) but does not run
+them: those spawn the server binary and are the Linux lane's job. Interface enumeration, socket binding, and ICE
+behavior on Windows and macOS are therefore **compile-verified only**.
 
 ## Troubleshooting
 

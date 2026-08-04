@@ -274,13 +274,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
 
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-    let engine = Engine::new(
-        cli.cripple_ice,
-        cli.disable_mdns,
-        cli.ice_transport_policy.is_relay_only(),
-        engine_tx,
-    )
-    .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
+    let engine = Engine::new(cli.engine_settings(), engine_tx)
+        .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
     present.insert(my_id);
     let members_seen = present.clone();
@@ -2118,13 +2113,13 @@ impl Orchestrator<'_> {
     /// Both channels toward `peer` are open: emit the pair event, run the
     /// optional exchange, and check the all-pairs resolution condition.
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        if let Some((local_candidate_type, remote_candidate_type)) =
-            self.engine.selected_candidate_types(peer).await
-        {
+        if let Some(selected) = self.engine.selected_candidate_pair(peer).await {
             emit(&Event::SelectedCandidatePair {
                 peer,
-                local_candidate_type,
-                remote_candidate_type,
+                local_candidate_type: selected.local_candidate_type,
+                remote_candidate_type: selected.remote_candidate_type,
+                local_candidate_address: selected.local_candidate_address,
+                remote_candidate_address: selected.remote_candidate_address,
             });
         } else {
             tracing::warn!(%peer, "connected pair has no selected ICE candidate pair");

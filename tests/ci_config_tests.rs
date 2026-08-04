@@ -23300,6 +23300,68 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     );
 }
 
+/// The native reference client is a standalone crate that no other lane
+/// compiles: the root CI matrix builds only the root package, and the interop
+/// cells run on Linux. Issue #271 added two proofs that must not silently
+/// disappear — a Windows/macOS/Linux compile + unit matrix, and one live IPv6
+/// data-channel cell that fails loudly instead of skipping when the runner
+/// cannot provide IPv6.
+#[test]
+fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/webrtc-interop.yml"));
+    let ipv6_test = read_file(&root.join("clients/native/tests/ipv6_interop_e2e.rs"));
+    let cli = read_file(&root.join("clients/native/src/cli.rs"));
+
+    for required in [
+        "native-platforms:",
+        "name: Native Client Build (${{ matrix.os }})",
+        "runs-on: ${{ matrix.os }}",
+        "os: [ubuntu-latest, windows-latest, macos-latest]",
+        "working-directory: clients/native",
+        "run: cargo metadata --locked --format-version 1 > /dev/null",
+        "run: cargo fmt --check",
+        "run: cargo clippy --locked --all-targets -- -D warnings",
+        "run: cargo test --locked --lib --bins",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "webrtc-interop.yml lost the native platform matrix contract `{required}`; \
+             clients/native would compile on Linux only (issue #271)"
+        );
+    }
+    assert!(
+        workflow.contains("fail-fast: false"),
+        "one red platform must not cancel the other platforms' evidence"
+    );
+
+    for required in [
+        "--ip-family",
+        "\"ipv6\"",
+        "--disable-mdns",
+        "fn require_ipv6_loopback",
+        "The lane must not be skipped silently.",
+        "local_candidate_type",
+        "remote_candidate_type",
+        "local_candidate_address",
+        "remote_candidate_address",
+        "Ipv6Addr::LOCALHOST",
+        "\"host\"",
+        "assert_both_channels_exchanged",
+        "fallback_engaged",
+        "p2p_pair_connected",
+    ] {
+        assert!(
+            ipv6_test.contains(required),
+            "the IPv6 interop proof lost acceptance marker `{required}`"
+        );
+    }
+    assert!(
+        cli.contains("pub ip_family: IpFamily"),
+        "the client must keep the --ip-family selector the IPv6 proof drives"
+    );
+}
+
 #[test]
 fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let root = repo_root();
