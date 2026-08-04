@@ -286,7 +286,7 @@ fn json_deep_nesting_in_signal_errs_without_overflow() {
     run_on_deep_stack(|| {
         let depth = 10_000;
         let payload = format!(
-            r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","signal":{}{}}}}}"#,
+            r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","generation":"00000000-0000-0000-0000-000000000002","signal":{}{}}}}}"#,
             "[".repeat(depth),
             "]".repeat(depth)
         );
@@ -302,7 +302,7 @@ fn json_deep_nesting_in_signal_errs_without_overflow() {
 
         // Deeply nested objects are limited identically.
         let object_payload = format!(
-            r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","signal":{}null{}}}}}"#,
+            r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","generation":"00000000-0000-0000-0000-000000000002","signal":{}null{}}}}}"#,
             r#"{"k":"#.repeat(depth),
             "}".repeat(depth)
         );
@@ -312,7 +312,8 @@ fn json_deep_nesting_in_signal_errs_without_overflow() {
 }
 
 /// Hand-rolled MessagePack `{"type":"Signal","data":{"to":<bin8 uuid>,
-/// "signal":` + `depth` nested fixarray-of-1 headers + `nil}}`. Hand-rolled
+/// "generation":<bin8 uuid>,"signal":` + `depth` nested fixarray-of-1
+/// headers + `nil}}`. Hand-rolled
 /// because the `rmp` crate is not a direct dependency and valid encoders
 /// refuse to build hostile depth. Shared by the deep-stack depth-bomb probe
 /// and the release-profile worker-stack margin probe.
@@ -328,10 +329,13 @@ fn msgpack_signal_depth_bomb(depth: usize) -> Vec<u8> {
     push_fixstr(&mut bytes, "type");
     push_fixstr(&mut bytes, "Signal");
     push_fixstr(&mut bytes, "data");
-    bytes.push(0x82); // fixmap, 2 entries
+    bytes.push(0x83); // fixmap, 3 entries
     push_fixstr(&mut bytes, "to");
     bytes.extend_from_slice(&[0xc4, 16]); // bin8, 16 bytes (uuid wire form)
     bytes.extend_from_slice(&[0u8; 16]);
+    push_fixstr(&mut bytes, "generation");
+    bytes.extend_from_slice(&[0xc4, 16]);
+    bytes.extend_from_slice(&[1u8; 16]);
     push_fixstr(&mut bytes, "signal");
     // `depth` fixarray-of-1 headers (0x91): one nesting level each.
     bytes.extend(std::iter::repeat_n(0x91u8, depth));
@@ -419,7 +423,7 @@ fn oversized_strings_and_huge_numbers_return() {
     // re-serialize.
     let big = "x".repeat(2 * 1024 * 1024);
     let payload = format!(
-        r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","signal":"{big}"}}}}"#
+        r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","generation":"00000000-0000-0000-0000-000000000002","signal":"{big}"}}}}"#
     );
     let parsed = serde_json::from_slice::<ClientMessage>(payload.as_bytes())
         .expect("oversized string is structurally valid JSON");
@@ -430,7 +434,7 @@ fn oversized_strings_and_huge_numbers_return() {
     // range), exponent overflow and 400-digit integer literals alike.
     for huge in ["1e999", "-1e999", &format!("{}9", "9".repeat(400))] {
         let payload = format!(
-            r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","signal":{huge}}}}}"#
+            r#"{{"type":"Signal","data":{{"to":"00000000-0000-0000-0000-000000000001","generation":"00000000-0000-0000-0000-000000000002","signal":{huge}}}}}"#
         );
         let result = serde_json::from_slice::<ClientMessage>(payload.as_bytes());
         assert!(
@@ -440,8 +444,7 @@ fn oversized_strings_and_huge_numbers_return() {
     }
 
     // Largest finite f64 exponent still parses fine.
-    let payload =
-        r#"{"type":"Signal","data":{"to":"00000000-0000-0000-0000-000000000001","signal":1e308}}"#;
+    let payload = r#"{"type":"Signal","data":{"to":"00000000-0000-0000-0000-000000000001","generation":"00000000-0000-0000-0000-000000000002","signal":1e308}}"#;
     assert!(serde_json::from_slice::<ClientMessage>(payload.as_bytes()).is_ok());
 }
 
@@ -671,6 +674,7 @@ fn delivery_class_and_report_boundaries_decode_on_both_paths() {
 fn truncated_valid_msgpack_never_panics() {
     let message = ClientMessage::Signal {
         to: uuid::Uuid::from_u128(7),
+        generation: uuid::Uuid::from_u128(8),
         signal: serde_json::json!({"Offer": "v=0 mock sdp", "nested": [1, 2.5, {"deep": true}]}),
     };
     let encoded = rmp_serde::to_vec_named(&message).expect("encodes");

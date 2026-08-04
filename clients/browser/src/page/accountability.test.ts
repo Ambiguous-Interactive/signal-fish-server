@@ -6,11 +6,13 @@ import {
   authoritativePeerDelta,
   changedTransportStatus,
   clearDepartedMembershipPlan,
-  connectionTargetsForPlan,
+  connectionTargetsForGeneration,
   directPlanRejectionMessage,
   isTerminalPeerConnectionState,
+  isCurrentSessionGeneration,
   noteCurrentPairConnected,
   observeJoinHandshakeFrame,
+  parseSessionGeneration,
   requireFinalizedMembershipPlan,
   requiresAuthoritativeFinalizationPlan,
   rejectUnsupportedDirectPlan,
@@ -18,6 +20,7 @@ import {
   shouldBufferSignalForUnpairedPeer,
   shouldResolveConnectedPair,
   sessionPlanPeerIds,
+  tryBufferPlannedSignal,
 } from './orchestrator.js';
 import {
   NON_TEXT_APPLICATION_FRAME,
@@ -694,11 +697,52 @@ test('only failed and closed peer-connection states are terminal', () => {
   if (changedTransportStatus(true, 0) !== false) {
     throw new Error('terminal loss of the final connected pair did not resolve fallback');
   }
-  if (!shouldBufferSignalForUnpairedPeer(new Set(), SENDER)) {
-    throw new Error('pre-plan signal was not buffered defensively');
+  if (shouldBufferSignalForUnpairedPeer(new Set(), SENDER)) {
+    throw new Error('unplanned signal would contaminate a future pair');
   }
-  if (shouldBufferSignalForUnpairedPeer(new Set([SENDER]), SENDER)) {
-    throw new Error('stale post-terminal signal would contaminate a replacement link');
+  if (!shouldBufferSignalForUnpairedPeer(new Set([SENDER]), SENDER)) {
+    throw new Error('planned signal racing pair creation was not buffered');
+  }
+});
+
+test('planned signal buffering is bounded per peer and in aggregate', () => {
+  const pending = new Map<string, unknown[]>();
+  for (let index = 0; index < 32; index += 1) {
+    if (!tryBufferPlannedSignal(pending, SENDER, { IceCandidate: index })) {
+      throw new Error(`per-peer buffer rejected valid slot ${index}`);
+    }
+  }
+  if (tryBufferPlannedSignal(pending, SENDER, { IceCandidate: 'overflow' })) {
+    throw new Error('per-peer signal buffer exceeded its bound');
+  }
+  for (const peer of ['peer-b', 'peer-c', 'peer-d']) {
+    for (let index = 0; index < 32; index += 1) {
+      if (!tryBufferPlannedSignal(pending, peer, { IceCandidate: index })) {
+        throw new Error(`aggregate setup rejected ${peer} slot ${index}`);
+      }
+    }
+  }
+  if (tryBufferPlannedSignal(pending, 'peer-e', { Offer: 'overflow' })) {
+    throw new Error('aggregate signal buffer exceeded its bound');
+  }
+});
+
+test('wire session generation parsing and stale-signal fencing fail closed', () => {
+  const current = '00000000-0000-4000-8000-000000000001';
+  const stale = '00000000-0000-4000-8000-000000000002';
+  if (parseSessionGeneration(current) !== current) {
+    throw new Error('valid UUID generation was rejected');
+  }
+  for (const malformed of [undefined, null, '', 'not-a-uuid', 7]) {
+    if (parseSessionGeneration(malformed) !== null) {
+      throw new Error(`malformed generation was accepted: ${String(malformed)}`);
+    }
+  }
+  if (!isCurrentSessionGeneration(current, current)) {
+    throw new Error('current-generation signal was rejected');
+  }
+  if (isCurrentSessionGeneration(current, stale) || isCurrentSessionGeneration(null, current)) {
+    throw new Error('stale or pre-plan signal generation was accepted');
   }
 });
 
@@ -719,15 +763,27 @@ test('pair connection is reported once across transport generations', () => {
   }
 });
 
-test('a fresh plan retries a retained obligation whose engine link is absent', () => {
-  const retained = playerId(71);
+test('a changed generation rebuilds both asymmetric pair endpoints', () => {
+  const retained = playerId(72);
   const delta = authoritativePeerDelta(new Set([retained]), [retained]);
-  const targets = connectionTargetsForPlan(delta, () => false);
-  if (!targets.has(retained)) {
-    throw new Error('fresh plan did not retry the absent retained link');
-  }
-  if (connectionTargetsForPlan(delta, () => true).size !== 0) {
-    throw new Error('fresh plan rebuilt an existing retained link without a wire barrier');
+  for (const [scenario, initiatorPaired, responderPaired] of [
+    ['initiator retains, responder missing', true, false],
+    ['initiator missing, responder retains', false, true],
+  ] as const) {
+    for (const [role, paired] of [
+      ['initiator', initiatorPaired],
+      ['responder', responderPaired],
+    ] as const) {
+      const targets = connectionTargetsForGeneration(delta, true);
+      if (!targets.has(retained)) {
+        throw new Error(`${scenario}: ${role} did not install the new physical generation`);
+      }
+      if (connectionTargetsForGeneration(delta, false).size !== 0) {
+        throw new Error(
+          `${scenario}: duplicate generation let ${role} rebuild unilaterally (paired=${paired})`,
+        );
+      }
+    }
   }
 });
 

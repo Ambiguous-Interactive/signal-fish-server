@@ -39,13 +39,14 @@ never appears in other members' `peers`. (At
 finalization this filter is vacuous: a plan is only selected when every member
 supports it.) Topology and transport never change across re-issues —
 they are sticky for the session lifetime — so the client rule is simple: **the
-latest `SessionPlan` wins**. Re-run the `on SessionPlan` logic below against the
-new `peers` / `host` / `ice_servers`, tearing down peer connections that are no
-longer listed (e.g. the departed host) and connecting per the new `initiate`
-flags.
+latest `SessionPlan` wins**. When its `generation` changes, tear down and rebuild
+even retained WebRTC pairs against the new `peers` / `host` / `ice_servers`,
+reject signals carrying any other generation, and connect per the new
+`initiate` flags.
 
 ```text
 on SessionPlan(plan):
+    current_generation = plan.generation
     if plan.transport == relay:
         use GameData over the WebSocket relay            # the floor
     else if plan.transport == direct:
@@ -61,7 +62,7 @@ on SessionPlan(plan):
         start WebRTC P2P using plan + plan.ice_servers
         for each peer where initiate == true: send Offer
         for each peer where initiate == false: await Offer, then send Answer
-        relay all Offer / Answer / IceCandidate via ClientMessage::Signal { to, signal }
+        relay all Offer / Answer / IceCandidate via ClientMessage::Signal { to, generation: current_generation, signal }
         if WebRTC path established within the timeout:
             (optionally) stop sending GameData over the relay
             emit ClientMessage::TransportStatus { transport, connected: true }

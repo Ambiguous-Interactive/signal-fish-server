@@ -221,7 +221,15 @@ async fn join_room(
 
 /// Send one `Signal { to, signal }` from `ws`.
 async fn send_signal(ws: &mut WsStream, to: PlayerId, signal: serde_json::Value) {
-    send(ws, &ClientMessage::Signal { to, signal }).await;
+    send(
+        ws,
+        &ClientMessage::Signal {
+            to,
+            generation: uuid::Uuid::nil(),
+            signal,
+        },
+    )
+    .await;
 }
 
 /// Assert the next *relevant* message the sender receives is an `Error` carrying
@@ -259,7 +267,9 @@ async fn expect_relayed_signal(
 ) {
     next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "relayed signal", |message| {
         match message {
-            ServerMessage::Signal { from: got, signal } => {
+            ServerMessage::Signal {
+                from: got, signal, ..
+            } => {
                 assert_eq!(got, from, "{who}: relayed Signal must carry the sender id");
                 assert_eq!(
                     &signal, payload,

@@ -59,8 +59,13 @@ impl EnhancedGameServer {
             ClientMessage::GameData { data, class, key } => {
                 self.handle_game_data(player_id, data, class, key).await;
             }
-            ClientMessage::Signal { to, signal } => {
-                self.handle_signal(player_id, to, signal).await;
+            ClientMessage::Signal {
+                to,
+                generation,
+                signal,
+            } => {
+                self.handle_signal_in_generation(player_id, to, generation, signal)
+                    .await;
             }
             ClientMessage::AuthorityRequest { become_authority } => {
                 self.handle_authority_request(player_id, become_authority)

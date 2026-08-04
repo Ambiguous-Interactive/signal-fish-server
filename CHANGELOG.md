@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Fence protocol-v3 WebRTC signaling with a required
+  `SessionPlan.generation` UUID carried by every client and server `Signal`
+  envelope (issue #258). Clients must rebuild retained WebRTC pairs when the
+  authoritative generation changes, use the refreshed ICE/TURN credentials,
+  and discard delayed signals from older generations. The reference clients
+  also bound pre-connection signal buffers and drop signals for peers outside
+  the current plan; protocol-v2 wire bytes remain unchanged.
 - Reduce relay allocation work for the universal WebSocket fallback (issue
   #207). MessagePack-to-JSON projection now pre-sizes its output and eliminates
   all 3/6 growth reallocations in 2-/8-/16-player mixed-format rooms, reducing

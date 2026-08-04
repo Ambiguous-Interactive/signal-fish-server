@@ -149,6 +149,7 @@ fn arb_session_peer() -> impl Strategy<Value = SessionPeer> {
 
 fn arb_session_plan() -> impl Strategy<Value = SessionPlanPayload> {
     (
+        arb_uuid(),
         arb_topology(),
         arb_transport(),
         proptest::option::of(arb_uuid()),
@@ -160,8 +161,18 @@ fn arb_session_plan() -> impl Strategy<Value = SessionPlanPayload> {
         arb_transport(),
     )
         .prop_map(
-            |(topology, transport, host, direct_endpoint, peers, ice_servers, fallback)| {
+            |(
+                generation,
+                topology,
+                transport,
+                host,
+                direct_endpoint,
+                peers,
+                ice_servers,
+                fallback,
+            )| {
                 SessionPlanPayload {
+                    generation,
                     topology,
                     transport,
                     host,
@@ -203,7 +214,7 @@ fn msgpack_roundtrip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &
 /// Pull the opaque payload back out of a decoded client `Signal`.
 fn client_signal_parts(message: ClientMessage) -> (Uuid, Value) {
     match message {
-        ClientMessage::Signal { to, signal } => (to, signal),
+        ClientMessage::Signal { to, signal, .. } => (to, signal),
         other => panic!("decoded to a different variant: {other:?}"),
     }
 }
@@ -211,7 +222,7 @@ fn client_signal_parts(message: ClientMessage) -> (Uuid, Value) {
 /// Pull the opaque payload back out of a decoded server `Signal`.
 fn server_signal_parts(message: ServerMessage) -> (Uuid, Value) {
     match message {
-        ServerMessage::Signal { from, signal } => (from, signal),
+        ServerMessage::Signal { from, signal, .. } => (from, signal),
         other => panic!("decoded to a different variant: {other:?}"),
     }
 }
@@ -229,12 +240,12 @@ proptest! {
         id in arb_uuid(),
         signal in arb_json_no_floats(4),
     ) {
-        let client = ClientMessage::Signal { to: id, signal: signal.clone() };
+        let client = ClientMessage::Signal { to: id, generation: Uuid::nil(), signal: signal.clone() };
         let (to, decoded) = client_signal_parts(json_roundtrip(&client));
         prop_assert_eq!(to, id);
         prop_assert_eq!(&decoded, &signal, "opaque payload must be preserved exactly");
 
-        let server = ServerMessage::Signal { from: id, signal: signal.clone() };
+        let server = ServerMessage::Signal { from: id, generation: Uuid::nil(), signal: signal.clone() };
         let (from, decoded) = server_signal_parts(json_roundtrip(&server));
         prop_assert_eq!(from, id);
         prop_assert_eq!(&decoded, &signal, "opaque payload must be preserved exactly");
@@ -249,12 +260,12 @@ proptest! {
         id in arb_uuid(),
         signal in arb_json(4),
     ) {
-        let client = ClientMessage::Signal { to: id, signal: signal.clone() };
+        let client = ClientMessage::Signal { to: id, generation: Uuid::nil(), signal: signal.clone() };
         let (to, decoded) = client_signal_parts(msgpack_roundtrip(&client));
         prop_assert_eq!(to, id);
         prop_assert_eq!(&decoded, &signal, "MessagePack must preserve the payload bit-exactly");
 
-        let server = ServerMessage::Signal { from: id, signal: signal.clone() };
+        let server = ServerMessage::Signal { from: id, generation: Uuid::nil(), signal: signal.clone() };
         let (from, decoded) = server_signal_parts(msgpack_roundtrip(&server));
         prop_assert_eq!(from, id);
         prop_assert_eq!(&decoded, &signal, "MessagePack must preserve the payload bit-exactly");
@@ -272,7 +283,7 @@ proptest! {
         let float = f64::from_bits(bits);
         prop_assume!(float.is_finite());
 
-        let message = ClientMessage::Signal { to: id, signal: json!({ "f": float }) };
+        let message = ClientMessage::Signal { to: id, generation: Uuid::nil(), signal: json!({ "f": float }) };
         let (_, decoded) = client_signal_parts(json_roundtrip(&message));
         let roundtripped = decoded
             .get("f")

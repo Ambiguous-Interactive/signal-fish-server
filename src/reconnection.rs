@@ -2094,6 +2094,7 @@ mod tests {
             },
             ServerMessage::Signal {
                 from: player_id,
+                generation: uuid::Uuid::nil(),
                 signal: serde_json::Value::Null,
             },
             ServerMessage::Pong,

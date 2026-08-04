@@ -33,7 +33,9 @@ contract.
   lobby finalization, and relays WebRTC handshake traffic through the server's `Signal` message. If P2P never
   establishes, the client stays on the relay floor — the server never stops relaying.
 - **The signal payload is opaque and matchbox-shaped.** The server never parses SDP or ICE; it routes by `to` /
-  `from` and forwards the `signal` field verbatim. By convention the payload is one of `{"Offer": "<sdp>"}`,
+  `from` and forwards the `generation` and `signal` fields verbatim. Copy the
+  latest `SessionPlan.generation` into every outbound signal and discard any
+  inbound signal for a different generation. By convention the payload is one of `{"Offer": "<sdp>"}`,
   `{"Answer": "<sdp>"}`, or `{"IceCandidate": "<candidate>"}` (per
   [ADR-0002](../adr/0002-matchbox-compatibility.md)). Any WebRTC stack works as long as the client serializes its
   local description and candidates into that shape and applies the remote side's verbatim.
@@ -71,10 +73,10 @@ denominator that every other platform must interoperate with.
   to 3, but advertising it explicitly is good practice. Send `Authenticate` with `protocol_version: 3`,
   `supported_transports: ["relay", "webrtc"]`, and `supported_topologies` matching your game (`["relay", "mesh"]`
   or `["relay", "host"]`).
-- **Handshake.** On each `SessionPlan`, reconcile the current peer set, create an `RTCPeerConnection` per peer using
-  the plan's
+- **Handshake.** On each changed `SessionPlan.generation`, reconcile the current
+  peer set and recreate every retained `RTCPeerConnection` using the plan's
   `ice_servers`. For each peer where `initiate` is true, `createOffer()`, set it locally, and send
-  `Signal {to, signal: {Offer: pc.localDescription.sdp}}`. On an incoming `Offer`, set it remotely, `createAnswer()`,
+  `Signal {to, generation, signal: {Offer: pc.localDescription.sdp}}`. On an incoming `Offer`, set it remotely, `createAnswer()`,
   and reply with `{Answer: ...}`. Forward each `onicecandidate` as `{IceCandidate: JSON.stringify(candidate)}` and
   apply incoming candidates verbatim (trickle ICE — RFC 8838 — comes free over the WebSocket).
 - **Channels.** Create `pc.createDataChannel("reliable")` and

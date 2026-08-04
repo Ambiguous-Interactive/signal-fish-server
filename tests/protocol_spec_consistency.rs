@@ -318,6 +318,23 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
         ]),
         "SessionPlan schema must reject every illegal topology/transport cross-product"
     );
+    for branch in branches {
+        let required: BTreeSet<_> = branch
+            .as_mapping_get("required")
+            .and_then(Yaml::as_sequence)
+            .expect("every SessionPlan branch must list required fields")
+            .iter()
+            .map(|field| field.as_str().expect("required field must be a string"))
+            .collect();
+        assert!(
+            required.contains("generation"),
+            "every SessionPlan branch must require its generation fence"
+        );
+        assert_eq!(
+            mapping_path(branch, &["properties", "generation", "$ref"]).and_then(Yaml::as_str),
+            Some("#/components/schemas/SessionGeneration")
+        );
+    }
 
     let direct_branch = branches
         .iter()
@@ -336,6 +353,7 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
     assert_eq!(
         direct_required,
         BTreeSet::from([
+            "generation",
             "topology",
             "transport",
             "host",
@@ -352,6 +370,7 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
 
     let host = Uuid::from_u128(10);
     let message = ServerMessage::SessionPlan(Box::new(SessionPlanPayload {
+        generation: Uuid::from_u128(9),
         topology: Topology::Host,
         transport: Transport::Direct,
         host: Some(host),
@@ -371,6 +390,39 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
     assert_eq!(serialized["data"]["direct_endpoint"]["host"], "192.0.2.10");
     assert_eq!(serialized["data"]["direct_endpoint"]["port"], 7777);
     assert!(serialized["data"].get("ice_servers").is_none());
+}
+
+#[test]
+fn signal_schemas_require_the_session_generation_fence() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    for (schema, peer_field) in [("ClientSignal", "to"), ("ServerSignal", "from")] {
+        let data = mapping_path(
+            root,
+            &["components", "schemas", schema, "properties", "data"],
+        )
+        .unwrap_or_else(|| panic!("spec must define {schema}.data"));
+        let required: BTreeSet<_> = data
+            .as_mapping_get("required")
+            .and_then(Yaml::as_sequence)
+            .unwrap_or_else(|| panic!("{schema}.data must list required fields"))
+            .iter()
+            .map(|field| field.as_str().expect("required field must be a string"))
+            .collect();
+        assert_eq!(
+            required,
+            BTreeSet::from([peer_field, "generation", "signal"])
+        );
+        assert_eq!(
+            mapping_path(data, &["properties", "generation", "$ref"]).and_then(Yaml::as_str),
+            Some("#/components/schemas/SessionGeneration")
+        );
+    }
 }
 
 #[test]

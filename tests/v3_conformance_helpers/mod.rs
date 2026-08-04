@@ -101,7 +101,7 @@ pub async fn expect_session_plan_strict(ws: &mut WsStream, who: &str) -> Session
 pub async fn expect_signal(ws: &mut WsStream, who: &str) -> (PlayerId, serde_json::Value) {
     next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "relayed Signal", |message| {
         match message {
-            ServerMessage::Signal { from, signal } => Some((from, signal)),
+            ServerMessage::Signal { from, signal, .. } => Some((from, signal)),
             other => panic!("{who} expected a relayed Signal, got {other:?}"),
         }
     })
@@ -153,6 +153,7 @@ pub async fn relay_one_signal(
         from_ws,
         &ClientMessage::Signal {
             to: ids[to_idx],
+            generation: uuid::Uuid::nil(),
             signal: payload.clone(),
         },
     )

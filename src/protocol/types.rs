@@ -19,6 +19,12 @@ pub const DEFAULT_REGION_ID: &str = "default";
 pub type PlayerId = Uuid;
 /// Unique identifier for rooms
 pub type RoomId = Uuid;
+/// Opaque server-authored generation fencing one authoritative session plan.
+///
+/// Every protocol-v3 signaling frame carries the generation from the sender's
+/// latest `SessionPlan`. Recipients accept only their current generation, so
+/// delayed offer/answer/ICE traffic cannot cross a retained-pair rebuild.
+pub type SessionGeneration = Uuid;
 
 /// Relay transport protocol selection
 #[derive(
@@ -188,6 +194,10 @@ pub struct SessionPeer {
 /// state. Protocol-v2 recipients receive no `SessionPlan`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionPlanPayload {
+    /// Opaque generation shared by every recipient of this room-plan
+    /// publication. A later generation supersedes every retained physical
+    /// WebRTC pair; logical peer obligations remain stable.
+    pub generation: SessionGeneration,
     /// Chosen session topology (`relay`, `host`, or `mesh`).
     pub topology: Topology,
     /// Chosen data-path transport (`relay`, `direct`, or `webrtc`).

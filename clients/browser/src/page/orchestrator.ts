@@ -96,6 +96,9 @@ const PONG_DRAIN_GRACE_MS = 1_000;
  * drop instead; the recipe lives in the building-a-client guide.)
  */
 const SEND_BUFFER_LIMIT_BYTES = 1_048_576;
+/** Defensive bounds for same-generation signals racing local pair creation. */
+const MAX_PENDING_SIGNALS_PER_PEER = 32;
+const MAX_PENDING_SIGNALS_TOTAL = 128;
 /** A failure that terminates the run with a specific exit code. */
 class FatalError extends Error {
   readonly code: number;
@@ -205,7 +208,42 @@ export function shouldBufferSignalForUnpairedPeer(
   expectedPeers: ReadonlySet<string>,
   peer: string,
 ): boolean {
-  return !expectedPeers.has(peer);
+  return expectedPeers.has(peer);
+}
+
+const SESSION_GENERATION_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function parseSessionGeneration(value: unknown): string | null {
+  return typeof value === 'string' && SESSION_GENERATION_PATTERN.test(value) ? value : null;
+}
+
+export function isCurrentSessionGeneration(current: string | null, incoming: string): boolean {
+  return current !== null && current === incoming;
+}
+
+export function tryBufferPlannedSignal(
+  pending: Map<string, unknown[]>,
+  peer: string,
+  signal: unknown,
+): boolean {
+  let total = 0;
+  for (const signals of pending.values()) {
+    total += signals.length;
+  }
+  const peerSignals = pending.get(peer);
+  if (
+    total >= MAX_PENDING_SIGNALS_TOTAL ||
+    (peerSignals !== undefined && peerSignals.length >= MAX_PENDING_SIGNALS_PER_PEER)
+  ) {
+    return false;
+  }
+  if (peerSignals === undefined) {
+    pending.set(peer, [signal]);
+  } else {
+    peerSignals.push(signal);
+  }
+  return true;
 }
 
 export function requiresAuthoritativeFinalizationPlan(negotiatedVersion: number): boolean {
@@ -224,13 +262,13 @@ export function authoritativePeerDelta(
   };
 }
 
-export function connectionTargetsForPlan(
+export function connectionTargetsForGeneration(
   delta: Readonly<{ added: readonly string[]; retained: readonly string[] }>,
-  isPaired: (peer: string) => boolean,
+  rebuildRetained: boolean,
 ): Set<string> {
   const targets = new Set(delta.added);
-  for (const peer of delta.retained) {
-    if (!isPaired(peer)) {
+  if (rebuildRetained) {
+    for (const peer of delta.retained) {
       targets.add(peer);
     }
   }
@@ -369,6 +407,8 @@ class Orchestrator {
   private initialSessionPlanPending = false;
   private readonly pendingMembershipPlans = new Map<string, number>();
   private webrtcPlanSeen = false;
+  /** Opaque generation from the latest authoritative SessionPlan. */
+  private currentSessionGeneration: string | null = null;
   private readonly expectedPeers = new Set<string>();
   private readonly connectedPairs = new Set<string>();
   private readonly pairConnectedReported = new Set<string>();
@@ -946,6 +986,8 @@ class Orchestrator {
         this.initialSessionPlanPending = false;
         this.pendingMembershipPlans.clear();
         this.lobbyState = null;
+        this.currentSessionGeneration = null;
+        this.pendingSignals.clear();
         break;
       case 'PlayerJoined': {
         const player = data['player'] as Record<string, unknown>;
@@ -1012,6 +1054,15 @@ class Orchestrator {
         const peers = (data['peers'] ?? []) as Array<Record<string, unknown>>;
         const iceServers = (data['ice_servers'] ?? []) as PlanIceServer[];
         const transport = String(data['transport']);
+        const generation = parseSessionGeneration(data['generation']);
+        if (generation === null) {
+          throw FatalError.protocol('SessionPlan.generation must be a UUID');
+        }
+        const generationChanged = this.currentSessionGeneration !== generation;
+        this.currentSessionGeneration = generation;
+        if (generationChanged) {
+          this.pendingSignals.clear();
+        }
         emit({
           event: 'session_plan',
           topology: String(data['topology']),
@@ -1041,7 +1092,16 @@ class Orchestrator {
         for (const peer of delta.removed) {
           this.removePairObligation(peer);
         }
-        const added = connectionTargetsForPlan(delta, (peer) => this.engine.isPaired(peer));
+        const rebuildRetained = generationChanged && transport === 'webrtc';
+        const added = connectionTargetsForGeneration(delta, rebuildRetained);
+        if (rebuildRetained) {
+          for (const peer of delta.retained) {
+            this.prepareRetainedPairReplacement(peer);
+          }
+          if (this.webrtcPlanSeen && this.transportStatus !== null) {
+            this.resolveTransportStatus();
+          }
+        }
         for (const peer of peers) {
           const peerId = String(peer['player_id']);
           if (transport === 'webrtc' && added.delete(peerId)) {
@@ -1069,7 +1129,11 @@ class Orchestrator {
         break;
       }
       case 'Signal': {
-        await this.handleSignal(String(data['from']), data['signal']);
+        await this.handleSignal(
+          String(data['from']),
+          parseSessionGeneration(data['generation']) ?? '',
+          data['signal'],
+        );
         break;
       }
       case 'GameData': {
@@ -1288,22 +1352,34 @@ class Orchestrator {
     }
   }
 
+  /** Retire one retained physical link for a newer authoritative generation. */
+  private prepareRetainedPairReplacement(peer: string): void {
+    this.connectedPairs.delete(peer);
+    this.pendingExchangePeers.delete(peer);
+    this.reportedExchangeDiagnostics.delete(peer);
+    this.pendingSignals.delete(peer);
+    this.engine.removePeer(peer);
+  }
+
   /**
    * Emit `signal_received` and route an inbound signal (buffering it when the
    * peer is not paired yet).
    */
-  private async handleSignal(from: string, signal: unknown): Promise<void> {
+  private async handleSignal(from: string, generation: string, signal: unknown): Promise<void> {
+    if (!isCurrentSessionGeneration(this.currentSessionGeneration, generation)) {
+      console.debug(
+        `discarding signal from ${from} for stale/unknown generation ${generation}`,
+      );
+      return;
+    }
     emit({ event: 'signal_received', from, kind: classifySignal(signal) });
     if (!this.engine.isPaired(from)) {
       if (shouldBufferSignalForUnpairedPeer(this.expectedPeers, from)) {
-        let buffered = this.pendingSignals.get(from);
-        if (buffered === undefined) {
-          buffered = [];
-          this.pendingSignals.set(from, buffered);
+        if (!tryBufferPlannedSignal(this.pendingSignals, from, signal)) {
+          console.error(`dropping planned-peer signal from ${from}: defensive buffer is full`);
         }
-        buffered.push(signal);
       } else {
-        console.error(`discarding stale signal from terminal expected peer ${from}`);
+        console.debug(`discarding signal from ${from}: peer is absent from the plan`);
       }
       return;
     }
@@ -1533,7 +1609,16 @@ class Orchestrator {
   }
 
   private sendSignal(to: string, kind: SignalKind, signal: Record<string, unknown>): void {
-    this.sendFrame(clientFrame('Signal', { to, signal }));
+    if (this.currentSessionGeneration === null) {
+      throw FatalError.protocol(`cannot signal peer ${to} before an authoritative SessionPlan`);
+    }
+    this.sendFrame(
+      clientFrame('Signal', {
+        to,
+        generation: this.currentSessionGeneration,
+        signal,
+      }),
+    );
     emit({ event: 'signal_sent', to, kind });
   }
 

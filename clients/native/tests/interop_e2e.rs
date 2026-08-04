@@ -507,6 +507,30 @@ fn assert_peer_status_fan_out(events: &[Value], who: &str, expected: &BTreeMap<&
     }
 }
 
+/// Assert the exact ordered connected-state sequence received from each peer.
+fn assert_peer_status_sequences(events: &[Value], who: &str, expected: &BTreeMap<&str, Vec<bool>>) {
+    let events = events_named(events, "peer_transport_status");
+    let mut actual: BTreeMap<&str, Vec<bool>> = BTreeMap::new();
+    for event in &events {
+        assert_eq!(
+            str_field(event, "transport"),
+            "webrtc",
+            "{who}: fan-out transport"
+        );
+        let peer = str_field(event, "peer");
+        assert!(
+            expected.contains_key(peer),
+            "{who}: unexpected status reporter {peer}: {event}"
+        );
+        let connected = event
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| panic!("{who}: status lacks connected flag: {event}"));
+        actual.entry(peer).or_default().push(connected);
+    }
+    assert_eq!(actual, *expected, "{who}: unexpected peer status sequences");
+}
+
 /// Assert this client's relay-floor traffic: exactly one `game_data_sent`,
 /// plus exactly one received `relay_msg` payload per expected sender id (and
 /// none from anyone else).
@@ -1041,13 +1065,15 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
             "joiner: initiate toward {peer_id} must follow the UUID glare rule"
         );
     }
-    // Fan-outs fire once, at report time: both incumbents reported BEFORE the
-    // join (harness-gated above), so the joiner hears nothing — this also
-    // exercises the client's late-join peer-status waiver.
-    assert!(
-        events_named(&joiner.events, "peer_transport_status").is_empty(),
-        "joiner: status fan-outs pre-dating the join are never replayed"
-    );
+    // Pre-join reports are never replayed. The generation-fenced authoritative
+    // refresh does, however, rebuild each incumbent's retained pair and emits
+    // one real false/true transition after the joiner is present.
+    let joiner_statuses: BTreeMap<&str, Vec<bool>> = incumbent_ids
+        .iter()
+        .copied()
+        .map(|peer| (peer, vec![false, true]))
+        .collect();
+    assert_peer_status_sequences(&joiner.events, "joiner", &joiner_statuses);
     assert_transport_status_true(&joiner.events, "joiner");
     assert_pair_connected_exactly(&joiner.events, "joiner", &incumbent_ids);
     assert_exchange_received_from(&joiner.events, "joiner", &incumbent_ids);
@@ -1066,8 +1092,9 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
 
     // Incumbents: one finalize-time plan and one authoritative late-join
     // replacement plan (never an additive NewPeer), then pairs + the full
-    // matrix with {other incumbent, joiner} only, a single true status, and
-    // fan-outs from exactly those two.
+    // matrix with {other incumbent, joiner} only. The retained-pair rebuild
+    // produces one local true/false/true sequence and the same post-join
+    // false/true fan-out from the other incumbent.
     for (index, incumbent) in [(0_usize, &inc0), (1_usize, &inc1)] {
         let who = ["inc0", "inc1"][index];
         let my_id = inc_ids[index].as_str();
@@ -1133,9 +1160,11 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
         assert_exchange_received_from(&incumbent.events, who, &live_pairs);
         assert_exchange_sent_to(&incumbent.events, who, &live_pairs);
         assert_transport_status_true(&incumbent.events, who);
-        let expected_reports: BTreeMap<&str, bool> =
-            BTreeMap::from([(other_id, true), (joiner_id.as_str(), true)]);
-        assert_peer_status_fan_out(&incumbent.events, who, &expected_reports);
+        let expected_reports: BTreeMap<&str, Vec<bool>> = BTreeMap::from([
+            (other_id, vec![true, false, true]),
+            (joiner_id.as_str(), vec![true]),
+        ]);
+        assert_peer_status_sequences(&incumbent.events, who, &expected_reports);
 
         // Relay floor across the join boundary: one send, and exactly the
         // other incumbent's payload (pre-join) plus the late joiner's

@@ -675,6 +675,7 @@ fn plan_classifiers_track_relay_topology_and_webrtc_transport() {
         .chain(std::iter::once(RELAY_FLOOR))
     {
         let decision = SessionPlanDecision {
+            generation: uuid::Uuid::new_v4(),
             topology,
             transport,
             host: None,

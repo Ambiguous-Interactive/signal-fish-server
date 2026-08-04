@@ -6,8 +6,8 @@ use super::error_codes::ErrorCode;
 use super::room_state::LobbyState;
 use super::types::{
     ConnectionInfo, GameDataEncoding, IceServer, PeerConnectionInfo, PlayerId, PlayerInfo,
-    ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, SessionPlanPayload, SpectatorInfo,
-    SpectatorStateChangeReason, Topology, Transport,
+    ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, SessionGeneration,
+    SessionPlanPayload, SpectatorInfo, SpectatorStateChangeReason, Topology, Transport,
 };
 
 /// Message types sent from client to server
@@ -88,6 +88,9 @@ pub enum ClientMessage {
     /// `{"Offer":"..."}`, `{"Answer":"..."}`, or `{"IceCandidate":"..."}`.
     Signal {
         to: PlayerId,
+        /// Generation copied from the sender's latest authoritative
+        /// `SessionPlan`.
+        generation: SessionGeneration,
         signal: serde_json::Value,
     },
     /// Request to become or connect to authoritative server
@@ -449,6 +452,9 @@ pub enum ServerMessage {
     /// `{"Answer":"..."}` | `{"IceCandidate":"..."}`).
     Signal {
         from: PlayerId,
+        /// Generation copied from the sender and forwarded unchanged. The
+        /// recipient validates it against its latest authoritative plan.
+        generation: SessionGeneration,
         signal: serde_json::Value,
     },
     /// A new peer is available for a WebRTC peer connection (v3 only).

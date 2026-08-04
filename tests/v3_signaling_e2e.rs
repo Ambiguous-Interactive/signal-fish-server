@@ -180,9 +180,13 @@ async fn join_room(
     .await
 }
 
-async fn next_signal(ws: &mut WsStream) -> (PlayerId, serde_json::Value) {
+async fn next_signal(ws: &mut WsStream) -> (PlayerId, uuid::Uuid, serde_json::Value) {
     next_matching(ws, "relayed signal", |msg| match msg {
-        ServerMessage::Signal { from, signal } => Some((from, signal)),
+        ServerMessage::Signal {
+            from,
+            generation,
+            signal,
+        } => Some((from, generation, signal)),
         _ => None,
     })
     .await
@@ -205,6 +209,7 @@ async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
     authenticate_v3(&mut peer2).await;
     let (_room_id, _code, peer2_id) = join_room(&mut peer2, Some(room_code), "PeerTwo").await;
     assert_ne!(peer1_id, peer2_id);
+    let generation = uuid::Uuid::new_v4();
 
     // Full opaque offer -> answer -> ICE relay, byte-preserved end to end.
     let offer = json!({ "Offer": "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n" });
@@ -212,12 +217,14 @@ async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
         &mut peer1,
         &ClientMessage::Signal {
             to: peer2_id,
+            generation,
             signal: offer.clone(),
         },
     )
     .await;
-    let (from, signal) = next_signal(&mut peer2).await;
+    let (from, relayed_generation, signal) = next_signal(&mut peer2).await;
     assert_eq!(from, peer1_id);
+    assert_eq!(relayed_generation, generation);
     assert_eq!(signal, offer, "offer payload must be byte-preserved");
 
     let answer = json!({ "Answer": "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n" });
@@ -225,12 +232,14 @@ async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
         &mut peer2,
         &ClientMessage::Signal {
             to: peer1_id,
+            generation,
             signal: answer.clone(),
         },
     )
     .await;
-    let (from, signal) = next_signal(&mut peer1).await;
+    let (from, relayed_generation, signal) = next_signal(&mut peer1).await;
     assert_eq!(from, peer2_id);
+    assert_eq!(relayed_generation, generation);
     assert_eq!(signal, answer, "answer payload must be byte-preserved");
 
     let ice = json!({ "IceCandidate": "candidate:1 1 UDP 2130706431 192.0.2.1 54321 typ host" });
@@ -238,12 +247,14 @@ async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
         &mut peer1,
         &ClientMessage::Signal {
             to: peer2_id,
+            generation,
             signal: ice.clone(),
         },
     )
     .await;
-    let (from, signal) = next_signal(&mut peer2).await;
+    let (from, relayed_generation, signal) = next_signal(&mut peer2).await;
     assert_eq!(from, peer1_id);
+    assert_eq!(relayed_generation, generation);
     assert_eq!(signal, ice, "ICE payload must be byte-preserved");
     running_server.shutdown().await;
 }
@@ -316,20 +327,23 @@ async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
     .await;
 
     let ice = json!({ "IceCandidate": "candidate:restored-id" });
+    let generation = uuid::Uuid::new_v4();
     send(
         &mut replacement,
         &ClientMessage::Signal {
             to: peer1_id,
+            generation,
             signal: ice.clone(),
         },
     )
     .await;
 
-    let (from, relayed_signal) = next_signal(&mut peer1).await;
+    let (from, relayed_generation, relayed_signal) = next_signal(&mut peer1).await;
     assert_eq!(
         from, peer2_id,
         "post-reconnect signal must be routed under the restored player id"
     );
+    assert_eq!(relayed_generation, generation);
     assert_eq!(relayed_signal, ice);
     running_server.shutdown().await;
 }
@@ -353,10 +367,12 @@ async fn oversized_signal_is_rejected_over_the_wire_and_small_signal_still_relay
     // Over the cap (serialized length > 256): the sender gets SIGNAL_TOO_LARGE
     // and the target receives nothing.
     let oversized = json!({ "Offer": "x".repeat(512) });
+    let generation = uuid::Uuid::new_v4();
     send(
         &mut peer1,
         &ClientMessage::Signal {
             to: peer2_id,
+            generation,
             signal: oversized,
         },
     )
@@ -378,11 +394,13 @@ async fn oversized_signal_is_rejected_over_the_wire_and_small_signal_still_relay
         &mut peer1,
         &ClientMessage::Signal {
             to: peer2_id,
+            generation,
             signal: small.clone(),
         },
     )
     .await;
-    let (_from, relayed) = next_signal(&mut peer2).await;
+    let (_from, relayed_generation, relayed) = next_signal(&mut peer2).await;
+    assert_eq!(relayed_generation, generation);
     assert_eq!(
         relayed, small,
         "small signal must relay after a size rejection"
