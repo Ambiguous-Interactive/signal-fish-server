@@ -93,6 +93,33 @@ was inconsistent. A second agent implemented every warranted correction. The
 final independent adversarial pass reviewed the complete remediated diff and
 reported zero issues.
 
-Hosted Windows/macOS evidence and the published-PR reviewer loop remain in
-progress. P50 will not be marked complete until both platform legs and every
-triggered check are terminal green and all remote feedback is resolved.
+PR #280's implementation head `4852482` completed every substantive hosted
+workflow successfully. WebRTC Interop run 31031080742 passed the Linux full
+suite plus `Native Client Build + Live WebRTC` on both `windows-latest` and
+`macos-latest`; each non-Linux leg built the real server and client and passed
+the exact two-peer live selector. CI run 31031078683 passed all 16 jobs,
+including Windows and macOS nextest. Advanced Safety run 31031077648, TURN-only
+run 31031078869, Browser Interop run 31031077968, and the remaining policy,
+documentation, dependency, link, and spelling workflows all passed.
+
+Verification Nightly run 31031078068 initially exposed one unrelated H14
+control failure: the equally throttled compatible MessagePack recipient was
+evicted as a slow consumer, and the JSON fallback then panicked on that peer's
+`PlayerLeft`. That is the inverse of issue #212's historical amplification
+signature, which evicted only the fallback. The unchanged exact test passed
+locally under one CPU and under added contention in about 12.2 seconds with
+5,000/5,000 sequences accounted, 2,218 fallback bytes against 389,618
+compatible bytes (0.01x), and zero evictions. The failed-job retry then passed
+the H14 step on the identical SHA after the identical precursor suites, and the
+nightly run finished green. No production or workload change was justified.
+Issue #281 records the missing symmetric terminal/proxy-throughput diagnostics
+needed to classify a future recurrence without weakening the burst, throttle,
+or production deadlines.
+
+Cursor Bugbot reviewed exact implementation head `4852482` and reported zero
+issues. GitHub Copilot was explicitly requested but could not review because
+the requesting account had exhausted its quota; the PR author is the connected
+GitHub identity, so no independent human reviewer was available to request.
+The independent local adversarial loop nevertheless reviewed the complete
+remediated diff to zero findings, and a separate four-agent H14 audit converged
+on preserving the strong experiment unchanged. P50 is complete.
