@@ -104,8 +104,8 @@ the harness pins `ice_servers_count == 0` to keep it that way.
 - **Second compilation graph:** the webrtc tree builds separately from the root (CI caches both; the crate is
   excluded from the root gates by design, so its checks must be wired explicitly — done in
   `webrtc-interop.yml`). The root cross-OS matrix likewise never sees it, so that workflow carries its own
-  Linux/Windows/macOS compile + unit matrix; live WebRTC transport is proved on Linux only (see the client
-  README's platform-coverage table).
+  Windows/macOS build + unit matrix (Linux is covered by the interop job itself); live WebRTC transport is
+  proved on Linux only (see the client README's platform-coverage table).
 - **Path-dep reuse means the client does not re-derive types from the docs:** third-party implementability rests
   on the golden wire tests, the canonical JSONL samples, and `docs/protocol.md` rather than on this client.
 - **webrtc-rs quirks leak into the client** (async peer-event dispatch,

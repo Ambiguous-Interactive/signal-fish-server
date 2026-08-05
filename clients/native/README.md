@@ -227,17 +227,19 @@ client processes (loopback only; the interop server config disables TURN with ze
 | Mid-handshake close → one `error` + prompt exit 3 | n/a | ✅ `browser_cli_mid_handshake_close_single_error_exit_3` |
 | SIGTERM/SIGKILL Chromium teardown (orphan reaper) | n/a | ✅ `browser_cli_signal_teardown_reaps_chromium` |
 | TURN-only pair + mismatched-secret fallback controls | ✅ `turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live`; `mismatched_turn_secret_fails_p2p_and_uses_websocket_fallback` | — |
-| IPv6-only host path (both channels over `::1`) | ✅ `ipv6_loopback_mesh_pair_exchanges_on_a_host_ipv6_path` | — |
+| IPv6-only host path (both channels over IPv6) | ✅ `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` | — |
 
 The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop_e2e.rs) behind the
 `browser-interop` cargo feature (this crate's default suite never compiles them; they additionally need
 `SIGNAL_FISH_BROWSER_CLI` pointing at the built [browser client](../browser/README.md) bundle).
 
-The IPv6 cell lives in [`tests/ipv6_interop_e2e.rs`](tests/ipv6_interop_e2e.rs): both clients run with
-`--ip-family ipv6`, so only IPv6 host candidates can be advertised, and the assertions require a host/host pair
-of concrete dialable IPv6 addresses plus the exact exchange on both channel labels. Signaling still runs over the harness
-server's IPv4 loopback listener, so the IPv6 claim is about the WebRTC data path (ICE, DTLS, SCTP), not the
-WebSocket. A runner without IPv6 loopback fails the cell with an actionable message; it is never skipped.
+Scenario 6 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
+advertised, and the assertions require a host/host pair of concrete dialable IPv6 addresses plus the exact
+exchange on both channel labels. It shares the file's scenario-serialization guard, so it never overlaps another
+multi-process cell. Signaling still runs over the harness server's IPv4 loopback listener, so the IPv6 claim is
+about the WebRTC data path (ICE, DTLS, SCTP), not the WebSocket. Its precondition applies the client's own
+interface-selection rule, so a runner that cannot serve IPv6 fails the cell with an actionable message; it is
+never skipped.
 
 CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
 `.github/workflows/webrtc-interop.yml`, and the browser cells via
@@ -254,15 +256,18 @@ says:
 
 | Platform | Compile + unit suite | Live WebRTC transport |
 |----------|----------------------|-----------------------|
-| Linux (`ubuntu-latest`) | ✅ `Native Client Build (ubuntu-latest)` | ✅ every native, browser, TURN-only, and IPv6 cell |
+| Linux (`ubuntu-latest`) | ✅ `Native Client Interop (Linux)` | ✅ every native, browser, TURN-only, and IPv6 cell |
 | Windows (`windows-latest`) | ✅ `Native Client Build (windows-latest)` | ❌ not proved |
 | macOS (`macos-latest`) | ✅ `Native Client Build (macos-latest)` | ❌ not proved |
 
-The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs `cargo metadata --locked`,
-`cargo fmt --check`, `cargo clippy --locked --all-targets -D warnings`, and `cargo test --locked --lib --bins`
-on the repository MSRV for all three. It compiles the multi-process cells (via `--all-targets`) but does not run
-them: those spawn the server binary and are the Linux lane's job. Interface enumeration, socket binding, and ICE
-behavior on Windows and macOS are therefore **compile-verified only**.
+The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs, on the repository MSRV:
+`cargo metadata --locked`, `cargo fmt --check`, `cargo clippy --locked --all-targets -D warnings`,
+`cargo test --locked --all-targets --no-run`, and `cargo test --locked --lib --bins`. The `--no-run` step is
+what actually builds and links the multi-process cells — clippy only type-checks them (`--emit=metadata`, no
+codegen). Those cells are built but not run off Linux: they spawn the server binary, which is the Linux lane's
+job. Linux is absent from the matrix because the `interop` job already runs that same command set there, plus
+the live suite. Interface enumeration, socket binding, and ICE behavior on Windows and macOS are therefore
+**build-verified only**.
 
 ## Troubleshooting
 

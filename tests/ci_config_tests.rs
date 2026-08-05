@@ -23303,25 +23303,31 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
 /// The native reference client is a standalone crate that no other lane
 /// compiles: the root CI matrix builds only the root package, and the interop
 /// cells run on Linux. Issue #271 added two proofs that must not silently
-/// disappear — a Windows/macOS/Linux compile + unit matrix, and one live IPv6
-/// data-channel cell that fails loudly instead of skipping when the runner
-/// cannot provide IPv6.
+/// disappear — a Windows/macOS compile + unit matrix (Linux is the `interop`
+/// job's job), and one live IPv6 data-channel cell that fails loudly instead of
+/// skipping when the runner cannot serve IPv6.
+///
+/// Both source files are read with `read_live_file`, so a marker satisfied only
+/// by a comment or a commented-out line does not count as coverage.
 #[test]
 fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/webrtc-interop.yml"));
-    let ipv6_test = read_file(&root.join("clients/native/tests/ipv6_interop_e2e.rs"));
-    let cli = read_file(&root.join("clients/native/src/cli.rs"));
+    let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
+    let cli = read_live_file(&root.join("clients/native/src/cli.rs"));
 
     for required in [
         "native-platforms:",
         "name: Native Client Build (${{ matrix.os }})",
         "runs-on: ${{ matrix.os }}",
-        "os: [ubuntu-latest, windows-latest, macos-latest]",
+        "os: [windows-latest, macos-latest]",
         "working-directory: clients/native",
         "run: cargo metadata --locked --format-version 1 > /dev/null",
         "run: cargo fmt --check",
         "run: cargo clippy --locked --all-targets -- -D warnings",
+        // Clippy never links the integration cells; this is what proves they
+        // build on the platform.
+        "run: cargo test --locked --all-targets --no-run",
         "run: cargo test --locked --lib --bins",
     ] {
         assert!(
@@ -23332,30 +23338,43 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     }
     assert!(
         workflow.contains("fail-fast: false"),
-        "one red platform must not cancel the other platforms' evidence"
+        "one red platform must not cancel the other platform's evidence"
     );
 
+    // Structural facts, not loose tokens: each of these is a line the proof
+    // cannot lose while still proving anything.
     for required in [
-        "--ip-family",
-        "\"ipv6\"",
-        "--disable-mdns",
-        "fn require_ipv6_loopback",
+        // The clients really run IPv6-only, and the args really reach them.
+        r#"const IPV6_ARGS: [&str; 3] = ["--ip-family", "ipv6", "--disable-mdns"];"#,
+        "extra_args: &IPV6_ARGS,",
+        // The precondition applies the client's own rule and never skips.
+        "fn require_ipv6_ice_interface()",
+        "require_ipv6_ice_interface();",
+        "local_udp_addrs(settings).unwrap_or_else",
         "The lane must not be skipped silently.",
-        "local_candidate_type",
-        "remote_candidate_type",
-        "local_candidate_address",
-        "remote_candidate_address",
-        "Ipv6Addr::LOCALHOST",
-        "\"host\"",
-        "assert_both_channels_exchanged",
-        "fallback_engaged",
-        "p2p_pair_connected",
+        // The path is asserted to be direct IPv6 toward the planned peer.
+        "fn assert_ipv6_host_path(",
+        "assert_ipv6_host_path(window, who, peer_id);",
+        r#"fn selected_ipv6_address(event: &Value, field: &str, who: &str) -> Ipv6Addr {"#,
+        r#"IpAddr::V4(address) => {"#,
+        r#"for field in ["local_candidate_type", "remote_candidate_type"] {"#,
+        r#"for field in ["local_candidate_address", "remote_candidate_address"] {"#,
+        // ...carrying a real session on both labels, not the relay floor.
+        "assert_exchange_sent_to(window, who, &peers);",
+        "assert_exchange_received_from(window, who, &peers);",
+        "assert_pair_connected_exactly(window, who, &peers);",
+        r#"events_named(&client.events, "fallback_engaged").is_empty(),"#,
     ] {
         assert!(
-            ipv6_test.contains(required),
+            interop.contains(required),
             "the IPv6 interop proof lost acceptance marker `{required}`"
         );
     }
+    assert!(
+        !interop.contains("#[ignore]"),
+        "the interop cells must never become opt-in; that would silently drop \
+         every live-transport proof in this file"
+    );
     assert!(
         cli.contains("pub ip_family: IpFamily"),
         "the client must keep the --ip-family selector the IPv6 proof drives"

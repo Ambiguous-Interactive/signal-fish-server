@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact reliable and unreliable exchange. The client now reports each selected candidate's address
   alongside its type, and a runner without IPv6 loopback fails the cell with an
   actionable message instead of skipping it. Live WebRTC transport remains
-  proved on Linux only; Windows and macOS are compile-verified.
+  proved on Linux only; Windows and macOS are build-verified.
 - Add a deterministic TURN-only WebRTC interoperability gate (issue #239).
   Two native clients must select relay candidates through a digest-pinned local
   coturn, exchange exact reliable and unreliable data, and retain a live
@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Gate the 16-player matrix's wall-clock p99 relay-latency ceiling to Linux
+  (issue #274). On hosted macOS the same `message_pack-16p-clean-30hz` cell
+  measured 322,391us and 261,754us on two runs while the `json-16p` cell in the
+  same process measured 26,019us and Linux measures ~7,000us: a 12x intra-run
+  spread that tracks runner tenancy, not relay behavior. Every correctness
+  oracle — exact delivery ledgers, conformance audit, zero backpressure, zero
+  slow-consumer eviction — still runs on all platforms, and the percentiles are
+  still printed everywhere with an explicit "observed, not gated" line off
+  Linux.
 - Raise the exact Rust MSRV from 1.89 to 1.91 and migrate the standalone native
   reference client from webrtc-rs 0.17 to 0.20 (issue #268). The port preserves
   the matchbox candidate wire shape, deterministic ICE crippling, generation

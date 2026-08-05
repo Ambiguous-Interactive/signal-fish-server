@@ -25,7 +25,7 @@
 //! they forward through an unbounded [`EngineEvent`] channel back to the orchestrator.
 
 use std::collections::{BTreeSet, HashMap};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -164,16 +164,8 @@ impl IpFamily {
         )
     }
 
-    /// The loopback address of this family (`Any` keeps the IPv4 loopback,
-    /// which every supported platform provides).
-    fn loopback(self) -> IpAddr {
-        match self {
-            Self::Any | Self::Ipv4 => IpAddr::from(Ipv4Addr::LOCALHOST),
-            Self::Ipv6 => IpAddr::from(Ipv6Addr::LOCALHOST),
-        }
-    }
-
-    /// Stable lowercase token for diagnostics (matches the CLI token).
+    /// Stable lowercase token for diagnostics (pinned to the CLI token by
+    /// `ip_family_tokens_match_the_cli_surface`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Any => "any",
@@ -211,10 +203,20 @@ pub struct Engine {
 impl Engine {
     /// Build the engine with the default runtime and the invocation's
     /// [`EngineSettings`].
+    ///
+    /// An explicitly requested [`IpFamily`] is resolved here, before any
+    /// session work, so a host that cannot serve it fails the process instead
+    /// of failing every pair later — a per-pair failure would degrade to the
+    /// relay floor and still exit successfully, which is exactly the silent
+    /// pass `--ip-family` exists to prevent.
     pub fn new(
         settings: EngineSettings,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Result<Self> {
+        if settings.ip_family != IpFamily::Any {
+            local_udp_addrs(settings)
+                .with_context(|| format!("--ip-family {}", settings.ip_family.as_str()))?;
+        }
         let runtime = default_runtime()
             .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
         Ok(Self {
@@ -656,8 +658,10 @@ fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> 
 /// interface address instead, restricted to [`EngineSettings::ip_family`].
 /// IPv6 link-local addresses are omitted because the ICE candidate grammar
 /// cannot carry the local interface's scope ID.
-fn local_udp_addrs(settings: EngineSettings) -> Result<Vec<SocketAddr>> {
-    let family = settings.ip_family;
+///
+/// Public so a harness can apply the engine's exact rule as a precondition
+/// rather than approximating it with its own probe.
+pub fn local_udp_addrs(settings: EngineSettings) -> Result<Vec<SocketAddr>> {
     if settings.crippled {
         // rtc/webrtc 0.20 rejects a peer connection with no sockets or
         // listeners. Keep the fault deterministic with a loopback-only
@@ -667,7 +671,11 @@ fn local_udp_addrs(settings: EngineSettings) -> Result<Vec<SocketAddr>> {
         // client retain outbound/inbound signaling filters as defense in
         // depth while offer/answer and gathering completion still follow the
         // real peer-connection lifecycle.
-        return Ok(vec![SocketAddr::new(family.loopback(), 0)]);
+        //
+        // `ip_family` is deliberately ignored: this transport exists to be
+        // unusable, never to advertise a candidate, so pointing it at another
+        // family would only create a fault shape nothing exercises.
+        return Ok(vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))]);
     }
 
     let active = if_addrs::get_if_addrs()
@@ -675,7 +683,7 @@ fn local_udp_addrs(settings: EngineSettings) -> Result<Vec<SocketAddr>> {
         .into_iter()
         .filter(if_addrs::Interface::is_oper_up)
         .map(|interface| interface.ip());
-    select_udp_addrs(active, family)
+    select_udp_addrs(active, settings.ip_family)
 }
 
 /// The pure selection rule behind [`local_udp_addrs`]: keep the concrete,
@@ -705,7 +713,7 @@ fn select_udp_addrs(
 
     if addrs.is_empty() {
         return Err(anyhow!(
-            "no active concrete {} network interface is available for ICE",
+            "no active concrete network interface is available for ICE (requested family: {})",
             family.as_str()
         ));
     }
@@ -783,6 +791,9 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the fixtures need the IPv6 constructors; production selection is
+    // family-agnostic.
+    use std::net::Ipv6Addr;
 
     /// Deterministic ICE failure in the given family.
     fn crippled_settings(ip_family: IpFamily) -> EngineSettings {
@@ -814,9 +825,9 @@ mod tests {
         );
         assert_eq!(
             local_udp_addrs(crippled_settings(IpFamily::Ipv6))
-                .expect("crippled IPv6 transport address resolves"),
-            vec![SocketAddr::new(IpAddr::from(Ipv6Addr::LOCALHOST), 0)],
-            "an IPv6-only crippled run must not fall back to an IPv4 socket"
+                .expect("crippled transport ignores the requested family"),
+            vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+            "the crippled transport exists to be unusable; --ip-family must not              fork it into a shape nothing exercises"
         );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1015,6 +1026,20 @@ mod tests {
     }
 
     #[test]
+    fn ip_family_tokens_match_the_cli_surface() {
+        for family in IpFamily::value_variants() {
+            let token = family
+                .to_possible_value()
+                .expect("every family is selectable on the CLI");
+            assert_eq!(
+                family.as_str(),
+                token.get_name(),
+                "the diagnostic token must stay identical to the flag value"
+            );
+        }
+    }
+
+    #[test]
     fn a_family_the_host_cannot_serve_fails_loudly_instead_of_falling_back() {
         let ipv4_only = vec![
             IpAddr::from(Ipv4Addr::LOCALHOST),
@@ -1027,6 +1052,28 @@ mod tests {
             "the failure must name the requested family: {error}"
         );
         assert!(select_udp_addrs(Vec::new(), IpFamily::Any).is_err());
+
+        // And that failure is fatal at startup, not a per-pair error that
+        // would degrade to the relay floor and still exit successfully.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let unavailable = EngineSettings {
+            // No host can serve a family with zero usable interfaces; the
+            // reachable equivalent is asserted through select_udp_addrs above,
+            // so drive the real constructor with whichever family this host
+            // lacks, if any.
+            ip_family: IpFamily::Ipv6,
+            ..EngineSettings::default()
+        };
+        match local_udp_addrs(unavailable) {
+            Ok(_available) => assert!(
+                Engine::new(unavailable, tx).is_ok(),
+                "a servable family must not fail construction"
+            ),
+            Err(_) => assert!(
+                Engine::new(unavailable, tx).is_err(),
+                "an unservable family must fail before any session work"
+            ),
+        }
     }
 
     #[tokio::test]

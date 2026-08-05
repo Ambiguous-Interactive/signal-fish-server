@@ -119,16 +119,21 @@ jobs:
     # Windows or macOS, so a platform-specific break in the client (its
     # interface enumeration is the obvious candidate — see issue #271) would
     # reach users undetected. This matrix is the compile-and-unit-test proof for
-    # every supported desktop platform. The ubuntu-latest leg is the control:
-    # identical commands, so a red macOS/Windows leg is unambiguously
-    # platform-specific rather than a change that broke the crate everywhere.
+    # the other two supported desktop platforms. Linux is deliberately absent:
+    # the `interop` job above already runs this exact command set there (via
+    # scripts/run-webrtc-interop.sh) plus the live suite, so it is the control
+    # and a duplicate ubuntu leg would only pay for a second cold build of the
+    # webrtc graph.
+    #
+    # Cold-cache durations on the first run of this job: windows 4m06s,
+    # macos 2m04s — the 30-minute ceiling is a runaway guard, not a budget.
     name: Native Client Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -173,10 +178,18 @@ jobs:
         shell: bash
         working-directory: clients/native
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build every test target
+        # Clippy is a check-shaped pass (`--emit=metadata`): it type-checks the
+        # integration cells but never codegens or links them, so a
+        # platform-specific link or cfg failure in tests/ would slip through.
+        # `--no-run` builds and links them for real.
+        shell: bash
+        working-directory: clients/native
+        run: cargo test --locked --all-targets --no-run
       - name: Run the native unit suite
-        # Library + binary unit tests only. The integration cells spawn the
-        # real server binary and are compiled (not run) by the clippy step
-        # above; running them is the Linux interop job's live-transport proof.
+        # Library + binary unit tests only: the integration cells spawn the
+        # real server binary, and running them is the Linux interop job's
+        # live-transport proof.
         shell: bash
         working-directory: clients/native
         run: cargo test --locked --lib --bins
