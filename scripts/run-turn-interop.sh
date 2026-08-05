@@ -100,10 +100,51 @@ has_unredacted_credentials() {
         "$@" 2>/dev/null | grep -Fv '[REDACTED]' >/dev/null
 }
 
+# Append the host's view of the TURN network to the run's diagnostics.
+#
+# Issue #276's failures are all "no bound socket reached coturn", and the
+# client's own log can only report which addresses it bound. Whether the
+# expected source address existed, which device carried it, and whether that
+# device was carrier-up are properties of the host that no client log can
+# recover after the fact. The bridge's `operstate` is the exact quantity
+# `if_addrs::Interface::is_oper_up` reads, so an enumeration that missed the
+# route is visible here rather than inferred.
+capture_host_routing() {
+    local label=$1
+    local network_id bridge
+    {
+        printf '\n===== %s =====\n' "${label}"
+        printf 'turn_host=%s listen_port=%s subnet=%s network=%s\n' \
+            "${TURN_HOST}" "${LISTEN_PORT}" "${NETWORK_SUBNET:-<published>}" "${COTURN_NETWORK}"
+        if command -v ip >/dev/null 2>&1; then
+            printf -- '--- ip -4 route get %s ---\n' "${TURN_HOST}"
+            timeout 10 ip -4 route get "${TURN_HOST}" 2>&1
+            printf -- '--- ip -4 addr ---\n'
+            timeout 10 ip -4 addr 2>&1
+            printf -- '--- ip -4 route ---\n'
+            timeout 10 ip -4 route 2>&1
+        else
+            printf 'iproute2 is unavailable on this host\n'
+        fi
+        network_id=$(timeout 10 docker network inspect -f '{{.Id}}' "${COTURN_NETWORK}" 2>&1)
+        printf -- '--- docker network id ---\n%s\n' "${network_id}"
+        bridge="br-${network_id:0:12}"
+        if command -v ip >/dev/null 2>&1 && [ ${#network_id} -ge 12 ]; then
+            printf -- '--- ip -d link show dev %s ---\n' "${bridge}"
+            timeout 10 ip -d link show dev "${bridge}" 2>&1
+            printf -- '--- ip -4 addr show dev %s ---\n' "${bridge}"
+            timeout 10 ip -4 addr show dev "${bridge}" 2>&1
+        fi
+    } >>"${ARTIFACT_DIR}/host-routing.log" 2>&1 || true
+}
+
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
     set +e
+    # Before the teardown removes the container and the bridge: the state at
+    # failure time is the state that matters.
+    capture_host_routing "teardown"
     timeout 10 docker rm --force "${COTURN_CONTAINER}" >/dev/null 2>&1 || true
     if [ -n "${COTURN_RUNNER_PID}" ]; then
         wait "${COTURN_RUNNER_PID}" 2>/dev/null || true
@@ -157,6 +198,7 @@ shopt -s nullglob
 prior_diagnostics=(
     "${ARTIFACT_DIR}"/coturn.log
     "${ARTIFACT_DIR}"/test.log
+    "${ARTIFACT_DIR}"/host-routing.log
     "${ARTIFACT_DIR}"/diagnostics.manifest
     "${ARTIFACT_DIR}"/server-*.log
     "${ARTIFACT_DIR}"/client-*.log
@@ -266,6 +308,8 @@ if [ "${ready}" != true ]; then
     echo "ERROR: coturn did not initialize UDP relay ports within 30 seconds" >&2
     exit 1
 fi
+
+capture_host_routing "coturn ready"
 
 echo "==> Verifying cached native-client dependencies"
 (cd "${CLIENT_DIR}" && cargo metadata --locked --offline --format-version 1 >/dev/null)

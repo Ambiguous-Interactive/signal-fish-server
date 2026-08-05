@@ -103,6 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make an unreachable TURN allocation self-describing in the native reference
+  client and its interoperability lane (issue #276). The client now reports the
+  complete resolved ICE bind set on every pairing — bound addresses, which came
+  from interface enumeration, and which the routing probe added — instead of
+  reporting only the union's additions, so a run where the probe contributed
+  nothing is no longer indistinguishable from one where it never ran. An ICE
+  server that does not resolve or does not route is a warning rather than a
+  debug line. The lane also captures the host's own view of the TURN network
+  (`ip route get`, addresses, routes, and the Docker bridge's link state) into
+  its failure artifacts, because whether the expected source address existed
+  and whether its device was carrier-up cannot be recovered from a client log
+  after the fact.
 - Stop a closing connection from writing the queue that sits behind a socket
   write abandoned in flight (issue #274). The live writer runs inside the close
   `select!`, so a close request cancels it wherever it is — including while a
