@@ -114,7 +114,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ip route get`, addresses, routes, and the Docker bridge's link state) into
   its failure artifacts, because whether the expected source address existed
   and whether its device was carrier-up cannot be recovered from a client log
-  after the fact.
+  after the fact. Those diagnostics falsified the recorded cause on their first
+  failing run: the bind set already contained the bridge's routable source and
+  the bridge was carrier-up, so the missing datagrams are a property of the
+  path, not of the client's address selection. The lane therefore now measures
+  that path itself — a STUN Binding request from the host over the same
+  connected-socket source the client picks — and waits, bounded, for an answer
+  before handing the run to the clients, instead of reporting an unreachable
+  coturn as a thirty-second `no candidate pairs` ICE failure.
 - Stop a closing connection from writing the queue that sits behind a socket
   write abandoned in flight (issue #274). The live writer runs inside the close
   `select!`, so a close request cancels it wherever it is — including while a

@@ -138,6 +138,68 @@ capture_host_routing() {
     } >>"${ARTIFACT_DIR}/host-routing.log" 2>&1 || true
 }
 
+# One STUN Binding request from the host to coturn, over the exact path the
+# clients use, printing the first bytes of any response.
+#
+# `/dev/udp` connects the socket, so the kernel picks the same source address
+# the client's own route probe picks: this measures the client's path, not an
+# approximation of it. STUN Binding needs no credentials, so a response proves
+# the datagram arrived and the reply came back — the one fact every #276
+# failure is missing. Any inability to measure is reported as such and never
+# mistaken for a negative result.
+probe_turn_udp() {
+    local response=""
+    if ! exec 3<>"/dev/udp/${TURN_HOST}/${LISTEN_PORT}" 2>/dev/null; then
+        printf 'turn_udp_probe=socket_unavailable\n' >>"${ARTIFACT_DIR}/host-routing.log"
+        return 2
+    fi
+    # RFC 5389 Binding request: type 0x0001, length 0, the magic cookie, and a
+    # fixed 12-byte transaction id.
+    printf '\x00\x01\x00\x00\x21\x12\xa4\x42sf-turn-prob' >&3 2>/dev/null || true
+    # One read of the whole datagram: a byte-at-a-time read would consume the
+    # datagram and return only its first byte.
+    response=$(timeout 2 dd bs=64 count=1 status=none <&3 2>/dev/null |
+        od -An -tx1 2>/dev/null | tr -d ' \n' || true)
+    exec 3<&- 2>/dev/null || true
+    exec 3>&- 2>/dev/null || true
+    if [ -n "${response}" ]; then
+        printf 'turn_udp_stun_binding_response=%s\n' "${response}" \
+            >>"${ARTIFACT_DIR}/host-routing.log"
+        return 0
+    fi
+    return 1
+}
+
+# Wait, bounded, for that path to work before handing the run to the clients.
+#
+# Without this the only symptom of an unreachable coturn is a 30-second ICE
+# failure with "no candidate pairs", which says nothing about whose fault it
+# is. With it, a path that is merely slow to come up is absorbed, and a path
+# that never comes up fails here with the measurement attached.
+wait_for_turn_udp_reachable() {
+    local attempt status
+    for attempt in $(seq 1 20); do
+        probe_turn_udp
+        status=$?
+        if [ "${status}" -eq 0 ]; then
+            printf 'turn_udp_reachable_after_attempts=%s\n' "${attempt}" \
+                >>"${ARTIFACT_DIR}/host-routing.log"
+            echo "==> coturn answered a STUN Binding request on attempt ${attempt}/20"
+            return 0
+        fi
+        if [ "${status}" -eq 2 ]; then
+            echo "==> bash UDP redirections are unavailable; skipping the reachability gate"
+            return 0
+        fi
+        sleep 1
+    done
+    printf 'turn_udp_reachable=false attempts=20\n' >>"${ARTIFACT_DIR}/host-routing.log"
+    echo "ERROR: the host cannot reach coturn at ${TURN_HOST}:${LISTEN_PORT} over UDP;" >&2
+    echo "       a STUN Binding request went unanswered for 20 seconds, so no client" >&2
+    echo "       could have allocated a relay candidate. See host-routing.log." >&2
+    return 1
+}
+
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
@@ -145,6 +207,12 @@ cleanup() {
     # Before the teardown removes the container and the bridge: the state at
     # failure time is the state that matters.
     capture_host_routing "teardown"
+    if [ "${status}" -ne 0 ]; then
+        # Only on the failing path: a successful run has already stopped
+        # coturn, so probing it there would record a misleading negative.
+        probe_turn_udp >/dev/null 2>&1 ||
+            printf 'turn_udp_stun_binding_response=<none>\n' >>"${ARTIFACT_DIR}/host-routing.log"
+    fi
     timeout 10 docker rm --force "${COTURN_CONTAINER}" >/dev/null 2>&1 || true
     if [ -n "${COTURN_RUNNER_PID}" ]; then
         wait "${COTURN_RUNNER_PID}" 2>/dev/null || true
@@ -310,6 +378,7 @@ if [ "${ready}" != true ]; then
 fi
 
 capture_host_routing "coturn ready"
+wait_for_turn_udp_reachable
 
 echo "==> Verifying cached native-client dependencies"
 (cd "${CLIENT_DIR}" && cargo metadata --locked --offline --format-version 1 >/dev/null)
