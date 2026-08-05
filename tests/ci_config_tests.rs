@@ -23161,20 +23161,20 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
         "the standalone Fortress fixture must track the server MSRV"
     );
 
-    for required_path in [
-        "src/**",
-        "Cargo.toml",
-        "Cargo.lock",
-        "clients/fortress/**",
-        "scripts/run-fortress-interop.sh",
-        ".github/workflows/fortress-interop.yml",
-    ] {
-        assert_eq!(
-            workflow.matches(&format!("- \"{required_path}\"")).count(),
-            2,
-            "fortress-interop.yml must trigger on `{required_path}` for both push and pull_request"
-        );
-    }
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "fortress-interop.yml",
+        &[
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "clients/fortress/**",
+            "scripts/run-fortress-interop.sh",
+            "scripts/read-toml-string.sh",
+            ".github/workflows/fortress-interop.yml",
+        ],
+    );
 
     for required in [
         "cargo build --locked --bin signal-fish-server",
@@ -23196,22 +23196,20 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     let runner = read_file(&root.join("scripts/run-turn-interop.sh"));
     let test = read_file(&root.join("clients/native/tests/turn_interop_e2e.rs"));
 
-    for required_path in [
-        "src/**",
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain.toml",
-        "clients/native/**",
-        "scripts/run-turn-interop.sh",
-        "scripts/read-toml-string.sh",
-        ".github/workflows/turn-interop.yml",
-    ] {
-        assert_eq!(
-            workflow.matches(&format!("- \"{required_path}\"")).count(),
-            2,
-            "turn-interop.yml must trigger on `{required_path}` for push and pull_request"
-        );
-    }
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "turn-interop.yml",
+        &[
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "clients/native/**",
+            "scripts/run-turn-interop.sh",
+            "scripts/read-toml-string.sh",
+            ".github/workflows/turn-interop.yml",
+        ],
+    );
 
     for required in [
         "permissions:\n  contents: read",
@@ -23300,6 +23298,117 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     );
 }
 
+/// Assert both the `push` and `pull_request` events trigger on exactly
+/// `required_paths`.
+///
+/// Parsed, not counted: a substring count of `- "<path>"` cannot tell which key
+/// the list sits under, so renaming `paths:` to `paths-ignore:` — which INVERTS
+/// the filter and stops the workflow running on precisely the changes it exists
+/// to cover — passes a counting check untouched.
+fn assert_workflow_triggers_on_paths(workflow: &str, name: &str, required_paths: &[&str]) {
+    let documents = Yaml::load_from_str(workflow)
+        .unwrap_or_else(|error| panic!("{name} must parse as YAML: {error}"));
+    let document = documents.first().expect("a workflow has one document");
+    // `on` is a YAML 1.1 boolean keyword; saphyr keeps it a string key here,
+    // but accept the boolean spelling too rather than depend on that.
+    let triggers = document
+        .as_mapping_get("on")
+        .or_else(|| document.as_mapping_get("true"))
+        .unwrap_or_else(|| panic!("{name} must define workflow triggers"));
+    let expected: BTreeSet<&str> = required_paths.iter().copied().collect();
+    for event in ["push", "pull_request"] {
+        let block = triggers
+            .as_mapping_get(event)
+            .unwrap_or_else(|| panic!("{name} must define an `{event}` trigger"));
+        assert!(
+            block.as_mapping_get("paths-ignore").is_none(),
+            "{name}: `{event}.paths-ignore` inverts the filter; the gate would stop \
+             running on exactly the changes it covers"
+        );
+        let configured: BTreeSet<&str> = block
+            .as_mapping_get("paths")
+            .and_then(|paths| paths.as_sequence())
+            .unwrap_or_else(|| panic!("{name}: `{event}` must filter on paths"))
+            .iter()
+            .map(|value| value.as_str().expect("each trigger path is a string"))
+            .collect();
+        assert_eq!(
+            configured, expected,
+            "{name}: `{event}.paths` drifted; dropping one path silently disables \
+             this gate for changes that only touch it"
+        );
+    }
+}
+
+/// Records whether a syntax subtree calls a function whose path ends in
+/// `name`. Walking the tree means comments and strings cannot match.
+struct CallFinder<'a> {
+    name: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for CallFinder<'_> {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = call.func.as_ref() {
+            if path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == self.name)
+            {
+                self.found = true;
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+/// Records whether a syntax subtree *mentions* a path ending in `name` —
+/// which is how a function passed as an argument appears, rather than as a
+/// call.
+struct PathFinder<'a> {
+    name: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for PathFinder<'_> {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == self.name)
+        {
+            self.found = true;
+        }
+        syn::visit::visit_path(self, path);
+    }
+}
+
+/// Statement index of the first statement whose subtree calls `name`.
+fn position_of(body: &syn::Block, name: &str) -> Option<usize> {
+    body.stmts.iter().position(|statement| {
+        let mut finder = CallFinder { name, found: false };
+        finder.visit_stmt(statement);
+        finder.found
+    })
+}
+
+/// Like [`position_of`], but only accepts a statement of the exact shape
+/// `<expr containing the call>?;` — an expression statement whose value is a
+/// `?` propagation. `let _ = call();` (a `Stmt::Local`) and
+/// `if cond { call()?; }` (a `Stmt::Expr(Expr::If, _)`) are rejected, because
+/// both keep the call in place while discarding or skipping its failure.
+fn position_of_propagating(body: &syn::Block, name: &str) -> Option<usize> {
+    body.stmts.iter().position(|statement| {
+        let syn::Stmt::Expr(syn::Expr::Try(propagated), Some(_semicolon)) = statement else {
+            return false;
+        };
+        let mut finder = CallFinder { name, found: false };
+        finder.visit_expr(&propagated.expr);
+        finder.found
+    })
+}
+
 /// The client must resolve an explicitly requested address family BEFORE it
 /// opens its WebSocket; otherwise the process creates or joins a room it could
 /// never have used, and the per-pair failure it would hit instead is non-fatal
@@ -23313,38 +23422,6 @@ fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
     let source = read_file(&root.join("clients/native/src/client.rs"));
     let file = syn::parse_file(&source).expect("client.rs must parse as Rust");
 
-    /// Records whether a syntax subtree calls a function whose path ends in
-    /// `name`. Walking the tree means comments and strings cannot match.
-    struct CallFinder<'a> {
-        name: &'a str,
-        found: bool,
-    }
-
-    impl<'ast> Visit<'ast> for CallFinder<'_> {
-        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if let syn::Expr::Path(path) = call.func.as_ref() {
-                if path
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == self.name)
-                {
-                    self.found = true;
-                }
-            }
-            syn::visit::visit_expr_call(self, call);
-        }
-    }
-
-    /// Statement index of the first call whose path ends in `name`.
-    fn position_of(body: &syn::Block, name: &str) -> Option<usize> {
-        body.stmts.iter().position(|statement| {
-            let mut finder = CallFinder { name, found: false };
-            finder.visit_stmt(statement);
-            finder.found
-        })
-    }
-
     let run_inner = file
         .items
         .iter()
@@ -23354,8 +23431,15 @@ fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
         })
         .expect("client.rs must define run_inner");
 
-    let preflight = position_of(&run_inner.block, "preflight_ip_family")
-        .expect("run_inner must call engine::preflight_ip_family");
+    // Position alone is not the property. `let _ = preflight(..);` and
+    // `if flag { preflight(..)?; }` both keep the call at statement 0 while
+    // discarding or skipping it, and clippy accepts both. Require the
+    // statement to BE `<expr>?;` at the top level of `run_inner`, so the
+    // failure necessarily propagates out of the function.
+    let preflight = position_of_propagating(&run_inner.block, "preflight_ip_family").expect(
+        "run_inner must call engine::preflight_ip_family as a top-level `?` \
+         statement, so an unservable --ip-family aborts the run",
+    );
     let connect = position_of(&run_inner.block, "connect")
         .expect("run_inner must open the WebSocket with wire::connect");
     assert!(
@@ -23370,6 +23454,42 @@ fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
     assert_eq!(
         call_sites, 1,
         "client.rs must call the pre-flight exactly once; found {call_sites}"
+    );
+
+    // ...and the pre-flight must still apply the engine's own selection rule.
+    // No host-independent behavioral seam exists once the resolver is
+    // hard-coded (a runner that serves the family makes any `Ok(())` body
+    // pass), so pin the forwarding itself.
+    let engine_source = read_file(&root.join("clients/native/src/engine.rs"));
+    let engine = syn::parse_file(&engine_source).expect("engine.rs must parse as Rust");
+    let preflight_fn = engine
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "preflight_ip_family" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .expect("engine.rs must define preflight_ip_family");
+    let mut forwards = CallFinder {
+        name: "ensure_requested_family_is_available",
+        found: false,
+    };
+    forwards.visit_block(&preflight_fn.block);
+    assert!(
+        forwards.found,
+        "preflight_ip_family must delegate to ensure_requested_family_is_available"
+    );
+    let mut resolver = PathFinder {
+        name: "local_udp_addrs",
+        found: false,
+    };
+    resolver.visit_block(&preflight_fn.block);
+    assert!(
+        resolver.found,
+        "preflight_ip_family must apply the engine's real bind selection \
+         (`local_udp_addrs`), not a stand-in that always succeeds"
     );
 }
 
@@ -23405,24 +23525,20 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
     let cli = read_live_file(&root.join("clients/native/src/cli.rs"));
 
-    for required_path in [
-        "src/**",
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain.toml",
-        "clients/native/**",
-        "scripts/run-webrtc-interop.sh",
-        "scripts/read-toml-string.sh",
-        ".github/workflows/webrtc-interop.yml",
-    ] {
-        assert_eq!(
-            workflow.matches(&format!("- \"{required_path}\"")).count(),
-            2,
-            "webrtc-interop.yml must trigger on `{required_path}` for push and \
-             pull_request; dropping one path silently disables BOTH the platform \
-             matrix and the Linux live-transport job for changes that only touch it"
-        );
-    }
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "webrtc-interop.yml",
+        &[
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "clients/native/**",
+            "scripts/run-webrtc-interop.sh",
+            "scripts/read-toml-string.sh",
+            ".github/workflows/webrtc-interop.yml",
+        ],
+    );
 
     // Parse the job rather than substring-match it: `contains` cannot see an
     // `if: false` that disables the whole matrix, a `continue-on-error: true`

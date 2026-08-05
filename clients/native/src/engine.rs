@@ -203,7 +203,6 @@ pub struct Engine {
 impl Engine {
     /// Build the engine with the default runtime and the invocation's
     /// [`EngineSettings`].
-    ///
     pub fn new(
         settings: EngineSettings,
         events: mpsc::UnboundedSender<EngineEvent>,
@@ -845,7 +844,8 @@ mod tests {
             local_udp_addrs(crippled_settings(IpFamily::Ipv6))
                 .expect("crippled transport ignores the requested family"),
             vec![SocketAddr::from(([127, 0, 0, 1], 0))],
-            "the crippled transport exists to be unusable; --ip-family must not              fork it into a shape nothing exercises"
+            "the crippled transport exists to be unusable; --ip-family must not \
+             fork it into a shape nothing exercises"
         );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
