@@ -86,5 +86,21 @@ The authoritative local validation completed with:
 - the focused documentation-policy and 305-test CI-configuration suites; and
 - hook readiness plus the worktree pre-commit and pre-push preflights.
 
-All commands exited successfully. Hosted CI and external reviewer outcomes will
-be appended after the pull request reaches a terminal state.
+All commands exited successfully.
+
+## Hosted validation and review
+
+PR #282's implementation head `133ca79` reached a terminal state with 40 check
+runs: 37 successes, two intentional policy skips, and one failure from the
+Copilot reviewer's account quota. The successful checks include the complete
+CI platform matrix, MSRV, coverage, Miri, AddressSanitizer, audits, and the
+Verification Nightly workflow. Nightly's real-world scenario job passed the
+exact mixed-encoding amplification experiment with the unchanged H14 workload.
+
+Cursor Bugbot reviewed `133ca79` and reported zero issues; GitHub exposed no
+inline review threads. Copilot was explicitly requested through its supported
+bot reviewer identity and returned only the repository account's quota-limit
+message. No independent human reviewer was available: there is no CODEOWNERS
+file, the connected repository identity is the PR author, and GitHub rejected
+the explicit human request because authors cannot review their own pull
+requests.
