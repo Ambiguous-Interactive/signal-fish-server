@@ -23389,27 +23389,6 @@ impl<'ast> Visit<'ast> for CallFinder<'_> {
     }
 }
 
-/// Records whether a syntax subtree *mentions* a path ending in `name` —
-/// which is how a function passed as an argument appears, rather than as a
-/// call.
-struct PathFinder<'a> {
-    name: &'a str,
-    found: bool,
-}
-
-impl<'ast> Visit<'ast> for PathFinder<'_> {
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        if path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == self.name)
-        {
-            self.found = true;
-        }
-        syn::visit::visit_path(self, path);
-    }
-}
-
 /// Statement index of the first statement whose subtree calls `name`.
 fn position_of(body: &syn::Block, name: &str) -> Option<usize> {
     body.stmts.iter().position(|statement| {
