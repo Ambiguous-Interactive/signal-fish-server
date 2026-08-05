@@ -131,6 +131,7 @@ process continues to its normal bounded exit.
 | `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`pair_retry`/`other`) |
 | `signal_received` | `from`, `kind` | Inbound `Signal` arrived (emitted even when `--cripple-ice` then drops it) |
 | `ice_candidate_dropped` | `from` | Native-only `--drop-ice-from` discarded this peer's inbound candidate after `signal_received` made the signaling hop observable. The older shared `--cripple-ice` contract remains unchanged and does not emit this event |
+| `local_candidate` | `peer`, `candidate_type`, `address`, `port`, `protocol` | Native-only: a gathered local ICE candidate was advertised to `peer`, reported after the relay so the set describes what the remote side can see. `candidate_type` ∈ `host`/`srflx`/`prflx`/`relay`. The relay-only TURN cell requires every entry to be `relay`, and the IPv6 cell requires no entry of the other family; without it, a session that gathers nothing reports only "no candidate pairs" |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
 | `channel_open` | `peer`, `label` | One data channel reached open (`label` ∈ `reliable`/`unreliable`) |
 | `channel_closed` | `peer`, `label` | A required data channel closed or became unreadable; the unusable pair is removed and relay fallback remains live |
@@ -239,7 +240,32 @@ exchange on both channel labels. It shares the file's scenario-serialization gua
 multi-process cell. Signaling still runs over the harness server's IPv4 loopback listener, so the IPv6 claim is
 about the WebRTC data path (ICE, DTLS, SCTP), not the WebSocket. Its precondition applies the client's own
 interface-selection rule, so a runner that cannot serve IPv6 fails the cell with an actionable message; it is
-never skipped.
+never skipped. The cell also asserts the **advertised** candidate set carries no IPv4 entry, so a
+`--ip-family` that silently became a no-op cannot pass on a dual-stack host that happens to select IPv6
+anyway.
+
+## ICE socket selection
+
+`--ip-family` decides which families this client binds; two rules decide _which addresses_:
+
+1. **Every usable interface address.** webrtc 0.20 turns each supplied bind directly into a host candidate, so
+   a wildcard bind would advertise `0.0.0.0`. Unspecified, multicast, and IPv6 link-local addresses are dropped
+   (the candidate grammar cannot carry a scope ID).
+2. **The kernel's own source address for each configured STUN/TURN server.** Interface enumeration reports only
+   interfaces whose operational status is _up_, while reachability is a property of the routing table. A Docker
+   bridge, a VPN adapter, or any interface that is momentarily carrier-down is therefore invisible to (1) while
+   still being the only address that can reach the server. webrtc starts a binding request or allocation from
+   _every_ bound socket, so when none of them routes to the server the session gathers no relay candidate at
+   all — and under `--ice-transport-policy relay`, no candidate whatsoever. The source address is obtained by
+   `connect()`ing an unbound UDP socket, which performs the route lookup without sending a packet.
+
+The two sets are unioned and then filtered by the same rule, so a routing answer can never widen `--ip-family`.
+`--cripple-ice` is exempt from (2): that transport exists to be unreachable.
+
+Rule (2) runs on the task that also pumps the WebSocket, so it is bounded twice: the whole probe shares a
+two-second budget, and its answers are resolved once per endpoint set rather than once per pair. A resolver that
+hangs therefore costs the union and nothing else — never the pairing, and never the server's activity deadlines.
+A replan that changes servers re-probes; a credential rotation, which keeps the same URLs, does not.
 
 CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
 `.github/workflows/webrtc-interop.yml`, and the browser cells via

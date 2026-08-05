@@ -67,6 +67,23 @@ pub enum Event {
     /// A configured ICE fault discarded this peer's inbound candidate after
     /// the signaling envelope was observed.
     IceCandidateDropped { from: PlayerId },
+    /// A gathered local ICE candidate was advertised to `peer`, reported after
+    /// the relay succeeded so the stream describes what the remote side can
+    /// actually see. `candidate_type` is `host`/`srflx`/`prflx`/`relay` and
+    /// `protocol` is `udp`/`tcp`.
+    ///
+    /// Harnesses assert on the advertised *set*: that a relay-only session
+    /// gathered a relay candidate at all, and that an `--ip-family` run
+    /// advertised no address of the other family. Without it, a session that
+    /// gathers nothing reports only "no candidate pairs", with nothing naming
+    /// the cause (issues #275, #276).
+    LocalCandidate {
+        peer: PlayerId,
+        candidate_type: String,
+        address: String,
+        port: u16,
+        protocol: String,
+    },
     /// RTCPeerConnection state transition (`new`/`connecting`/`connected`/...).
     PcState { peer: PlayerId, state: String },
     /// One data channel reached the open state.
@@ -278,6 +295,16 @@ mod tests {
                 },
                 "transport_status_sent",
             ),
+            (
+                Event::LocalCandidate {
+                    peer: PlayerId::nil(),
+                    candidate_type: "relay".to_string(),
+                    address: "10.254.124.2".to_string(),
+                    port: 49160,
+                    protocol: "udp".to_string(),
+                },
+                "local_candidate",
+            ),
             (Event::GameDataSent, "game_data_sent"),
             (Event::FallbackEngaged, "fallback_engaged"),
             (Event::ExchangeReady, "exchange_ready"),
@@ -382,6 +409,28 @@ mod tests {
             redacted["remote_candidate_address"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn local_candidate_event_carries_the_advertised_type_and_address() {
+        let peer = PlayerId::new_v4();
+        let value = serde_json::to_value(Event::LocalCandidate {
+            peer,
+            candidate_type: "relay".to_string(),
+            address: "10.254.124.2".to_string(),
+            port: 49160,
+            protocol: "udp".to_string(),
+        })
+        .expect("event serializes");
+        assert_eq!(value["event"], "local_candidate");
+        assert_eq!(value["peer"], peer.to_string());
+        // The harness reads exactly these keys to decide whether a relay-only
+        // session gathered a relay candidate, and whether an --ip-family run
+        // advertised anything of the other family.
+        assert_eq!(value["candidate_type"], "relay");
+        assert_eq!(value["address"], "10.254.124.2");
+        assert_eq!(value["port"], 49160);
+        assert_eq!(value["protocol"], "udp");
     }
 
     #[test]

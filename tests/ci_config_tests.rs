@@ -23839,6 +23839,205 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     );
 }
 
+/// The engine's per-pair bind set must be the routing-aware union, applied to
+/// this session's real ICE servers (issue #276).
+///
+/// Every part of this is defeatable by an edit that keeps the call in place.
+/// `session_udp_addrs(self.settings, local_udp_addrs, Vec::new())` compiles,
+/// passes `clippy -D warnings`, and passes every live cell on a host whose
+/// interface table already contains the route — which is most of them, and
+/// exactly why the original defect was intermittent. So the arguments, not the
+/// call, are what this pins.
+fn assert_ice_bind_set_is_routing_aware(root: &Path) {
+    let source = read_file(&root.join("clients/native/src/engine.rs"));
+    let file = syn::parse_file(&source).expect("engine.rs must parse as Rust");
+
+    // Exactly one production call site. A second one cannot satisfy this while
+    // the effective path skips it, and the unit tests below `mod tests` call
+    // the same function with fixtures, so counting the raw text would not see
+    // the difference.
+    let mut call_sites = production_call_arguments(&file, "session_udp_addrs");
+    assert_eq!(
+        call_sites.len(),
+        1,
+        "exactly one production call site must build the bind set through \
+         engine::session_udp_addrs; found {}",
+        call_sites.len()
+    );
+    let arguments = call_sites.remove(0);
+    assert_eq!(
+        arguments.len(),
+        3,
+        "the bind set takes the settings, the interface rule and the routing answers"
+    );
+
+    // The settings must be this engine's own, not a constant: `--cripple-ice`
+    // and `--ip-family` both read from them, and `EngineSettings::default()`
+    // would quietly re-enable both.
+    let syn::Expr::Field(settings) = arguments[0] else {
+        panic!("the bind set must be built from `self.settings`, not a constant")
+    };
+    let syn::Member::Named(field) = &settings.member else {
+        panic!("the bind set must be built from `self.settings`")
+    };
+    assert_eq!(
+        field, "settings",
+        "the bind set reads this engine's settings"
+    );
+
+    // The interface rule must be the engine's own function, passed by path. A
+    // closure could swallow its failure or substitute a fixture.
+    let syn::Expr::Path(enumerate) = arguments[1] else {
+        panic!(
+            "the interface rule must be the path `local_udp_addrs`, not a \
+             closure or adapter that can swallow its failure"
+        )
+    };
+    assert!(
+        enumerate.path.is_ident("local_udp_addrs"),
+        "the interface rule must be `local_udp_addrs`, got {:?}",
+        enumerate.path.segments.last().map(|s| s.ident.to_string())
+    );
+
+    // The routing answers must come from THIS pairing's servers. An empty
+    // literal restores the pre-#276 behaviour with the call still in place.
+    let syn::Expr::Await(awaited) = arguments[2] else {
+        panic!(
+            "the routing answers must be `self.ice_route_sources(..).await`; a \
+             literal or a constant makes the union a permanent no-op"
+        )
+    };
+    let syn::Expr::MethodCall(probe) = awaited.base.as_ref() else {
+        panic!("the routing answers must come from `self.ice_route_sources(..)`")
+    };
+    assert_eq!(
+        probe.method, "ice_route_sources",
+        "the routing answers must come from `self.ice_route_sources(..)`"
+    );
+    let probe_argument = probe
+        .args
+        .first()
+        .expect("the probe takes the session's ICE servers");
+    let syn::Expr::Path(servers) = probe_argument else {
+        panic!(
+            "the probe must be handed `ice_servers` — this pairing's real \
+             servers — not a literal or a constructed list"
+        )
+    };
+    assert!(
+        servers.path.is_ident("ice_servers"),
+        "the probe must be handed this pairing's `ice_servers`"
+    );
+
+    // ...and that memo must be a memo of the real probe. Returning a cached
+    // constant, or dropping the probe entirely, is invisible to every live cell
+    // on a host whose interface table already contains the route.
+    let memo = production_call_arguments(&file, "ice_server_source_addrs");
+    assert_eq!(
+        memo.len(),
+        1,
+        "`ice_route_sources` must resolve through exactly one call to \
+         `ice_server_source_addrs`; found {}",
+        memo.len()
+    );
+    assert!(
+        source.contains("let endpoints = ice_server_endpoints(ice_servers);"),
+        "the memo must key on the endpoints of THIS pairing's servers, so a \
+         replan that changes servers re-probes"
+    );
+}
+
+/// Arguments of every call to `name` in `file`'s production items — that is,
+/// excluding the `mod tests` unit-test module, whose fixture calls would
+/// otherwise be indistinguishable from the shipped one.
+fn production_call_arguments<'ast>(file: &'ast syn::File, name: &str) -> Vec<Vec<&'ast syn::Expr>> {
+    struct Finder<'ast, 'a> {
+        name: &'a str,
+        calls: Vec<Vec<&'ast syn::Expr>>,
+    }
+
+    impl<'ast> Visit<'ast> for Finder<'ast, '_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref() {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == self.name)
+                {
+                    self.calls.push(call.args.iter().collect());
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    let mut finder = Finder {
+        name,
+        calls: Vec::new(),
+    };
+    for item in &file.items {
+        let is_test_module = matches!(item, syn::Item::Mod(module) if module.ident == "tests");
+        if !is_test_module {
+            finder.visit_item(item);
+        }
+    }
+    finder.calls
+}
+
+/// The routing-aware ICE bind set and the advertised-candidate oracles that
+/// make a failed gathering self-describing (issues #275, #276).
+#[test]
+fn test_ice_bind_set_and_advertised_candidate_oracles_are_pinned() {
+    let root = repo_root();
+    assert_ice_bind_set_is_routing_aware(&root);
+
+    // Each of these is a line the proof cannot lose while still proving
+    // anything.
+    let turn = read_live_file(&root.join("clients/native/tests/turn_interop_e2e.rs"));
+    for required in [
+        "fn assert_only_relay_candidates_advertised(events: &[Value], who: &str) {",
+        "assert_only_relay_candidates_advertised(events, who);",
+        r#"advertised.iter().all(|entry| entry.starts_with("relay ")),"#,
+        // The negative control's complement: a rejected allocation advertises
+        // nothing, so "no pair" cannot be reported while a path existed.
+        "advertised_candidates(events).is_empty(),",
+    ] {
+        assert!(
+            turn.contains(required),
+            "the TURN relay-candidate oracle lost marker `{required}` (issue #276)"
+        );
+    }
+
+    let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
+    for required in [
+        "fn assert_no_ipv4_candidate_advertised(events: &[Value], who: &str) {",
+        "assert_no_ipv4_candidate_advertised(window, who);",
+        "advertised_candidate_addresses(events, who);",
+    ] {
+        assert!(
+            interop.contains(required),
+            "the IPv6 advertised-candidate oracle lost marker `{required}` (issue #275)"
+        );
+    }
+
+    // The event those oracles read must still be emitted, and emitted only
+    // after the candidate was actually relayed to the peer.
+    let client = read_live_file(&root.join("clients/native/src/client.rs"));
+    let relay = client
+        .find("json!({ \"IceCandidate\": candidate_json }),")
+        .expect("client.rs must relay gathered candidates as IceCandidate signals");
+    let emit = client
+        .find("emit(&Event::LocalCandidate {")
+        .expect("client.rs must report every advertised candidate on the event stream");
+    assert!(
+        relay < emit,
+        "`local_candidate` must be emitted after the relay succeeds; reporting a \
+         candidate the peer never received would make the oracles read a set \
+         that does not exist"
+    );
+}
+
 #[test]
 fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let root = repo_root();

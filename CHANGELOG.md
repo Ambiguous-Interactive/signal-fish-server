@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Report every advertised local ICE candidate on the client's JSONL event
+  stream as `local_candidate` (`peer`, `candidate_type`, `address`, `port`,
+  `protocol`), emitted after the relay so the set describes what the remote
+  side can actually see (issues #275, #276). The relay-only TURN cells now
+  require the positive control to advertise relay candidates and only relay
+  candidates, and the mismatched-secret control to advertise none; the IPv6
+  cell requires no IPv4 entry in the advertised set, closing the gap where a
+  `--ip-family` regressed to a no-op could still pass on a dual-stack host.
 - Prove the native reference client on every supported desktop platform and over
   IPv6 (issue #271). A locked Windows/macOS matrix now builds, lints, and
   unit-tests `clients/native` on the exact repository MSRV, alongside the
@@ -95,6 +103,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind the kernel's own source address for every configured STUN/TURN server in
+  the native reference client, alongside the enumerated interface addresses
+  (issue #276). Interface enumeration reports only interfaces whose operational
+  status is _up_, while reachability is a property of the routing table: a
+  Docker bridge that is momentarily carrier-down — reproduced here as
+  `NO-CARRIER ... state DOWN` on an `--internal` network — is invisible to
+  enumeration while remaining the only address that network accepts. webrtc
+  0.20 starts a binding request or allocation from _every_ bound socket, so
+  when none of them routes to the server the session gathers no relay candidate
+  at all, and under `--ice-transport-policy relay` no candidate whatsoever,
+  which is how the TURN interoperability lane failed intermittently with only
+  "no candidate pairs" as evidence. The source address is obtained by
+  `connect()`ing an unbound UDP socket, which performs the route lookup without
+  sending a packet; the two sets are unioned and filtered by the same rule, so
+  a routing answer can never widen `--ip-family`, and `--cripple-ice` is
+  exempt.
 - Preserve deterministic `--cripple-ice` fallback on webrtc-rs 0.20 by keeping
   offer/answer and gathering lifecycles live while preventing both local and
   SDP-embedded remote candidates from forming an ICE pair.

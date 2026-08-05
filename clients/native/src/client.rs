@@ -1731,6 +1731,7 @@ impl Orchestrator<'_> {
             EngineEvent::LocalCandidate {
                 peer,
                 candidate_json,
+                gathered,
                 ..
             } => {
                 // Crippled mode never reaches here (the engine drops gathered
@@ -1741,6 +1742,15 @@ impl Orchestrator<'_> {
                     json!({ "IceCandidate": candidate_json }),
                 )
                 .await?;
+                // After the relay, never before: the event means "the peer can
+                // see this candidate", which is what a harness asserts on.
+                emit(&Event::LocalCandidate {
+                    peer,
+                    candidate_type: gathered.candidate_type,
+                    address: gathered.address,
+                    port: gathered.port,
+                    protocol: gathered.protocol,
+                });
             }
             EngineEvent::IceGatheringComplete { peer, .. } => {
                 self.ice_gathering_complete.insert(peer);
