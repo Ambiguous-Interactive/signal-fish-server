@@ -263,6 +263,14 @@ probe that answers immediately, answers on the fifth attempt, never answers, and
 cannot be run at all. Against the previous gate the answer-on-the-fifth-probe
 case exits 1 after a single attempt.
 
+That new test then failed on `Nextest (windows-latest)` — and Bugbot had already
+named the reason before the lane ran: the harness interpolated
+`Path::display()` into bash, so `C:\Users\…` lost its backslashes to shell
+escaping and the counter file was never written (an empty `attempts` value in the
+assertion). The harness already runs with the temp directory as its working
+directory, so the fix removes path syntax from the shell text entirely rather
+than quoting it.
+
 `docker network inspect` confirms an `--internal` network is still assigned its
 gateway address (`{"Subnet":"10.253.99.0/24","Gateway":"10.253.99.1"}`), so the
 expected source exists by construction — which is consistent with what the
@@ -286,7 +294,7 @@ analysis added.
 
 ## Validation
 
-- Root suite `cargo test --all-features`: green.
+- Root suite `cargo test --all-features`: **2,047 passed, 0 failed**.
 - `cargo fmt` + `cargo clippy --all-targets --all-features -- -D warnings`:
   clean, root and `clients/native`.
 - `clients/native`: 89 unit tests green, `cargo fmt --check` and strict Clippy
@@ -298,9 +306,12 @@ analysis added.
 
 ## Review
 
-Cursor Bugbot reviewed every head. It reported no issues on the first, and on
-the third found the reachability gate's own errexit defect described above —
-a real finding on code that had 41 green runs behind it. Copilot was
+Cursor Bugbot reviewed every head and found two real defects, both in code this
+session added and both invisible to the runs that had already passed: the
+reachability gate's errexit collapse (41 green runs behind it) and the harness's
+Windows path interpolation (which the Windows lane then confirmed
+independently). Both are fixed with the replies recorded in their threads, and
+Bugbot reports **no new issues** on the final head `d9f1ff3`. Copilot was
 quota-blocked on every request (`the user who requested the review has reached
 their quota limit`), as on every recent PR.
 
@@ -320,3 +331,10 @@ No new issues. Two existing ones were advanced with evidence:
 ## Publication
 
 PR #279 from branch `agent/session-092-teardown-write-integrity`.
+
+Final head `d9f1ff3`: **14 hosted workflows green**, the Dependabot-only
+workflow skipped as designed, and one failure — `Running Copilot Code Review`,
+the reviewer's own account quota, which has failed identically on every recent
+PR. The `TURN-only WebRTC Interop` lane that is red on `main` is green here,
+with **60 consecutive passes** across every head carrying the reachability gate
+(41 + 11 + 1 + 7). Left unmerged for the owner.
