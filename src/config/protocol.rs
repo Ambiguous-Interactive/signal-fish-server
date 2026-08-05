@@ -101,6 +101,9 @@ impl ProtocolConfig {
     /// (`max >= min`), and the ceiling must not exceed what this build implements
     /// ([`SERVER_MAX_PROTOCOL_VERSION`]).
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.room_code_length == 0 {
+            anyhow::bail!("protocol.room_code_length must be greater than 0");
+        }
         if self.min_protocol_version < SERVER_MIN_PROTOCOL_VERSION {
             anyhow::bail!(
                 "protocol.min_protocol_version ({}) must be >= {SERVER_MIN_PROTOCOL_VERSION}",
@@ -121,6 +124,45 @@ impl ProtocolConfig {
                 self.max_protocol_version
             );
         }
+        Ok(())
+    }
+
+    /// Validate that automatic room-code generation can only produce codes
+    /// accepted by the client join validator.
+    ///
+    /// The optional server prefix is trimmed and uppercased by the generator.
+    /// Restricting it to ASCII alphanumeric characters keeps byte length equal
+    /// to character length and matches the exact wire validator. At least one
+    /// random character must remain so a prefix cannot collapse every room in
+    /// the deployment onto one code.
+    pub fn validate_room_code_generation(
+        &self,
+        room_code_prefix: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+
+        let Some(prefix) = room_code_prefix else {
+            return Ok(());
+        };
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            anyhow::bail!("server.room_code_prefix must not be blank when configured");
+        }
+        if !prefix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+        {
+            anyhow::bail!(
+                "server.room_code_prefix must contain only ASCII alphanumeric characters"
+            );
+        }
+        if prefix.len() >= self.room_code_length {
+            anyhow::bail!(
+                "server.room_code_prefix must be shorter than protocol.room_code_length ({})",
+                self.room_code_length
+            );
+        }
+
         Ok(())
     }
 }

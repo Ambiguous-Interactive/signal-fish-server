@@ -2111,6 +2111,290 @@ fn test_ci_workflow_matrix_os_values_match_constant() {
     }
 }
 
+#[test]
+fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/relay-timing-observations.yml");
+    assert!(
+        workflow_path.exists(),
+        "issue #274 requires .github/workflows/relay-timing-observations.yml so hosted timing \n\
+         policy is based on retained multi-run evidence instead of isolated log lines"
+    );
+    let workflow = read_live_file(&workflow_path);
+    let documents = Yaml::load_from_str(&workflow).expect("relay timing workflow must parse");
+    let document = documents.first().expect("workflow YAML document");
+    let triggers = document
+        .as_mapping_get("on")
+        .or_else(|| document.as_mapping_get("true"))
+        .expect("workflow must define triggers");
+    let schedule = triggers
+        .as_mapping_get("schedule")
+        .and_then(Yaml::as_sequence)
+        .expect("workflow must define a schedule");
+    assert_eq!(
+        schedule.len(),
+        1,
+        "timing sampling has one canonical cadence"
+    );
+    assert_eq!(
+        schedule[0].as_mapping_get("cron").and_then(Yaml::as_str),
+        Some("30 5 * * *")
+    );
+    assert!(
+        triggers.as_mapping_get("workflow_dispatch").is_some(),
+        "manual diagnostic sampling must remain available"
+    );
+    let pull_request = triggers
+        .as_mapping_get("pull_request")
+        .expect("workflow changes must validate on pull requests");
+    assert_eq!(
+        pull_request
+            .as_mapping_get("branches")
+            .and_then(Yaml::as_sequence)
+            .expect("pull request branch filter")
+            .iter()
+            .map(|value| value.as_str().expect("branch string"))
+            .collect::<Vec<_>>(),
+        vec!["main"]
+    );
+    assert_eq!(
+        pull_request
+            .as_mapping_get("paths")
+            .and_then(Yaml::as_sequence)
+            .expect("pull request path filter")
+            .iter()
+            .map(|value| value.as_str().expect("path string"))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "tests/sixteen_player_matrix_e2e.rs",
+            ".github/workflows/relay-timing-observations.yml",
+        ])
+    );
+
+    let concurrency = document
+        .as_mapping_get("concurrency")
+        .expect("timing attempts need explicit concurrency semantics");
+    assert_eq!(
+        concurrency
+            .as_mapping_get("cancel-in-progress")
+            .and_then(Yaml::as_bool),
+        Some(false),
+        "manual or overlapping runs must not cancel an eligible scheduled attempt"
+    );
+    assert_eq!(
+        document
+            .as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("REPETITIONS"))
+            .and_then(Yaml::as_integer),
+        Some(5)
+    );
+    assert_eq!(
+        document
+            .as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("SIGNAL_FISH_RELAY_WORKLOAD_VERSION"))
+            .and_then(Yaml::as_str),
+        Some("relay-clean-v1")
+    );
+
+    let job = document
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("observations"))
+        .expect("workflow must define the observations job");
+    assert!(
+        job.as_mapping_get("if").is_none(),
+        "job must be unconditional"
+    );
+    assert!(
+        job.as_mapping_get("needs").is_none(),
+        "a skipped dependency must not erase a timing attempt"
+    );
+    assert_failure_is_not_swallowed(job, "the observations job");
+    assert_eq!(
+        job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some("${{ matrix.os }}")
+    );
+    assert_eq!(
+        job.as_mapping_get("timeout-minutes")
+            .and_then(Yaml::as_integer),
+        Some(45)
+    );
+    let strategy = job.as_mapping_get("strategy").expect("matrix strategy");
+    assert_eq!(
+        strategy.as_mapping_get("fail-fast").and_then(Yaml::as_bool),
+        Some(false)
+    );
+    let matrix = strategy
+        .as_mapping_get("matrix")
+        .expect("observation OS matrix");
+    for narrowing in ["include", "exclude"] {
+        assert!(
+            matrix.as_mapping_get(narrowing).is_none(),
+            "matrix.{narrowing} can silently narrow the platform evidence"
+        );
+    }
+    assert_eq!(
+        matrix
+            .as_mapping_get("os")
+            .and_then(Yaml::as_sequence)
+            .expect("matrix.os")
+            .iter()
+            .map(|value| value.as_str().expect("OS string"))
+            .collect::<Vec<_>>(),
+        vec!["ubuntu-latest", "windows-latest", "macos-latest"]
+    );
+
+    let steps = job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("observation steps");
+    for step in steps {
+        assert_failure_is_not_swallowed(step, "every observation step");
+    }
+    let named_step = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("missing `{name}` step"))
+    };
+    let capture = named_step("Capture repeated clean relay observations");
+    assert!(capture.as_mapping_get("if").is_none());
+    assert_eq!(
+        capture.as_mapping_get("shell").and_then(Yaml::as_str),
+        Some("bash")
+    );
+    let capture_run = capture
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("capture command");
+    for required in [
+        "set -euo pipefail",
+        "SIGNAL_FISH_RELAY_OBSERVATIONS_JSONL=relay-timing-observations.jsonl",
+        "expected_rows=$((REPETITIONS * 6))",
+    ] {
+        assert!(
+            capture_run.contains(required),
+            "capture step lost `{required}`"
+        );
+    }
+    assert!(
+        !capture_run.contains("|| true"),
+        "capture must propagate every semantic test failure"
+    );
+    let cargo_commands: Vec<String> = shell_logical_lines(capture_run)
+        .into_iter()
+        .filter(|line| line.contains("cargo test"))
+        .collect();
+    assert_eq!(
+        cargo_commands,
+        vec![
+            "cargo test --locked --all-features --test sixteen_player_matrix_e2e \
+             hosted_timing_profile_keeps_backpressure_gate_without_wall_clock_gate -- --exact",
+            "SIGNAL_FISH_RELAY_OBSERVATIONS_JSONL=relay-timing-observations.jsonl \
+             SIGNAL_FISH_RELAY_OBSERVATION_SAMPLE=\"$sample\" cargo test --locked \
+             --all-features --test sixteen_player_matrix_e2e \
+             hosted_relay_timing_observations_preserve_semantic_oracles -- --exact --ignored \
+             --nocapture --test-threads=1 2>&1 | tee -a relay-timing-output.log",
+        ],
+        "the profile guard and the one repeated observation invocation must each \
+         retain their exact all-feature selector and harness flags"
+    );
+
+    let manifest = named_step("Write attempt manifest");
+    assert_eq!(
+        manifest.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    let manifest_run = manifest
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("attempt manifest command");
+    for required in [
+        "GITHUB_EVENT_NAME",
+        "GITHUB_RUN_ATTEMPT",
+        "SIGNAL_FISH_RELAY_WORKLOAD_VERSION",
+        "SIGNAL_FISH_RUST_TOOLCHAIN",
+        "ImageVersion",
+        "actual_rows",
+        "complete",
+        "eligible",
+        "relay-timing-attempt.json",
+    ] {
+        assert!(
+            manifest_run.contains(required),
+            "attempt manifest lost `{required}`"
+        );
+    }
+
+    let upload = named_step("Upload raw and machine-readable observations");
+    assert_eq!(
+        upload.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert_eq!(
+        upload.as_mapping_get("uses").and_then(Yaml::as_str),
+        Some("actions/upload-artifact@v7.0.1")
+    );
+    let with = upload.as_mapping_get("with").expect("upload settings");
+    let paths = with
+        .as_mapping_get("path")
+        .and_then(Yaml::as_str)
+        .expect("artifact paths");
+    for required in [
+        "relay-timing-observations.jsonl",
+        "relay-timing-output.log",
+        "relay-timing-attempt.json",
+    ] {
+        assert!(paths.lines().any(|line| line.trim() == required));
+    }
+    assert_eq!(
+        with.as_mapping_get("retention-days")
+            .and_then(Yaml::as_integer),
+        Some(90)
+    );
+    assert_eq!(
+        with.as_mapping_get("if-no-files-found")
+            .and_then(Yaml::as_str),
+        Some("error")
+    );
+
+    let nightly_path = root.join(".github/workflows/verification-nightly.yml");
+    let nightly = read_live_file(&nightly_path);
+    let nightly_documents =
+        Yaml::load_from_str(&nightly).expect("verification nightly workflow must parse");
+    let nightly_job = nightly_documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("scenario-profiles"))
+        .expect("verification nightly must retain the scenario-profiles job");
+    let nightly_matrix_run = nightly_job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .and_then(|steps| {
+            steps.iter().find(|step| {
+                step.as_mapping_get("name").and_then(Yaml::as_str)
+                    == Some("Run 16-player relay matrix and knee sweep")
+            })
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("verification nightly relay-matrix command");
+    let nightly_cargo_commands: Vec<String> = shell_logical_lines(nightly_matrix_run)
+        .into_iter()
+        .filter(|line| line.contains("cargo nextest"))
+        .collect();
+    assert_eq!(
+        nightly_cargo_commands,
+        vec![
+            "cargo nextest run --profile ci --locked --all-features --test \
+             sixteen_player_matrix_e2e --run-ignored all --success-output final -- --skip \
+             hosted_relay_timing_observations_preserve_semantic_oracles 2>&1 | tee \
+             relay-matrix-output.txt"
+        ],
+        "nightly must retain its complete matrix/fault/knee selection and exclude only the \
+         dedicated hosted observation selector"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests for expand_matrix_display_name and display_name_matches_template
 // ---------------------------------------------------------------------------

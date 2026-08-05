@@ -298,6 +298,33 @@ git diff 875057d -- tests/sixteen_player_matrix_e2e.rs |
 Do not interpret a zero-test filter result from the unmodified base as a
 comparison run.
 
+Hosted-runner timing policy is measured separately by the
+`Relay Timing Observations` workflow. Its daily/manual matrix runs five complete
+all-feature clean-grid repetitions in a dedicated process on Linux, Windows,
+and macOS, keeps every delivery, conformance, zero-backpressure, and
+zero-eviction oracle, but deliberately does not gate the observed wall clock.
+Each job retains raw output, one JSONL row per completed cell, and an explicit
+attempt manifest for 90 days, including RED-run artifacts. Records identify the
+event, attempt, commit, exact Rust toolchain, workload schema, runner image, and
+completion state.
+
+Issue #274's platform decision uses the first 20 consecutive scheduled,
+first-attempt allocations per operating system after `relay-clean-v1` lands
+(100 requested observations per cell). Manual, pull-request, and rerun samples
+are diagnostic only. The GitHub workflow-run ledger is the denominator: a RED,
+cancelled, missing-artifact, incomplete, different-toolchain, or different
+workload-version attempt invalidates that enablement cohort instead of being
+dropped in favor of a later green run. A replacement cohort requires a
+documented cause and a new workload version before collection restarts.
+
+The dedicated-process observations may justify only an equivalently isolated,
+all-feature PR timing job; they cannot set a threshold for the concurrently
+loaded broad Nextest job. The current 250 ms ceiling is a candidate for that
+isolated job only if every eligible observation is below it and the largest
+retains at least 2x headroom (at most 125 ms). Otherwise the platform stays
+correctness-only. A new ceiling must not be invented from one outlier or one
+shared-runner sample.
+
 ## Code Coverage
 
 ```bash

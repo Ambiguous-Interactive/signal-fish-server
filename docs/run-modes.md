@@ -32,7 +32,7 @@ v2 relay floor, so enabling v3 never breaks a v2-only client.
 | TLS (built-in) | Terminates HTTPS/`wss://` in the server itself | `security.transport.tls.enabled=true`, `security.transport.tls.certificate_path`, `security.transport.tls.private_key_path` (env: `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true`) | `cargo run` (with the three TLS keys set) |
 | TLS (reverse proxy) | Terminates TLS at nginx/Caddy; server stays plain `ws://` on loopback | none on the server; configure the proxy (see [reverse proxy setup](deployment.md#reverse-proxy-setup)) | `cargo run` (server) + proxy in front |
 | Metrics + Prometheus | Exposes JSON + Prometheus metrics, optionally behind a bearer token | `security.require_metrics_auth=true`, `security.metrics_auth_token=<token>` (env: `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN`) | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN="$(openssl rand -hex 32)" SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=true cargo run` |
-| Externally routed isolated deployments | An application-owned directory chooses one independent, single-process room home before any peer opens its WebSocket; Signal Fish does not share or hand off room state | Optional observability metadata: `server.room_code_prefix="us-east-"`, `server.region_id="us-east"` (env: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east-`) | After deploying the external directory: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east- SIGNAL_FISH__SERVER__REGION_ID=us-east cargo run` |
+| Externally routed isolated deployments | An application-owned directory chooses one independent, single-process room home before any peer opens its WebSocket; Signal Fish does not share or hand off room state | Optional observability metadata: `server.room_code_prefix="USE"`, `server.region_id="us-east"` (env: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE`) | After deploying the external directory: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE SIGNAL_FISH__SERVER__REGION_ID=us-east cargo run` |
 
 Per-feature JSON snippets (with env equivalents and "when to use") live in the
 [configuration recipes](configuration-recipes.md).
@@ -163,10 +163,14 @@ of that external routing scheme, and `server.region_id` can label metrics, but
 both are metadata rather than coordination:
 
 ```bash
-SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=us-east- \
+SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE \
   SIGNAL_FISH__SERVER__REGION_ID=us-east \
   cargo run
 ```
+
+The prefix is normalized to uppercase and must contain only ASCII letters or
+digits. It must be shorter than `protocol.room_code_length`; hyphenated region
+names such as `us-east-` are invalid room-code prefixes.
 
 See the
 [single-instance deployment contract](architecture/single-instance-deployment.md)

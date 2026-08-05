@@ -18,11 +18,15 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::{
     ClientMessage, GameDataEncoding, ServerMessage, V3BinaryGameDataFrame,
@@ -59,18 +63,25 @@ struct TrafficProfile {
     messages_per_sender: u64,
     send_interval: Duration,
     target_sender_rate_hz: u64,
+    require_zero_backpressure: bool,
     enforce_pr_latency_limit: bool,
 }
 
 impl TrafficProfile {
-    fn one_second_at(target_sender_rate_hz: u64, enforce_pr_latency_limit: bool) -> Self {
+    fn one_second_at(target_sender_rate_hz: u64, enforce_clean_gates: bool) -> Self {
         assert!(target_sender_rate_hz > 0, "sender rate must be positive");
         Self {
             messages_per_sender: target_sender_rate_hz,
             send_interval: Duration::from_nanos(NANOS_PER_SECOND / target_sender_rate_hz),
             target_sender_rate_hz,
-            enforce_pr_latency_limit,
+            require_zero_backpressure: enforce_clean_gates,
+            enforce_pr_latency_limit: enforce_clean_gates,
         }
+    }
+
+    fn without_wall_clock_gate(mut self) -> Self {
+        self.enforce_pr_latency_limit = false;
+        self
     }
 }
 
@@ -97,7 +108,7 @@ fn wall_clock_latency_is_gated() -> bool {
     !cfg!(target_os = "macos")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct CellObservation {
     target_deliveries_per_second: usize,
     completed_deliveries: usize,
@@ -111,6 +122,74 @@ struct CellObservation {
     max_micros: u64,
     backpressure_events: u64,
     rss_kib: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct RelayTimingRecord<'a> {
+    schema_version: u8,
+    event_name: Option<&'a str>,
+    run_id: Option<&'a str>,
+    run_attempt: Option<&'a str>,
+    commit_sha: Option<&'a str>,
+    runner_os: Option<&'a str>,
+    runner_image_os: Option<&'a str>,
+    runner_image_version: Option<&'a str>,
+    rust_toolchain: Option<&'a str>,
+    workload_version: Option<&'a str>,
+    target_os: &'static str,
+    target_arch: &'static str,
+    sample: u32,
+    encoding: &'static str,
+    players: usize,
+    profile: &'static str,
+    observation: &'a CellObservation,
+}
+
+fn append_relay_timing_record(path: &Path, record: &RelayTimingRecord<'_>) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, record)?;
+    file.write_all(b"\n")
+}
+
+fn record_scheduled_observation(cell: MatrixCell, observation: &CellObservation) {
+    let Ok(path) = std::env::var("SIGNAL_FISH_RELAY_OBSERVATIONS_JSONL") else {
+        return;
+    };
+    let sample = std::env::var("SIGNAL_FISH_RELAY_OBSERVATION_SAMPLE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_default();
+    let event_name = std::env::var("GITHUB_EVENT_NAME").ok();
+    let run_id = std::env::var("GITHUB_RUN_ID").ok();
+    let run_attempt = std::env::var("GITHUB_RUN_ATTEMPT").ok();
+    let commit_sha = std::env::var("GITHUB_SHA").ok();
+    let runner_os = std::env::var("RUNNER_OS").ok();
+    let runner_image_os = std::env::var("ImageOS").ok();
+    let runner_image_version = std::env::var("ImageVersion").ok();
+    let rust_toolchain = std::env::var("SIGNAL_FISH_RUST_TOOLCHAIN").ok();
+    let workload_version = std::env::var("SIGNAL_FISH_RELAY_WORKLOAD_VERSION").ok();
+    let record = RelayTimingRecord {
+        schema_version: 1,
+        event_name: event_name.as_deref(),
+        run_id: run_id.as_deref(),
+        run_attempt: run_attempt.as_deref(),
+        commit_sha: commit_sha.as_deref(),
+        runner_os: runner_os.as_deref(),
+        runner_image_os: runner_image_os.as_deref(),
+        runner_image_version: runner_image_version.as_deref(),
+        rust_toolchain: rust_toolchain.as_deref(),
+        workload_version: workload_version.as_deref(),
+        target_os: std::env::consts::OS,
+        target_arch: std::env::consts::ARCH,
+        sample,
+        encoding: cell.encoding.as_wire_str(),
+        players: cell.players,
+        profile: NetworkProfile::Clean.label(),
+        observation,
+    };
+    append_relay_timing_record(Path::new(&path), &record).unwrap_or_else(|error| {
+        panic!("failed to append relay timing observation to {path}: {error}")
+    });
 }
 
 impl std::fmt::Display for CellObservation {
@@ -673,7 +752,7 @@ async fn run_cell(
     let backpressure_events = metrics
         .websocket_backpressure_events
         .load(Ordering::Relaxed);
-    if traffic.enforce_pr_latency_limit {
+    if traffic.require_zero_backpressure {
         assert_eq!(
             backpressure_events, 0,
             "{cell_label}: bounded matrix cell must not enter backpressure"
@@ -778,7 +857,92 @@ fn resident_set_kib() -> Option<u64> {
 async fn clean_relay_matrix_is_complete_fast_and_backpressure_free() {
     let traffic = TrafficProfile::one_second_at(MESSAGES_PER_SENDER, true);
     for cell in matrix_cells() {
-        run_cell(cell, NetworkProfile::Clean, traffic).await;
+        let observation = run_cell(cell, NetworkProfile::Clean, traffic).await;
+        record_scheduled_observation(cell, &observation);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+#[ignore = "scheduled/manual-only (relay-timing-observations.yml): hosted timing distribution"]
+async fn hosted_relay_timing_observations_preserve_semantic_oracles() {
+    let traffic =
+        TrafficProfile::one_second_at(MESSAGES_PER_SENDER, true).without_wall_clock_gate();
+    for cell in matrix_cells() {
+        let observation = run_cell(cell, NetworkProfile::Clean, traffic).await;
+        record_scheduled_observation(cell, &observation);
+    }
+}
+
+#[test]
+fn hosted_timing_profile_keeps_backpressure_gate_without_wall_clock_gate() {
+    let traffic =
+        TrafficProfile::one_second_at(MESSAGES_PER_SENDER, true).without_wall_clock_gate();
+    assert!(traffic.require_zero_backpressure);
+    assert!(!traffic.enforce_pr_latency_limit);
+}
+
+#[test]
+fn relay_timing_records_are_machine_readable_and_append_only() {
+    let temp = tempfile::tempdir().expect("temporary observation directory");
+    let path = temp.path().join("relay-observations.jsonl");
+    let observation = CellObservation {
+        target_deliveries_per_second: 60,
+        completed_deliveries: 60,
+        achieved_ingress_messages_per_second: 60.0,
+        sender_completion_millis: 1_000,
+        observed_deliveries_per_second: 60.0,
+        completion_millis: 1_000,
+        p50_micros: 100,
+        p95_micros: 200,
+        p99_micros: 300,
+        max_micros: 400,
+        backpressure_events: 0,
+        rss_kib: Some(1_024),
+    };
+    let record = RelayTimingRecord {
+        schema_version: 1,
+        event_name: Some("schedule"),
+        run_id: Some("123"),
+        run_attempt: Some("1"),
+        commit_sha: Some("abc"),
+        runner_os: Some("Linux"),
+        runner_image_os: Some("ubuntu24"),
+        runner_image_version: Some("20260801.1"),
+        rust_toolchain: Some("1.91.0"),
+        workload_version: Some("relay-clean-v1"),
+        target_os: "linux",
+        target_arch: "x86_64",
+        sample: 1,
+        encoding: "json",
+        players: 2,
+        profile: "clean",
+        observation: &observation,
+    };
+
+    append_relay_timing_record(&path, &record).expect("first observation append");
+    append_relay_timing_record(&path, &record).expect("second observation append");
+
+    let content = std::fs::read_to_string(path).expect("observation artifact");
+    let rows: Vec<serde_json::Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("valid JSONL row"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "each append must preserve an independent row"
+    );
+    for row in rows {
+        assert_eq!(row["schema_version"], 1);
+        assert_eq!(row["event_name"], "schedule");
+        assert_eq!(row["rust_toolchain"], "1.91.0");
+        assert_eq!(row["workload_version"], "relay-clean-v1");
+        assert_eq!(row["sample"], 1);
+        assert_eq!(row["encoding"], "json");
+        assert_eq!(row["players"], 2);
+        assert_eq!(row["observation"]["p99_micros"], 300);
+        assert_eq!(row["observation"]["backpressure_events"], 0);
     }
 }
 

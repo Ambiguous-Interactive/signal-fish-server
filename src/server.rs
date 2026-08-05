@@ -292,6 +292,11 @@ impl EnhancedGameServer {
         transport_security: crate::config::TransportSecurityConfig,
         authorized_apps: Vec<AppAuthEntry>,
     ) -> anyhow::Result<Arc<Self>> {
+        // Library embedders can construct `ServerConfig` directly without the
+        // top-level config loader. Enforce the same generation/join closure
+        // here before initializing storage or background tasks.
+        protocol_config.validate_room_code_generation(config.room_code_prefix.as_deref())?;
+
         let database: Arc<dyn GameDatabase> =
             Arc::from(create_database(database_config.clone()).await?);
         database.initialize().await?;
@@ -3335,5 +3340,37 @@ mod relay_projection_cache_tests {
         ] {
             assert!(!rendered.contains(removed), "stale series {removed}");
         }
+    }
+
+    #[tokio::test]
+    async fn library_constructor_rejects_unjoinable_generated_room_codes() {
+        let config = super::ServerConfig {
+            room_code_prefix: Some("EU-".to_string()),
+            ..super::ServerConfig::default()
+        };
+        let result = super::EnhancedGameServer::new(
+            config,
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("invalid prefix must fail before server construction"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("server.room_code_prefix must contain only ASCII alphanumeric"),
+            "constructor must report the exact invalid generation field: {error}"
+        );
     }
 }

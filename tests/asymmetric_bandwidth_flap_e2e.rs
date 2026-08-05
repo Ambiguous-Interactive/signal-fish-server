@@ -23,6 +23,7 @@ mod websocket_test_helpers;
 
 use futures_util::{Sink, SinkExt, StreamExt};
 use signal_fish_server::config::ProtocolConfig;
+use signal_fish_server::metrics::ServerMetrics;
 use signal_fish_server::protocol::{
     ClientMessage, DeliveryClass, DeliveryGap, DeliveryGapReason, PlayerId, ReconnectedPayload,
     ServerMessage,
@@ -49,7 +50,6 @@ const RELIABLE_CYCLES: u64 = 2;
 const VOLATILE_DURATION: Duration = Duration::from_secs(60);
 const PHASE_DEADLINE: Duration = Duration::from_secs(90);
 const EVENT_DEADLINE: Duration = Duration::from_secs(30);
-const POST_FAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(60);
 const PADDING_BYTES: usize = 512;
 
 #[derive(Default)]
@@ -70,7 +70,7 @@ enum ReliableTermination {
     ResetWithoutClosingHandshake,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct VolatileObservation {
     delivered: u64,
     reported_dropped: u64,
@@ -311,6 +311,43 @@ async fn poll_until_within(context: &str, timeout: Duration, mut condition: impl
             "{context}: condition not reached before {timeout:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_volatile_fanouts(
+    metrics: &ServerMetrics,
+    attempted_target: u64,
+    timeout: Duration,
+    observer: &mut tokio::task::JoinHandle<VolatileObservation>,
+) -> Result<(), VolatileObservation> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let accounting = async {
+        loop {
+            let volatile = metrics.delivery_metrics_by_class().volatile;
+            let resolved = volatile.delivered
+                + volatile.superseded
+                + volatile.dropped_full
+                + volatile.dropped
+                + volatile.abandoned
+                + volatile.unsupported_format;
+            if volatile.attempted == attempted_target && resolved == volatile.attempted {
+                return;
+            }
+            let now = tokio::time::Instant::now();
+            assert!(
+                now < deadline,
+                "volatile fanouts did not drain before {timeout:?}: \
+                 target_attempted={attempted_target} observed={volatile:?} resolved={resolved}"
+            );
+            tokio::time::sleep_until((now + Duration::from_millis(25)).min(deadline)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        observation = &mut *observer => {
+            Err(observation.expect("volatile observer panicked before the marker"))
+        }
+        () = accounting => Ok(()),
     }
 }
 
@@ -599,7 +636,7 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
     // `victim_ws` is the live second reconnect from the loop.
     let sender_baseline = metrics.delivery_metrics_by_class().reliable.attempted;
     let volatile_attempted_baseline = metrics.delivery_metrics_by_class().volatile.attempted;
-    let volatile_observer = spawn_volatile_observer(victim_ws, sender_id, sender_watermark.seq);
+    let mut volatile_observer = spawn_volatile_observer(victim_ws, sender_id, sender_watermark.seq);
     proxy.throttle(Direction::ServerToClient, Some(DOWNSTREAM_BYTES_PER_SEC));
     let volatile_started = tokio::time::Instant::now();
     let volatile_deadline = volatile_started + VOLATILE_DURATION;
@@ -626,21 +663,44 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
     // fanouts reached terminal accounting, then use Reliable as the post-fault
     // stream delimiter it is intended to be.
     let volatile_attempted_target = volatile_attempted_baseline + volatile_sent * 2;
-    poll_until_within(
-        "volatile fanouts drain before the reliable marker",
-        POST_FAULT_DRAIN_DEADLINE,
-        || {
-            let volatile = metrics.delivery_metrics_by_class().volatile;
-            let resolved = volatile.delivered
-                + volatile.superseded
-                + volatile.dropped_full
-                + volatile.dropped
-                + volatile.abandoned
-                + volatile.unsupported_format;
-            volatile.attempted == volatile_attempted_target && resolved == volatile.attempted
-        },
+    // This is an event-driven frontier, not a latency assertion. On a
+    // single-core runner the sender-side socket backlog can take almost the
+    // full 60-second volatile phase to reach the server after sending stops,
+    // so use the experiment's pre-registered 90-second phase ceiling.
+    if let Err(observation) = wait_for_volatile_fanouts(
+        &metrics,
+        volatile_attempted_target,
+        PHASE_DEADLINE,
+        &mut volatile_observer,
     )
-    .await;
+    .await
+    {
+        let delivery = metrics.delivery_metrics_by_class();
+        let slow_consumer_disconnects = metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed);
+        let ping_timeouts = metrics.websocket_ping_timeouts.load(Ordering::Relaxed);
+        let ping_probes_skipped = metrics
+            .websocket_ping_probes_skipped_activity
+            .load(Ordering::Relaxed);
+        let ping_probes_cancelled = metrics
+            .websocket_ping_probes_cancelled_activity
+            .load(Ordering::Relaxed);
+        let expired_players = metrics.expired_players_cleaned.load(Ordering::Relaxed);
+        let proxy_terminations = proxy.terminations();
+        let watcher_delivered = watcher_state.game_data.load(Ordering::Relaxed);
+        panic!(
+            "volatile victim terminated before the post-fault marker after {volatile_sent} \
+             offers during the terminal fanout accounting wait: \
+             observation={observation:?}; server recorded {slow_consumer_disconnects} \
+             slow-consumer disconnects, {ping_timeouts} ping timeouts, \
+             {ping_probes_skipped} skipped and {ping_probes_cancelled} cancelled probes, and \
+             {expired_players} activity-reaper evictions; delivery={delivery:?}; healthy \
+             watcher delivered={watcher_delivered}/{} pre-marker offers; proxy terminations: \
+             {proxy_terminations:?}",
+            total_sent + volatile_sent,
+        );
+    }
 
     send(
         &mut sender_sink,

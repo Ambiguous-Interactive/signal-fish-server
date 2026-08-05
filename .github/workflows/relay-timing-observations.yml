@@ -1,0 +1,167 @@
+# Hosted Relay Timing Observations
+#
+# Collects the repeated, cross-platform distribution required to resolve issue
+# #274 without turning shared-runner wall clock into a guessed correctness
+# threshold. Every sample still runs the exact delivery, conformance,
+# backpressure, and eviction oracles from the ordinary clean relay matrix.
+#
+# Runs daily at 05:30 UTC, after the 03:00 delivery suite and 04:00 fuzz suite,
+# so independent hosted allocations accumulate without concentrating load.
+# Manual runs support deliberate experiments. Pull requests run this workflow
+# only when its measurement contract changes.
+#
+# all-jobs-run-on-schedule
+
+name: Relay Timing Observations
+
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/sixteen_player_matrix_e2e.rs"
+      - ".github/workflows/relay-timing-observations.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  REPETITIONS: 5
+  SIGNAL_FISH_RELAY_WORKLOAD_VERSION: relay-clean-v1
+
+jobs:
+  observations:
+    name: Clean Relay Samples (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "SIGNAL_FISH_RUST_TOOLCHAIN=$CHANNEL" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: >-
+            ${{ github.event_name != 'pull_request' ||
+                github.event.pull_request.head.repo.full_name == github.repository }}
+
+      - name: Capture repeated clean relay observations
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          : > relay-timing-observations.jsonl
+          : > relay-timing-output.log
+
+          cargo test --locked --all-features --test sixteen_player_matrix_e2e \
+            hosted_timing_profile_keeps_backpressure_gate_without_wall_clock_gate \
+            -- --exact
+
+          for sample in $(seq 1 "$REPETITIONS"); do
+            echo "=== hosted relay sample ${sample}/${REPETITIONS} on ${{ matrix.os }} ===" \
+              | tee -a relay-timing-output.log
+            SIGNAL_FISH_RELAY_OBSERVATIONS_JSONL=relay-timing-observations.jsonl \
+            SIGNAL_FISH_RELAY_OBSERVATION_SAMPLE="$sample" \
+              cargo test --locked --all-features --test sixteen_player_matrix_e2e \
+                hosted_relay_timing_observations_preserve_semantic_oracles \
+                -- --exact --ignored --nocapture --test-threads=1 \
+                2>&1 | tee -a relay-timing-output.log
+          done
+
+          expected_rows=$((REPETITIONS * 6))
+          actual_rows=$(wc -l < relay-timing-observations.jsonl | tr -d ' ')
+          if [ "$actual_rows" -ne "$expected_rows" ]; then
+            echo "ERROR: expected ${expected_rows} observation rows, found ${actual_rows}"
+            exit 1
+          fi
+
+      - name: Write attempt manifest
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -u
+          expected_rows=$((REPETITIONS * 6))
+          actual_rows=0
+          if [ -f relay-timing-observations.jsonl ]; then
+            actual_rows=$(wc -l < relay-timing-observations.jsonl | tr -d ' ')
+          fi
+          complete=false
+          if [ "$JOB_STATUS" = "success" ] && [ "$actual_rows" -eq "$expected_rows" ]; then
+            complete=true
+          fi
+          eligible=false
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$GITHUB_RUN_ATTEMPT" = "1" ]; then
+            eligible=true
+          fi
+          {
+            printf '{"schema_version":1,'
+            printf '"event_name":"%s","run_id":"%s",' \
+              "$GITHUB_EVENT_NAME" "$GITHUB_RUN_ID"
+            printf '"run_attempt":"%s","commit_sha":"%s",' \
+              "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA"
+            printf '"runner_os":"%s","runner_image_os":"%s",' \
+              "$RUNNER_OS" "${ImageOS:-unknown}"
+            printf '"runner_image_version":"%s","rust_toolchain":"%s",' \
+              "${ImageVersion:-unknown}" "${SIGNAL_FISH_RUST_TOOLCHAIN:-unknown}"
+            printf '"workload_version":"%s","job_status":"%s",' \
+              "$SIGNAL_FISH_RELAY_WORKLOAD_VERSION" "$JOB_STATUS"
+            printf '"expected_rows":%s,"actual_rows":%s,' "$expected_rows" "$actual_rows"
+            printf '"complete":%s,"eligible":%s}\n' "$complete" "$eligible"
+          } > relay-timing-attempt.json
+
+      - name: Report observation summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Hosted relay observations — ${{ matrix.os }}"
+            echo
+            echo "Repetitions requested: ${REPETITIONS}"
+            echo
+            echo '```text'
+            grep "matrix cell" relay-timing-output.log 2>/dev/null \
+              || echo "no complete matrix-cell observations captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw and machine-readable observations
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: relay-timing-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            relay-timing-observations.jsonl
+            relay-timing-output.log
+            relay-timing-attempt.json
+          retention-days: 90
+          if-no-files-found: error

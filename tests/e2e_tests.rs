@@ -1467,10 +1467,14 @@ async fn test_e2e_room_code_generation_with_custom_length() {
         ..Default::default()
     };
 
+    let server_config = ServerConfig {
+        room_code_prefix: Some("eu".to_string()),
+        ..ServerConfig::default()
+    };
     let running_server =
-        start_test_server_with_config_and_protocol(ServerConfig::default(), protocol_config).await;
+        start_test_server_with_config_and_protocol(server_config, protocol_config).await;
     let addr = running_server.addr();
-    let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
+    let (mut creator_sender, mut creator_receiver) = connect_client(addr, "/v2/ws").await;
 
     // Create room without specifying code (should auto-generate with custom length)
     let auto_room_msg = ClientMessage::JoinRoom {
@@ -1482,10 +1486,10 @@ async fn test_e2e_room_code_generation_with_custom_length() {
         relay_transport: None,
     };
 
-    let response = send_and_receive(&mut sender, &mut receiver, auto_room_msg)
+    let response = send_and_receive(&mut creator_sender, &mut creator_receiver, auto_room_msg)
         .await
         .unwrap();
-    match response {
+    let generated_code = match response {
         ServerMessage::RoomJoined(ref payload) => {
             assert_eq!(
                 payload.room_code.len(),
@@ -1497,8 +1501,34 @@ async fn test_e2e_room_code_generation_with_custom_length() {
             assert!(!payload.room_code.contains('O'));
             assert!(!payload.room_code.contains('I'));
             assert!(!payload.room_code.contains('1'));
+            assert!(payload.room_code.starts_with("EU"));
+            payload.room_code.clone()
         }
         _ => panic!("Expected successful room creation with auto-generated code, got {response:?}"),
+    };
+
+    expect_lobby_state_changed_notification(&mut creator_receiver, "creator joined prefixed room")
+        .await;
+    let (mut joiner_sender, mut joiner_receiver) = connect_client(addr, "/v2/ws").await;
+    let join_response = send_and_receive(
+        &mut joiner_sender,
+        &mut joiner_receiver,
+        ClientMessage::JoinRoom {
+            game_name: "autogame".to_string(),
+            room_code: Some(generated_code.clone()),
+            player_name: "Joiner".to_string(),
+            max_players: None,
+            supports_authority: Some(true),
+            relay_transport: None,
+        },
+    )
+    .await
+    .unwrap();
+    match join_response {
+        ServerMessage::RoomJoined(payload) => assert_eq!(payload.room_code, generated_code),
+        other => {
+            panic!("second player could not join generated room `{generated_code}`: {other:?}")
+        }
     }
     running_server.shutdown().await;
 }

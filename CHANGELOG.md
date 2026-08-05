@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject room-code settings that can generate rooms no second player can join
+  (issue #283). `protocol.room_code_length` must now be nonzero, and
+  `server.room_code_prefix` must be a nonblank ASCII-alphanumeric string shorter
+  than the total code length. The same fail-fast invariant applies to config
+  startup and direct library construction; valid lowercase prefixes remain
+  normalized to uppercase.
 - Make an unreachable TURN allocation self-describing in the native reference
   client and its interoperability lane (issue #276). The client now reports the
   complete resolved ICE bind set on every pairing — bound addresses, which came
