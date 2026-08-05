@@ -101,6 +101,38 @@ The authoritative local validation completed successfully with:
   path changed in this session; the over-target warning is recorded rather than
   expanding the gameplay/workflow PR into an unrelated hook rewrite.
 
-Publication, hosted checks, and reviewer disposition remain to be recorded.
+## Publication and hosted failure analysis
+
+Pull request #285 published the two scoped commits at `ecef57f`. Eighteen
+hosted workflows completed successfully, including CI, Advanced Safety,
+Fuzzing, every interop lane, and the new three-platform Relay Timing
+Observations run; both Dependabot-only invocations skipped as designed. Cursor
+was explicitly triggered on the exact head. Copilot reached its repository/user
+review quota and returned no code review, and no independent human reviewer is
+available beyond the PR author.
+
+Verification Nightly's Real-World Scenario Profiles job was the sole failure.
+Every preceding profile passed, then H10 completed both expected reliable
+slow-consumer/reconnect cycles before its volatile terminal-accounting frontier
+missed the 60-second post-fault ceiling by less than one second. The exact
+hosted selector reproduced under `taskset -c 0`: it preserved both `4002`
+cycles, stayed connected throughout the volatile phase, conserved every offer,
+and passed in 158.399 seconds, but the healthy path's maximum interarrival gap
+reached 52.657 seconds and accounting completed almost exactly at the old
+ceiling. This classifies the failure as a loaded-runner sender-ingress backlog,
+not a production relay stall or lost terminal outcome.
+
+The accounting condition remains event-driven and unchanged. Its ceiling now
+uses H10's existing 90-second phase budget, giving the 60-second offered phase
+bounded scheduling headroom without weakening any eviction, reconnect,
+delivery, gap, liveness, or conservation oracle. A dedicated waiter also emits
+the target and complete per-class counter snapshot if the frontier genuinely
+fails again. Adversarial review found that an early victim termination could
+otherwise leave the two-recipient target unreachable for the entire wider
+ceiling; the waiter now races the observer and immediately reports its exact
+Close, transport-error, or EOF classification. The constrained exact Nextest
+selector passes at the reproduced 158-second boundary, and the follow-up head
+is subject to the same full hosted gate and reviewer loop.
+
 P53 itself intentionally stays open after publication while the pre-registered
 scheduled cohort accumulates.
