@@ -262,6 +262,11 @@ anyway.
 The two sets are unioned and then filtered by the same rule, so a routing answer can never widen `--ip-family`.
 `--cripple-ice` is exempt from (2): that transport exists to be unreachable.
 
+Rule (2) runs on the task that also pumps the WebSocket, so it is bounded twice: the whole probe shares a
+two-second budget, and its answers are resolved once per endpoint set rather than once per pair. A resolver that
+hangs therefore costs the union and nothing else — never the pairing, and never the server's activity deadlines.
+A replan that changes servers re-probes; a credential rotation, which keeps the same URLs, does not.
+
 CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
 `.github/workflows/webrtc-interop.yml`, and the browser cells via
 [`scripts/run-browser-interop.sh`](../../scripts/run-browser-interop.sh) in

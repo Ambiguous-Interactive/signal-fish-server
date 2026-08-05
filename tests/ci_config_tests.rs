@@ -23899,24 +23899,20 @@ fn assert_ice_bind_set_is_routing_aware(root: &Path) {
         enumerate.path.segments.last().map(|s| s.ident.to_string())
     );
 
-    // The routing answers must come from THIS session's servers. An empty
-    // literal, or `ice_server_source_addrs(&[])`, restores the pre-#276
-    // behaviour with the call still in place.
+    // The routing answers must come from THIS pairing's servers. An empty
+    // literal restores the pre-#276 behaviour with the call still in place.
     let syn::Expr::Await(awaited) = arguments[2] else {
         panic!(
-            "the routing answers must be `ice_server_source_addrs(..).await`; a \
+            "the routing answers must be `self.ice_route_sources(..).await`; a \
              literal or a constant makes the union a permanent no-op"
         )
     };
-    let syn::Expr::Call(probe) = awaited.base.as_ref() else {
-        panic!("the routing answers must come from a call to ice_server_source_addrs")
+    let syn::Expr::MethodCall(probe) = awaited.base.as_ref() else {
+        panic!("the routing answers must come from `self.ice_route_sources(..)`")
     };
-    let syn::Expr::Path(probe_path) = probe.func.as_ref() else {
-        panic!("the routing answers must come from a call to ice_server_source_addrs")
-    };
-    assert!(
-        probe_path.path.is_ident("ice_server_source_addrs"),
-        "the routing answers must come from `ice_server_source_addrs`"
+    assert_eq!(
+        probe.method, "ice_route_sources",
+        "the routing answers must come from `self.ice_route_sources(..)`"
     );
     let probe_argument = probe
         .args
@@ -23931,6 +23927,23 @@ fn assert_ice_bind_set_is_routing_aware(root: &Path) {
     assert!(
         servers.path.is_ident("ice_servers"),
         "the probe must be handed this pairing's `ice_servers`"
+    );
+
+    // ...and that memo must be a memo of the real probe. Returning a cached
+    // constant, or dropping the probe entirely, is invisible to every live cell
+    // on a host whose interface table already contains the route.
+    let memo = production_call_arguments(&file, "ice_server_source_addrs");
+    assert_eq!(
+        memo.len(),
+        1,
+        "`ice_route_sources` must resolve through exactly one call to \
+         `ice_server_source_addrs`; found {}",
+        memo.len()
+    );
+    assert!(
+        source.contains("let endpoints = ice_server_endpoints(ice_servers);"),
+        "the memo must key on the endpoints of THIS pairing's servers, so a \
+         replan that changes servers re-probes"
     );
 }
 

@@ -27,6 +27,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -200,6 +201,16 @@ pub struct Engine {
     events: mpsc::UnboundedSender<EngineEvent>,
     peers: HashMap<PlayerId, PeerLink>,
     next_generation: u64,
+    /// Routing answers for the current ICE endpoints, resolved once per set
+    /// rather than once per pair.
+    ///
+    /// Pairing runs on the orchestrator task, which also pumps the WebSocket.
+    /// Resolving every server for every peer would multiply any resolver
+    /// latency by the mesh size on that task, and a long enough stall there is
+    /// indistinguishable from an idle client to the server. The key is the
+    /// endpoint list itself, so a replan that changes servers re-probes while a
+    /// credential rotation — same URLs, new username and password — does not.
+    ice_route_sources: Option<(Vec<(String, u16)>, Vec<IpAddr>)>,
 }
 
 impl Engine {
@@ -217,7 +228,22 @@ impl Engine {
             events,
             peers: HashMap::new(),
             next_generation: 0,
+            ice_route_sources: None,
         })
+    }
+
+    /// Routing answers for `ice_servers`, resolved on first use and reused
+    /// while the endpoint set is unchanged (see [`Engine::ice_route_sources`]).
+    async fn ice_route_sources(&mut self, ice_servers: &[IceServer]) -> Vec<IpAddr> {
+        let endpoints = ice_server_endpoints(ice_servers);
+        if let Some((probed, sources)) = &self.ice_route_sources {
+            if *probed == endpoints {
+                return sources.clone();
+            }
+        }
+        let sources = ice_server_source_addrs(&endpoints).await;
+        self.ice_route_sources = Some((endpoints, sources.clone()));
+        sources
     }
 
     /// Whether a peer connection toward `peer` already exists.
@@ -306,7 +332,7 @@ impl Engine {
         let udp_addrs = session_udp_addrs(
             self.settings,
             local_udp_addrs,
-            ice_server_source_addrs(ice_servers).await,
+            self.ice_route_sources(ice_servers).await,
         )?;
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
@@ -804,12 +830,20 @@ pub fn session_udp_addrs(
         enumerated.iter().map(SocketAddr::ip).chain(sources),
         settings.ip_family,
     )?;
-    if merged.len() > enumerated.len() {
-        // The exact condition behind issue #276. Without this line a failed run
-        // shows only "no candidate pairs", with nothing naming the cause.
+    // Name the exact condition behind issue #276. Comparing lengths would not:
+    // the interface rule drops link-local and duplicate addresses, so a set
+    // that gained a routing answer can still be no larger. Without this line a
+    // failed run shows only "no candidate pairs", with nothing naming the
+    // cause.
+    let enumerated_ips: BTreeSet<IpAddr> = enumerated.iter().map(SocketAddr::ip).collect();
+    let added: Vec<IpAddr> = merged
+        .iter()
+        .map(SocketAddr::ip)
+        .filter(|ip| !enumerated_ips.contains(ip))
+        .collect();
+    if !added.is_empty() {
         tracing::info!(
-            enumerated = enumerated.len(),
-            bound = merged.len(),
+            ?added,
             "interface enumeration missed a route to a configured ICE server; \
              binding the kernel's source address for it as well"
         );
@@ -817,34 +851,73 @@ pub fn session_udp_addrs(
     Ok(merged)
 }
 
-/// Kernel-selected source addresses for every configured STUN/TURN server.
+/// Total budget for the routing probe.
+///
+/// The probe runs on the orchestrator task, which also pumps the WebSocket, so
+/// a resolver that hangs must cost the session a bounded delay and the union —
+/// never the pairing, and never the server's activity deadlines. Every
+/// configured URL shares one budget; on expiry the enumerated interface
+/// addresses stand alone, exactly as before this rule existed.
+const ICE_ROUTE_PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Kernel-selected source addresses for the given STUN/TURN endpoints.
 ///
 /// A server this host cannot resolve or route to contributes nothing and is
 /// reported as a diagnostic rather than an error: the enumerated interface
 /// addresses still stand, and webrtc applies its own URL validation to the
 /// same list.
-pub async fn ice_server_source_addrs(ice_servers: &[IceServer]) -> Vec<IpAddr> {
-    let mut sources = BTreeSet::new();
-    for (host, port) in ice_server_endpoints(ice_servers) {
-        let resolved = match tokio::net::lookup_host((host.as_str(), port)).await {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                tracing::debug!(%host, port, %error, "ICE server did not resolve; no route probe");
-                continue;
-            }
-        };
-        for server in resolved {
-            match route_source_addr(server) {
-                Ok(source) => {
-                    sources.insert(source);
-                }
+pub async fn ice_server_source_addrs(endpoints: &[(String, u16)]) -> Vec<IpAddr> {
+    if endpoints.is_empty() {
+        return Vec::new();
+    }
+    let probe = async {
+        let mut sources = BTreeSet::new();
+        for (host, port) in endpoints {
+            let resolved = match tokio::net::lookup_host((host.as_str(), *port)).await {
+                Ok(resolved) => resolved,
                 Err(error) => {
-                    tracing::debug!(%server, %error, "no local route to this ICE server");
+                    tracing::debug!(%host, port, %error, "ICE server did not resolve");
+                    continue;
+                }
+            };
+            for server in resolved {
+                match route_source_addr(server) {
+                    Ok(source) => {
+                        sources.insert(source);
+                    }
+                    Err(error) => {
+                        tracing::debug!(%server, %error, "no local route to this ICE server");
+                    }
                 }
             }
         }
+        sources.into_iter().collect()
+    };
+    route_sources_within(ICE_ROUTE_PROBE_BUDGET, probe).await
+}
+
+/// Run `probe` under `budget`, yielding no routing answers when it expires.
+///
+/// Separated from the probe body so the expiry path is reachable from a test
+/// without a hung resolver. A `timeout` wrapped around real resolution races
+/// Tokio's poll order — the inner future is polled before the timer, so a
+/// lookup that already finished on the blocking pool wins — which is a flaky
+/// oracle, not a proof.
+async fn route_sources_within(
+    budget: Duration,
+    probe: impl std::future::Future<Output = Vec<IpAddr>>,
+) -> Vec<IpAddr> {
+    match tokio::time::timeout(budget, probe).await {
+        Ok(sources) => sources,
+        Err(_elapsed) => {
+            tracing::warn!(
+                budget_ms = budget.as_millis(),
+                "ICE server route probe exceeded its budget; pairing continues on the \
+                 enumerated interface addresses alone"
+            );
+            Vec::new()
+        }
     }
-    sources.into_iter().collect()
 }
 
 /// Host and port of every STUN or TURN URL a session plan carried.
@@ -852,7 +925,7 @@ pub async fn ice_server_source_addrs(ice_servers: &[IceServer]) -> Vec<IpAddr> {
 /// Unparsable or non-STUN/TURN URLs are skipped rather than rejected: this
 /// client is not the authority on the URL grammar, and an entry it cannot read
 /// must not cost the session the servers it can.
-fn ice_server_endpoints(ice_servers: &[IceServer]) -> Vec<(String, u16)> {
+pub fn ice_server_endpoints(ice_servers: &[IceServer]) -> Vec<(String, u16)> {
     let mut endpoints = BTreeSet::new();
     for server in ice_servers {
         for raw in &server.urls {
@@ -1364,18 +1437,98 @@ mod tests {
             credential: Some("interop".to_string()),
         }];
         assert_eq!(
-            ice_server_source_addrs(&ice_servers).await,
+            ice_server_source_addrs(&ice_server_endpoints(&ice_servers)).await,
             vec![IpAddr::from(Ipv6Addr::LOCALHOST)],
             "the routing answer for a reachable TURN URL is its own loopback"
         );
 
         // A server this host cannot resolve costs the session nothing.
-        let unresolvable = vec![IceServer {
+        let unresolvable = [IceServer {
             urls: vec!["turn:invalid.invalid:3478?transport=udp".to_string()],
             username: None,
             credential: None,
         }];
-        assert!(ice_server_source_addrs(&unresolvable).await.is_empty());
+        assert!(
+            ice_server_source_addrs(&ice_server_endpoints(&unresolvable))
+                .await
+                .is_empty()
+        );
+        // No endpoints means no probe at all, not an empty resolution.
+        assert!(ice_server_source_addrs(&[]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_route_probe_gives_up_within_its_budget() {
+        // The probe runs on the task that also pumps the WebSocket, so a
+        // resolver that never answers must cost the union, not the session: a
+        // stalled read would let the server's own activity deadline close a
+        // healthy connection. `pending()` IS that resolver, exactly, with no
+        // dependence on when a blocking lookup happens to finish.
+        assert_eq!(
+            route_sources_within(Duration::from_millis(50), std::future::pending()).await,
+            Vec::<IpAddr>::new(),
+            "an expired budget yields no routing answers, never a stall"
+        );
+        // A probe that answers inside its budget is returned untouched, so the
+        // assertion above cannot be passing because the wrapper drops answers.
+        let answer = vec![IpAddr::from(Ipv4Addr::LOCALHOST)];
+        assert_eq!(
+            route_sources_within(Duration::from_secs(30), async { answer.clone() }).await,
+            answer
+        );
+        // The shipped budget is the only thing between a hung resolver and a
+        // stalled pairing; a zero or near-zero value would disable the union on
+        // every host, silently, with no failing cell anywhere.
+        assert!(
+            ICE_ROUTE_PROBE_BUDGET >= Duration::from_secs(1),
+            "the route probe budget must leave a real resolver time to answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_answers_are_probed_once_per_endpoint_set() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(EngineSettings::default(), tx).expect("engine builds");
+        let loopback = [IceServer {
+            urls: vec!["turn:127.0.0.1:3478?transport=udp".to_string()],
+            username: Some("a".to_string()),
+            credential: Some("b".to_string()),
+        }];
+        let expected = vec![IpAddr::from(Ipv4Addr::LOCALHOST)];
+        assert_eq!(engine.ice_route_sources(&loopback).await, expected);
+
+        // A credential rotation keeps the same URLs, so it must not re-probe.
+        let rotated = [IceServer {
+            urls: loopback[0].urls.clone(),
+            username: Some("rotated".to_string()),
+            credential: Some("rotated".to_string()),
+        }];
+        assert_eq!(engine.ice_route_sources(&rotated).await, expected);
+        assert_eq!(
+            engine.ice_route_sources.as_ref().map(|(probed, _)| probed),
+            Some(&ice_server_endpoints(&loopback)),
+            "the memo is keyed by the endpoint set, not by the credentials"
+        );
+
+        // A replan that changes the servers must, so a stale answer cannot
+        // outlive the endpoints it was measured for.
+        let replanned = [IceServer {
+            urls: vec!["turn:[::1]:3478?transport=udp".to_string()],
+            username: None,
+            credential: None,
+        }];
+        assert_eq!(
+            engine.ice_route_sources(&replanned).await,
+            vec![IpAddr::from(Ipv6Addr::LOCALHOST)]
+        );
+
+        // A plan with no ICE servers probes nothing and caches that.
+        assert!(engine.ice_route_sources(&[]).await.is_empty());
+        assert_eq!(
+            engine.ice_route_sources,
+            Some((Vec::new(), Vec::new())),
+            "an empty endpoint set is a cached answer, not a repeated no-op probe"
+        );
     }
 
     #[test]
