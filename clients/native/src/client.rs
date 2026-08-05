@@ -53,7 +53,7 @@ use webrtc::peer_connection::RTCPeerConnectionState;
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
-use crate::engine::{self, Engine, EngineEvent, RELIABLE_LABEL, UNRELIABLE_LABEL};
+use crate::engine::{Engine, EngineEvent, RELIABLE_LABEL, UNRELIABLE_LABEL};
 use crate::events::{emit, Event, PlanPeer, SignalKind};
 use crate::wire::{self, WsStream, HANDSHAKE_TIMEOUT};
 
@@ -261,7 +261,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     // Resolve an explicitly requested `--ip-family` BEFORE touching the
     // network, so a host that cannot serve it fails the process instead of
     // creating or joining a server-side room it could never have used.
-    engine::preflight_ip_family(cli.engine_settings(), engine::local_udp_addrs)
+    crate::engine::preflight_ip_family(cli.engine_settings(), crate::engine::local_udp_addrs)
         .map_err(|error| FatalError::protocol(format!("{error:#}")))?;
 
     // Built before the socket too: `Engine::new` touches no network, and its

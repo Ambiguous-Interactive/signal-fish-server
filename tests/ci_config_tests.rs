@@ -23469,13 +23469,38 @@ fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
     // rule while swallowing its failure, and a bare `local_udp_addrs` can be a
     // local stand-in shadowing it — both compile clean under
     // `clippy -D warnings`.
-    let resolver = resolver_argument(&run_inner.block.stmts[preflight])
-        .expect("the pre-flight call must pass a resolver argument");
+    let arguments = preflight_arguments(&run_inner.block.stmts[preflight])
+        .expect("the pre-flight call must pass its arguments");
+
+    // The settings argument carries the requested family. A constant such as
+    // `EngineSettings::default()` is `IpFamily::Any`, for which the pre-flight
+    // returns before it ever consults the resolver — a permanent no-op that no
+    // live cell can catch, since the failure needs a family the host lacks.
+    let settings = arguments
+        .first()
+        .expect("the pre-flight takes the invocation's settings");
+    let syn::Expr::MethodCall(settings) = settings else {
+        panic!(
+            "the pre-flight must be handed THIS invocation's settings \
+             (`cli.engine_settings()`), not a constant"
+        );
+    };
+    assert_eq!(
+        settings.method, "engine_settings",
+        "the pre-flight must resolve the family this invocation asked for"
+    );
+
+    // The resolver must be the engine's own rule, spelled from the crate root
+    // so that neither a local definition nor a re-imported `engine` alias can
+    // stand in for it.
+    let resolver = arguments
+        .get(1)
+        .expect("the pre-flight takes a resolver argument");
     let syn::Expr::Path(path) = resolver else {
         panic!(
-            "the pre-flight's resolver must be the bare path \
-             `engine::local_udp_addrs`, not a closure or adapter that can \
-             swallow its failure"
+            "the pre-flight's resolver must be the path \
+             `crate::engine::local_udp_addrs`, not a closure or adapter that \
+             can swallow its failure"
         );
     };
     let segments: Vec<String> = path
@@ -23486,16 +23511,20 @@ fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
         .collect();
     assert_eq!(
         segments,
-        vec!["engine".to_string(), "local_udp_addrs".to_string()],
-        "the pre-flight must use the engine's own bind selection, fully \
-         qualified so a local definition cannot shadow it"
+        vec![
+            "crate".to_string(),
+            "engine".to_string(),
+            "local_udp_addrs".to_string()
+        ],
+        "the pre-flight must use the engine's own bind selection, spelled from \
+         the crate root so no alias or local definition can shadow it"
     );
 }
 
-/// The second argument of the `preflight_ip_family` call inside `statement`.
-fn resolver_argument(statement: &syn::Stmt) -> Option<&syn::Expr> {
+/// The arguments of the `preflight_ip_family` call inside `statement`.
+fn preflight_arguments(statement: &syn::Stmt) -> Option<Vec<&syn::Expr>> {
     struct Finder<'ast> {
-        argument: Option<&'ast syn::Expr>,
+        arguments: Option<Vec<&'ast syn::Expr>>,
     }
 
     impl<'ast> Visit<'ast> for Finder<'ast> {
@@ -23507,16 +23536,16 @@ fn resolver_argument(statement: &syn::Stmt) -> Option<&syn::Expr> {
                     .last()
                     .is_some_and(|segment| segment.ident == "preflight_ip_family")
                 {
-                    self.argument = call.args.iter().nth(1);
+                    self.arguments = Some(call.args.iter().collect());
                 }
             }
             syn::visit::visit_expr_call(self, call);
         }
     }
 
-    let mut finder = Finder { argument: None };
+    let mut finder = Finder { arguments: None };
     finder.visit_stmt(statement);
-    finder.argument
+    finder.arguments
 }
 
 /// A job or step must propagate its failure: `continue-on-error` is either
@@ -23584,6 +23613,17 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         "the interop job must not be conditional; the IPv6 cell and every other \
          live-transport cell run only there"
     );
+    assert!(
+        interop_job.as_mapping_get("needs").is_none(),
+        "the interop job must not depend on another job: a skipped dependency \
+         skips it, and a workflow whose jobs all skip still concludes success"
+    );
+    assert_eq!(
+        interop_job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some("ubuntu-latest"),
+        "the live-transport proof runs on Linux; the README platform table and \
+         the CHANGELOG both say so"
+    );
     assert_failure_is_not_swallowed(interop_job, "the interop job");
     let interop_steps: Vec<&Yaml> = interop_job
         .as_mapping_get("steps")
@@ -23606,6 +23646,22 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         }),
         "the interop job must still run the suite via scripts/run-webrtc-interop.sh"
     );
+    // ...and that script must still run the WHOLE suite. Narrowing its
+    // `cargo test` to `--lib` drops every multi-process cell, including the
+    // IPv6 proof, without touching the workflow at all.
+    let runner = read_live_file(&root.join("scripts/run-webrtc-interop.sh"));
+    let suite_command = runner
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains("cargo test"))
+        .expect("the runner script must run the client test suite");
+    for narrowing in ["--lib", "--bins", "--test ", "--no-run", "--doc"] {
+        assert!(
+            !suite_command.contains(narrowing),
+            "the interop runner must not narrow its suite with `{narrowing}`: \
+             that silently drops the multi-process cells; found `{suite_command}`"
+        );
+    }
 
     let job = documents
         .first()

@@ -5,7 +5,7 @@
 //! 30 msg/s stream with a 1 KiB payload while every peer drains concurrently.
 //! Each cell must preserve the complete per-sender payload ledger, satisfy the
 //! protocol-v3 `(epoch, seq)` rules through `ConformanceAuditor`, avoid all
-//! backpressure/evictions, and — except on hosted macOS, where that number
+//! backpressure/evictions, and — except on macOS, where that number
 //! measures runner tenancy rather than the relay (issue #274) — keep observed
 //! p99 relay latency below 250 ms.
 //! The nightly lane repeats the grid behind one chaos proxy per client for
@@ -44,7 +44,7 @@ const PAYLOAD_BYTES: usize = 1024;
 const CELL_DEADLINE: Duration = Duration::from_secs(45);
 const FRAME_DEADLINE: Duration = Duration::from_secs(30);
 /// Wall-clock p99 ceiling for the bounded PR-lane cells. Enforced everywhere
-/// except hosted macOS — see [`wall_clock_latency_is_gated`].
+/// except macOS — see [`wall_clock_latency_is_gated`].
 const P99_LIMIT_MICROS: u64 = 250_000;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
