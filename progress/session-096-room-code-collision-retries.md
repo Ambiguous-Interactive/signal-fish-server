@@ -85,5 +85,17 @@ tests/type checks/formatting, Markdown, and hook preflights. The dependency
 configuration guards were observed red before the YAML changes and green after
 them. Three adversarial passes found and then cleared legacy-adapter ambiguous
 commit handling, permanent health degradation after a recovered collision, and
-shared retry-metric denominator drift. Publication, exact-head hosted CI, and
-the hosted reviewer feedback loop remain to be completed on the final head.
+shared retry-metric denominator drift.
+
+PR #286 published the implementation and dependency-audit heads. The
+implementation head `9a5a749` completed all 19 attached workflow runs: 18
+successes covering the complete CI matrix, Advanced Safety, Fuzzing, every
+interop lane, documentation, and policy checks, plus the intentional
+Dependabot-only skip. Cursor Bugbot reviewed that exact head and reported no new
+issues. GitHub Copilot was requested through both its supported reviewer
+identity and a tagged comment, but returned the requesting account's quota-limit
+response rather than a code finding. GitHub exposed zero inline review threads,
+and no independent human reviewer was available beyond the PR author. The final
+progress-only publication head retriggered the same exact-head CI and both
+reviewer mechanisms; those gates also completed without an actionable finding
+before handoff.
