@@ -118,7 +118,11 @@ characters that are visually confusing:
 This leaves 32 unambiguous characters: `2-9` and `A-H, J-N, P-Z`.
 
 The code length is configurable via the `room_code_length` protocol setting
-(default: 6).
+(default: 6) and must be greater than zero. An optional
+`server.room_code_prefix` is normalized to uppercase and prepended to generated
+codes. Prefixes must be nonblank ASCII alphanumeric strings shorter than the
+total code length; startup rejects any configuration that could generate a code
+the join validator would refuse.
 
 ## Room Lifecycle
 
@@ -285,7 +289,9 @@ Key room-related configuration options:
 
 - `max_players` -- Maximum players per room. Default: `8`, maximum: `100`.
   Set per room at creation time via the `JoinRoom` message.
-- `room_code_length` -- Length of generated room codes. Default: `6`.
+- `room_code_length` -- Nonzero length of generated room codes. Default: `6`.
+- `room_code_prefix` -- Optional ASCII-alphanumeric prefix, shorter than the
+  total code length.
 - `room_cleanup_interval` -- Seconds between cleanup sweeps. Default: `60`.
 - `empty_room_timeout` -- Seconds before an empty room is removed.
   Default: `300`.

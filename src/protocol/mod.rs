@@ -861,12 +861,27 @@ mod tests {
     }
 
     #[test]
-    fn region_room_code_falls_back_when_prefix_too_long() {
-        let config = ProtocolConfig {
-            room_code_length: 4,
-            ..ProtocolConfig::default()
-        };
-        let code = room_codes::generate_region_room_code(&config, Some("LONGPREFIX"));
-        assert_eq!(code.len(), 4);
+    fn accepted_room_code_generation_configs_always_produce_joinable_codes() {
+        let prefixes = [None, Some("A"), Some("na"), Some(" na "), Some("USE")];
+
+        for room_code_length in 1..=12 {
+            for prefix in prefixes {
+                let config = ProtocolConfig {
+                    room_code_length,
+                    ..ProtocolConfig::default()
+                };
+                if config.validate_room_code_generation(prefix).is_err() {
+                    continue;
+                }
+
+                for _ in 0..32 {
+                    let code = room_codes::generate_region_room_code(&config, prefix);
+                    assert!(
+                        validate_room_code_with_config(&code, &config).is_ok(),
+                        "accepted length={room_code_length}, prefix={prefix:?} generated unjoinable `{code}`"
+                    );
+                }
+            }
+        }
     }
 }

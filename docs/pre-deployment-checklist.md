@@ -113,7 +113,8 @@ cargo run -- --print-config
   assigns the room home before the WebSocket upgrade and routes every initial
   connection and reconnect for that room to the same process.
 - [ ] `server.room_code_prefix` and `server.region_id`, if set, are treated as
-  routing/observability metadata rather than shared-state coordination.
+  routing/observability metadata rather than shared-state coordination; the
+  prefix is ASCII alphanumeric and shorter than `protocol.room_code_length`.
 - [ ] The load balancer stops sending new connections before `SIGTERM`, and its
   timeout allows at least `server.drain_grace_secs` for the close boundary.
 - [ ] Review the

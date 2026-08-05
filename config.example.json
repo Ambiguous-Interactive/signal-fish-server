@@ -12,7 +12,8 @@
     "event_buffer_size": 100,
     "enable_reconnection": true,
     "heartbeat_throttle_secs": 30,
-    "region_id": "default"
+    "region_id": "default",
+    "room_code_prefix": null
   },
   "rate_limit": {
     "max_room_creations": 5,

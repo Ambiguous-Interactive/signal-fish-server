@@ -261,13 +261,14 @@ complete reference.
 | `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION`        | `server.enable_reconnection`       | `true`    | Enable reconnection support                         |
 | `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS`    | `server.heartbeat_throttle_secs`   | `30`      | Min seconds between `last_seen` heartbeat writes    |
 | `SIGNAL_FISH__SERVER__REGION_ID`                  | `server.region_id`                 | `default` | Region identifier for metrics                       |
+| `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX`           | `server.room_code_prefix`          | `null`    | Optional ASCII-alphanumeric generated-code prefix   |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`    | `5`       | Max room creations per player per window            |
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`           | `60`      | Rate limit window in seconds                        |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`     | `20`      | Max join attempts per player per window             |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`           | `600`     | Max validated WebRTC Signal dispatch attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS`      | `rate_limit.max_signal_errors`     | `60`      | Detailed WebRTC rejection errors per player/window  |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`    | `64`      | Max characters in a game name                       |
-| `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`        | `6`       | Length of generated room codes                      |
+| `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`        | `6`       | Nonzero length of generated room codes              |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH`   | `protocol.max_player_name_length`  | `32`      | Max characters in a player name                     |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYERS_LIMIT`        | `protocol.max_players_limit`       | `100`     | Hard ceiling on players per room                    |
 | `SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA` | `protocol.enable_message_pack_game_data` | `true` | Enable MessagePack game-data frames                 |

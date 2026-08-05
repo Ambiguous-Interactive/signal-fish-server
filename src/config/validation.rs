@@ -281,8 +281,11 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // Protocol version-bounds validation
-    config.protocol.validate()?;
+    // Protocol bounds plus generated-room-code closure: every automatically
+    // generated code must be admissible through the explicit join path.
+    config
+        .protocol
+        .validate_room_code_generation(config.server.room_code_prefix.as_deref())?;
 
     // Session topology/transport policy validation
     config.session.validate()?;
@@ -441,6 +444,73 @@ mod tests {
             assert!(
                 err.to_string().contains(&expected),
                 "error must point at the blank field {expected}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn room_code_generation_config_rejects_unjoinable_codes() {
+        struct Case {
+            name: &'static str,
+            length: usize,
+            prefix: Option<&'static str>,
+            expected: &'static str,
+        }
+
+        let cases = [
+            Case {
+                name: "zero total length",
+                length: 0,
+                prefix: None,
+                expected: "protocol.room_code_length must be greater than 0",
+            },
+            Case {
+                name: "blank configured prefix",
+                length: 6,
+                prefix: Some(" \t"),
+                expected: "server.room_code_prefix must not be blank",
+            },
+            Case {
+                name: "punctuation in prefix",
+                length: 6,
+                prefix: Some("EU-"),
+                expected: "server.room_code_prefix must contain only ASCII alphanumeric",
+            },
+            Case {
+                name: "non-ASCII prefix",
+                length: 6,
+                prefix: Some("ÉU"),
+                expected: "server.room_code_prefix must contain only ASCII alphanumeric",
+            },
+            Case {
+                name: "prefix consumes entire code",
+                length: 6,
+                prefix: Some("ABCDEF"),
+                expected: "server.room_code_prefix must be shorter than protocol.room_code_length",
+            },
+            Case {
+                name: "prefix exceeds code",
+                length: 6,
+                prefix: Some("ABCDEFG"),
+                expected: "server.room_code_prefix must be shorter than protocol.room_code_length",
+            },
+        ];
+
+        for case in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.protocol.room_code_length = case.length;
+            config.server.room_code_prefix = case.prefix.map(ToString::to_string);
+
+            let error = match validate_config_security(&config) {
+                Ok(()) => panic!("{} must fail startup validation", case.name),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(case.expected),
+                "{}: expected `{}`, got `{error}`",
+                case.name,
+                case.expected
             );
         }
     }
