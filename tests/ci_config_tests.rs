@@ -23370,8 +23370,16 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
             "the IPv6 interop proof lost acceptance marker `{required}`"
         );
     }
+    // Absence checks must NOT read the stripped view: `read_live_file` drops
+    // every line starting with `#`, which includes Rust attributes, so
+    // `!live.contains("#[ignore]")` would pass even with every cell ignored.
+    // Read the raw file and match only a real attribute line, so a commented
+    // `// #[ignore]` cannot false-positive either.
+    let interop_raw = read_file(&root.join("clients/native/tests/interop_e2e.rs"));
     assert!(
-        !interop.contains("#[ignore]"),
+        !interop_raw
+            .lines()
+            .any(|line| line.trim_start().starts_with("#[ignore")),
         "the interop cells must never become opt-in; that would silently drop \
          every live-transport proof in this file"
     );
