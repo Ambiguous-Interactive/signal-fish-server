@@ -107,9 +107,11 @@ const SERIAL_ACQUIRE_TIMEOUT: Duration =
 const RELIABLE: &str = "reliable";
 const UNRELIABLE: &str = "unreliable";
 const CLIENT_NAMES: [&str; 3] = ["c0", "c1", "c2"];
-/// Scenario 6 only: bind IPv6 exclusively, and keep mDNS obfuscation off so
-/// every host candidate is a raw address the assertions can read.
-const IPV6_ARGS: [&str; 3] = ["--ip-family", "ipv6", "--disable-mdns"];
+/// Scenario 6 only: bind IPv6 exclusively, so an IPv6 host candidate is the
+/// only thing this client can advertise. (No `--disable-mdns`: rtc 0.20's
+/// default multicast-DNS mode is query-only, so native host candidates are
+/// raw addresses either way.)
+const IPV6_ARGS: [&str; 2] = ["--ip-family", "ipv6"];
 
 async fn acquire_serial() -> tokio::sync::MutexGuard<'static, ()> {
     tokio::time::timeout(SERIAL_ACQUIRE_TIMEOUT, SCENARIO_SERIAL.lock())
@@ -1610,9 +1612,23 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
         // A live WebRTC pair carried the session, not the relay floor.
         assert_pair_connected_exactly(window, who, &peers);
         assert_transport_status_true(&client.events, who);
+        // Bound the fallback claim to the LIVE session. A sibling that exits
+        // first legitimately drives this client's status to `false` plus one
+        // `fallback_engaged` — and the server emits that transition BEFORE
+        // `PlayerLeft`, so `scenario_window` does not exclude it (reproduced
+        // 4 times in 12 single-core runs). What must hold is that the relay
+        // floor never carried the exchange.
+        let live_end = client
+            .events
+            .iter()
+            .rposition(|event| {
+                event.get("event").and_then(Value::as_str) == Some("channel_message")
+            })
+            .expect("the exchange produced channel messages")
+            + 1;
         assert!(
-            events_named(&client.events, "fallback_engaged").is_empty(),
-            "{who}: the IPv6 host path must carry the session, not the relay fallback;\n{}",
+            events_named(&client.events[..live_end], "fallback_engaged").is_empty(),
+            "{who}: the IPv6 host path must carry the exchange, not the relay fallback;\n{}",
             client.diagnostics()
         );
 

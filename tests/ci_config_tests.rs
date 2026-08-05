@@ -23316,36 +23316,100 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
     let cli = read_live_file(&root.join("clients/native/src/cli.rs"));
 
+    // Parse the job rather than substring-match it: `contains` cannot see an
+    // `if: false` that disables the whole matrix, a `continue-on-error: true`
+    // that swallows its result, or a `|| true` appended to a pinned command.
+    let documents = Yaml::load_from_str(&workflow).expect("webrtc-interop.yml must parse as YAML");
+    let job = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("native-platforms"))
+        .expect("webrtc-interop.yml must define the native-platforms job (issue #271)");
+    assert!(
+        job.as_mapping_get("if").is_none(),
+        "the native platform matrix must not be conditional; an `if:` can disable \
+         every non-Linux proof without touching a single command"
+    );
+    assert!(
+        !job.as_mapping_get("continue-on-error")
+            .and_then(Yaml::as_bool)
+            .unwrap_or(false),
+        "the native platform matrix must fail its workflow, not report success"
+    );
+    let strategy = job
+        .as_mapping_get("strategy")
+        .expect("the native platform job must define a strategy");
+    assert_eq!(
+        strategy.as_mapping_get("fail-fast").and_then(Yaml::as_bool),
+        Some(false),
+        "one red platform must not cancel the other platform's evidence"
+    );
+    let platforms: Vec<&str> = strategy
+        .as_mapping_get("matrix")
+        .and_then(|matrix| matrix.as_mapping_get("os"))
+        .and_then(|os| os.as_sequence())
+        .expect("the native platform job must define strategy.matrix.os")
+        .iter()
+        .map(|value| value.as_str().expect("each matrix os is a string"))
+        .collect();
+    assert_eq!(
+        platforms,
+        vec!["windows-latest", "macos-latest"],
+        "the platforms clients/native is proved on must not shrink; Linux is the \
+         separate `interop` job, which runs the same commands plus the live suite"
+    );
+
+    // Exact `run` values: a trailing `|| true` (or any other suffix) would keep
+    // a `contains` check green while discarding the command's exit status.
+    let steps: Vec<&Yaml> = job
+        .as_mapping_get("steps")
+        .and_then(|steps| steps.as_sequence())
+        .expect("the native platform job must define steps")
+        .iter()
+        .collect();
+    let commands: Vec<&str> = steps
+        .iter()
+        .filter_map(|step| step.as_mapping_get("run").and_then(Yaml::as_str))
+        .map(str::trim)
+        .collect();
     for required in [
-        "native-platforms:",
-        "name: Native Client Build (${{ matrix.os }})",
-        "runs-on: ${{ matrix.os }}",
-        "os: [windows-latest, macos-latest]",
-        "working-directory: clients/native",
-        "run: cargo metadata --locked --format-version 1 > /dev/null",
-        "run: cargo fmt --check",
-        "run: cargo clippy --locked --all-targets -- -D warnings",
+        "cargo metadata --locked --format-version 1 > /dev/null",
+        "cargo fmt --check",
+        "cargo clippy --locked --all-targets -- -D warnings",
         // Clippy never links the integration cells; this is what proves they
         // build on the platform.
-        "run: cargo test --locked --all-targets --no-run",
-        "run: cargo test --locked --lib --bins",
+        "cargo test --locked --all-targets --no-run",
+        "cargo test --locked --lib --bins",
     ] {
         assert!(
-            workflow.contains(required),
-            "webrtc-interop.yml lost the native platform matrix contract `{required}`; \
-             clients/native would compile on Linux only (issue #271)"
+            commands.contains(&required),
+            "the native platform matrix lost the exact command `{required}`; \
+             commands present: {commands:?} (issue #271)"
+        );
+    }
+    for step in &steps {
+        assert!(
+            !step
+                .as_mapping_get("continue-on-error")
+                .and_then(Yaml::as_bool)
+                .unwrap_or(false),
+            "no step in the native platform matrix may swallow its failure"
         );
     }
     assert!(
-        workflow.contains("fail-fast: false"),
-        "one red platform must not cancel the other platform's evidence"
+        workflow.contains("name: Native Client Build (${{ matrix.os }})"),
+        "the per-platform check name is API surface for branch protection"
+    );
+    assert!(
+        workflow.contains("working-directory: clients/native"),
+        "the matrix must run against the standalone crate, not the root package"
     );
 
     // Structural facts, not loose tokens: each of these is a line the proof
     // cannot lose while still proving anything.
     for required in [
         // The clients really run IPv6-only, and the args really reach them.
-        r#"const IPV6_ARGS: [&str; 3] = ["--ip-family", "ipv6", "--disable-mdns"];"#,
+        r#"const IPV6_ARGS: [&str; 2] = ["--ip-family", "ipv6"];"#,
         "extra_args: &IPV6_ARGS,",
         // The precondition applies the client's own rule and never skips.
         "fn require_ipv6_ice_interface()",
@@ -23363,7 +23427,7 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         "assert_exchange_sent_to(window, who, &peers);",
         "assert_exchange_received_from(window, who, &peers);",
         "assert_pair_connected_exactly(window, who, &peers);",
-        r#"events_named(&client.events, "fallback_engaged").is_empty(),"#,
+        r#"events_named(&client.events[..live_end], "fallback_engaged").is_empty(),"#,
     ] {
         assert!(
             interop.contains(required),

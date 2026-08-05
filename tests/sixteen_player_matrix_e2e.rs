@@ -5,7 +5,9 @@
 //! 30 msg/s stream with a 1 KiB payload while every peer drains concurrently.
 //! Each cell must preserve the complete per-sender payload ledger, satisfy the
 //! protocol-v3 `(epoch, seq)` rules through `ConformanceAuditor`, avoid all
-//! backpressure/evictions, and keep observed p99 relay latency below 250 ms.
+//! backpressure/evictions, and — except on hosted macOS, where that number
+//! measures runner tenancy rather than the relay (issue #274) — keep observed
+//! p99 relay latency below 250 ms.
 //! The nightly lane repeats the grid behind one chaos proxy per client for
 //! jitter/throttle and complete-burst pause/resume recovery, then sweeps the
 //! 16-player JSON cell through increasing sender rates to expose the measured
@@ -76,16 +78,19 @@ impl TrafficProfile {
 ///
 /// Every correctness oracle — exact delivery ledgers, the conformance audit,
 /// zero backpressure, zero slow-consumer eviction — runs on all platforms.
-/// Only this one wall-clock number is Linux-gated, because on hosted macOS it
-/// measures runner tenancy rather than relay behavior: the same
+/// Only this one wall-clock number is exempted, and only where there is
+/// evidence for the exemption: on hosted macOS it measures runner tenancy
+/// rather than relay behavior — the same
 /// `message_pack-16p-clean-30hz` cell reported 322,391us (run 30961040248) and
 /// 261,754us (run 30953968136) while the `json-16p` cell *in the same process*
 /// reported 26,019us and this repository's Linux runs report ~7,000us. A 12x
 /// intra-run spread cannot be a property of the code under test. PLAN P24
 /// already records the doctrine: hosted timing is a local comparison point,
-/// never a portable capacity claim. Tracked as issue #274.
+/// never a portable capacity claim. Windows keeps the gate — it has never
+/// failed this assertion, and exempting it would exceed the evidence.
+/// Tracked as issue #274.
 fn wall_clock_latency_is_gated() -> bool {
-    cfg!(target_os = "linux")
+    !cfg!(target_os = "macos")
 }
 
 #[derive(Debug)]
@@ -693,20 +698,17 @@ async fn run_cell(
     let p95_micros = percentile(95);
     let p99_micros = percentile(99);
     let max_micros = *latencies.last().expect("matrix produced latency samples");
-    if profile == NetworkProfile::Clean && traffic.enforce_pr_latency_limit {
-        if wall_clock_latency_is_gated() {
-            assert!(
-                p99_micros < P99_LIMIT_MICROS,
-                "{cell_label}: p99 relay latency {p99_micros}us exceeded {P99_LIMIT_MICROS}us"
-            );
-        } else {
-            // Never drop a measurement silently: the number stays in the log
-            // with its status, so a real regression is still visible here.
-            eprintln!(
-                "matrix cell {cell_label}: p99 relay latency {p99_micros}us observed, \
-                 NOT gated on this platform (limit {P99_LIMIT_MICROS}us, see issue #274)"
-            );
-        }
+    // The per-cell diagnostic below reports `p99_us` on every platform either
+    // way, so an exempt platform still records the number; only the gate is
+    // skipped.
+    if profile == NetworkProfile::Clean
+        && traffic.enforce_pr_latency_limit
+        && wall_clock_latency_is_gated()
+    {
+        assert!(
+            p99_micros < P99_LIMIT_MICROS,
+            "{cell_label}: p99 relay latency {p99_micros}us exceeded {P99_LIMIT_MICROS}us"
+        );
     }
     let sender_completion = sender_completed_at.saturating_sub(Duration::from_millis(50));
     let ingress_messages = cell.players as f64 * traffic.messages_per_sender as f64;

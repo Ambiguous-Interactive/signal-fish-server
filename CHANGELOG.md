@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Prove the native reference client on every supported desktop platform and over
-  IPv6 (issue #271). A locked Linux/Windows/macOS matrix now compiles, lints,
-  and unit-tests `clients/native` on the exact repository MSRV — neither the
-  root CI matrix nor the interop cells built that standalone crate off Linux. A
+  IPv6 (issue #271). A locked Windows/macOS matrix now builds, lints, and
+  unit-tests `clients/native` on the exact repository MSRV, alongside the
+  pre-existing Linux interop job — neither the root CI matrix nor those cells
+  built that standalone crate off Linux. A
   new interoperability cell drives two real client processes with the new
   `--ip-family ipv6` selector, so only IPv6 host candidates can be advertised,
   and requires a host/host pair of concrete dialable IPv6 addresses plus the

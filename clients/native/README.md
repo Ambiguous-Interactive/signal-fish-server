@@ -261,7 +261,7 @@ says:
 | macOS (`macos-latest`) | ✅ `Native Client Build (macos-latest)` | ❌ not proved |
 
 The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs, on the repository MSRV:
-`cargo metadata --locked`, `cargo fmt --check`, `cargo clippy --locked --all-targets -D warnings`,
+`cargo metadata --locked`, `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
 `cargo test --locked --all-targets --no-run`, and `cargo test --locked --lib --bins`. The `--no-run` step is
 what actually builds and links the multi-process cells — clippy only type-checks them (`--emit=metadata`, no
 codegen). Those cells are built but not run off Linux: they spawn the server binary, which is the Linux lane's

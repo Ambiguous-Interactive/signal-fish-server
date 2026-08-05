@@ -6,10 +6,10 @@
 # actual WebRTC sessions (DTLS + SCTP data channels over loopback UDP)
 # brokered by the server's protocol v3 signaling. Scenarios cover the mesh
 # and host-star topologies, the crippled-ICE relay fallback, late-join
-# NewPeer pairing, mixed v2/v3 relay-floor rooms, and an IPv6-only loopback
-# pair (tests/ipv6_interop_e2e.rs). The interop server config disables TURN
-# and configures zero STUN URLs, so the suite performs no external network
-# access.
+# NewPeer pairing, mixed v2/v3 relay-floor rooms, and an IPv6-only pair
+# (scenario 6 of clients/native/tests/interop_e2e.rs). The interop server
+# config disables TURN and configures zero STUN URLs, so the suite performs no
+# external network access.
 #
 # Live transport is proved on Linux only; `native-platforms` adds the
 # compile + unit-test proof for Windows and macOS, because neither the interop

@@ -204,19 +204,17 @@ impl Engine {
     /// Build the engine with the default runtime and the invocation's
     /// [`EngineSettings`].
     ///
-    /// An explicitly requested [`IpFamily`] is resolved here, before any
-    /// session work, so a host that cannot serve it fails the process instead
-    /// of failing every pair later — a per-pair failure would degrade to the
-    /// relay floor and still exit successfully, which is exactly the silent
-    /// pass `--ip-family` exists to prevent.
+    /// An explicitly requested [`IpFamily`] is resolved here. The client
+    /// builds the engine before it opens its WebSocket, so a host that cannot
+    /// serve the family fails the process before any server-side room exists,
+    /// instead of failing every pair later — a per-pair failure would degrade
+    /// to the relay floor and still exit successfully, which is exactly the
+    /// silent pass `--ip-family` exists to prevent.
     pub fn new(
         settings: EngineSettings,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Result<Self> {
-        if settings.ip_family != IpFamily::Any {
-            local_udp_addrs(settings)
-                .with_context(|| format!("--ip-family {}", settings.ip_family.as_str()))?;
-        }
+        ensure_requested_family_is_available(settings, local_udp_addrs)?;
         let runtime = default_runtime()
             .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
         Ok(Self {
@@ -650,6 +648,23 @@ fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> 
     serde_json::to_string(&candidate).context("serialize ICE candidate wire projection")
 }
 
+/// Fail when an explicitly requested [`IpFamily`] cannot be served.
+///
+/// `resolve` is the bind-selection rule (production passes
+/// [`local_udp_addrs`]); injecting it keeps the failure path reachable in a
+/// unit test on a host that happens to serve every family.
+fn ensure_requested_family_is_available(
+    settings: EngineSettings,
+    resolve: impl Fn(EngineSettings) -> Result<Vec<SocketAddr>>,
+) -> Result<()> {
+    if settings.ip_family == IpFamily::Any {
+        return Ok(());
+    }
+    resolve(settings)
+        .with_context(|| format!("--ip-family {}", settings.ip_family.as_str()))
+        .map(|_addrs| ())
+}
+
 /// Concrete local addresses for webrtc 0.20's application-owned ICE sockets.
 ///
 /// Unlike earlier webrtc-rs releases, 0.20 turns each socket's bound address
@@ -805,8 +820,8 @@ mod tests {
         }
     }
 
-    /// A healthy engine with mDNS obfuscation off (what every interop cell
-    /// runs, so candidates are raw IPs).
+    /// A healthy engine with remote mDNS resolution disabled, matching the
+    /// harness cells that pass `--disable-mdns`.
     fn mdns_disabled_settings() -> EngineSettings {
         EngineSettings {
             disable_mdns: true,
@@ -1052,28 +1067,33 @@ mod tests {
             "the failure must name the requested family: {error}"
         );
         assert!(select_udp_addrs(Vec::new(), IpFamily::Any).is_err());
+    }
 
-        // And that failure is fatal at startup, not a per-pair error that
-        // would degrade to the relay floor and still exit successfully.
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let unavailable = EngineSettings {
-            // No host can serve a family with zero usable interfaces; the
-            // reachable equivalent is asserted through select_udp_addrs above,
-            // so drive the real constructor with whichever family this host
-            // lacks, if any.
+    #[test]
+    fn an_unservable_requested_family_fails_construction_not_one_pair() {
+        // Injected so the failure path is exercised on every host, including
+        // the ones that serve both families.
+        let unservable = |settings: EngineSettings| {
+            select_udp_addrs([IpAddr::from(Ipv4Addr::LOCALHOST)], settings.ip_family)
+        };
+        let requested = EngineSettings {
             ip_family: IpFamily::Ipv6,
             ..EngineSettings::default()
         };
-        match local_udp_addrs(unavailable) {
-            Ok(_available) => assert!(
-                Engine::new(unavailable, tx).is_ok(),
-                "a servable family must not fail construction"
-            ),
-            Err(_) => assert!(
-                Engine::new(unavailable, tx).is_err(),
-                "an unservable family must fail before any session work"
-            ),
-        }
+        let error = ensure_requested_family_is_available(requested, unservable)
+            .expect_err("an unservable family must fail before any session work");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("--ip-family ipv6"),
+            "the failure must name the flag that caused it: {rendered}"
+        );
+
+        // The default never consults the resolver at all, so a host with no
+        // usable interface still fails later (per pair) exactly as before.
+        ensure_requested_family_is_available(EngineSettings::default(), |_settings| {
+            panic!("--ip-family any must not be resolved eagerly")
+        })
+        .expect("the default family imposes no startup requirement");
     }
 
     #[tokio::test]

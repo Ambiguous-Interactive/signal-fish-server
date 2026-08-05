@@ -258,6 +258,14 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     validate_p2p_rebuild_retry_count(cli.p2p_rebuild_release_file.is_some(), cli.p2p_retry_count)
         .map_err(FatalError::protocol)?;
 
+    // Build the WebRTC engine BEFORE touching the network: an explicitly
+    // requested `--ip-family` is resolved in `Engine::new`, and failing it
+    // here means the process never creates or joins a server-side room it
+    // could not have used.
+    let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+    let engine = Engine::new(cli.engine_settings(), engine_tx)
+        .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
+
     // The soft run window starts at process start, handshake included.
     let run_deadline = checked_deadline(Instant::now(), Duration::from_secs(cli.run_for_secs));
 
@@ -272,10 +280,6 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     let negotiated_version = authenticate(&mut ws, cli).await?;
     let (my_id, mut present, lobby_state, accountability) =
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
-
-    let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-    let engine = Engine::new(cli.engine_settings(), engine_tx)
-        .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
     present.insert(my_id);
     let members_seen = present.clone();

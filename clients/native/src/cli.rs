@@ -133,9 +133,10 @@ pub struct Cli {
     /// Restrict the ICE sockets this client binds to one address family, and
     /// therefore the family of every host candidate it advertises. `any` (the
     /// default) binds every usable interface address. An explicitly requested
-    /// family is resolved at startup: a host that cannot serve it fails the
-    /// process instead of silently negotiating the other family or degrading
-    /// to the relay floor.
+    /// family is resolved before the client opens its WebSocket: a host that
+    /// cannot serve it fails the process — without creating or joining a room
+    /// — instead of silently negotiating the other family or degrading to the
+    /// relay floor.
     #[arg(long, value_enum, default_value_t = IpFamily::Any)]
     pub ip_family: IpFamily,
 
