@@ -23325,6 +23325,32 @@ fn assert_workflow_triggers_on_paths(workflow: &str, name: &str, required_paths:
             "{name}: `{event}.paths-ignore` inverts the filter; the gate would stop \
              running on exactly the changes it covers"
         );
+        // A branch or event-type filter disables the gate exactly as
+        // completely as deleting a path, and just as quietly.
+        assert!(
+            block.as_mapping_get("branches-ignore").is_none(),
+            "{name}: `{event}.branches-ignore` inverts the branch filter"
+        );
+        let branches: Vec<&str> = block
+            .as_mapping_get("branches")
+            .and_then(|branches| branches.as_sequence())
+            .unwrap_or_else(|| panic!("{name}: `{event}` must scope to a branch"))
+            .iter()
+            .map(|value| value.as_str().expect("each branch is a string"))
+            .collect();
+        assert_eq!(
+            branches,
+            vec!["main"],
+            "{name}: `{event}.branches` drifted; narrowing it disables this gate \
+             as completely as deleting it"
+        );
+        if event == "pull_request" {
+            assert!(
+                block.as_mapping_get("types").is_none(),
+                "{name}: a `types:` filter can drop this gate off the default \
+                 opened/synchronize/reopened events without touching a path"
+            );
+        }
         let configured: BTreeSet<&str> = block
             .as_mapping_get("paths")
             .and_then(|paths| paths.as_sequence())
@@ -23456,40 +23482,19 @@ fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
         "client.rs must call the pre-flight exactly once; found {call_sites}"
     );
 
-    // ...and the pre-flight must still apply the engine's own selection rule.
-    // No host-independent behavioral seam exists once the resolver is
-    // hard-coded (a runner that serves the family makes any `Ok(())` body
-    // pass), so pin the forwarding itself.
-    let engine_source = read_file(&root.join("clients/native/src/engine.rs"));
-    let engine = syn::parse_file(&engine_source).expect("engine.rs must parse as Rust");
-    let preflight_fn = engine
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Fn(function) if function.sig.ident == "preflight_ip_family" => {
-                Some(function)
-            }
-            _ => None,
-        })
-        .expect("engine.rs must define preflight_ip_family");
-    let mut forwards = CallFinder {
-        name: "ensure_requested_family_is_available",
-        found: false,
-    };
-    forwards.visit_block(&preflight_fn.block);
-    assert!(
-        forwards.found,
-        "preflight_ip_family must delegate to ensure_requested_family_is_available"
-    );
+    // ...applying the engine's real bind selection. The pre-flight takes its
+    // resolver as an argument precisely so the unit-tested function IS the
+    // production one; what remains to pin is that this call site passes the
+    // real rule rather than a stand-in that always succeeds.
     let mut resolver = PathFinder {
         name: "local_udp_addrs",
         found: false,
     };
-    resolver.visit_block(&preflight_fn.block);
+    resolver.visit_stmt(&run_inner.block.stmts[preflight]);
     assert!(
         resolver.found,
-        "preflight_ip_family must apply the engine's real bind selection \
-         (`local_udp_addrs`), not a stand-in that always succeeds"
+        "the pre-flight call must pass the engine's real bind selection \
+         (`local_udp_addrs`)"
     );
 }
 

@@ -648,14 +648,13 @@ fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> 
 /// alternative — discovering it per pair — is non-fatal there: the run would
 /// degrade to the relay floor and still exit successfully, which is exactly
 /// the silent pass `--ip-family` exists to prevent.
-pub fn preflight_ip_family(settings: EngineSettings) -> Result<()> {
-    ensure_requested_family_is_available(settings, local_udp_addrs)
-}
-
-/// [`preflight_ip_family`] with an injectable bind-selection rule, so the
-/// failure path is reachable in a unit test on a host that serves every
-/// family.
-fn ensure_requested_family_is_available(
+///
+/// `resolve` is the bind-selection rule; production passes [`local_udp_addrs`]
+/// and a test passes a fixed interface set, so the failure path is reachable
+/// on a host that happens to serve every family. There is deliberately no
+/// convenience wrapper that hard-codes the resolver: a wrapper would be a
+/// seam no host-independent test can cover.
+pub fn preflight_ip_family(
     settings: EngineSettings,
     resolve: impl Fn(EngineSettings) -> Result<Vec<SocketAddr>>,
 ) -> Result<()> {
@@ -1083,7 +1082,7 @@ mod tests {
             ip_family: IpFamily::Ipv6,
             ..EngineSettings::default()
         };
-        let error = ensure_requested_family_is_available(requested, unservable)
+        let error = preflight_ip_family(requested, unservable)
             .expect_err("an unservable family must fail the pre-flight");
         let rendered = format!("{error:#}");
         assert!(
@@ -1093,18 +1092,17 @@ mod tests {
 
         // The default never consults the resolver at all, so a host with no
         // usable interface still fails later (per pair) exactly as before.
-        ensure_requested_family_is_available(EngineSettings::default(), |_settings| {
+        preflight_ip_family(EngineSettings::default(), |_settings| {
             panic!("--ip-family any must not be resolved eagerly")
         })
         .expect("the default family imposes no startup requirement");
 
-        // The production entry point applies the real rule. Whatever this host
-        // serves, the two must agree — so a pre-flight that stopped consulting
-        // the selection rule fails here.
+        // This IS the production entry point — the client calls it with
+        // `local_udp_addrs` — so there is no untested wrapper between the
+        // covered behavior and the shipped one.
         assert_eq!(
-            preflight_ip_family(requested).is_ok(),
-            local_udp_addrs(requested).is_ok(),
-            "the pre-flight must mirror the engine's own bind selection"
+            preflight_ip_family(requested, local_udp_addrs).is_ok(),
+            local_udp_addrs(requested).is_ok()
         );
     }
 
