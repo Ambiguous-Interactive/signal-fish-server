@@ -18,14 +18,14 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::{
-    ClientMessage, DeliveryGapReason, GameDataEncoding, PlayerId, ServerMessage,
-    V3BinaryGameDataFrame,
+    decode_v3_binary_game_data, ClientMessage, DeliveryGap, DeliveryGapReason, ErrorCode,
+    GameDataEncoding, PlayerId, ServerMessage, V3BinaryGameDataFrame,
 };
 use signal_fish_server::websocket::create_router;
 use tokio_tungstenite::tungstenite::Message;
 
 use test_helpers::{create_test_server_with_config, test_server_config, RunningTestServer};
-use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction};
+use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction, PumpTermination};
 use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
 use websocket_test_helpers::delivery_ledger::{ReceiverExpectation, SenderExpectation};
 use websocket_test_helpers::room16::{authenticate_with_encoding, connect, try_join};
@@ -322,8 +322,97 @@ async fn mixed_json_and_message_pack_relay_without_error_amplification() {
     running_server.shutdown().await;
 }
 
+#[derive(Debug)]
+struct ObservedError {
+    code: Option<ErrorCode>,
+    message: String,
+}
+
+impl std::fmt::Display for ObservedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:?}: {}", self.code, self.message)
+    }
+}
+
+fn summarize_errors(errors: &[ObservedError]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+#[derive(Debug)]
+enum ReaderTerminal {
+    Complete,
+    Close { code: u16, reason: String },
+    TimedOut,
+    Eof,
+    WebSocketError(String),
+    UnexpectedMessage(String),
+    TaskFailure(String),
+}
+
+impl ReaderTerminal {
+    fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+impl std::fmt::Display for ReaderTerminal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Complete => formatter.write_str("complete"),
+            Self::Close { code, reason } => write!(formatter, "close {code}: {reason}"),
+            Self::TimedOut => formatter.write_str("timed out"),
+            Self::Eof => formatter.write_str("EOF"),
+            Self::WebSocketError(error) => write!(formatter, "WebSocket error: {error}"),
+            Self::UnexpectedMessage(message) => {
+                write!(formatter, "unexpected message: {message}")
+            }
+            Self::TaskFailure(message) => write!(formatter, "reader task failed: {message}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AuditFrame {
+    Text(String),
+    Binary(Vec<u8>),
+    Close { code: u16, reason: String },
+}
+
+fn replay_audit(auditor: &ConformanceAuditor, receiver: &str, frames: &[AuditFrame]) {
+    for frame in frames {
+        match frame {
+            AuditFrame::Text(text) => {
+                auditor.record_text_frame(receiver, text);
+            }
+            AuditFrame::Binary(bytes) => {
+                auditor.record_binary_frame(receiver, bytes);
+            }
+            AuditFrame::Close { code, reason } => auditor.record_close(receiver, *code, reason),
+        }
+    }
+}
+
+/// Everything the throttled compatible recipient observed, including a
+/// terminal failure instead of an early task panic. Keeping this symmetric
+/// with [`FallbackObservation`] preserves both sides of a RED H14 run.
+#[derive(Debug)]
+struct CompatibleObservation {
+    delivered: u64,
+    wire_bytes: u64,
+    player_left: Vec<PlayerId>,
+    errors: Vec<ObservedError>,
+    terminal: ReaderTerminal,
+    elapsed: Duration,
+    audit_frames: Vec<AuditFrame>,
+}
+
 /// Everything the throttled JSON recipient observed, so the amplification
 /// oracle can be asserted against measured wire bytes rather than frame counts.
+#[derive(Debug)]
 struct FallbackObservation {
     /// `DeliveryReport` frames received.
     reports: u64,
@@ -333,8 +422,366 @@ struct FallbackObservation {
     accounted: u64,
     /// Total WebSocket payload bytes this recipient had to drain.
     wire_bytes: u64,
-    close: Option<(u16, String)>,
+    player_left: Vec<PlayerId>,
+    errors: Vec<ObservedError>,
+    terminal: ReaderTerminal,
     elapsed: Duration,
+    audit_frames: Vec<AuditFrame>,
+}
+
+#[derive(Debug)]
+struct ProxyObservation {
+    destination_bytes: u64,
+    measurement_elapsed: Duration,
+    bytes_per_second: f64,
+    terminations_at_reader_terminal: Vec<PumpTermination>,
+    natural_termination_wait: TerminationWait,
+    terminations_after_teardown: Vec<PumpTermination>,
+    teardown_termination_wait: TerminationWait,
+    control_errors: Vec<String>,
+}
+
+struct ReaderProxySnapshot {
+    destination_bytes: u64,
+    measurement_elapsed: Duration,
+    terminations: Vec<PumpTermination>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminationWait {
+    NotRequested,
+    Observed,
+    TimedOut(Duration),
+}
+
+struct H14Diagnostics<'a> {
+    fallback: &'a FallbackObservation,
+    compatible: &'a CompatibleObservation,
+    fallback_proxy: &'a ProxyObservation,
+    compatible_proxy: &'a ProxyObservation,
+    burst: u64,
+    backpressure: u64,
+    slow_consumer_evictions: u64,
+}
+
+impl std::fmt::Display for H14Diagnostics<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "fallback accounted={}/{} reports={} advisories={} player_left={:?} errors=[{}] \
+             terminal={} wire_bytes={} elapsed={:?}; compatible delivered={}/{} \
+             player_left={:?} errors=[{}] terminal={} wire_bytes={} elapsed={:?}; \
+             proxy destination_bytes: fallback={} over {:?} ({:.0} B/s), compatible={} \
+             over {:?} ({:.0} B/s); \
+             proxy diagnostics: fallback terminations_at_reader_terminal={:?} \
+             natural_wait={:?} terminations_after_teardown={:?} teardown_wait={:?} \
+             control_errors={:?}, compatible terminations_at_reader_terminal={:?} \
+             natural_wait={:?} terminations_after_teardown={:?} teardown_wait={:?} \
+             control_errors={:?}; amplification={:.2}x backpressure_events={} \
+             slow_consumer_evictions={}",
+            self.fallback.accounted,
+            self.burst,
+            self.fallback.reports,
+            self.fallback.advisories,
+            self.fallback.player_left,
+            summarize_errors(&self.fallback.errors),
+            self.fallback.terminal,
+            self.fallback.wire_bytes,
+            self.fallback.elapsed,
+            self.compatible.delivered,
+            self.burst,
+            self.compatible.player_left,
+            summarize_errors(&self.compatible.errors),
+            self.compatible.terminal,
+            self.compatible.wire_bytes,
+            self.compatible.elapsed,
+            self.fallback_proxy.destination_bytes,
+            self.fallback_proxy.measurement_elapsed,
+            self.fallback_proxy.bytes_per_second,
+            self.compatible_proxy.destination_bytes,
+            self.compatible_proxy.measurement_elapsed,
+            self.compatible_proxy.bytes_per_second,
+            self.fallback_proxy.terminations_at_reader_terminal,
+            self.fallback_proxy.natural_termination_wait,
+            self.fallback_proxy.terminations_after_teardown,
+            self.fallback_proxy.teardown_termination_wait,
+            self.fallback_proxy.control_errors,
+            self.compatible_proxy.terminations_at_reader_terminal,
+            self.compatible_proxy.natural_termination_wait,
+            self.compatible_proxy.terminations_after_teardown,
+            self.compatible_proxy.teardown_termination_wait,
+            self.compatible_proxy.control_errors,
+            self.fallback.wire_bytes as f64 / self.compatible.wire_bytes.max(1) as f64,
+            self.backpressure,
+            self.slow_consumer_evictions,
+        )
+    }
+}
+
+async fn wait_for_proxy_termination(proxy: &ChaosProxy, budget: Duration) -> TerminationWait {
+    if !proxy.terminations().is_empty() {
+        return TerminationWait::Observed;
+    }
+    let wait = async {
+        while proxy.terminations().is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    match tokio::time::timeout(budget, wait).await {
+        Ok(()) => TerminationWait::Observed,
+        Err(_) => TerminationWait::TimedOut(budget),
+    }
+}
+
+async fn collect_task_with_snapshot<T, U>(
+    task: tokio::task::JoinHandle<T>,
+    snapshot: impl FnOnce() -> U,
+) -> (Result<T, tokio::task::JoinError>, U) {
+    let result = task.await;
+    (result, snapshot())
+}
+
+fn unsupported_gap_count(gaps: &[DeliveryGap]) -> Result<u64, String> {
+    gaps.iter()
+        .filter(|gap| gap.reason == DeliveryGapReason::UnsupportedFormat)
+        .try_fold(0u64, |accounted, gap| {
+            let length = gap
+                .to_seq
+                .checked_sub(gap.from_seq)
+                .and_then(|length| length.checked_add(1))
+                .ok_or_else(|| {
+                    format!(
+                        "invalid unsupported-format gap {}..={} for player {} epoch {}",
+                        gap.from_seq, gap.to_seq, gap.from_player, gap.epoch
+                    )
+                })?;
+            accounted
+                .checked_add(length)
+                .ok_or_else(|| "unsupported-format accounted count overflowed".to_string())
+        })
+}
+
+fn first_h14_reader_failure(
+    sender_error: Option<&str>,
+    fallback: &FallbackObservation,
+    compatible: &CompatibleObservation,
+    burst: u64,
+) -> Option<String> {
+    if let Some(error) = sender_error {
+        return Some(format!(
+            "H14 sender failed before completing the fixed burst: {error}"
+        ));
+    }
+    // Prefer the directly observed recipient failure over the peer's later
+    // lifecycle consequence. In the historical RED signature the compatible
+    // recipient's SlowConsumer farewell/close caused the fallback PlayerLeft.
+    if !compatible.errors.is_empty() {
+        return Some(format!(
+            "compatible recipient observed unexpected server errors: {}",
+            summarize_errors(&compatible.errors)
+        ));
+    }
+    if !compatible.terminal.is_complete() {
+        return Some(format!(
+            "compatible recipient terminated after {}/{} deliveries: {}",
+            compatible.delivered, burst, compatible.terminal
+        ));
+    }
+    if let Some(error) = fallback
+        .errors
+        .iter()
+        .find(|error| !matches!(&error.code, Some(ErrorCode::UnsupportedGameDataFormat)))
+    {
+        return Some(format!(
+            "fallback recipient observed a non-advisory error: {error}"
+        ));
+    }
+    if usize::try_from(fallback.advisories).ok() != Some(fallback.errors.len()) {
+        return Some(format!(
+            "fallback observed {} Error frame(s), but counted {} advisories",
+            fallback.errors.len(),
+            fallback.advisories
+        ));
+    }
+    if !fallback.terminal.is_complete() {
+        return Some(format!(
+            "fallback recipient terminated after {}/{} accounted sequences: {}",
+            fallback.accounted, burst, fallback.terminal
+        ));
+    }
+    if !fallback.player_left.is_empty() {
+        return Some(format!(
+            "fallback recipient observed compatible-recipient eviction: {:?}",
+            fallback.player_left
+        ));
+    }
+    if !compatible.player_left.is_empty() {
+        return Some(format!(
+            "compatible recipient observed fallback-recipient eviction: {:?}",
+            compatible.player_left
+        ));
+    }
+    None
+}
+
+#[tokio::test]
+async fn h14_red_diagnostics_preserve_both_recipients_and_proxy_outcomes() {
+    let mut fallback = FallbackObservation {
+        reports: 3,
+        advisories: 2,
+        accounted: 4_999,
+        wire_bytes: 2_218,
+        player_left: vec![PlayerId::nil()],
+        errors: vec![ObservedError {
+            code: Some(ErrorCode::UnsupportedGameDataFormat),
+            message: "advisory".to_string(),
+        }],
+        terminal: ReaderTerminal::Complete,
+        elapsed: Duration::from_secs(3),
+        audit_frames: Vec::new(),
+    };
+    let mut compatible = CompatibleObservation {
+        delivered: 4_000,
+        wire_bytes: 320_000,
+        player_left: Vec::new(),
+        errors: vec![ObservedError {
+            code: Some(ErrorCode::SlowConsumer),
+            message: "farewell".to_string(),
+        }],
+        terminal: ReaderTerminal::Close {
+            code: 4002,
+            reason: "slow_consumer".to_string(),
+        },
+        elapsed: Duration::from_secs(12),
+        audit_frames: Vec::new(),
+    };
+    let fallback_proxy = ProxyObservation {
+        destination_bytes: 2_242,
+        measurement_elapsed: Duration::from_secs(3),
+        bytes_per_second: 747.0,
+        terminations_at_reader_terminal: Vec::new(),
+        natural_termination_wait: TerminationWait::TimedOut(Duration::from_secs(5)),
+        terminations_after_teardown: vec![PumpTermination {
+            direction: Direction::ClientToServer,
+            cause: "source reached EOF".to_string(),
+        }],
+        teardown_termination_wait: TerminationWait::Observed,
+        control_errors: Vec::new(),
+    };
+    let compatible_proxy = ProxyObservation {
+        destination_bytes: 327_680,
+        measurement_elapsed: Duration::from_secs(12),
+        bytes_per_second: 27_307.0,
+        terminations_at_reader_terminal: vec![PumpTermination {
+            direction: Direction::ServerToClient,
+            cause: "destination write failed".to_string(),
+        }],
+        natural_termination_wait: TerminationWait::Observed,
+        terminations_after_teardown: Vec::new(),
+        teardown_termination_wait: TerminationWait::Observed,
+        control_errors: vec!["retained control failure".to_string()],
+    };
+
+    let diagnostics = H14Diagnostics {
+        fallback: &fallback,
+        compatible: &compatible,
+        fallback_proxy: &fallback_proxy,
+        compatible_proxy: &compatible_proxy,
+        burst: 5_000,
+        backpressure: 7,
+        slow_consumer_evictions: 1,
+    }
+    .to_string();
+
+    for expected in [
+        "fallback accounted=4999/5000",
+        "player_left=[00000000-0000-0000-0000-000000000000]",
+        "terminal=complete",
+        "compatible delivered=4000/5000",
+        "terminal=close 4002: slow_consumer",
+        "fallback=2242 over 3s (747 B/s)",
+        "compatible=327680 over 12s (27307 B/s)",
+        "source reached EOF",
+        "destination write failed",
+        "retained control failure",
+        "natural_wait=TimedOut(5s)",
+        "teardown_wait=Observed",
+        "backpressure_events=7",
+        "slow_consumer_evictions=1",
+    ] {
+        assert!(
+            diagnostics.contains(expected),
+            "RED diagnostic omitted {expected:?}: {diagnostics}"
+        );
+    }
+
+    let counter = Arc::new(std::sync::atomic::AtomicU64::new(17));
+    let snapshot_counter = Arc::clone(&counter);
+    let (reader_result, snapshot) =
+        collect_task_with_snapshot(tokio::spawn(async { 4_000u64 }), move || {
+            snapshot_counter.load(Ordering::Relaxed)
+        })
+        .await;
+    counter.store(99, Ordering::Relaxed);
+    assert_eq!(reader_result.expect("synthetic reader task"), 4_000);
+    assert_eq!(
+        snapshot, 17,
+        "reader proxy frontier must be captured when that reader completes"
+    );
+
+    let malformed_gap = DeliveryGap {
+        from_player: PlayerId::nil(),
+        epoch: 0,
+        from_seq: 10,
+        to_seq: 9,
+        reason: DeliveryGapReason::UnsupportedFormat,
+    };
+    assert!(
+        unsupported_gap_count(&[malformed_gap]).is_err(),
+        "malformed gap ranges must become terminal observations, not reader panics"
+    );
+    let failure = first_h14_reader_failure(None, &fallback, &compatible, 5_000)
+        .expect("synthetic RED observations must fail");
+    assert!(
+        failure.starts_with("compatible recipient observed unexpected server errors"),
+        "first failed control was not preserved: {failure}"
+    );
+
+    compatible.errors.clear();
+    compatible.terminal = ReaderTerminal::Complete;
+    compatible.delivered = 5_000;
+    fallback.player_left.clear();
+    fallback.advisories = 1;
+    fallback.accounted = 5_000;
+    assert!(
+        first_h14_reader_failure(None, &fallback, &compatible, 5_000).is_none(),
+        "complete observations with only the expected fallback advisory must be GREEN"
+    );
+
+    fallback.advisories = 2;
+    let mismatch = first_h14_reader_failure(None, &fallback, &compatible, 5_000)
+        .expect("advisory count mismatch must fail");
+    assert!(mismatch.contains("counted 2 advisories"), "{mismatch}");
+
+    fallback.advisories = 1;
+    fallback.terminal = ReaderTerminal::TimedOut;
+    let fallback_terminal = first_h14_reader_failure(None, &fallback, &compatible, 5_000)
+        .expect("fallback terminal failure must fail");
+    assert!(
+        fallback_terminal.starts_with("fallback recipient terminated"),
+        "{fallback_terminal}"
+    );
+
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unused upstream");
+    let proxy =
+        ChaosProxy::spawn(upstream.local_addr().expect("read unused upstream address")).await;
+    assert_eq!(
+        wait_for_proxy_termination(&proxy, Duration::from_millis(1)).await,
+        TerminationWait::TimedOut(Duration::from_millis(1)),
+        "missing pump termination must surface its wait timeout"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -403,53 +850,116 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
 
     compatible_proxy.throttle(Direction::ServerToClient, Some(THROTTLE_BYTES_PER_SEC));
     fallback_proxy.throttle(Direction::ServerToClient, Some(THROTTLE_BYTES_PER_SEC));
+    let compatible_proxy_bytes_before =
+        compatible_proxy.destination_write_bytes(Direction::ServerToClient);
+    let fallback_proxy_bytes_before =
+        fallback_proxy.destination_write_bytes(Direction::ServerToClient);
+    let proxy_measurement_started = std::time::Instant::now();
 
     let mut sender = players.remove(0).ws;
     let compatible = players.remove(0).ws;
     let fallback = players.remove(0).ws;
 
-    let compatible_auditor = Arc::clone(&auditor);
     let compatible_reader = tokio::spawn(async move {
         let (_, mut stream) = compatible.split();
+        let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + EXPERIMENT_DEADLINE;
         let mut delivered = 0u64;
-        let mut player_left = 0u64;
+        let mut player_left = Vec::new();
+        let mut errors = Vec::new();
         let mut wire_bytes = 0u64;
-        while delivered < BURST {
-            let frame = tokio::time::timeout_at(deadline, stream.next())
-                .await
-                .unwrap_or_else(|_| {
-                    panic!("compatible recipient timed out after {delivered}/{BURST} binary frames")
-                })
-                .unwrap_or_else(|| {
-                    panic!("compatible recipient closed after {delivered}/{BURST} binary frames")
-                })
-                .unwrap_or_else(|error| panic!("compatible recipient read failed: {error}"));
+        let mut audit_frames = Vec::with_capacity(BURST as usize);
+        let terminal = loop {
+            if delivered >= BURST {
+                break ReaderTerminal::Complete;
+            }
+            let frame = match tokio::time::timeout_at(deadline, stream.next()).await {
+                Err(_) => break ReaderTerminal::TimedOut,
+                Ok(None) => break ReaderTerminal::Eof,
+                Ok(Some(Err(error))) => break ReaderTerminal::WebSocketError(error.to_string()),
+                Ok(Some(Ok(frame))) => frame,
+            };
             match frame {
                 Message::Binary(bytes) => {
                     wire_bytes += bytes.len() as u64;
-                    let relayed = compatible_auditor.record_binary_frame("P1", &bytes);
-                    assert_eq!(relayed.encoding, GameDataEncoding::MessagePack);
-                    assert_eq!(relayed.payload.as_slice(), [0xc1]);
+                    audit_frames.push(AuditFrame::Binary(bytes.to_vec()));
+                    let relayed = match decode_v3_binary_game_data(&bytes) {
+                        Ok(relayed) => relayed,
+                        Err(error) => {
+                            break ReaderTerminal::UnexpectedMessage(format!(
+                                "invalid binary delivery: {error}"
+                            ))
+                        }
+                    };
+                    if relayed.encoding != GameDataEncoding::MessagePack
+                        || relayed.payload.as_slice() != [0xc1]
+                    {
+                        break ReaderTerminal::UnexpectedMessage(format!(
+                            "binary delivery had encoding {:?} and payload {:?}",
+                            relayed.encoding, relayed.payload
+                        ));
+                    }
                     delivered += 1;
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
-                Message::Text(text) => match compatible_auditor.record_text_frame("P1", &text) {
-                    ServerMessage::PlayerLeft { .. } => player_left += 1,
-                    other => panic!("compatible recipient expected binary delivery, got {other:?}"),
-                },
+                Message::Text(text) => {
+                    wire_bytes += text.len() as u64;
+                    audit_frames.push(AuditFrame::Text(text.to_string()));
+                    let message = match serde_json::from_str(&text) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            break ReaderTerminal::UnexpectedMessage(format!(
+                                "invalid ServerMessage text frame: {error}; text={text:?}"
+                            ))
+                        }
+                    };
+                    match message {
+                        ServerMessage::PlayerLeft { player_id, .. } => player_left.push(player_id),
+                        ServerMessage::Error {
+                            error_code,
+                            message,
+                        } => errors.push(ObservedError {
+                            code: error_code,
+                            message,
+                        }),
+                        other => {
+                            break ReaderTerminal::UnexpectedMessage(format!(
+                                "expected binary delivery, got {other:?}"
+                            ));
+                        }
+                    }
+                }
                 Message::Close(reason) => {
-                    panic!("compatible recipient was evicted after {delivered}/{BURST}: {reason:?}")
+                    let (code, reason) = reason
+                        .map(|reason| (u16::from(reason.code), reason.reason.to_string()))
+                        .unwrap_or((1005, "close frame carried no status".to_string()));
+                    audit_frames.push(AuditFrame::Close {
+                        code,
+                        reason: reason.clone(),
+                    });
+                    break ReaderTerminal::Close { code, reason };
                 }
                 Message::Frame(frame) => {
-                    panic!("compatible recipient observed raw frame: {frame:?}")
+                    break ReaderTerminal::UnexpectedMessage(format!(
+                        "observed raw frame: {frame:?}"
+                    ));
                 }
             }
-        }
-        (stream, player_left, wire_bytes)
+        };
+        (
+            stream,
+            CompatibleObservation {
+                delivered,
+                wire_bytes,
+                player_left,
+                errors,
+                terminal,
+                elapsed: started.elapsed(),
+                audit_frames,
+            },
+        )
     });
 
-    let fallback_auditor = Arc::clone(&auditor);
     let fallback_reader = tokio::spawn(async move {
         let (_, mut stream) = fallback.split();
         let started = std::time::Instant::now();
@@ -458,24 +968,32 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
         let mut errors = 0u64;
         let mut wire_bytes = 0u64;
         let mut accounted = 0u64;
-        while accounted < BURST {
-            let frame = tokio::time::timeout_at(deadline, stream.next())
-                .await
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "fallback recipient timed out after {reports}/{BURST} reports and \
-                         {errors} advisories in {:?}",
-                        started.elapsed()
-                    )
-                })
-                .unwrap_or_else(|| {
-                    panic!("fallback recipient closed without a semantic close frame")
-                })
-                .unwrap_or_else(|error| panic!("fallback recipient read failed: {error}"));
+        let mut player_left = Vec::new();
+        let mut observed_errors = Vec::new();
+        let mut audit_frames = Vec::new();
+        let terminal = loop {
+            if accounted >= BURST {
+                break ReaderTerminal::Complete;
+            }
+            let frame = match tokio::time::timeout_at(deadline, stream.next()).await {
+                Err(_) => break ReaderTerminal::TimedOut,
+                Ok(None) => break ReaderTerminal::Eof,
+                Ok(Some(Err(error))) => break ReaderTerminal::WebSocketError(error.to_string()),
+                Ok(Some(Ok(frame))) => frame,
+            };
             match frame {
                 Message::Text(text) => {
                     wire_bytes += text.len() as u64;
-                    match fallback_auditor.record_text_frame("P2", &text) {
+                    audit_frames.push(AuditFrame::Text(text.to_string()));
+                    let message = match serde_json::from_str(&text) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            break ReaderTerminal::UnexpectedMessage(format!(
+                                "invalid ServerMessage text frame: {error}; text={text:?}"
+                            ))
+                        }
+                    };
+                    match message {
                         ServerMessage::DeliveryReport(report) => {
                             reports += 1;
                             // The auditor already proves these ranges never overlap
@@ -484,69 +1002,64 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
                             // sequences rather than frames is what lets one
                             // coalesced range stand in for a burst of omissions
                             // without weakening the accountability oracle.
-                            accounted += report
-                                .gaps
-                                .iter()
-                                .filter(|gap| gap.reason == DeliveryGapReason::UnsupportedFormat)
-                                .map(|gap| gap.to_seq - gap.from_seq + 1)
-                                .sum::<u64>();
+                            let newly_accounted = match unsupported_gap_count(&report.gaps) {
+                                Ok(count) => count,
+                                Err(error) => {
+                                    break ReaderTerminal::UnexpectedMessage(error);
+                                }
+                            };
+                            accounted = match accounted.checked_add(newly_accounted) {
+                                Some(next) => next,
+                                None => {
+                                    break ReaderTerminal::UnexpectedMessage(
+                                        "fallback accounted count overflowed".to_string(),
+                                    );
+                                }
+                            };
                         }
                         ServerMessage::Error {
                             error_code,
                             message,
                         } => {
-                            // `SlowConsumer` here is not a stray advisory: the server
-                            // only ever emits it as a farewell frame immediately
-                            // before eviction, so seeing it means this recipient is
-                            // being dropped. Report the counters and elapsed time
-                            // with it — a bare `assert_eq!` on the code says nothing
-                            // about how far the experiment got, which is the first
-                            // thing needed to tell a genuine amplification eviction
-                            // from a link that simply never kept pace. See issue
-                            // #212.
-                            assert_eq!(
-                            error_code,
-                            Some(
-                                signal_fish_server::protocol::ErrorCode::UnsupportedGameDataFormat
-                            ),
-                            "fallback recipient received `{error_code:?}` after \
-                             {accounted}/{BURST} accounted sequences in {reports} reports and \
-                             {errors} advisories ({wire_bytes} wire bytes), {:?} into a \
-                             {EXPERIMENT_DEADLINE:?} budget: {message}",
-                            started.elapsed(),
-                        );
-                            errors += 1;
+                            if error_code == Some(ErrorCode::UnsupportedGameDataFormat) {
+                                errors += 1;
+                            }
+                            observed_errors.push(ObservedError {
+                                code: error_code,
+                                message,
+                            });
                         }
+                        ServerMessage::PlayerLeft { player_id, .. } => player_left.push(player_id),
                         other => {
-                            panic!("fallback recipient observed unexpected message: {other:?}")
+                            break ReaderTerminal::UnexpectedMessage(format!(
+                                "observed unexpected message: {other:?}"
+                            ))
                         }
                     }
                 }
                 Message::Close(reason) => {
-                    let reason = reason.expect("fallback close must carry code and reason");
-                    let code = u16::from(reason.code);
-                    fallback_auditor.record_close("P2", code, &reason.reason);
-                    return (
-                        stream,
-                        FallbackObservation {
-                            reports,
-                            advisories: errors,
-                            accounted,
-                            wire_bytes,
-                            close: Some((code, reason.reason.to_string())),
-                            elapsed: started.elapsed(),
-                        },
-                    );
+                    let (code, reason) = reason
+                        .map(|reason| (u16::from(reason.code), reason.reason.to_string()))
+                        .unwrap_or((1005, "close frame carried no status".to_string()));
+                    audit_frames.push(AuditFrame::Close {
+                        code,
+                        reason: reason.clone(),
+                    });
+                    break ReaderTerminal::Close { code, reason };
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
                 Message::Binary(bytes) => {
-                    panic!("JSON fallback recipient received unconvertible binary bytes: {bytes:?}")
+                    break ReaderTerminal::UnexpectedMessage(format!(
+                        "received unconvertible binary bytes: {bytes:?}"
+                    ));
                 }
                 Message::Frame(frame) => {
-                    panic!("fallback recipient observed raw frame: {frame:?}")
+                    break ReaderTerminal::UnexpectedMessage(format!(
+                        "observed raw frame: {frame:?}"
+                    ));
                 }
             }
-        }
+        };
         (
             stream,
             FallbackObservation {
@@ -554,20 +1067,24 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
                 advisories: errors,
                 accounted,
                 wire_bytes,
-                close: None,
+                player_left,
+                errors: observed_errors,
+                terminal,
                 elapsed: started.elapsed(),
+                audit_frames,
             },
         )
     });
 
-    for _ in 0..BURST {
+    let mut sender_error = None;
+    for seq in 0..BURST {
         // 0xc1 is MessagePack's reserved/invalid marker. The server correctly
         // treats binary game data as opaque for same-format peers, while a JSON
         // recipient cannot convert it and needs explicit gap accountability.
-        sender
-            .send(Message::Binary(vec![0xc1].into()))
-            .await
-            .expect("send unconvertible MessagePack payload");
+        if let Err(error) = sender.send(Message::Binary(vec![0xc1].into())).await {
+            sender_error = Some(format!("send failed at sequence {seq}/{BURST}: {error}"));
+            break;
+        }
     }
 
     // Both recipients must complete their streams while the bandwidth fault is
@@ -575,33 +1092,175 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     // finished would let the compatible recipient drain its remainder on an
     // unimpaired link, and "the compatible peer survives the same fault" is half
     // the oracle.
-    let (fallback_result, compatible_result) = tokio::join!(fallback_reader, compatible_reader);
+    let ((fallback_result, fallback_reader_proxy), (compatible_result, compatible_reader_proxy)) = tokio::join!(
+        collect_task_with_snapshot(fallback_reader, || ReaderProxySnapshot {
+            destination_bytes: fallback_proxy
+                .destination_write_bytes(Direction::ServerToClient)
+                .saturating_sub(fallback_proxy_bytes_before),
+            measurement_elapsed: proxy_measurement_started.elapsed(),
+            terminations: fallback_proxy.terminations(),
+        }),
+        collect_task_with_snapshot(compatible_reader, || ReaderProxySnapshot {
+            destination_bytes: compatible_proxy
+                .destination_write_bytes(Direction::ServerToClient)
+                .saturating_sub(compatible_proxy_bytes_before),
+            measurement_elapsed: proxy_measurement_started.elapsed(),
+            terminations: compatible_proxy.terminations(),
+        }),
+    );
+
+    let (fallback_stream, fallback) = match fallback_result {
+        Ok((stream, observation)) => (Some(stream), observation),
+        Err(error) => (
+            None,
+            FallbackObservation {
+                reports: 0,
+                advisories: 0,
+                accounted: 0,
+                wire_bytes: 0,
+                player_left: Vec::new(),
+                errors: Vec::new(),
+                terminal: ReaderTerminal::TaskFailure(error.to_string()),
+                elapsed: Duration::ZERO,
+                audit_frames: Vec::new(),
+            },
+        ),
+    };
+    let (compatible_stream, compatible) = match compatible_result {
+        Ok((stream, observation)) => (Some(stream), observation),
+        Err(error) => (
+            None,
+            CompatibleObservation {
+                delivered: 0,
+                wire_bytes: 0,
+                player_left: Vec::new(),
+                errors: Vec::new(),
+                terminal: ReaderTerminal::TaskFailure(error.to_string()),
+                elapsed: Duration::ZERO,
+                audit_frames: Vec::new(),
+            },
+        ),
+    };
+
+    const PROXY_TERMINATION_BUDGET: Duration = Duration::from_secs(5);
+    let (fallback_natural_wait, compatible_natural_wait) = tokio::join!(
+        async {
+            if fallback.terminal.is_complete() {
+                TerminationWait::NotRequested
+            } else {
+                wait_for_proxy_termination(&fallback_proxy, PROXY_TERMINATION_BUDGET).await
+            }
+        },
+        async {
+            if compatible.terminal.is_complete() {
+                TerminationWait::NotRequested
+            } else {
+                wait_for_proxy_termination(&compatible_proxy, PROXY_TERMINATION_BUDGET).await
+            }
+        },
+    );
+
+    // Byte-rate evidence ends at the readers' terminal observations. Lift the
+    // fault only after that immutable frontier is captured so queued bytes
+    // cannot flush unpaced into a RED run's numerator.
     compatible_proxy.throttle(Direction::ServerToClient, None);
     fallback_proxy.throttle(Direction::ServerToClient, None);
 
-    let (fallback_stream, fallback) = fallback_result.expect("fallback recipient task panicked");
-    let (compatible_stream, compatible_player_left, compatible_bytes) =
-        compatible_result.expect("compatible recipient task panicked");
+    // The client streams own the proxy-facing sockets. Close them, then wait
+    // for the proxy supervisor to retain the pump's terminal cause so the
+    // snapshot cannot race an otherwise decisive RED-run diagnostic.
+    drop(compatible_stream);
+    drop(fallback_stream);
+    let (fallback_teardown_wait, compatible_teardown_wait) = tokio::join!(
+        wait_for_proxy_termination(&fallback_proxy, PROXY_TERMINATION_BUDGET),
+        wait_for_proxy_termination(&compatible_proxy, PROXY_TERMINATION_BUDGET),
+    );
+
+    let compatible_proxy_observation = ProxyObservation {
+        destination_bytes: compatible_reader_proxy.destination_bytes,
+        measurement_elapsed: compatible_reader_proxy.measurement_elapsed,
+        bytes_per_second: compatible_reader_proxy.destination_bytes as f64
+            / compatible_reader_proxy
+                .measurement_elapsed
+                .as_secs_f64()
+                .max(f64::EPSILON),
+        terminations_at_reader_terminal: compatible_reader_proxy.terminations,
+        natural_termination_wait: compatible_natural_wait,
+        terminations_after_teardown: compatible_proxy.terminations(),
+        teardown_termination_wait: compatible_teardown_wait,
+        control_errors: compatible_proxy.control_errors(),
+    };
+    let fallback_proxy_observation = ProxyObservation {
+        destination_bytes: fallback_reader_proxy.destination_bytes,
+        measurement_elapsed: fallback_reader_proxy.measurement_elapsed,
+        bytes_per_second: fallback_reader_proxy.destination_bytes as f64
+            / fallback_reader_proxy
+                .measurement_elapsed
+                .as_secs_f64()
+                .max(f64::EPSILON),
+        terminations_at_reader_terminal: fallback_reader_proxy.terminations,
+        natural_termination_wait: fallback_natural_wait,
+        terminations_after_teardown: fallback_proxy.terminations(),
+        teardown_termination_wait: fallback_teardown_wait,
+        control_errors: fallback_proxy.control_errors(),
+    };
 
     let backpressure = metrics
         .websocket_backpressure_events
         .load(Ordering::Relaxed);
+    let slow_consumer_evictions = metrics
+        .websocket_slow_consumer_disconnects
+        .load(Ordering::Relaxed);
     // Printed before the oracles so a RED run still reports the numbers that
     // separate genuine amplification from a link that never kept pace (#212).
     eprintln!(
-        "mixed-encoding H14: accounted={}/{BURST} reports={} advisories={} \
-         fallback_bytes={} compatible_bytes={compatible_bytes} \
-         amplification={:.2}x elapsed={:?} backpressure_events={backpressure} \
-         slow_consumer_evictions={}",
-        fallback.accounted,
-        fallback.reports,
-        fallback.advisories,
-        fallback.wire_bytes,
-        fallback.wire_bytes as f64 / compatible_bytes.max(1) as f64,
-        fallback.elapsed,
-        metrics
-            .websocket_slow_consumer_disconnects
-            .load(Ordering::Relaxed),
+        "mixed-encoding H14: {}",
+        H14Diagnostics {
+            fallback: &fallback,
+            compatible: &compatible,
+            fallback_proxy: &fallback_proxy_observation,
+            compatible_proxy: &compatible_proxy_observation,
+            burst: BURST,
+            backpressure,
+            slow_consumer_evictions,
+        }
+    );
+
+    if let Some(failure) =
+        first_h14_reader_failure(sender_error.as_deref(), &fallback, &compatible, BURST)
+    {
+        panic!("{failure}");
+    }
+
+    // Conformance assertions run only after both readers and every transport
+    // diagnostic have been preserved. A protocol assertion can therefore
+    // still fail loudly without poisoning the sibling reader or erasing the
+    // first-failure evidence.
+    replay_audit(&auditor, "P1", &compatible.audit_frames);
+    replay_audit(&auditor, "P2", &fallback.audit_frames);
+
+    assert!(
+        fallback.player_left.is_empty(),
+        "fallback recipient observed compatible-recipient eviction: {:?}",
+        fallback.player_left
+    );
+    assert!(
+        fallback
+            .errors
+            .iter()
+            .all(|error| matches!(&error.code, Some(ErrorCode::UnsupportedGameDataFormat))),
+        "fallback recipient observed a non-advisory error: {}",
+        summarize_errors(&fallback.errors)
+    );
+    assert_eq!(
+        usize::try_from(fallback.advisories).expect("advisory count fits usize"),
+        fallback.errors.len(),
+        "every fallback Error must be an UnsupportedGameDataFormat advisory"
+    );
+    assert!(
+        compatible.errors.is_empty(),
+        "compatible recipient observed unexpected server errors: {}",
+        summarize_errors(&compatible.errors)
     );
 
     // This is the pre-registered falsification oracle. A RED result here means
@@ -609,12 +1268,12 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     // evict a recipient that survives the same throttle on compact binary
     // delivery.
     assert!(
-        fallback.close.is_none(),
+        fallback.terminal.is_complete(),
         "unsupported-format amplification evicted only the JSON fallback recipient after \
          {}/{BURST} accounted sequences and {} advisories ({:?})",
         fallback.accounted,
         fallback.advisories,
-        fallback.close
+        fallback.terminal
     );
     // Exactness is a property of the *sequences* named, not of the frame count:
     // one coalesced range may account for a whole burst of omissions. The
@@ -643,15 +1302,26 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     // reports were coalesced this ratio was ~8x, which is what evicted the
     // fallback recipient under an equal bandwidth fault.
     assert!(
-        fallback.wire_bytes <= compatible_bytes,
+        fallback.wire_bytes <= compatible.wire_bytes,
         "unsupported-format accountability cost the fallback recipient {} bytes against \
-         {compatible_bytes} bytes of compact binary delivery ({:.2}x amplification)",
+         {} bytes of compact binary delivery ({:.2}x amplification)",
         fallback.wire_bytes,
-        fallback.wire_bytes as f64 / compatible_bytes.max(1) as f64
+        compatible.wire_bytes,
+        fallback.wire_bytes as f64 / compatible.wire_bytes.max(1) as f64
+    );
+    assert!(
+        compatible.terminal.is_complete(),
+        "compatible recipient did not complete the equal-throttle control: {:?}",
+        compatible.terminal
     );
     assert_eq!(
-        compatible_player_left, 0,
-        "compatible recipient observed fallback-recipient eviction"
+        compatible.delivered, BURST,
+        "compatible recipient must receive every compact binary delivery"
+    );
+    assert!(
+        compatible.player_left.is_empty(),
+        "compatible recipient observed fallback-recipient eviction: {:?}",
+        compatible.player_left
     );
     assert_eq!(
         metrics
@@ -669,8 +1339,6 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     auditor.assert_conformance(&metrics, &[]).await;
 
     drop(sender);
-    drop(compatible_stream);
-    drop(fallback_stream);
     drop(compatible_proxy);
     drop(fallback_proxy);
     running_server.shutdown().await;
