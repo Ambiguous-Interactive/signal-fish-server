@@ -317,12 +317,15 @@ fn test_turn_reachability_gate_retries_until_answered() {
         let artifact_dir = temp_root.path().join("artifacts");
         fs::create_dir_all(&artifact_dir).expect("create artifact dir");
         let counter = temp_root.path().join("attempts");
+        // Relative names, resolved against the harness's own working
+        // directory: a `Path::display()` interpolation would embed Windows
+        // backslashes, which bash then eats as escapes.
         let harness = format!(
             "set -euo pipefail\n\
-             ARTIFACT_DIR={artifact}\n\
+             ARTIFACT_DIR=artifacts\n\
              TURN_HOST=203.0.113.9\n\
              LISTEN_PORT=3478\n\
-             COUNTER={counter}\n\
+             COUNTER=attempts\n\
              printf '0' >\"${{COUNTER}}\"\n\
              # Stubbed probe: the gate's contract is what it does with the\n\
              # status, not how the datagram is sent.\n\
@@ -335,14 +338,11 @@ fn test_turn_reachability_gate_retries_until_answered() {
              sleep() {{ :; }}\n\
              {gate}\n\
              wait_for_turn_udp_reachable\n",
-            artifact = artifact_dir.display(),
-            counter = counter.display(),
         );
-        let harness_path = temp_root.path().join("gate.sh");
-        write_file(&harness_path, &harness);
+        write_file(&temp_root.path().join("gate.sh"), &harness);
 
         let output = bash_command()
-            .arg(&harness_path)
+            .arg("gate.sh")
             .current_dir(temp_root.path())
             .output()
             .expect("reachability gate harness should execute");
