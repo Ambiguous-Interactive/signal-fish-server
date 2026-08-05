@@ -27,8 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and requires a host/host pair of concrete dialable IPv6 addresses plus the
   exact reliable and unreliable exchange. The client now reports each selected candidate's address
   alongside its type, and a runner without IPv6 loopback fails the cell with an
-  actionable message instead of skipping it. Live WebRTC transport remains
-  proved on Linux only; Windows and macOS are build-verified.
+  actionable message instead of skipping it. Windows and macOS now also build
+  the real server and run the smallest complete live mesh: two client processes
+  must select a direct host/host pair and exchange exact traffic on both SCTP
+  data channels. The larger topology, fault-injection, TURN, browser, and IPv6
+  matrices remain Linux-specific evidence (issue #275).
 - Add a deterministic TURN-only WebRTC interoperability gate (issue #239).
   Two native clients must select relay candidates through a digest-pinned local
   coturn, exchange exact reliable and unreliable data, and retain a live

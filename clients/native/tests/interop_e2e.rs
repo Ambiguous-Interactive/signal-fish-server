@@ -47,7 +47,11 @@
 //!    member forces the relay floor, each v3 member receives an explicit
 //!    Relay/Relay empty `SessionPlan`, the v2 member receives none, no
 //!    signaling/WebRTC activity occurs, and the GameData relay matrix completes.
-//! 6. `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` — the only cell whose
+//! 6. `two_peer_mesh_exchanges_over_live_webrtc` — the cross-platform smoke
+//!    cell: the smallest complete session (two clients) establishes a direct
+//!    host/host pair and exchanges one message on both data channels. CI runs
+//!    this exact selector on Linux, Windows, and macOS.
+//! 7. `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` — the only cell whose
 //!    live path is IPv6. webrtc 0.20 turns each application-supplied UDP bind
 //!    directly into a host candidate, so the bound family decides the
 //!    negotiated family; every other cell leaves `--ip-family any`, and a
@@ -61,7 +65,7 @@
 //!    so the IPv6 claim is about the WebRTC data path (ICE, DTLS, SCTP). A
 //!    runner without IPv6 loopback fails the cell; it is never skipped.
 //!
-//! Scenarios are serialized behind a mutex (each spawns 4+ OS processes and
+//! Scenarios are serialized behind a mutex (each spawns 3+ OS processes and
 //! up to three concurrent WebRTC stacks; running them in parallel on small CI
 //! runners invites scheduling flakes for zero extra coverage). Ports are
 //! reserved per scenario, so serialization is a robustness choice, not a
@@ -70,7 +74,7 @@
 mod harness;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, Ipv6Addr, UdpSocket};
+use std::net::{IpAddr, UdpSocket};
 use std::time::Duration;
 
 use harness::{
@@ -86,7 +90,7 @@ use uuid::Uuid;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the `#[tokio::test]` functions in this file).
-const SCENARIO_COUNT: u64 = 6;
+const SCENARIO_COUNT: u64 = 7;
 /// Generous ceiling for ONE scenario in a fully degraded run, sized to the
 /// worst-case shape — scenario 4's TWO client waves:
 ///  - server spawn: up to 3 attempts x 15 s health deadline each (see
@@ -101,14 +105,15 @@ const SCENARIO_COUNT: u64 = 6;
 /// deadline (<= `CLIENT_EXIT_TIMEOUT`), releasing the lock via unwind.
 const SCENARIO_CEILING: Duration = Duration::from_secs(240);
 /// Worst case for the LAST test in the queue: every other scenario runs to
-/// its completion (or its panic deadline) first (5 x 240 s = 1,200 s).
+/// its completion (or its panic deadline) first (6 x 240 s = 1,440 s).
 const SERIAL_ACQUIRE_TIMEOUT: Duration =
     Duration::from_secs(SCENARIO_CEILING.as_secs() * (SCENARIO_COUNT - 1));
 
 const RELIABLE: &str = "reliable";
 const UNRELIABLE: &str = "unreliable";
 const CLIENT_NAMES: [&str; 3] = ["c0", "c1", "c2"];
-/// Scenario 6 only: bind IPv6 exclusively, so an IPv6 host candidate is the
+const TWO_CLIENT_NAMES: [&str; 2] = ["c0", "c1"];
+/// Scenario 7 only: bind IPv6 exclusively, so an IPv6 host candidate is the
 /// only thing this client can advertise. (No `--disable-mdns`: rtc 0.20's
 /// default multicast-DNS mode is query-only, so native host candidates are
 /// raw addresses either way.)
@@ -120,13 +125,14 @@ async fn acquire_serial() -> tokio::sync::MutexGuard<'static, ()> {
         .expect("acquire the scenario serialization lock in time")
 }
 
-/// One fully drained scenario: 3 clients (creator + 2 joiners by room code),
-/// all `--exchange --relay-payload relay-from-<name>`, run to process exit.
+/// One fully drained multi-client scenario, indexed in spawn order.
 struct ScenarioRun {
-    /// Player id strings, indexed like [`CLIENT_NAMES`] (creator first).
+    /// Player id strings (creator first).
     ids: Vec<String>,
     /// Complete stdout event logs, same indexing.
     logs: Vec<Vec<Value>>,
+    /// Recent stdout events plus captured stderr, same indexing.
+    diagnostics: Vec<String>,
 }
 
 impl ScenarioRun {
@@ -144,6 +150,10 @@ impl ScenarioRun {
     /// host-failover replans triggered by siblings exiting first.
     fn window(&self, index: usize) -> &[Value] {
         scenario_window(&self.logs[index])
+    }
+
+    fn diagnostics(&self, index: usize) -> &str {
+        &self.diagnostics[index]
     }
 }
 
@@ -280,6 +290,7 @@ async fn run_three_clients(
         .collect();
     let distinct: BTreeSet<&String> = ids.iter().collect();
     assert_eq!(distinct.len(), 3, "player ids must be distinct: {ids:?}");
+    let diagnostics = clients.iter().map(ClientProcess::diagnostics).collect();
 
     ScenarioRun {
         ids,
@@ -289,6 +300,7 @@ async fn run_three_clients(
             .into_iter()
             .map(|mut client| std::mem::take(&mut client.events))
             .collect(),
+        diagnostics,
     }
 }
 
@@ -304,6 +316,67 @@ async fn run_three_client_scenario(default_topology: &str, game_name: &str) -> S
         ],
     )
     .await
+}
+
+/// Run the smallest complete WebRTC mesh: two real client processes establish
+/// one pair and exchange on both data channels. Keeping this independent of the
+/// three-client matrix gives non-Linux CI a fast live-transport proof without
+/// weakening the full Linux suite.
+async fn run_two_peer_mesh(game_name: &str, extra_args: &'static [&'static str]) -> ScenarioRun {
+    let mut server = spawn_server("mesh").await;
+    let workdir = tempfile::tempdir().expect("create client workdir");
+    let url = server.v3_ws_url();
+
+    let mut creator = spawn_client(
+        &ClientSpec {
+            name: TWO_CLIENT_NAMES[0],
+            server_url: &url,
+            game_name,
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args,
+        },
+        workdir.path(),
+    );
+    let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
+    let room_code = str_field(&created, "room_code").to_string();
+    let joiner = spawn_client(
+        &ClientSpec {
+            name: TWO_CLIENT_NAMES[1],
+            server_url: &url,
+            game_name,
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args,
+        },
+        workdir.path(),
+    );
+
+    let mut clients = vec![creator, joiner];
+    for client in &mut clients {
+        drain_expect_success(client).await;
+    }
+    server.shutdown().await;
+
+    let ids: Vec<String> = clients
+        .iter()
+        .map(|client| player_id_of(&client.events, &client.name))
+        .collect();
+    assert_ne!(ids[0], ids[1], "the two clients need distinct identities");
+    let diagnostics = clients.iter().map(ClientProcess::diagnostics).collect();
+
+    ScenarioRun {
+        ids,
+        logs: clients
+            .into_iter()
+            .map(|mut client| std::mem::take(&mut client.events))
+            .collect(),
+        diagnostics,
+    }
 }
 
 /// Assert the client's single `session_plan` event and return it.
@@ -1471,7 +1544,7 @@ async fn mixed_v2_v3_n3_relay_floor_with_reference_client() {
 /// The precondition applies the client's OWN selection rule rather than an
 /// approximation of it, so "the harness says yes but the client says no" is
 /// impossible; it then binds one of the resulting addresses to prove the
-/// socket layer agrees with the interface table. Scenario 6's whole claim is
+/// socket layer agrees with the interface table. Scenario 7's whole claim is
 /// that a live path ran over IPv6, so a silent skip would report a green lane
 /// that proved nothing.
 fn require_ipv6_ice_interface() {
@@ -1506,35 +1579,21 @@ fn require_ipv6_ice_interface() {
     }
 }
 
-/// The IPv6 address a `selected_candidate_pair` field carries, or a loud
-/// failure. A missing/`null` address fails: it would otherwise let a run that
-/// never proved the family pass.
-fn selected_ipv6_address(event: &Value, field: &str, who: &str) -> Ipv6Addr {
+/// The IP address a `selected_candidate_pair` field carries, or a loud failure.
+/// A missing/`null` address fails: it would otherwise let a run that never
+/// proved a concrete live path pass.
+fn selected_ip_address(event: &Value, field: &str, who: &str) -> IpAddr {
     let raw = event
         .get(field)
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("{who}: selected pair has no `{field}`: {event}"));
-    match raw
-        .parse::<IpAddr>()
+    raw.parse::<IpAddr>()
         .unwrap_or_else(|error| panic!("{who}: `{field}` is not an IP address ({error}): {raw}"))
-    {
-        IpAddr::V6(address) => address,
-        IpAddr::V4(address) => {
-            panic!("{who}: the IPv6-only run selected an IPv4 candidate {address}: {event}")
-        }
-    }
 }
 
-/// Assert this client's single selected pair is host/host over concrete IPv6,
-/// toward the expected peer.
-///
-/// The address is not pinned to `::1`: a runner that also has a global IPv6
-/// interface binds it too, and either host candidate is a legitimate IPv6
-/// proof. What must hold is that the path is IPv6, direct (host/host, since no
-/// STUN or TURN is configured), and carried by an address a peer could actually
-/// dial — never unspecified, multicast, or link-local, whose scope ID the
-/// candidate wire cannot carry.
-fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str) {
+/// Assert this client's single selected pair is a direct host/host path toward
+/// the expected peer, and return its concrete local and remote addresses.
+fn assert_direct_host_path(events: &[Value], who: &str, peer_id: &str) -> [IpAddr; 2] {
     let selected = single_event(events, "selected_candidate_pair", who);
     assert_eq!(
         str_field(selected, "peer"),
@@ -1548,13 +1607,38 @@ fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str) {
             "{who}: {field} must be a direct host candidate (no STUN/TURN is configured)"
         );
     }
-    for field in ["local_candidate_address", "remote_candidate_address"] {
-        let address = selected_ipv6_address(selected, field, who);
+    let addresses = [
+        selected_ip_address(selected, "local_candidate_address", who),
+        selected_ip_address(selected, "remote_candidate_address", who),
+    ];
+    for address in addresses {
+        assert!(
+            !address.is_unspecified() && !address.is_multicast(),
+            "{who}: the selected pair must use concrete unicast addresses, got {address}: {selected}"
+        );
+    }
+    addresses
+}
+
+/// Assert this client's single selected pair is host/host over concrete IPv6,
+/// toward the expected peer.
+///
+/// The address is not pinned to `::1`: a runner that also has a global IPv6
+/// interface binds it too, and either host candidate is a legitimate IPv6
+/// proof. What must hold is that the path is IPv6, direct (host/host, since no
+/// STUN or TURN is configured), and carried by an address a peer could actually
+/// dial — never unspecified, multicast, or link-local, whose scope ID the
+/// candidate wire cannot carry.
+fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str) {
+    for address in assert_direct_host_path(events, who, peer_id) {
+        let IpAddr::V6(address) = address else {
+            panic!("{who}: the IPv6-only run selected an IPv4 candidate {address}");
+        };
         assert!(
             !address.is_unspecified()
                 && !address.is_multicast()
                 && !address.is_unicast_link_local(),
-            "{who}: {field} must be a concrete dialable IPv6 address, got {address}"
+            "{who}: the selected pair must use concrete dialable IPv6 addresses, got {address}"
         );
     }
 }
@@ -1586,75 +1670,49 @@ fn assert_no_ipv4_candidate_advertised(events: &[Value], who: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn two_peer_mesh_exchanges_over_live_webrtc() {
+    let _serial = acquire_serial().await;
+    let run = run_two_peer_mesh("interop-cross-platform-smoke", &[]).await;
+
+    for (index, who) in TWO_CLIENT_NAMES.iter().enumerate() {
+        let peer_id = run.ids[1 - index].as_str();
+        let peers = BTreeSet::from([peer_id]);
+        let window = run.window(index);
+        let plan = session_plan(window, who, "mesh", 1);
+        assert!(
+            plan.get("host").is_some_and(Value::is_null),
+            "{who}: mesh plans elect no host: {plan}"
+        );
+
+        assert_pair_connected_exactly(window, who, &peers);
+        assert_direct_host_path(window, who, peer_id);
+        assert_exchange_sent_to(window, who, &peers);
+        assert_exchange_received_from(window, who, &peers);
+        assert_transport_status_true(&run.logs[index], who);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
     let _serial = acquire_serial().await;
     require_ipv6_ice_interface();
+    let run = run_two_peer_mesh("interop-ipv6", &IPV6_ARGS).await;
 
-    // Two members, not three: the claim under test is the address family of a
-    // live path, and a pair is the smallest configuration that establishes one.
-    const NAMES: [&str; 2] = ["c0", "c1"];
-    let mut server = spawn_server("mesh").await;
-    let workdir = tempfile::tempdir().expect("create client workdir");
-    let url = server.v3_ws_url();
-
-    let mut creator = spawn_client(
-        &ClientSpec {
-            name: NAMES[0],
-            server_url: &url,
-            game_name: "interop-ipv6",
-            join_code: None,
-            peers: 2,
-            exchange: true,
-            relay_payload: None,
-            extra_args: &IPV6_ARGS,
-        },
-        workdir.path(),
-    );
-    let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
-    let room_code = str_field(&created, "room_code").to_string();
-    let joiner = spawn_client(
-        &ClientSpec {
-            name: NAMES[1],
-            server_url: &url,
-            game_name: "interop-ipv6",
-            join_code: Some(&room_code),
-            peers: 2,
-            exchange: true,
-            relay_payload: None,
-            extra_args: &IPV6_ARGS,
-        },
-        workdir.path(),
-    );
-
-    let mut clients = [creator, joiner];
-    for client in &mut clients {
-        drain_expect_success(client).await;
-    }
-    server.shutdown().await;
-
-    let ids = [
-        player_id_of(&clients[0].events, &clients[0].name),
-        player_id_of(&clients[1].events, &clients[1].name),
-    ];
-    assert_ne!(ids[0], ids[1], "the two clients need distinct identities");
-
-    for (index, client) in clients.iter().enumerate() {
-        let who = &client.name;
-        let peer_id = ids[1 - index].as_str();
+    for (index, who) in TWO_CLIENT_NAMES.iter().enumerate() {
+        let peer_id = run.ids[1 - index].as_str();
         let peers = BTreeSet::from([peer_id]);
-        let window = scenario_window(&client.events);
+        let window = run.window(index);
 
         // A live WebRTC pair carried the session, not the relay floor.
         assert_pair_connected_exactly(window, who, &peers);
-        assert_transport_status_true(&client.events, who);
+        assert_transport_status_true(&run.logs[index], who);
         // Bound the fallback claim to the LIVE session. A sibling that exits
         // first legitimately drives this client's status to `false` plus one
         // `fallback_engaged` — and the server emits that transition BEFORE
         // `PlayerLeft`, so `scenario_window` does not exclude it (reproduced
         // 4 times in 12 single-core runs). What must hold is that the relay
         // floor never carried the exchange.
-        let live_end = client
-            .events
+        let live_end = run.logs[index]
             .iter()
             .rposition(|event| {
                 event.get("event").and_then(Value::as_str) == Some("channel_message")
@@ -1662,23 +1720,22 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
             .unwrap_or_else(|| {
                 panic!(
                     "{who}: the exchange produced no channel messages;\n{}",
-                    client.diagnostics()
+                    run.diagnostics(index)
                 )
             })
             + 1;
         assert!(
-            events_named(&client.events[..live_end], "fallback_engaged").is_empty(),
+            events_named(&run.logs[index][..live_end], "fallback_engaged").is_empty(),
             "{who}: the IPv6 host path must carry the exchange, not the relay fallback;\n{}",
-            client.diagnostics()
+            run.diagnostics(index)
         );
         // Teardown produces at most one such transition, so this still catches
         // a path that collapses right after the exchange (or flaps) without
         // re-introducing the race the bound above avoids.
         assert!(
-            events_named(&client.events, "fallback_engaged").len() <= 1,
-            "{who}: at most one fallback transition (the sibling's departure) may \
-             ever occur;\n{}",
-            client.diagnostics()
+            events_named(&run.logs[index], "fallback_engaged").len() <= 1,
+            "{who}: at most one fallback transition (the sibling's departure) may ever occur;\n{}",
+            run.diagnostics(index)
         );
 
         // ...over IPv6, with the exact exchange on both channel labels.
