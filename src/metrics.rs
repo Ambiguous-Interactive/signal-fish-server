@@ -141,6 +141,9 @@ pub struct ServerMetrics {
     // Race condition and retry metrics
     pub room_capacity_conflicts: AtomicU64,
     pub room_code_collisions: AtomicU64,
+    pub room_code_retry_operations: AtomicU64,
+    pub room_code_retry_successes: AtomicU64,
+    pub room_code_retry_exhaustions: AtomicU64,
     pub authority_transfer_conflicts: AtomicU64,
     pub retry_attempts: AtomicU64,
     pub retry_successes: AtomicU64,
@@ -381,6 +384,10 @@ pub struct RoomMetrics {
 pub struct RaceConditionMetrics {
     pub room_capacity_conflicts: u64,
     pub room_code_collisions: u64,
+    pub room_code_retry_operations: u64,
+    pub room_code_retry_successes: u64,
+    pub room_code_retry_exhaustions: u64,
+    pub room_code_retry_success_rate: f64,
     pub authority_transfer_conflicts: u64,
     pub retry_attempts: u64,
     pub retry_successes: u64,
@@ -552,6 +559,9 @@ impl ServerMetrics {
             room_cap_denials: AtomicU64::new(0),
             room_capacity_conflicts: AtomicU64::new(0),
             room_code_collisions: AtomicU64::new(0),
+            room_code_retry_operations: AtomicU64::new(0),
+            room_code_retry_successes: AtomicU64::new(0),
+            room_code_retry_exhaustions: AtomicU64::new(0),
             authority_transfer_conflicts: AtomicU64::new(0),
             retry_attempts: AtomicU64::new(0),
             retry_successes: AtomicU64::new(0),
@@ -873,6 +883,21 @@ impl ServerMetrics {
 
     pub fn increment_room_code_collisions(&self) {
         self.room_code_collisions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_room_code_retry_operations(&self) {
+        self.room_code_retry_operations
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_room_code_retry_successes(&self) {
+        self.room_code_retry_successes
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_room_code_retry_exhaustions(&self) {
+        self.room_code_retry_exhaustions
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
@@ -1265,6 +1290,13 @@ impl ServerMetrics {
         } else {
             1.0
         };
+        let room_code_retry_operations = self.room_code_retry_operations.load(Ordering::Relaxed);
+        let room_code_retry_successes = self.room_code_retry_successes.load(Ordering::Relaxed);
+        let room_code_retry_success_rate = if room_code_retry_operations > 0 {
+            (room_code_retry_successes as f64) / (room_code_retry_operations as f64)
+        } else {
+            1.0
+        };
 
         let validation_errors = self.validation_errors.load(Ordering::Relaxed);
         let internal_errors = self.internal_errors.load(Ordering::Relaxed);
@@ -1322,6 +1354,12 @@ impl ServerMetrics {
             race_conditions: RaceConditionMetrics {
                 room_capacity_conflicts: self.room_capacity_conflicts.load(Ordering::Relaxed),
                 room_code_collisions: self.room_code_collisions.load(Ordering::Relaxed),
+                room_code_retry_operations,
+                room_code_retry_successes,
+                room_code_retry_exhaustions: self
+                    .room_code_retry_exhaustions
+                    .load(Ordering::Relaxed),
+                room_code_retry_success_rate,
                 authority_transfer_conflicts: self
                     .authority_transfer_conflicts
                     .load(Ordering::Relaxed),
@@ -1506,10 +1544,10 @@ impl ServerMetrics {
             ));
         }
 
-        if snapshot.race_conditions.room_code_collisions > 0 {
+        if snapshot.race_conditions.room_code_retry_exhaustions > 0 {
             warnings.push(format!(
-                "Room code collisions: {}",
-                snapshot.race_conditions.room_code_collisions
+                "Room code retry exhaustions: {}",
+                snapshot.race_conditions.room_code_retry_exhaustions
             ));
         }
 
@@ -1924,5 +1962,26 @@ mod tests {
                 + rate_limits.signal_rejections
                 + rate_limits.signal_error_rejections
         );
+    }
+
+    #[tokio::test]
+    async fn recovered_room_code_collision_does_not_degrade_health() {
+        let metrics = ServerMetrics::new();
+        metrics.increment_room_code_collisions();
+        metrics.increment_room_code_retry_operations();
+        metrics.increment_room_code_retry_successes();
+
+        let health = metrics.health_status().await;
+        assert_eq!(health.status, HealthStatusLevel::Healthy);
+        assert!(health.warnings.is_empty());
+        assert_eq!(
+            health.metrics.race_conditions.room_code_retry_success_rate,
+            1.0
+        );
+
+        metrics.increment_room_code_retry_exhaustions();
+        let exhausted = metrics.health_status().await;
+        assert_eq!(exhausted.status, HealthStatusLevel::Degraded);
+        assert_eq!(exhausted.warnings, ["Room code retry exhaustions: 1"]);
     }
 }

@@ -302,6 +302,18 @@ than the total code length so at least one random character remains. Startup
 rejects settings that could generate a code the explicit join path would not
 accept.
 
+The prefix consumes part of the 32-character clean-code namespace. If `s` is
+the remaining random suffix length, each game has `32^s` generated suffixes.
+Keep the expected active-room count below 1% of that space (for example, a
+four-character suffix has 1,048,576 possibilities and comfortably covers the
+default 1,000-room cap). Automatic creation makes at most eight independent
+attempts, counts them as one rate-limited client operation, and reports
+collisions through `race_conditions.room_code_collisions`. The adjacent
+`room_code_retry_*` fields report logical retry operations, recoveries,
+exhaustions, and their recovery rate without mixing them into infrastructure
+retry accounting. Exhausting the budget fails the creation without exposing
+candidate codes or changing the behavior of explicit room-code requests.
+
 ## WebSocket Settings
 
 ```json

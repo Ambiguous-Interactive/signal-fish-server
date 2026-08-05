@@ -2,6 +2,7 @@ use super::{
     EnhancedGameServer, MaxPlayersPerApplicationExceededError, MaxRoomsPerApplicationExceededError,
     MaxRoomsPerGameExceededError, PendingApplicationClaimRollback,
 };
+use crate::database::CreateRoomError;
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
@@ -17,6 +18,13 @@ use thiserror::Error;
 const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
 const APPLICATION_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
+const GENERATED_ROOM_CODE_MAX_ATTEMPTS: u8 = 8;
+
+#[derive(Clone, Copy)]
+enum RoomAdmissionIntent {
+    ExistingOrCreate,
+    CreateOnly,
+}
 
 #[derive(Clone)]
 enum RoomAdmissionKind {
@@ -78,6 +86,13 @@ pub(super) enum JoinRoomError {
     /// (→ `SERVER_DRAINING`).
     #[error("Server is draining for shutdown")]
     ServerDraining,
+    /// An automatic room-code candidate was already occupied. This never
+    /// reaches the client directly; the bounded create loop consumes it.
+    #[error("Generated room code collision")]
+    RoomCodeCollision,
+    /// Every automatic room-code candidate in the bounded budget collided.
+    #[error("Unable to allocate a unique generated room code after {attempts} attempts")]
+    RoomCodeRetryExhausted { attempts: u8 },
     /// Any other failure — storage, lock, name validation, broadcast — an
     /// infrastructure fault that must NOT masquerade as a specific business
     /// rejection (→ `ROOM_CREATION_FAILED`).
@@ -96,6 +111,9 @@ impl JoinRoomError {
             Self::MaxPlayersPerApplicationExceeded(_) => ErrorCode::InvalidMaxPlayers,
             Self::RoomNotFound => ErrorCode::RoomNotFound,
             Self::ServerDraining => ErrorCode::ServerDraining,
+            Self::RoomCodeCollision | Self::RoomCodeRetryExhausted { .. } => {
+                ErrorCode::RoomCreationFailed
+            }
             Self::Internal(_) => ErrorCode::RoomCreationFailed,
         }
     }
@@ -336,7 +354,7 @@ impl EnhancedGameServer {
             return;
         }
 
-        let room_code = match room_code {
+        let room_join_result = match room_code {
             Some(code) => {
                 if let Err(reason) =
                     validation::validate_room_code_with_config(&code, &self.protocol_config)
@@ -353,26 +371,34 @@ impl EnhancedGameServer {
                         .await;
                     return;
                 }
-                code.to_uppercase()
+                let room_code = code.to_uppercase();
+                room_join_span.record("room_code", tracing::field::display(&room_code));
+                self.join_room_with_coordination(
+                    player_id,
+                    &game_name,
+                    &room_code,
+                    &player_name,
+                    max_players,
+                    supports_authority,
+                    RoomAdmissionIntent::ExistingOrCreate,
+                )
+                .await
             }
-            None => self.generate_region_room_code(),
+            None => {
+                self.create_room_with_generated_code(
+                    player_id,
+                    &game_name,
+                    &player_name,
+                    max_players,
+                    supports_authority,
+                )
+                .await
+            }
         };
-        room_join_span.record("room_code", tracing::field::display(&room_code));
-
-        // Serialize room operations with the process-local coordinator.
-        let room_join_result = self
-            .join_room_with_coordination(
-                player_id,
-                &game_name,
-                &room_code,
-                &player_name,
-                max_players,
-                supports_authority,
-            )
-            .await;
 
         match room_join_result {
             Ok((room, room_event_guard, admission_kind)) => {
+                room_join_span.record("room_code", tracing::field::display(&room.code));
                 room_join_span.record("room_id", tracing::field::display(room.id));
                 let Some((delivery, membership_stamp)) = self
                     .connection_manager
@@ -701,6 +727,68 @@ impl EnhancedGameServer {
         }
     }
 
+    async fn create_room_with_generated_code(
+        &self,
+        player_id: &PlayerId,
+        game_name: &str,
+        player_name: &str,
+        max_players: u8,
+        supports_authority: bool,
+    ) -> Result<
+        (
+            Room,
+            crate::coordination::RoomEventMutationGuard,
+            RoomAdmissionKind,
+        ),
+        JoinRoomError,
+    > {
+        for attempt in 1..=GENERATED_ROOM_CODE_MAX_ATTEMPTS {
+            let candidate = self.generate_region_room_code();
+            match self
+                .join_room_with_coordination(
+                    player_id,
+                    game_name,
+                    &candidate,
+                    player_name,
+                    max_players,
+                    supports_authority,
+                    RoomAdmissionIntent::CreateOnly,
+                )
+                .await
+            {
+                Ok(result) => {
+                    if attempt > 1 {
+                        self.metrics.increment_room_code_retry_successes();
+                    }
+                    return Ok(result);
+                }
+                Err(JoinRoomError::RoomCodeCollision) => {
+                    self.metrics.increment_room_code_collisions();
+                    if attempt == 1 {
+                        self.metrics.increment_room_code_retry_operations();
+                    }
+                    if attempt < GENERATED_ROOM_CODE_MAX_ATTEMPTS {
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = GENERATED_ROOM_CODE_MAX_ATTEMPTS,
+                            "Generated room code collided; retrying with a new candidate"
+                        );
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        tracing::error!(
+            attempts = GENERATED_ROOM_CODE_MAX_ATTEMPTS,
+            "Generated room code retry budget exhausted"
+        );
+        self.metrics.increment_room_code_retry_exhaustions();
+        Err(JoinRoomError::RoomCodeRetryExhausted {
+            attempts: GENERATED_ROOM_CODE_MAX_ATTEMPTS,
+        })
+    }
+
     /// Leave room with coordination
     pub async fn leave_room(self: &Arc<Self>, player_id: &PlayerId) {
         let server = Arc::clone(self);
@@ -1019,6 +1107,7 @@ impl EnhancedGameServer {
         player_name: &str,
         max_players: u8,
         supports_authority: bool,
+        admission_intent: RoomAdmissionIntent,
     ) -> Result<
         (
             Room,
@@ -1059,6 +1148,9 @@ impl EnhancedGameServer {
 
         // Try to join existing room or create new one
         let result = match self.database.get_room(game_name, room_code).await {
+            Ok(Some(_)) if matches!(admission_intent, RoomAdmissionIntent::CreateOnly) => {
+                Err(JoinRoomError::RoomCodeCollision)
+            }
             Ok(Some(room_lane)) => {
                 // Admission, routing publication, the directed RoomJoined
                 // baseline, and PlayerJoined enqueue share one room mutation
@@ -1269,9 +1361,9 @@ impl EnhancedGameServer {
 
                         let relay_type = self.resolve_relay_type(game_name);
                         let region_id = self.region_id().to_string();
-                        let room = self
+                        let room = match self
                             .database
-                            .create_room(
+                            .create_room_classified(
                                 game_name.to_string(),
                                 Some(room_code.to_string()),
                                 max_players,
@@ -1281,7 +1373,47 @@ impl EnhancedGameServer {
                                 region_id,
                                 client_app_id,
                             )
-                            .await?;
+                            .await
+                        {
+                            Ok(room) => room,
+                            Err(error @ CreateRoomError::RoomCodeCollision { .. }) => {
+                                if matches!(admission_intent, RoomAdmissionIntent::CreateOnly) {
+                                    return Err(JoinRoomError::RoomCodeCollision);
+                                }
+                                return Err(anyhow::Error::new(error).into());
+                            }
+                            Err(CreateRoomError::Storage(error)) => {
+                                // A source-compatible adapter may still expose
+                                // uniqueness races through its legacy untyped
+                                // `create_room` result. For automatic creation,
+                                // confirm whether the candidate became occupied
+                                // before treating that error as unrelated
+                                // storage failure. Explicit requests retain the
+                                // adapter's original error semantics.
+                                if matches!(admission_intent, RoomAdmissionIntent::CreateOnly) {
+                                    if let Ok(Some(room)) =
+                                        self.database.get_room(game_name, room_code).await
+                                    {
+                                        if room.players.contains_key(player_id) {
+                                            // The write may have committed even
+                                            // though the legacy adapter returned
+                                            // an error (for example, transport
+                                            // loss after acknowledgement). Adopt
+                                            // that exact creator-owned result so
+                                            // retrying cannot orphan a room or
+                                            // consume quota twice.
+                                            room
+                                        } else {
+                                            return Err(JoinRoomError::RoomCodeCollision);
+                                        }
+                                    } else {
+                                        return Err(error.into());
+                                    }
+                                } else {
+                                    return Err(error.into());
+                                }
+                            }
+                        };
 
                         if self.is_draining() {
                             match self.database.delete_room(&room.id).await {

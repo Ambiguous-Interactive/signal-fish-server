@@ -156,6 +156,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         pending_durable_player_detaches: Arc::new(DashMap::new()),
         fail_retain_room_publication_snapshot: AtomicBool::new(false),
         reconnect_teardown_test_gate: StdMutex::new(None),
+        scripted_room_codes: StdMutex::new(std::collections::VecDeque::new()),
         spectator_service,
         transport_security: TransportSecurityConfig::default(),
         dashboard_metrics_cache,
@@ -164,6 +165,363 @@ async fn create_test_server_with_message_coordinator_and_lock(
         active_socket_tasks: AtomicUsize::new(0),
         active_socket_tasks_notify: Notify::new(),
     })
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn generated_room_code_collision_retries_instead_of_joining_existing_room() {
+    let server = create_test_server().await;
+    let existing_creator = PlayerId::new_v4();
+    let existing_room = server
+        .database
+        .create_room(
+            "collision-game".to_string(),
+            Some("TAKEN1".to_string()),
+            4,
+            true,
+            existing_creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("collision fixture room should be created");
+    server.script_room_codes_for_test(["TAKEN1", "FRESH1"]);
+
+    let (creator, mut receiver) =
+        register_client(&server, "127.0.0.1:48032".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "collision-game".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("generated create should finish")
+        .expect("generated create should return a response");
+    let ServerMessage::RoomJoined(payload) = response.as_ref() else {
+        panic!("expected RoomJoined after collision retry, got {response:?}");
+    };
+    assert_eq!(payload.room_code, "FRESH1");
+    assert_ne!(payload.room_id, existing_room.id);
+    let race = server.metrics.snapshot().await.race_conditions;
+    assert_eq!(race.room_code_collisions, 1);
+    assert_eq!(race.room_code_retry_operations, 1);
+    assert_eq!(race.room_code_retry_successes, 1);
+    assert_eq!(race.room_code_retry_exhaustions, 0);
+    assert_eq!(race.room_code_retry_success_rate, 1.0);
+    assert_eq!(race.retry_attempts, 0, "generic retries stay independent");
+    assert_eq!(race.retry_successes, 0, "generic retries stay independent");
+    let rate_stats = server
+        .rate_limiter
+        .get_player_stats(&creator)
+        .await
+        .expect("room creation should create rate-limit stats");
+    assert_eq!(
+        (rate_stats.room_creations, rate_stats.join_attempts),
+        (1, 1),
+        "internal candidates must remain one client operation"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let message_coordinator: Arc<dyn MessageCoordinator> =
+        Arc::new(InMemoryMessageCoordinator::new());
+    let database = Arc::new(DrainAfterCreateDatabase::with_legacy_collision_once(
+        create_test_database().await,
+    ));
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        message_coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    server.script_room_codes_for_test(["LEGACY", "FRESH2"]);
+
+    let (creator, mut receiver) =
+        register_client(&server, "127.0.0.1:48037".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "legacy-collision".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("legacy collision recovery should finish")
+        .expect("legacy collision recovery should respond");
+    let ServerMessage::RoomJoined(payload) = response.as_ref() else {
+        panic!("expected RoomJoined after legacy collision recovery, got {response:?}");
+    };
+    assert_eq!(payload.room_code, "FRESH2");
+    assert!(
+        server
+            .database
+            .get_room("legacy-collision", "LEGACY")
+            .await
+            .expect("winning room lookup should succeed")
+            .is_some(),
+        "the adapter's competing winner must remain intact"
+    );
+    let race = server.metrics.snapshot().await.race_conditions;
+    assert_eq!(race.room_code_collisions, 1);
+    assert_eq!(race.room_code_retry_operations, 1);
+    assert_eq!(race.room_code_retry_successes, 1);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn legacy_adapter_ambiguous_success_is_adopted_without_duplicate_room() {
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let message_coordinator: Arc<dyn MessageCoordinator> =
+        Arc::new(InMemoryMessageCoordinator::new());
+    let database = Arc::new(DrainAfterCreateDatabase::with_ambiguous_commit_once(
+        create_test_database().await,
+    ));
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        message_coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    server.script_room_codes_for_test(["AMBIG1", "UNUSED"]);
+
+    let (creator, mut receiver) =
+        register_client(&server, "127.0.0.1:48038".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "ambiguous-commit".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("ambiguous commit recovery should finish")
+        .expect("ambiguous commit recovery should respond");
+    let ServerMessage::RoomJoined(payload) = response.as_ref() else {
+        panic!("expected RoomJoined after ambiguous commit recovery, got {response:?}");
+    };
+    assert_eq!(payload.room_code, "AMBIG1");
+    assert_eq!(
+        server
+            .database
+            .get_game_room_count("ambiguous-commit")
+            .await
+            .expect("room count should succeed"),
+        1,
+        "adopting the committed room must not create an orphaned duplicate"
+    );
+    let race = server.metrics.snapshot().await.race_conditions;
+    assert_eq!(race.room_code_collisions, 0);
+    assert_eq!(race.room_code_retry_operations, 0);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn generated_room_code_retry_budget_exhaustion_is_bounded_and_observable() {
+    let server = create_test_server().await;
+    server
+        .database
+        .create_room(
+            "collision-game".to_string(),
+            Some("TAKEN1".to_string()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("collision fixture room should be created");
+    server.script_room_codes_for_test(["TAKEN1"; 8]);
+
+    let (creator, mut receiver) =
+        register_client(&server, "127.0.0.1:48033".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "collision-game".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("bounded create should finish")
+        .expect("bounded create should return a response");
+    match response.as_ref() {
+        ServerMessage::RoomJoinFailed { reason, error_code } => {
+            assert_eq!(*error_code, Some(ErrorCode::RoomCreationFailed));
+            assert_eq!(
+                reason,
+                "Unable to allocate a unique generated room code after 8 attempts"
+            );
+            assert!(
+                !reason.contains("TAKEN1"),
+                "exhaustion must not disclose a generated candidate"
+            );
+        }
+        other => panic!("expected bounded RoomJoinFailed, got {other:?}"),
+    }
+    let race = server.metrics.snapshot().await.race_conditions;
+    assert_eq!(race.room_code_collisions, 8);
+    assert_eq!(race.room_code_retry_operations, 1);
+    assert_eq!(race.room_code_retry_successes, 0);
+    assert_eq!(race.room_code_retry_exhaustions, 1);
+    assert_eq!(race.room_code_retry_success_rate, 0.0);
+    let rate_stats = server
+        .rate_limiter
+        .get_player_stats(&creator)
+        .await
+        .expect("room creation should create rate-limit stats");
+    assert_eq!(
+        (rate_stats.room_creations, rate_stats.join_attempts),
+        (1, 1),
+        "exhausting internal retries must remain one client operation"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn explicit_room_code_keeps_existing_join_semantics_without_retry() {
+    let server = create_test_server().await;
+    let existing = server
+        .database
+        .create_room(
+            "explicit-game".to_string(),
+            Some("EXPL01".to_string()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("existing room should be created");
+    server.script_room_codes_for_test(["UNUSED"]);
+
+    let (joiner, mut receiver) = register_client(&server, "127.0.0.1:48034".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &joiner,
+            "explicit-game".to_string(),
+            Some("EXPL01".to_string()),
+            "distinct-joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("explicit join should finish")
+        .expect("explicit join should return a response");
+    let ServerMessage::RoomJoined(payload) = response.as_ref() else {
+        panic!("expected explicit RoomJoined, got {response:?}");
+    };
+    assert_eq!(payload.room_id, existing.id);
+    assert_eq!(payload.room_code, "EXPL01");
+    let race = server.metrics.snapshot().await.race_conditions;
+    assert_eq!(race.room_code_collisions, 0);
+    assert_eq!(race.room_code_retry_operations, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(miri, ignore)]
+async fn concurrent_generated_creators_retry_shared_candidate_without_cross_joining() {
+    let server = create_test_server().await;
+    server.script_room_codes_for_test(["RACE01", "RACE01", "RACE02"]);
+    let (first, mut first_rx) = register_client(&server, "127.0.0.1:48035".parse().unwrap()).await;
+    let (second, mut second_rx) =
+        register_client(&server, "127.0.0.1:48036".parse().unwrap()).await;
+
+    tokio::join!(
+        server.handle_join_room(
+            &first,
+            "concurrent-collision".to_string(),
+            None,
+            "first".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        ),
+        server.handle_join_room(
+            &second,
+            "concurrent-collision".to_string(),
+            None,
+            "second".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+    );
+
+    let first_response = timeout(Duration::from_secs(1), first_rx.recv())
+        .await
+        .expect("first create should finish")
+        .expect("first create should respond");
+    let second_response = timeout(Duration::from_secs(1), second_rx.recv())
+        .await
+        .expect("second create should finish")
+        .expect("second create should respond");
+    let ServerMessage::RoomJoined(first_payload) = first_response.as_ref() else {
+        panic!("first creator expected RoomJoined, got {first_response:?}");
+    };
+    let ServerMessage::RoomJoined(second_payload) = second_response.as_ref() else {
+        panic!("second creator expected RoomJoined, got {second_response:?}");
+    };
+    assert_ne!(first_payload.room_id, second_payload.room_id);
+    assert_ne!(first_payload.room_code, second_payload.room_code);
+    assert_eq!(
+        HashSet::from([
+            first_payload.room_code.as_str(),
+            second_payload.room_code.as_str()
+        ]),
+        HashSet::from(["RACE01", "RACE02"])
+    );
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .race_conditions
+            .room_code_collisions,
+        1,
+        "exactly one creator should retry the shared candidate"
+    );
 }
 
 struct DrainOnLockAcquire {
@@ -258,6 +616,9 @@ struct DrainAfterCreateDatabase {
     inner: Arc<dyn GameDatabase>,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
+    trigger_drain_after_create: bool,
+    legacy_collision_once: AtomicBool,
+    ambiguous_commit_once: AtomicBool,
 }
 
 impl DrainAfterCreateDatabase {
@@ -266,6 +627,31 @@ impl DrainAfterCreateDatabase {
             inner,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
+            trigger_drain_after_create: true,
+            legacy_collision_once: AtomicBool::new(false),
+            ambiguous_commit_once: AtomicBool::new(false),
+        }
+    }
+
+    fn with_legacy_collision_once(inner: Arc<dyn GameDatabase>) -> Self {
+        Self {
+            inner,
+            server: StdMutex::new(None),
+            triggered: AtomicBool::new(false),
+            trigger_drain_after_create: false,
+            legacy_collision_once: AtomicBool::new(true),
+            ambiguous_commit_once: AtomicBool::new(false),
+        }
+    }
+
+    fn with_ambiguous_commit_once(inner: Arc<dyn GameDatabase>) -> Self {
+        Self {
+            inner,
+            server: StdMutex::new(None),
+            triggered: AtomicBool::new(false),
+            trigger_drain_after_create: false,
+            legacy_collision_once: AtomicBool::new(false),
+            ambiguous_commit_once: AtomicBool::new(true),
         }
     }
 
@@ -308,6 +694,8 @@ impl GameDatabase for DrainAfterCreateDatabase {
         region_id: String,
         application_id: Option<uuid::Uuid>,
     ) -> anyhow::Result<Room> {
+        let simulate_competing_winner = self.legacy_collision_once.swap(false, Ordering::AcqRel);
+        let simulate_ambiguous_commit = self.ambiguous_commit_once.swap(false, Ordering::AcqRel);
         let room = self
             .inner
             .create_room(
@@ -315,13 +703,24 @@ impl GameDatabase for DrainAfterCreateDatabase {
                 room_code,
                 max_players,
                 supports_authority,
-                creator_id,
+                if simulate_competing_winner {
+                    PlayerId::new_v4()
+                } else {
+                    creator_id
+                },
                 relay_type,
                 region_id,
                 application_id,
             )
             .await?;
-        self.begin_drain_once();
+        if simulate_competing_winner || simulate_ambiguous_commit {
+            return Err(anyhow::anyhow!(
+                "legacy adapter returned an untyped error after the write"
+            ));
+        }
+        if self.trigger_drain_after_create {
+            self.begin_drain_once();
+        }
         Ok(room)
     }
 

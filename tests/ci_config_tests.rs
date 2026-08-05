@@ -16028,6 +16028,47 @@ fn dependabot_cargo_directories_from_yaml(content: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn dependabot_npm_directories() -> BTreeSet<String> {
+    let path = repo_root().join(".github/dependabot.yml");
+    let content = read_live_file(&path);
+    let documents = Yaml::load_from_str(&content).expect("dependabot.yml must parse as YAML");
+    let directories = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("updates"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("dependabot.yml must define an updates sequence"))
+        .iter()
+        .filter(|entry| {
+            entry
+                .as_mapping_get("package-ecosystem")
+                .and_then(Yaml::as_str)
+                == Some("npm")
+        })
+        .map(|entry| {
+            let directory = entry
+                .as_mapping_get("directory")
+                .and_then(Yaml::as_str)
+                .unwrap_or_else(|| panic!("every Dependabot npm entry must define a directory"));
+            assert!(
+                directory == "/"
+                    || (directory.starts_with('/')
+                        && !directory.ends_with('/')
+                        && !directory.contains("//")),
+                "Dependabot npm directory `{directory}` must be a canonical absolute repository \
+                 path (exactly `/` or `/path` with no trailing slash)"
+            );
+            directory.to_owned()
+        })
+        .collect::<Vec<_>>();
+    let unique = directories.iter().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        directories.len(),
+        unique.len(),
+        "Dependabot npm directories must be unique; configured {directories:?}"
+    );
+    unique
+}
+
 fn dependabot_cargo_holds_by_directory() -> BTreeMap<String, BTreeSet<(String, String)>> {
     let path = repo_root().join(".github/dependabot.yml");
     let content = read_live_file(&path);
@@ -16278,6 +16319,46 @@ fn test_dependabot_cargo_directories_cover_every_automated_package() {
          Configured directories: {configured_set:?}\n\
          Fix: remove stale entries and add one Cargo update entry for every newly evolving \
          standalone package in .github/dependabot.yml."
+    );
+}
+
+#[test]
+fn test_dependabot_npm_directories_cover_every_locked_package() {
+    let root = repo_root();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args([
+            "ls-files",
+            "-z",
+            "--",
+            "package-lock.json",
+            "*/package-lock.json",
+        ])
+        .output()
+        .expect("`git ls-files` must be available to inventory npm lockfiles");
+    assert!(
+        output.status.success(),
+        "`git ls-files` must succeed to inventory npm lockfiles"
+    );
+    let expected = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|lockfile| match lockfile.rsplit_once('/') {
+            Some((directory, "package-lock.json")) => format!("/{directory}"),
+            None if lockfile == "package-lock.json" => "/".to_owned(),
+            _ => panic!("tracked npm lockfile has an unexpected path: {lockfile}"),
+        })
+        .collect::<BTreeSet<_>>();
+    let configured = dependabot_npm_directories();
+
+    assert_eq!(
+        configured, expected,
+        "Dependabot npm coverage must equal the tracked package-lock.json inventory.\n\
+         Expected directories: {expected:?}\n\
+         Configured directories: {configured:?}\n\
+         Fix: add one canonical npm update entry per locked package to \
+         .github/dependabot.yml and remove stale entries."
     );
 }
 
@@ -21426,6 +21507,103 @@ fn test_audit_job_covers_every_dependabot_managed_cargo_graph() {
         !audit_section.contains("cargo audit --locked"),
         "cargo-audit reads Cargo.lock directly and does not support --locked.\n\
          Fix: use `cargo audit` without --locked in .github/workflows/ci.yml."
+    );
+}
+
+#[test]
+fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
+    let root = repo_root();
+    let path = root.join(".github/workflows/ci.yml");
+    let content = read_live_file(&path);
+    let documents = Yaml::load_from_str(&content).expect("ci.yml must parse as YAML");
+    let steps = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("audit"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("ci.yml must define jobs.audit.steps"));
+
+    let setup_node = steps.iter().any(|step| {
+        step.as_mapping_get("uses")
+            .and_then(Yaml::as_str)
+            .is_some_and(|uses| uses.starts_with("actions/setup-node@"))
+            && step
+                .as_mapping_get("with")
+                .and_then(|with| with.as_mapping_get("node-version"))
+                .and_then(Yaml::as_str)
+                == Some("22")
+    });
+    assert!(
+        setup_node,
+        "ci.yml jobs.audit must install Node 22 before scanning npm lockfiles.\n\
+         Fix: add a pinned actions/setup-node step with node-version: \"22\"."
+    );
+
+    let audited_directories = steps
+        .iter()
+        .filter(|step| {
+            step.as_mapping_get("run")
+                .and_then(Yaml::as_str)
+                .is_some_and(|run| run.lines().any(|line| line.trim() == "npm audit"))
+        })
+        .map(|step| {
+            step.as_mapping_get("working-directory")
+                .and_then(Yaml::as_str)
+                .unwrap_or(".")
+        })
+        .map(|directory| {
+            if directory == "." {
+                "/".to_owned()
+            } else {
+                format!("/{}", directory.trim_matches('/'))
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let expected = dependabot_npm_directories();
+    assert_eq!(
+        audited_directories, expected,
+        "The scheduled audit job must run `npm audit` for every Dependabot-managed npm graph.\n\
+         Expected directories: {expected:?}\n\
+         Audited directories: {audited_directories:?}\n\
+         Fix: add one npm audit step with the matching working-directory for every npm entry."
+    );
+}
+
+#[test]
+fn test_markdownlint_workflow_uses_supported_node_runtime() {
+    let root = repo_root();
+    let path = root.join(".github/workflows/markdownlint.yml");
+    let content = read_live_file(&path);
+    let documents = Yaml::load_from_str(&content).expect("markdownlint.yml must parse as YAML");
+    let steps = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("markdownlint"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("markdownlint.yml must define jobs.markdownlint.steps"));
+    let setup_node_index = steps.iter().position(|step| {
+        step.as_mapping_get("uses")
+            .and_then(Yaml::as_str)
+            .is_some_and(|uses| uses.starts_with("actions/setup-node@"))
+            && step
+                .as_mapping_get("with")
+                .and_then(|with| with.as_mapping_get("node-version"))
+                .and_then(Yaml::as_str)
+                == Some("22")
+    });
+    let npm_ci_index = steps.iter().position(|step| {
+        step.as_mapping_get("run")
+            .and_then(Yaml::as_str)
+            .is_some_and(|run| run.contains("npm ci"))
+    });
+
+    assert!(
+        setup_node_index.is_some_and(|setup| npm_ci_index.is_some_and(|install| setup < install)),
+        "markdownlint.yml must install Node 22 before `npm ci`; the pinned markdownlint-cli2 \
+         requires that runtime.\nFix: add a pinned actions/setup-node step with node-version: \"22\" \
+         before the dependency-install step."
     );
 }
 
