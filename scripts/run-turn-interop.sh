@@ -179,8 +179,12 @@ probe_turn_udp() {
 wait_for_turn_udp_reachable() {
     local attempt status
     for attempt in $(seq 1 20); do
-        probe_turn_udp
-        status=$?
+        # A probe that has not been answered yet is the normal case this loop
+        # exists for, so its status must be captured rather than executed bare:
+        # under `set -e` a bare call would end the script on the first
+        # unanswered probe and collapse the retry into a single attempt.
+        status=0
+        probe_turn_udp || status=$?
         if [ "${status}" -eq 0 ]; then
             printf 'turn_udp_reachable_after_attempts=%s\n' "${attempt}" \
                 >>"${ARTIFACT_DIR}/host-routing.log"
