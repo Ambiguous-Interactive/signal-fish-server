@@ -141,5 +141,11 @@ results. The nightly command now explicitly skips the dedicated observation
 selector while retaining its existing ordinary, fault, knee, and diagnostic
 coverage; the parsed workflow policy test pins that separation.
 
+Cursor's delayed second-head review also tightened the new H10 early-terminal
+diagnostic. It now states that termination happened during the accounting wait
+and preserves the same slow-consumer, ping, probe, activity-reaper,
+healthy-watcher, delivery, and proxy-termination evidence as the experiment's
+later terminal branches.
+
 P53 itself intentionally stays open after publication while the pre-registered
 scheduled cohort accumulates.

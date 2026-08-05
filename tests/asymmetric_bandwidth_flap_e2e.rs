@@ -676,9 +676,29 @@ async fn asymmetric_bandwidth_preserves_lossy_delivery_and_control_progress() {
     .await
     {
         let delivery = metrics.delivery_metrics_by_class();
+        let slow_consumer_disconnects = metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed);
+        let ping_timeouts = metrics.websocket_ping_timeouts.load(Ordering::Relaxed);
+        let ping_probes_skipped = metrics
+            .websocket_ping_probes_skipped_activity
+            .load(Ordering::Relaxed);
+        let ping_probes_cancelled = metrics
+            .websocket_ping_probes_cancelled_activity
+            .load(Ordering::Relaxed);
+        let expired_players = metrics.expired_players_cleaned.load(Ordering::Relaxed);
+        let proxy_terminations = proxy.terminations();
+        let watcher_delivered = watcher_state.game_data.load(Ordering::Relaxed);
         panic!(
-            "volatile victim terminated before the post-fault marker while fanouts drained: \
-             observation={observation:?} delivery={delivery:?}"
+            "volatile victim terminated before the post-fault marker after {volatile_sent} \
+             offers during the terminal fanout accounting wait: \
+             observation={observation:?}; server recorded {slow_consumer_disconnects} \
+             slow-consumer disconnects, {ping_timeouts} ping timeouts, \
+             {ping_probes_skipped} skipped and {ping_probes_cancelled} cancelled probes, and \
+             {expired_players} activity-reaper evictions; delivery={delivery:?}; healthy \
+             watcher delivered={watcher_delivered}/{} pre-marker offers; proxy terminations: \
+             {proxy_terminations:?}",
+            total_sent + volatile_sent,
         );
     }
 
