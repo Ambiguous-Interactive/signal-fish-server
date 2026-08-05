@@ -26,10 +26,7 @@ interface ParsedGap {
   fromSeq: number;
   toSeq: number;
   reason:
-    | 'latest_superseded'
-    | 'latest_dropped_full'
-    | 'volatile_dropped'
-    | 'unsupported_format';
+    'latest_superseded' | 'latest_dropped_full' | 'volatile_dropped' | 'unsupported_format';
 }
 
 interface RelayStatsSnapshot {

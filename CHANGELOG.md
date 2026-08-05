@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh the browser reference client's runtime and development toolchain:
+  Playwright Core 1.62.1, TypeScript 7.0.2, Prettier 3.9.6, and Node.js 26 type
+  definitions. The supported Node.js floor remains 20.
 - Exempt macOS from the 16-player matrix's wall-clock p99 relay-latency
   ceiling (issue #274); Linux and Windows still gate it. On hosted macOS the
   same `message_pack-16p-clean-30hz` cell measured 322,391us and
