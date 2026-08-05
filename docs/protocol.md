@@ -617,6 +617,13 @@ one physical connection. They cannot identify a missing sender, epoch, or
 sequence, and a snapshot observed before close need not include messages
 abandoned during that close.
 
+A close can cancel the socket write that owns one queued payload, and the
+cancellation may land either side of the point where the sink accepts the frame,
+so that payload's wire position is unknown. The server therefore writes nothing
+that was still queued behind it: the recipient's stream ends as a gap-free
+prefix, and the remainder is counted `abandoned`. Truncation at close is always
+legal; a hole never is.
+
 V3 control messages use a separate bounded priority lane
 (`websocket.control_queue_capacity`, default 128). Within the recipient's
 active room generation, the writer drains that lane strictly before queued data
@@ -1690,10 +1697,11 @@ Recipient rules:
   paired baseline in `current_players`. Discard pre-disconnect expectations.
   High-rate data is not replayed, so resynchronize application state before
   applying new deltas.
-- This recipient's own loud disconnect terminates the observable stream.
-  Messages abandoned during close do not need gap records because no later data
-  can appear on that physical connection. A replacement connection starts a new
-  accounting lifetime.
+- This recipient's own disconnect — loud or graceful — terminates the
+  observable stream. Messages abandoned during close do not need gap records
+  because no later data can appear on that physical connection: once a payload
+  is abandoned while a socket write owns it, nothing queued behind it is
+  written. A replacement connection starts a new accounting lifetime.
 
 Any same-epoch hole on a continuing connection without complete coverage by
 prior exact reports is a protocol violation. Process control messages in

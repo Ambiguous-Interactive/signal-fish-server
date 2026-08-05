@@ -709,6 +709,42 @@ async fn finalize_closed_connection(
             | CloseReason::IdleTimeout
             | CloseReason::Unregistered,
         )
+        | None
+            if rx.abandoned_in_flight_write() =>
+        {
+            // A queued payload was abandoned while a socket write owned it, so
+            // its wire position is unknown (the sink may have taken the frame
+            // into its own buffer before the close cancelled the write, or the
+            // cancellation may have landed first). Everything still queued sits
+            // BEHIND that payload, so flushing it here is exactly how a
+            // recipient ends up observing a delivered sequence that skips one
+            // it was never told about — an unexplained hole no `DeliveryReport`
+            // covers. Abandon the remainder instead: a gap-free prefix that
+            // stops early is a legal stream, a hole is not.
+            let abandoned = rx.len().saturating_add(batcher.len());
+            record_abandoned_by_class(rx, batcher);
+            server
+                .metrics()
+                .add_websocket_messages_dropped(abandoned as u64);
+            tracing::debug!(
+                %player_id,
+                abandoned_messages = abandoned,
+                "Socket write was abandoned in flight while closing; abandoning the queue behind it \
+                 rather than writing past an unaccountable sequence"
+            );
+            // The coalesced omissions are still exact and still describe frames
+            // this recipient already saw skipped, so they are written after the
+            // abandonment snapshot above — a report never advances the data
+            // sequence and so can never open a hole of its own.
+            flush_pending_unsupported_report(sender, rx, player_id).await;
+        }
+        Some(
+            CloseReason::Shutdown
+            | CloseReason::AuthTimeout
+            | CloseReason::ActivityTimeout
+            | CloseReason::IdleTimeout
+            | CloseReason::Unregistered,
+        )
         | None => {
             // Drain whatever is already buffered and flush it, bounded by the
             // close-write budget: an unregistered connection is usually
@@ -3111,5 +3147,202 @@ mod tests {
             }
         }
         exchange
+    }
+
+    /// One real upgraded WebSocket: the production sink type on the server
+    /// half, and the client half of the same TCP connection. Nothing here is
+    /// mocked — the teardown path under test writes real frames that the
+    /// client either observes or does not.
+    struct UpgradedSocketPair {
+        server_sink: futures_util::stream::SplitSink<WebSocket, Message>,
+        _server_stream: futures_util::stream::SplitStream<WebSocket>,
+        client: tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        serve_task: tokio::task::JoinHandle<()>,
+    }
+
+    impl UpgradedSocketPair {
+        async fn connect() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind upgraded-pair listener");
+            let addr = listener.local_addr().expect("read upgraded-pair address");
+            let (socket_tx, socket_rx) = tokio::sync::oneshot::channel::<WebSocket>();
+            let socket_tx = Arc::new(std::sync::Mutex::new(Some(socket_tx)));
+            let app = axum::Router::new().route(
+                "/ws",
+                axum::routing::get(move |upgrade: axum::extract::WebSocketUpgrade| {
+                    let socket_tx = Arc::clone(&socket_tx);
+                    async move {
+                        upgrade.on_upgrade(move |socket| async move {
+                            let handoff = socket_tx
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .take()
+                                .expect("upgraded-pair handoff is used once");
+                            let _ = handoff.send(socket);
+                        })
+                    }
+                }),
+            );
+            let serve_task = tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            let (client, _response) = connect_async(format!("ws://{addr}/ws"))
+                .await
+                .expect("client upgrade");
+            let socket = socket_rx.await.expect("server socket handoff");
+            let (server_sink, server_stream) = socket.split();
+            Self {
+                server_sink,
+                _server_stream: server_stream,
+                client,
+                serve_task,
+            }
+        }
+
+        /// Drain the client until the server's close frame arrives, returning
+        /// the `n` values of every `GameData` frame that reached the wire.
+        async fn drain_written_game_data(&mut self) -> Vec<u64> {
+            let mut written = Vec::new();
+            let drain = async {
+                while let Some(frame) = self.client.next().await {
+                    match frame.expect("client frame") {
+                        TungsteniteMessage::Text(text) => {
+                            let message: ServerMessage = serde_json::from_str(&text)
+                                .unwrap_or_else(|error| panic!("decode {text}: {error}"));
+                            if let ServerMessage::GameData { data, .. } = message {
+                                written.push(
+                                    data.get("n")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .expect("ledger frame carries its n"),
+                                );
+                            }
+                        }
+                        TungsteniteMessage::Close(_) => return,
+                        _other_frame => continue,
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), drain)
+                .await
+                .expect("server never closed the upgraded socket");
+            written
+        }
+
+        async fn shutdown(self) {
+            self.serve_task.abort();
+            let _ = self.serve_task.await;
+        }
+    }
+
+    fn ledger_data(seq: u64) -> crate::coordination::outbound_queue::OutboundData {
+        let from_player = PlayerId::from_u128(9);
+        let room_id = crate::protocol::RoomId::from_u128(11);
+        crate::coordination::outbound_queue::OutboundData::new(
+            Arc::new(ServerMessage::GameData {
+                from_player,
+                data: serde_json::json!({ "n": seq }),
+                seq: Some(seq),
+                epoch: Some(1),
+                class: Some(crate::protocol::DeliveryClass::Reliable),
+                key: None,
+            }),
+            crate::coordination::outbound_queue::DataDeliveryMetadata {
+                class: crate::protocol::DeliveryClass::Reliable,
+                key: None,
+                from_player,
+                room_id,
+                epoch: 1,
+                seq,
+            },
+        )
+    }
+
+    /// Issue #274: a graceful teardown must never write the queue that sits
+    /// behind a socket write which was abandoned in flight.
+    ///
+    /// The live write loop runs inside the close `select!`, so a close request
+    /// cancels it wherever it is — including while a socket write owns one
+    /// queued payload. That payload's wire position is then unknown, and the
+    /// close flush used to keep writing everything queued behind it. The
+    /// recipient then observes a delivered sequence that skips a sequence no
+    /// `DeliveryReport` ever described: the unexplained mid-stream hole issue
+    /// #274 recorded (`expected 90, got 91`).
+    ///
+    /// Both halves run against a real upgraded socket, so the oracle is the
+    /// bytes the client actually received.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn close_flush_never_writes_the_queue_behind_an_abandoned_write() {
+        const QUEUED: u64 = 3;
+        for (abandoned_in_flight, expected_written, context) in [
+            (false, vec![1, 2, 3], "healthy teardown flushes its queue"),
+            (
+                true,
+                Vec::new(),
+                "teardown after an abandoned in-flight write writes nothing behind it",
+            ),
+        ] {
+            let server = test_server().await;
+            let player_id = PlayerId::from_u128(9);
+            let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+            for seq in 1..=QUEUED {
+                tx.try_enqueue_data(ledger_data(seq))
+                    .unwrap_or_else(|_| panic!("{context}: queue seq {seq}"));
+            }
+
+            let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+            let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+            if abandoned_in_flight {
+                // The production seam, exactly: a socket write owned one
+                // payload and its future was dropped before resolving.
+                let accounting = crate::websocket::sending::SendAccounting::new(
+                    &rx,
+                    &server,
+                    &probe_state,
+                    player_id,
+                    Some(crate::protocol::DeliveryClass::Reliable),
+                );
+                drop(accounting);
+            }
+
+            let mut pair = UpgradedSocketPair::connect().await;
+            let mut batcher = MessageBatcher::new(1, 1);
+            finalize_closed_connection(
+                &mut pair.server_sink,
+                &mut rx,
+                &mut batcher,
+                None,
+                &player_id,
+                &server,
+                &close_signal,
+                &probe_state,
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let written = pair.drain_written_game_data().await;
+            assert_eq!(
+                written, expected_written,
+                "{context}: the client's observed stream must match the contract"
+            );
+            let expected_dropped = if abandoned_in_flight {
+                // The abandoned in-flight payload plus the whole queue behind it.
+                QUEUED + 1
+            } else {
+                0
+            };
+            assert_eq!(
+                server
+                    .metrics()
+                    .websocket_messages_dropped
+                    .load(Ordering::Relaxed),
+                expected_dropped,
+                "{context}: abandoned payloads must be counted, never lost silently"
+            );
+            pair.shutdown().await;
+        }
     }
 }

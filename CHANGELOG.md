@@ -103,6 +103,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop a closing connection from writing the queue that sits behind a socket
+  write abandoned in flight (issue #274). The live writer runs inside the close
+  `select!`, so a close request cancels it wherever it is — including while a
+  socket write owns one queued payload. That payload's wire position is then
+  unknown, yet the graceful teardown kept draining everything queued behind it,
+  which is how a recipient could observe a delivered sequence skipping one no
+  `DeliveryReport` ever described (`expected 90, got 91` on the `Nextest
+  (macos-latest)` lane). The remainder is now abandoned and counted instead:
+  truncation at close is always legal, a hole never is. Loud slow-consumer
+  teardown already abandoned its queue and is unchanged.
 - Bind the kernel's own source address for every configured STUN/TURN server in
   the native reference client, alongside the enumerated interface addresses
   (issue #276). Interface enumeration reports only interfaces whose operational

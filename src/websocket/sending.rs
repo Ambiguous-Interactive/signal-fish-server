@@ -590,6 +590,14 @@ impl Drop for SendAccounting<'_> {
         if self.resolved {
             return;
         }
+        // The payload was owned by a socket write that never resolved, so the
+        // sink may or may not have accepted its frame. Fence the connection's
+        // remaining queue before counting the loss: whatever is still queued
+        // sits *behind* an item whose wire position is unknown, and writing it
+        // would show the recipient a delivered sequence that skips one it was
+        // never told about. `finalize_closed_connection` reads this and
+        // abandons the remainder instead of flushing it.
+        self.receiver.record_abandoned_in_flight_write();
         if let Some(class) = self.class {
             self.receiver.record_abandoned(class, 1);
         }
@@ -1023,6 +1031,82 @@ mod tests {
 
     fn player_a() -> Uuid {
         Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff)
+    }
+
+    /// Issue #274: only an unresolved socket write fences the queue behind it.
+    ///
+    /// The fence stops a closing connection from writing past a payload whose
+    /// wire position is unknown. It must therefore fire for exactly one
+    /// terminal state — the write future dropped before resolving — because a
+    /// false positive would make every healthy teardown abandon its queue.
+    #[tokio::test]
+    async fn only_an_unresolved_socket_write_fences_the_queue_behind_it() {
+        use crate::coordination::outbound_queue::{channel, DataDeliveryMetadata};
+        use crate::database::DatabaseConfig;
+        use crate::protocol::RoomId;
+        use crate::server::ServerConfig;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Resolution {
+            Written,
+            UnsupportedFormat,
+            AbandonedInFlight,
+        }
+
+        for (resolution, expected_fence) in [
+            (Resolution::Written, false),
+            (Resolution::UnsupportedFormat, false),
+            (Resolution::AbandonedInFlight, true),
+        ] {
+            let server = EnhancedGameServer::new(
+                ServerConfig::default(),
+                crate::config::ProtocolConfig::default(),
+                crate::config::RelayTypeConfig::default(),
+                crate::config::SessionConfig::default(),
+                crate::config::TurnConfig::default(),
+                DatabaseConfig::InMemory,
+                crate::config::MetricsConfig::default(),
+                crate::config::CoordinationConfig::default(),
+                crate::config::TransportSecurityConfig::default(),
+                Vec::new(),
+            )
+            .await
+            .expect("construct accounting-fence test server");
+            let (_tx, rx) = channel(4, 4);
+            let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+            let from_player = PlayerId::from_u128(3);
+            let metadata = DataDeliveryMetadata {
+                class: crate::protocol::DeliveryClass::Reliable,
+                key: None,
+                from_player,
+                room_id: RoomId::from_u128(5),
+                epoch: 1,
+                seq: 7,
+            };
+
+            {
+                let mut accounting = SendAccounting::new(
+                    &rx,
+                    &server,
+                    &probe_state,
+                    from_player,
+                    Some(crate::protocol::DeliveryClass::Reliable),
+                );
+                match resolution {
+                    Resolution::Written => accounting.complete_written(),
+                    Resolution::UnsupportedFormat => {
+                        let _coalesced = accounting.complete_unsupported(Some(metadata));
+                    }
+                    Resolution::AbandonedInFlight => {}
+                }
+            }
+
+            assert_eq!(
+                rx.abandoned_in_flight_write(),
+                expected_fence,
+                "{resolution:?}: the teardown fence must reflect exactly this terminal state"
+            );
+        }
     }
 
     #[test]
