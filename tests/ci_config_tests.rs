@@ -23245,6 +23245,13 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
         "sanitize_file",
         "redaction-probe",
         "has_unredacted_credentials",
+        // The lane must measure its own environment before blaming the client:
+        // an unanswered STUN Binding request from the host is the one fact
+        // every issue #276 failure was missing, and the host's routing state is
+        // unrecoverable from a client log afterwards.
+        "capture_host_routing",
+        "wait_for_turn_udp_reachable",
+        "host-routing.log",
         "diagnostics.manifest",
         "server-*.log",
         "client-*.jsonl",

@@ -830,18 +830,30 @@ pub fn session_udp_addrs(
         enumerated.iter().map(SocketAddr::ip).chain(sources),
         settings.ip_family,
     )?;
-    // Name the exact condition behind issue #276. Comparing lengths would not:
-    // the interface rule drops link-local and duplicate addresses, so a set
-    // that gained a routing answer can still be no larger. Without this line a
-    // failed run shows only "no candidate pairs", with nothing naming the
-    // cause.
+    // Report the resolved bind set unconditionally. Reporting only the union's
+    // additions leaves the interesting failure invisible: a run where the probe
+    // contributed nothing looks exactly like a run where it was never
+    // consulted, and a failing lane then shows only "no candidate pairs" with
+    // nothing naming which addresses ICE was actually given. `added` is
+    // computed by membership rather than by comparing lengths, because the
+    // interface rule drops link-local and duplicate addresses, so a set that
+    // gained a routing answer can still be no larger.
     let enumerated_ips: BTreeSet<IpAddr> = enumerated.iter().map(SocketAddr::ip).collect();
-    let added: Vec<IpAddr> = merged
+    let bound: Vec<IpAddr> = merged.iter().map(SocketAddr::ip).collect();
+    let added: Vec<IpAddr> = bound
         .iter()
-        .map(SocketAddr::ip)
+        .copied()
         .filter(|ip| !enumerated_ips.contains(ip))
         .collect();
+    tracing::info!(
+        ?bound,
+        enumerated = ?enumerated_ips,
+        ?added,
+        family = settings.ip_family.as_str(),
+        "resolved the ICE bind set for this peer connection"
+    );
     if !added.is_empty() {
+        // Name the exact condition behind issue #276.
         tracing::info!(
             ?added,
             "interface enumeration missed a route to a configured ICE server; \
@@ -876,17 +888,24 @@ pub async fn ice_server_source_addrs(endpoints: &[(String, u16)]) -> Vec<IpAddr>
             let resolved = match tokio::net::lookup_host((host.as_str(), *port)).await {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    tracing::debug!(%host, port, %error, "ICE server did not resolve");
+                    // A configured server this host cannot even name is a real
+                    // operational condition, not a detail: every allocation
+                    // through it will fail, and the session's only remaining
+                    // hope is that interface enumeration happens to cover the
+                    // route. It must be visible at the level a failing run's
+                    // captured stderr actually records.
+                    tracing::warn!(%host, port, %error, "ICE server did not resolve");
                     continue;
                 }
             };
             for server in resolved {
                 match route_source_addr(server) {
                     Ok(source) => {
+                        tracing::info!(%server, %source, "routed a configured ICE server");
                         sources.insert(source);
                     }
                     Err(error) => {
-                        tracing::debug!(%server, %error, "no local route to this ICE server");
+                        tracing::warn!(%server, %error, "no local route to this ICE server");
                     }
                 }
             }

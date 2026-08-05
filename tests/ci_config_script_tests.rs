@@ -262,3 +262,105 @@ fn test_repository_ci_config_has_active_matching_healthcheck() {
         "checked-in Dockerfile healthcheck should be recognized.\nOutput:\n{combined}"
     );
 }
+
+/// Extract one shell function body verbatim from a script, so a test drives
+/// the shipped code rather than a copy of it.
+fn extract_shell_function(script: &str, name: &str) -> String {
+    let header = format!("{name}() {{");
+    let start = script
+        .find(&header)
+        .unwrap_or_else(|| panic!("scripts/run-turn-interop.sh must define {name}()"));
+    let rest = &script[start..];
+    let end = rest
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("{name}() must close with a brace at column 0"));
+    rest[..end + 3].to_string()
+}
+
+/// The TURN reachability gate must actually retry (issue #276).
+///
+/// Under `set -e` a bare `probe_turn_udp` call would end the script on the
+/// first unanswered probe, collapsing the twenty-attempt wait into one attempt
+/// while every symptom — a green run whose probe answered immediately — stayed
+/// identical. That is exactly the hollow guard this drives out: the loop is
+/// exercised with a stubbed probe whose answer arrives late, never, or not at
+/// all.
+#[test]
+fn test_turn_reachability_gate_retries_until_answered() {
+    let script = fs::read_to_string(repo_root().join("scripts/run-turn-interop.sh"))
+        .expect("read scripts/run-turn-interop.sh");
+    let gate = extract_shell_function(&script, "wait_for_turn_udp_reachable");
+
+    // (probe outcome program, expected exit status, expected marker)
+    let cases: [(&str, i32, &str); 4] = [
+        // Answered immediately.
+        (
+            "[ \"${ATTEMPT}\" -ge 1 ] && return 0; return 1",
+            0,
+            "attempt 1/20",
+        ),
+        // Answered only on the fifth probe: the wait must absorb the first four.
+        (
+            "[ \"${ATTEMPT}\" -ge 5 ] && return 0; return 1",
+            0,
+            "attempt 5/20",
+        ),
+        // Never answered: the gate fails with its own diagnosis, not silently.
+        ("return 1", 1, "cannot reach coturn"),
+        // No `/dev/udp` on this host: measurement is impossible, so the gate
+        // must stand aside rather than invent a negative result.
+        ("return 2", 0, "skipping the reachability gate"),
+    ];
+
+    for (probe_program, expected_status, expected_marker) in cases {
+        let temp_root = unique_temp_dir("turn-reachability-gate");
+        let artifact_dir = temp_root.path().join("artifacts");
+        fs::create_dir_all(&artifact_dir).expect("create artifact dir");
+        let counter = temp_root.path().join("attempts");
+        // Relative names, resolved against the harness's own working
+        // directory: a `Path::display()` interpolation would embed Windows
+        // backslashes, which bash then eats as escapes.
+        let harness = format!(
+            "set -euo pipefail\n\
+             ARTIFACT_DIR=artifacts\n\
+             TURN_HOST=203.0.113.9\n\
+             LISTEN_PORT=3478\n\
+             COUNTER=attempts\n\
+             printf '0' >\"${{COUNTER}}\"\n\
+             # Stubbed probe: the gate's contract is what it does with the\n\
+             # status, not how the datagram is sent.\n\
+             probe_turn_udp() {{\n\
+             ATTEMPT=$(( $(cat \"${{COUNTER}}\") + 1 ))\n\
+             printf '%s' \"${{ATTEMPT}}\" >\"${{COUNTER}}\"\n\
+             {probe_program}\n\
+             }}\n\
+             # Keep the wall clock out of it; the retry count is the contract.\n\
+             sleep() {{ :; }}\n\
+             {gate}\n\
+             wait_for_turn_udp_reachable\n",
+        );
+        write_file(&temp_root.path().join("gate.sh"), &harness);
+
+        let output = bash_command()
+            .arg("gate.sh")
+            .current_dir(temp_root.path())
+            .output()
+            .expect("reachability gate harness should execute");
+        let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        let combined = combined.replace("\r\n", "\n");
+        let attempts = fs::read_to_string(&counter).unwrap_or_default();
+
+        assert_eq!(
+            output.status.code().unwrap_or(-1),
+            expected_status,
+            "probe `{probe_program}` must exit {expected_status} \
+             (attempts: {attempts})\nOutput:\n{combined}"
+        );
+        assert!(
+            combined.contains(expected_marker),
+            "probe `{probe_program}` must report `{expected_marker}` \
+             (attempts: {attempts})\nOutput:\n{combined}"
+        );
+    }
+}

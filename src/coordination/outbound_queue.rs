@@ -7,7 +7,7 @@
 //! has a causally prior exact report.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::Notify;
@@ -548,6 +548,9 @@ struct SharedQueue {
     capacity_available: Notify,
     protocol_version: AtomicU16,
     game_data_format: AtomicU8,
+    /// Set once a queued payload was abandoned while a socket write owned it.
+    /// See [`OutboundReceiver::record_abandoned_in_flight_write`].
+    abandoned_in_flight_write: AtomicBool,
     unsupported_notices: Mutex<UnsupportedNoticeLimiter>,
     data_capacity: usize,
     control_capacity: usize,
@@ -748,6 +751,7 @@ fn channel_inner(
         capacity_available: Notify::new(),
         protocol_version: AtomicU16::new(crate::config::SERVER_MIN_PROTOCOL_VERSION),
         game_data_format: AtomicU8::new(encoding_tag(GameDataEncoding::Json)),
+        abandoned_in_flight_write: AtomicBool::new(false),
         unsupported_notices: Mutex::new(UnsupportedNoticeLimiter::default()),
         data_capacity,
         control_capacity,
@@ -1858,6 +1862,31 @@ impl OutboundReceiver {
         increment_abandoned(&mut state.counters, class, count);
         drop(state);
         self.shared.record_abandoned(class, count);
+    }
+
+    /// Record that one queued payload was abandoned while a socket write owned
+    /// it — the write future was dropped before it could resolve to a written
+    /// frame or to an accounted drop.
+    ///
+    /// The payload's wire position is then **unknown**: the sink may have
+    /// accepted the frame into its own buffer before the cancellation, or the
+    /// cancellation may have landed before the frame was ever handed over.
+    /// Either way the payload can no longer be described exactly, so nothing
+    /// still queued behind it may be written afterwards — the recipient would
+    /// observe a delivered sequence that skips a sequence it was never told
+    /// about, which is exactly the hole `DeliveryReport` exists to make
+    /// impossible.
+    pub fn record_abandoned_in_flight_write(&self) {
+        self.shared
+            .abandoned_in_flight_write
+            .store(true, Ordering::Release);
+    }
+
+    /// Whether a queued payload was abandoned while a socket write owned it.
+    pub fn abandoned_in_flight_write(&self) -> bool {
+        self.shared
+            .abandoned_in_flight_write
+            .load(Ordering::Acquire)
     }
 
     /// Account an encoding failure discovered only by the socket writer,
