@@ -2356,6 +2356,43 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
             .and_then(Yaml::as_str),
         Some("error")
     );
+
+    let nightly_path = root.join(".github/workflows/verification-nightly.yml");
+    let nightly = read_live_file(&nightly_path);
+    let nightly_documents =
+        Yaml::load_from_str(&nightly).expect("verification nightly workflow must parse");
+    let nightly_job = nightly_documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("scenario-profiles"))
+        .expect("verification nightly must retain the scenario-profiles job");
+    let nightly_matrix_run = nightly_job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .and_then(|steps| {
+            steps.iter().find(|step| {
+                step.as_mapping_get("name").and_then(Yaml::as_str)
+                    == Some("Run 16-player relay matrix and knee sweep")
+            })
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("verification nightly relay-matrix command");
+    let nightly_cargo_commands: Vec<String> = shell_logical_lines(nightly_matrix_run)
+        .into_iter()
+        .filter(|line| line.contains("cargo nextest"))
+        .collect();
+    assert_eq!(
+        nightly_cargo_commands,
+        vec![
+            "cargo nextest run --profile ci --locked --all-features --test \
+             sixteen_player_matrix_e2e --run-ignored all --success-output final -- --skip \
+             hosted_relay_timing_observations_preserve_semantic_oracles 2>&1 | tee \
+             relay-matrix-output.txt"
+        ],
+        "nightly must retain its complete matrix/fault/knee selection and exclude only the \
+         dedicated hosted observation selector"
+    );
 }
 
 // ---------------------------------------------------------------------------

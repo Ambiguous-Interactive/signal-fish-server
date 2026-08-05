@@ -134,5 +134,12 @@ Close, transport-error, or EOF classification. The constrained exact Nextest
 selector passes at the reproduced 158-second boundary, and the follow-up head
 is subject to the same full hosted gate and reviewer loop.
 
+Cursor's delayed first-head review found that Verification Nightly's broad
+`--run-ignored all` selector also picked up the new observation-only test. That
+duplicated the six-cell clean matrix in a contended job without recording its
+results. The nightly command now explicitly skips the dedicated observation
+selector while retaining its existing ordinary, fault, knee, and diagnostic
+coverage; the parsed workflow policy test pins that separation.
+
 P53 itself intentionally stays open after publication while the pre-registered
 scheduled cohort accumulates.

@@ -469,13 +469,18 @@ jobs:
           cargo nextest run --profile ci --locked --all-features \
             --test scenario_realworld_e2e --run-ignored all \
             --success-output final 2>&1 | tee scenario-output.txt
+      # Keep the dedicated hosted-timing selector isolated in its own workflow;
+      # this broad nightly lane supplies no observation metadata and would only
+      # duplicate the clean six-cell workload under unrelated contention.
       - name: Run 16-player relay matrix and knee sweep
         shell: bash
         run: |
           set -o pipefail
           cargo nextest run --profile ci --locked --all-features \
             --test sixteen_player_matrix_e2e --run-ignored all \
-            --success-output final 2>&1 | tee relay-matrix-output.txt
+            --success-output final -- \
+            --skip hosted_relay_timing_observations_preserve_semantic_oracles \
+            2>&1 | tee relay-matrix-output.txt
       - name: Run mixed-encoding amplification experiment
         shell: bash
         run: |
