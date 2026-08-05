@@ -1486,15 +1486,23 @@ fn require_ipv6_ice_interface() {
              containers: run with IPv6 enabled). The lane must not be skipped silently."
         )
     });
-    let first = *addrs
-        .first()
-        .expect("a non-empty selection has a first address");
-    UdpSocket::bind(first).unwrap_or_else(|error| {
-        panic!(
-            "the client would bind {first} for ICE, but this process cannot: {error}. \
-             The lane must not be skipped silently."
-        )
-    });
+    assert!(
+        !addrs.is_empty(),
+        "a successful selection is never empty; the client would have nothing to bind"
+    );
+    // Every one of them, not just the first: the client hands the whole vector
+    // to the peer-connection builder, so an address that is enumerated but not
+    // yet bindable — an IPv6 address still in duplicate-address detection, for
+    // instance — would otherwise fail deep inside the child process with a
+    // generic error, the very outcome this precondition exists to replace.
+    for addr in &addrs {
+        UdpSocket::bind(*addr).unwrap_or_else(|error| {
+            panic!(
+                "the client would bind {addr} for ICE, but this process cannot: \
+                 {error}. The lane must not be skipped silently."
+            )
+        });
+    }
 }
 
 /// The IPv6 address a `selected_candidate_pair` field carries, or a loud

@@ -23646,22 +23646,25 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         }),
         "the interop job must still run the suite via scripts/run-webrtc-interop.sh"
     );
-    // ...and that script must still run the WHOLE suite. Narrowing its
-    // `cargo test` to `--lib` drops every multi-process cell, including the
-    // IPv6 proof, without touching the workflow at all.
+    // ...and that script must still run the WHOLE suite. A token blocklist is
+    // not enough — `--test=interop_e2e`, `-- --skip ipv6_only`, `-p`, and an
+    // added earlier `cargo test` line all narrow it past such a list — so pin
+    // the invocation exactly, and pin that there is only one of them.
     let runner = read_live_file(&root.join("scripts/run-webrtc-interop.sh"));
-    let suite_command = runner
+    let suite_commands: Vec<&str> = runner
         .lines()
         .map(str::trim)
-        .find(|line| line.contains("cargo test"))
-        .expect("the runner script must run the client test suite");
-    for narrowing in ["--lib", "--bins", "--test ", "--no-run", "--doc"] {
-        assert!(
-            !suite_command.contains(narrowing),
-            "the interop runner must not narrow its suite with `{narrowing}`: \
-             that silently drops the multi-process cells; found `{suite_command}`"
-        );
-    }
+        .filter(|line| line.contains("cargo test"))
+        .collect();
+    assert_eq!(
+        suite_commands,
+        vec![
+            r#"SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}""#
+        ],
+        "the interop runner must run the WHOLE client suite as exactly one \
+         unnarrowed `cargo test`; any narrowing silently drops the \
+         multi-process cells, including the IPv6 proof"
+    );
 
     let job = documents
         .first()
