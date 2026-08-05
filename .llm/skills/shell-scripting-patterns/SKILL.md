@@ -291,5 +291,6 @@ use that when adding `--quiet` or deciding which messages must still print on wa
 - [Awk Text Processing](../awk-text-processing/SKILL.md) — AWK patterns, NUL delimiters, portability
 - [GitHub Actions Bash Scripts](../github-actions-bash-scripts/SKILL.md) — Shellcheck in CI workflows
 - [CI CD Troubleshooting Scripts](../ci-cd-troubleshooting/references/scripts-and-tests.md) — Debugging CI script failures
-- [Validation Script Output Modes](../validation-script-output-modes/SKILL.md) — `--quiet` behavior and failure-summary rules
+- [Validation Script Output Modes](../validation-script-output-modes/SKILL.md) —
+  `--quiet` behavior and failure-summary rules
 - [Repo Source Hygiene Guards](../repo-source-hygiene-guards/SKILL.md) — `return`-not-`exit` and `python3 -m pip` guards

@@ -14,7 +14,7 @@
 #   - relay-allocations: Deterministic production-seam allocation ceilings
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Security audits, license checks, and dependency validation
-#   - audit: Second-opinion vulnerability scan via cargo-audit (RustSec)
+#   - audit: RustSec and npm vulnerability scans
 #   - docker: Docker image build and smoke test with health check
 #   - coverage: Linux code coverage gate via cargo-llvm-cov
 #   - panic-policy: Zero-panic production code enforcement
@@ -392,8 +392,8 @@ jobs:
     name: Dependency Audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # This job handles all security audits including vulnerabilities (cargo-audit),
-    # licenses, banned dependencies, and source verification (cargo-deny).
+    # This job handles Rust licenses, banned dependencies, source verification,
+    # and the cargo-deny advisory pass.
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
@@ -427,12 +427,22 @@ jobs:
     name: Audit (cargo-audit)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Second-opinion vulnerability scanner using the RustSec advisory database directly.
-    # Complements cargo-deny which provides broader policy checks (licenses, bans, sources).
+    # Scan Rust lockfiles directly against RustSec and both locked JavaScript
+    # graphs against the npm advisory service. This complements cargo-deny's
+    # broader Rust policy checks (licenses, bans, and sources).
     # Runs on push/PR and daily via schedule (see workflow triggers).
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+      - name: Install Node.js for npm audits
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22"
+      - name: Run npm audit (repository tooling)
+        run: npm audit
+      - name: Run npm audit (browser reference client)
+        working-directory: clients/browser
+        run: npm audit
       - name: Read Rust toolchain
         id: toolchain
         shell: bash

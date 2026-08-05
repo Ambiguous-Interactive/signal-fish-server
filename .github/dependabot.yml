@@ -159,6 +159,66 @@ updates:
           - "patch"
 
   # ============================================================================
+  # JavaScript Dependencies - Repository Tooling
+  # ============================================================================
+  # Covers the locked markdownlint toolchain used by local and hosted checks.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "03:45"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "javascript"
+      - "automated"
+    groups:
+      npm-tooling-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
+
+  # ============================================================================
+  # JavaScript Dependencies - Browser Reference Client
+  # ============================================================================
+  - package-ecosystem: "npm"
+    directory: "/clients/browser"
+    schedule:
+      interval: "daily"
+      time: "04:00"
+      timezone: "America/Los_Angeles"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(browser)"
+      include: "scope"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "javascript"
+      - "browser"
+      - "automated"
+    groups:
+      npm-browser-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
+
+  # ============================================================================
   # GitHub Actions Dependencies
   # ============================================================================
   # Includes CI, documentation validation, linting workflows
@@ -313,6 +373,7 @@ updates:
 #
 # Schedule Intervals:
 # - Cargo (daily): Security advisories are frequent and critical
+# - npm (daily): JavaScript tooling and browser build advisories are security-sensitive
 # - GitHub Actions (weekly): Lower update frequency, less urgent
 # - Docker main (weekly): Base images update infrequently
 # - Docker devcontainer (weekly): Dev environment, not production-critical
@@ -320,6 +381,7 @@ updates:
 # PR Limits Rationale:
 # - Cargo root (2): prioritize broad, consolidated dependency updates
 # - Cargo native/fuzz (2 each): keep standalone package updates grouped
+# - npm root/browser (2 each): keep each locked JavaScript graph current
 # - GitHub Actions (2): consolidate workflow updates into fewer PRs
 # - Docker main (2): group base image updates for coordinated validation
 # - Docker devcontainer (2): reduce noise in developer-experience updates
@@ -328,6 +390,7 @@ updates:
 # - Each ecosystem uses broad grouping to produce fewer, larger PRs
 # - Root Cargo updates are grouped together across major/minor/patch
 # - Standalone native and fuzz package updates are grouped by package
+# - Root tooling and browser npm updates are grouped independently
 # - GitHub Actions and Docker updates are consolidated by area
 #
 # Ignore Rules:
@@ -338,7 +401,7 @@ updates:
 # - Native client: Hold the WebSocket-stack and MSRV-incompatible release lines
 # - Fuzz package: Mirror root manifest holds that path-dependency traversal can
 #   otherwise re-propose from the standalone update job
-# - Security scanning: cargo-deny runs in CI for supply chain vulnerabilities
+# - Security scanning: cargo-deny and npm audit run in CI for supply chain vulnerabilities
 #
 # Labels:
 # - Enable automated filtering and routing
