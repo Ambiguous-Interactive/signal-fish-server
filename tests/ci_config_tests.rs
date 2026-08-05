@@ -23665,6 +23665,20 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
          unnarrowed `cargo test`; any narrowing silently drops the \
          multi-process cells, including the IPv6 proof"
     );
+    // That pinned line expands an array, so pin the array too: `(--lib)` on an
+    // existing assignment is the cheapest way to narrow the suite while the
+    // command itself stays byte-identical.
+    let profile_assignments: Vec<&str> = runner
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("CARGO_PROFILE_ARGS"))
+        .collect();
+    assert_eq!(
+        profile_assignments,
+        vec!["CARGO_PROFILE_ARGS=()", "CARGO_PROFILE_ARGS=(--release)"],
+        "the interop runner's profile arguments must select a profile and \
+         nothing else"
+    );
 
     let job = documents
         .first()
