@@ -84,11 +84,15 @@ impl TrafficProfile {
 /// `message_pack-16p-clean-30hz` cell reported 322,391us (run 30961040248) and
 /// 261,754us (run 30953968136) while the `json-16p` cell *in the same process*
 /// reported 26,019us and this repository's Linux runs report ~7,000us. A 12x
-/// intra-run spread cannot be a property of the code under test. PLAN P24
-/// already records the doctrine: hosted timing is a local comparison point,
-/// never a portable capacity claim. Windows keeps the gate — it has never
-/// failed this assertion, and exempting it would exceed the evidence.
-/// Tracked as issue #274.
+/// intra-run spread cannot be a property of the code under test: a wall-clock
+/// number measured on a shared-tenancy runner is a comparison point, not a
+/// threshold. Windows keeps the gate — it has never failed this assertion, and
+/// exempting it would exceed the evidence.
+///
+/// The exemption is by target OS, so it also applies to a developer's local
+/// macOS build; the evidence is about hosted runners, and narrowing it to
+/// `GITHUB_ACTIONS` would make the suite behave differently in the two places
+/// for no measured reason. Tracked as issue #274.
 fn wall_clock_latency_is_gated() -> bool {
     !cfg!(target_os = "macos")
 }

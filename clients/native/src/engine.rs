@@ -1097,13 +1097,11 @@ mod tests {
         })
         .expect("the default family imposes no startup requirement");
 
-        // This IS the production entry point — the client calls it with
-        // `local_udp_addrs` — so there is no untested wrapper between the
-        // covered behavior and the shipped one.
-        assert_eq!(
-            preflight_ip_family(requested, local_udp_addrs).is_ok(),
-            local_udp_addrs(requested).is_ok()
-        );
+        // No `preflight_ip_family(_, local_udp_addrs)` cross-check here: for a
+        // non-`Any` family the pre-flight IS `resolve(settings)`, so comparing
+        // the two would restate the definition. That this is the production
+        // entry point is a property of the call site, pinned in
+        // `tests/ci_config_tests.rs`.
     }
 
     #[tokio::test]

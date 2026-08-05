@@ -31,9 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Exempt hosted macOS from the 16-player matrix's wall-clock p99
-  relay-latency ceiling (issue #274); Linux and Windows still gate it. On
-  macOS the same `message_pack-16p-clean-30hz` cell measured 322,391us and
+- Exempt macOS from the 16-player matrix's wall-clock p99 relay-latency
+  ceiling (issue #274); Linux and Windows still gate it. On hosted macOS the
+  same `message_pack-16p-clean-30hz` cell measured 322,391us and
   261,754us on two runs while the `json-16p` cell in the same process measured
   26,019us and Linux measures ~7,000us: a 12x intra-run spread that tracks
   runner tenancy, not relay behavior. Every correctness oracle — exact

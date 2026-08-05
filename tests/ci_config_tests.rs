@@ -23485,17 +23485,59 @@ fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
     // ...applying the engine's real bind selection. The pre-flight takes its
     // resolver as an argument precisely so the unit-tested function IS the
     // production one; what remains to pin is that this call site passes the
-    // real rule rather than a stand-in that always succeeds.
-    let mut resolver = PathFinder {
-        name: "local_udp_addrs",
-        found: false,
+    // real rule. It must be the EXACT qualified path: a closure such as
+    // `|s| Ok(engine::local_udp_addrs(s).unwrap_or_default())` mentions the
+    // rule while swallowing its failure, and a bare `local_udp_addrs` can be a
+    // local stand-in shadowing it — both compile clean under
+    // `clippy -D warnings`.
+    let resolver = resolver_argument(&run_inner.block.stmts[preflight])
+        .expect("the pre-flight call must pass a resolver argument");
+    let syn::Expr::Path(path) = resolver else {
+        panic!(
+            "the pre-flight's resolver must be the bare path \
+             `engine::local_udp_addrs`, not a closure or adapter that can \
+             swallow its failure"
+        );
     };
-    resolver.visit_stmt(&run_inner.block.stmts[preflight]);
-    assert!(
-        resolver.found,
-        "the pre-flight call must pass the engine's real bind selection \
-         (`local_udp_addrs`)"
+    let segments: Vec<String> = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect();
+    assert_eq!(
+        segments,
+        vec!["engine".to_string(), "local_udp_addrs".to_string()],
+        "the pre-flight must use the engine's own bind selection, fully \
+         qualified so a local definition cannot shadow it"
     );
+}
+
+/// The second argument of the `preflight_ip_family` call inside `statement`.
+fn resolver_argument(statement: &syn::Stmt) -> Option<&syn::Expr> {
+    struct Finder<'ast> {
+        argument: Option<&'ast syn::Expr>,
+    }
+
+    impl<'ast> Visit<'ast> for Finder<'ast> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref() {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "preflight_ip_family")
+                {
+                    self.argument = call.args.iter().nth(1);
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    let mut finder = Finder { argument: None };
+    finder.visit_stmt(statement);
+    finder.argument
 }
 
 /// A job or step must propagate its failure: `continue-on-error` is either
@@ -23545,10 +23587,47 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         ],
     );
 
-    // Parse the job rather than substring-match it: `contains` cannot see an
-    // `if: false` that disables the whole matrix, a `continue-on-error: true`
-    // that swallows its result, or a `|| true` appended to a pinned command.
+    // Parse the jobs rather than substring-match them: `contains` cannot see an
+    // `if: false` that disables a whole job, a `continue-on-error: true` that
+    // swallows its result, or a `|| true` appended to a pinned command.
     let documents = Yaml::load_from_str(&workflow).expect("webrtc-interop.yml must parse as YAML");
+
+    // The job that RUNS the live proofs (including the IPv6 cell) needs the
+    // same treatment as the matrix: an `if: false` on it deletes every
+    // live-transport proof this test pins, with every command untouched.
+    let interop_job = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("interop"))
+        .expect("webrtc-interop.yml must define the interop job");
+    assert!(
+        interop_job.as_mapping_get("if").is_none(),
+        "the interop job must not be conditional; the IPv6 cell and every other \
+         live-transport cell run only there"
+    );
+    assert_failure_is_not_swallowed(interop_job, "the interop job");
+    let interop_steps: Vec<&Yaml> = interop_job
+        .as_mapping_get("steps")
+        .and_then(|steps| steps.as_sequence())
+        .expect("the interop job must define steps")
+        .iter()
+        .collect();
+    for step in &interop_steps {
+        assert_failure_is_not_swallowed(step, "every interop step");
+        assert!(
+            step.as_mapping_get("if").is_none(),
+            "no step in the interop job may be conditional"
+        );
+    }
+    assert!(
+        interop_steps.iter().any(|step| {
+            step.as_mapping_get("run")
+                .and_then(Yaml::as_str)
+                .is_some_and(|run| run.trim() == "bash scripts/run-webrtc-interop.sh")
+        }),
+        "the interop job must still run the suite via scripts/run-webrtc-interop.sh"
+    );
+
     let job = documents
         .first()
         .and_then(|document| document.as_mapping_get("jobs"))
