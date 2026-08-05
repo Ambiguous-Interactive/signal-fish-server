@@ -3,7 +3,26 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use thiserror::Error;
 use uuid::Uuid;
+
+/// Classified room-creation failure used by callers that may safely recover
+/// from a generated-code collision without retrying unrelated storage faults.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CreateRoomError {
+    #[error("Room code {room_code} already exists for game {game_name}")]
+    RoomCodeCollision {
+        game_name: String,
+        room_code: String,
+    },
+    #[error(transparent)]
+    Storage(#[from] anyhow::Error),
+}
+
+/// Room creation result that keeps a uniqueness conflict distinct from other
+/// database failures.
+pub type CreateRoomResult = std::result::Result<Room, CreateRoomError>;
 
 /// Summary describing how many rooms were removed by the cleanup routine.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +94,35 @@ pub trait GameDatabase: Send + Sync {
         region_id: String,
         application_id: Option<Uuid>,
     ) -> Result<Room>;
+
+    /// Create a room while preserving collision identity for bounded generated
+    /// code retries. Implementations should override this method when they can
+    /// classify their storage backend's uniqueness violation.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_room_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+    ) -> CreateRoomResult {
+        self.create_room(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+        )
+        .await
+        .map_err(CreateRoomError::Storage)
+    }
     async fn set_room_application_id(
         &self,
         _room_id: &RoomId,
@@ -573,6 +621,31 @@ impl GameDatabase for InMemoryDatabase {
         region_id: String,
         application_id: Option<Uuid>,
     ) -> Result<Room> {
+        self.create_room_classified(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+        )
+        .await
+        .map_err(anyhow::Error::new)
+    }
+
+    async fn create_room_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+    ) -> CreateRoomResult {
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
 
@@ -612,7 +685,10 @@ impl GameDatabase for InMemoryDatabase {
         // Check room code uniqueness under the write lock (no TOCTOU gap)
         let game_room_key = (game_name.clone(), room_code.clone());
         if room_codes.contains_key(&game_room_key) {
-            anyhow::bail!("Room code {room_code} already exists for game {game_name}");
+            return Err(CreateRoomError::RoomCodeCollision {
+                game_name,
+                room_code,
+            });
         }
 
         // Generate a unique room ID
@@ -622,7 +698,9 @@ impl GameDatabase for InMemoryDatabase {
             while rooms.contains_key(&id) {
                 attempts = attempts.saturating_add(1);
                 if attempts >= 16 {
-                    anyhow::bail!("Failed to generate unique room ID after {attempts} attempts");
+                    return Err(CreateRoomError::Storage(anyhow::anyhow!(
+                        "Failed to generate unique room ID after {attempts} attempts"
+                    )));
                 }
                 id = uuid::Uuid::new_v4();
             }
@@ -1454,6 +1532,36 @@ mod tests {
             err_msg.contains("already exists"),
             "error message should contain 'already exists', got: {err_msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn room_code_collision_has_typed_classification() {
+        let db = InMemoryDatabase::new();
+        create_test_room(&db, "typed_collision", "TAKEN1")
+            .await
+            .expect("fixture room should be created");
+
+        let error = db
+            .create_room_classified(
+                "typed_collision".to_string(),
+                Some("TAKEN1".to_string()),
+                4,
+                true,
+                Uuid::new_v4(),
+                "relay".to_string(),
+                "us-east-1".to_string(),
+                None,
+            )
+            .await
+            .expect_err("duplicate code should be classified");
+
+        assert!(matches!(
+            error,
+            CreateRoomError::RoomCodeCollision {
+                ref game_name,
+                ref room_code,
+            } if game_name == "typed_collision" && room_code == "TAKEN1"
+        ));
     }
 
     // --- BUG-1: room lifecycle GC (activity refresh + reconnection-aware GC) ---

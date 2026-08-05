@@ -124,6 +124,24 @@ codes. Prefixes must be nonblank ASCII alphanumeric strings shorter than the
 total code length; startup rejects any configuration that could generate a code
 the join validator would refuse.
 
+Automatic room creation tries at most eight independently generated candidates.
+An occupied candidate is never treated as a request to join that room; the
+server generates another candidate instead. All internal attempts count as one
+client room-creation operation for rate limiting. Providing `room_code` retains
+the explicit join/create behavior described above.
+
+Let `s` be the random suffix length after the normalized prefix. The generator
+has `32^s` possible suffixes. With `r` occupied codes for one game, a candidate's
+collision probability is `r / 32^s`, and the probability that all eight uniform
+candidates collide is `(r / 32^s)^8`. Keep expected active rooms below 1% of the
+suffix namespace so collision retries remain exceptional. For example, four
+random characters provide 1,048,576 suffixes; a two-character prefix with the
+default six-character total length therefore comfortably supports the default
+1,000-room per-game cap. Monitor `race_conditions.room_code_collisions` and the
+dedicated `room_code_retry_operations`, `room_code_retry_successes`,
+`room_code_retry_exhaustions`, and `room_code_retry_success_rate` fields when
+selecting a longer prefix or shorter total length.
+
 ## Room Lifecycle
 
 Every room moves through a simple state machine. The following diagram

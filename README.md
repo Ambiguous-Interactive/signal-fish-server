@@ -355,6 +355,10 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 3. Provide `room_code` and no room exists for that `game_name`: create a new
    room with that room code.
 
+Automatic creation tries up to eight generated candidates when a code is
+already occupied; those internal attempts count as one rate-limited client
+operation. Explicit room-code requests keep the join/create behavior above.
+
 In all successful cases, the caller receives `RoomJoined`. When joining an
 existing room, current members also receive `PlayerJoined`.
 

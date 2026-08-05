@@ -17,6 +17,8 @@ use crate::protocol::{
 use crate::rate_limit::{RateLimitConfig, RoomRateLimiter};
 use anyhow::Result;
 use dashmap::DashMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 #[cfg(test)]
@@ -143,6 +145,8 @@ pub struct EnhancedGameServer {
     fail_retain_room_publication_snapshot: AtomicBool,
     #[cfg(test)]
     reconnect_teardown_test_gate: StdMutex<Option<Arc<ReconnectTeardownTestGate>>>,
+    #[cfg(test)]
+    scripted_room_codes: StdMutex<VecDeque<String>>,
     /// Spectator lifecycle manager
     spectator_service: SpectatorService,
     /// Transport-level security options (TLS, token binding, etc.)
@@ -420,6 +424,8 @@ impl EnhancedGameServer {
             fail_retain_room_publication_snapshot: AtomicBool::new(false),
             #[cfg(test)]
             reconnect_teardown_test_gate: StdMutex::new(None),
+            #[cfg(test)]
+            scripted_room_codes: StdMutex::new(VecDeque::new()),
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
@@ -447,10 +453,28 @@ impl EnhancedGameServer {
     }
 
     fn generate_region_room_code(&self) -> String {
+        #[cfg(test)]
+        if let Some(code) = self
+            .scripted_room_codes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+        {
+            return code;
+        }
+
         room_codes::generate_region_room_code(
             &self.protocol_config,
             self.config.room_code_prefix.as_deref(),
         )
+    }
+
+    #[cfg(test)]
+    fn script_room_codes_for_test(&self, codes: impl IntoIterator<Item = &'static str>) {
+        self.scripted_room_codes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(codes.into_iter().map(str::to_string));
     }
 
     /// Register a new client connection.

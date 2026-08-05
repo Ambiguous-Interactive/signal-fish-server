@@ -128,6 +128,74 @@ fn assert_join_failed(message: &ServerMessage, expected: ErrorCode) {
 }
 
 #[tokio::test]
+async fn generated_code_retry_preserves_application_ownership_and_quota() {
+    let server = create_server(
+        true,
+        vec![
+            app_entry(APP_A, Some(1), Some(8)),
+            app_entry(APP_B, Some(10), Some(8)),
+        ],
+    )
+    .await;
+    let app_b = server
+        .auth_middleware
+        .validate_app_id(APP_B)
+        .await
+        .expect("app B is configured");
+    let occupied = server
+        .database
+        .create_room(
+            "owned-collision".to_string(),
+            Some("TAKEN1".to_string()),
+            8,
+            true,
+            PlayerId::new_v4(),
+            "relay".to_string(),
+            "default".to_string(),
+            Some(app_b.id),
+        )
+        .await
+        .expect("occupied app-B room should be created");
+    server.script_room_codes_for_test(["TAKEN1", "FRESH1"]);
+
+    let (creator, mut creator_rx) = connect_as(&server, APP_A, 40990).await;
+    join_room(&server, &creator, "owned-collision", None, "Creator", 8).await;
+    let created = receive(&mut creator_rx).await;
+    let (created_id, created_code, _) = joined_room(created.as_ref());
+    assert_eq!(created_code, "FRESH1");
+    assert_ne!(created_id, occupied.id);
+
+    let app_a = server
+        .client_app_id(&creator)
+        .expect("authenticated creator retains app identity");
+    let created_room = server
+        .database
+        .get_room_by_id(&created_id)
+        .await
+        .expect("created room lookup should succeed")
+        .expect("created room should remain persisted");
+    assert_eq!(created_room.application_id, Some(app_a));
+    assert_eq!(
+        server
+            .database
+            .get_application_room_count(&app_a)
+            .await
+            .expect("app-A room count should succeed"),
+        1,
+        "the collision must not consume an application quota slot"
+    );
+    assert_eq!(
+        server
+            .database
+            .get_application_room_count(&app_b.id)
+            .await
+            .expect("app-B room count should succeed"),
+        1,
+        "the occupied room must remain owned by app B"
+    );
+}
+
+#[tokio::test]
 async fn authenticated_room_owner_gates_seated_spectator_and_reconnect_admission() {
     let server = create_server(
         true,
