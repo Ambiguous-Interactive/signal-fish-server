@@ -494,7 +494,7 @@ jobs:
         run: cargo publish --locked
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.85.6
+        uses: taiki-e/install-action@v2.85.7
         with:
           tool: cargo-sbom
 
