@@ -258,6 +258,19 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     validate_p2p_rebuild_retry_count(cli.p2p_rebuild_release_file.is_some(), cli.p2p_retry_count)
         .map_err(FatalError::protocol)?;
 
+    // Resolve an explicitly requested `--ip-family` BEFORE touching the
+    // network, so a host that cannot serve it fails the process instead of
+    // creating or joining a server-side room it could never have used.
+    crate::engine::preflight_ip_family(cli.engine_settings(), crate::engine::local_udp_addrs)
+        .map_err(|error| FatalError::protocol(format!("{error:#}")))?;
+
+    // Built before the socket too: `Engine::new` touches no network, and its
+    // one failure mode (a webrtc build without an async runtime) should not
+    // cost a server-side room either.
+    let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+    let engine = Engine::new(cli.engine_settings(), engine_tx)
+        .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
+
     // The soft run window starts at process start, handshake included.
     let run_deadline = checked_deadline(Instant::now(), Duration::from_secs(cli.run_for_secs));
 
@@ -272,15 +285,6 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     let negotiated_version = authenticate(&mut ws, cli).await?;
     let (my_id, mut present, lobby_state, accountability) =
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
-
-    let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-    let engine = Engine::new(
-        cli.cripple_ice,
-        cli.disable_mdns,
-        cli.ice_transport_policy.is_relay_only(),
-        engine_tx,
-    )
-    .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
     present.insert(my_id);
     let members_seen = present.clone();
@@ -2118,13 +2122,13 @@ impl Orchestrator<'_> {
     /// Both channels toward `peer` are open: emit the pair event, run the
     /// optional exchange, and check the all-pairs resolution condition.
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        if let Some((local_candidate_type, remote_candidate_type)) =
-            self.engine.selected_candidate_types(peer).await
-        {
+        if let Some(selected) = self.engine.selected_candidate_pair(peer).await {
             emit(&Event::SelectedCandidatePair {
                 peer,
-                local_candidate_type,
-                remote_candidate_type,
+                local_candidate_type: selected.local_candidate_type,
+                remote_candidate_type: selected.remote_candidate_type,
+                local_candidate_address: selected.local_candidate_address,
+                remote_candidate_address: selected.remote_candidate_address,
             });
         } else {
             tracing::warn!(%peer, "connected pair has no selected ICE candidate pair");

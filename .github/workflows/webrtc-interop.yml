@@ -6,9 +6,14 @@
 # actual WebRTC sessions (DTLS + SCTP data channels over loopback UDP)
 # brokered by the server's protocol v3 signaling. Scenarios cover the mesh
 # and host-star topologies, the crippled-ICE relay fallback, late-join
-# NewPeer pairing, and mixed v2/v3 relay-floor rooms. The interop server
-# config disables TURN and configures zero STUN URLs, so the suite performs
-# no external network access.
+# NewPeer pairing, mixed v2/v3 relay-floor rooms, and an IPv6-only pair
+# (scenario 6 of clients/native/tests/interop_e2e.rs). The interop server
+# config disables TURN and configures zero STUN URLs, so the suite performs no
+# external network access.
+#
+# Live transport is proved on Linux only; `native-platforms` adds the
+# compile + unit-test proof for Windows and macOS, because neither the interop
+# cells nor the root CI matrix ever build clients/native on those platforms.
 #
 # The reference client is a standalone crate OUTSIDE the root package (its
 # own Cargo.lock and deny.toml), so this workflow also runs cargo-deny over
@@ -107,6 +112,87 @@ jobs:
         # -D warnings), and runs its unit + multi-process interop tests with
         # SIGNAL_FISH_SERVER_BIN exported.
         run: bash scripts/run-webrtc-interop.sh
+
+  native-platforms:
+    # The interop job above proves the LIVE transport, but only on Linux: the
+    # multi-process cells and the root matrix never compile clients/native on
+    # Windows or macOS, so a platform-specific break in the client (its
+    # interface enumeration is the obvious candidate — see issue #271) would
+    # reach users undetected. This matrix is the compile-and-unit-test proof for
+    # the other two supported desktop platforms. Linux is deliberately absent:
+    # the `interop` job above already runs this exact command set there (via
+    # scripts/run-webrtc-interop.sh) plus the live suite, so it is the control
+    # and a duplicate ubuntu leg would only pay for a second cold build of the
+    # webrtc graph.
+    #
+    # Cold-cache durations on the first run of this job: windows 4m06s,
+    # macos 2m04s — the 30-minute ceiling is a runaway guard, not a budget.
+    name: Native Client Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.91.0)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          # Only the standalone client graph: this job never builds the server.
+          workspaces: clients/native
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Show Rust tool versions
+        shell: bash
+        run: |
+          rustc -Vv
+          cargo -V
+          cargo clippy -V
+          cargo fmt --version
+      - name: Verify the standalone lockfile resolves
+        shell: bash
+        working-directory: clients/native
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Check formatting
+        shell: bash
+        working-directory: clients/native
+        run: cargo fmt --check
+      - name: Run clippy
+        shell: bash
+        working-directory: clients/native
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build every test target
+        # Clippy is a check-shaped pass (`--emit=metadata`): it type-checks the
+        # integration cells but never codegens or links them, so a
+        # platform-specific link or cfg failure in tests/ would slip through.
+        # `--no-run` builds and links them for real.
+        shell: bash
+        working-directory: clients/native
+        run: cargo test --locked --all-targets --no-run
+      - name: Run the native unit suite
+        # Library + binary unit tests only: the integration cells spawn the
+        # real server binary, and running them is the Linux interop job's
+        # live-transport proof.
+        shell: bash
+        working-directory: clients/native
+        run: cargo test --locked --lib --bins
 
   client-deny:
     name: Client Dependency Audit

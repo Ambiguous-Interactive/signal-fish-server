@@ -9,6 +9,8 @@ use clap::{ArgGroup, Parser, ValueEnum};
 use signal_fish_server::protocol::{Topology, Transport};
 use std::path::PathBuf;
 
+use crate::engine::{EngineSettings, IpFamily};
+
 /// Native Rust reference client for the Signal Fish protocol v3.
 ///
 /// Connects to a Signal Fish server over WebSocket, walks the full v3 flow
@@ -127,6 +129,17 @@ pub struct Cli {
     /// discovery traffic out of packet-loss experiments.
     #[arg(long)]
     pub disable_mdns: bool,
+
+    /// Restrict the ICE sockets this client binds to one address family, and
+    /// therefore the family of every host candidate it advertises. `any` (the
+    /// default) binds every usable interface address. An explicitly requested
+    /// family is resolved before the client opens its WebSocket: a host that
+    /// cannot serve it fails the process — without creating or joining a room
+    /// — instead of silently negotiating the other family or degrading to the
+    /// relay floor. `--cripple-ice` is exempt: that transport is a deliberate
+    /// dead end and always binds the IPv4 loopback.
+    #[arg(long, value_enum, default_value_t = IpFamily::Any)]
+    pub ip_family: IpFamily,
 
     /// FAULT INJECTION (matrix harness only): discard inbound trickle-ICE
     /// candidates from the planned peer named `cNN`, where NN is this ordinal.
@@ -291,6 +304,16 @@ impl Cli {
         self.protocol_version >= 3
     }
 
+    /// The WebRTC engine configuration this invocation asks for.
+    pub fn engine_settings(&self) -> EngineSettings {
+        EngineSettings {
+            crippled: self.cripple_ice,
+            disable_mdns: self.disable_mdns,
+            relay_only: self.ice_transport_policy.is_relay_only(),
+            ip_family: self.ip_family,
+        }
+    }
+
     /// Distinct session members (self included) required before a successful
     /// exit: `--expect-total-peers`, defaulting to `--peers` (where it is
     /// already implied by the ready barrier).
@@ -435,6 +458,57 @@ mod tests {
             "--disable-mdns",
         ]);
         assert!(cli.disable_mdns);
+    }
+
+    #[test]
+    fn ip_family_selection_reaches_the_engine_settings() {
+        let default = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+        ]);
+        assert_eq!(default.ip_family, IpFamily::Any);
+        assert_eq!(
+            default.engine_settings(),
+            EngineSettings::default(),
+            "a plain run must configure the engine's production defaults"
+        );
+
+        let ipv6 = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://[::1]:9000/v3/ws",
+            "--create-room",
+            "--ip-family",
+            "ipv6",
+            "--disable-mdns",
+            "--cripple-ice",
+            "--ice-transport-policy",
+            "relay",
+        ]);
+        assert_eq!(
+            ipv6.engine_settings(),
+            EngineSettings {
+                crippled: true,
+                disable_mdns: true,
+                relay_only: true,
+                ip_family: IpFamily::Ipv6,
+            }
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "signal-fish-reference-native",
+                "--server-url",
+                "ws://127.0.0.1:9000/v3/ws",
+                "--create-room",
+                "--ip-family",
+                "ipv5",
+            ])
+            .is_err(),
+            "an unknown address family must be rejected, not defaulted"
+        );
     }
 
     #[test]

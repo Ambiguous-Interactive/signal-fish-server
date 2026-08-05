@@ -23161,20 +23161,20 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
         "the standalone Fortress fixture must track the server MSRV"
     );
 
-    for required_path in [
-        "src/**",
-        "Cargo.toml",
-        "Cargo.lock",
-        "clients/fortress/**",
-        "scripts/run-fortress-interop.sh",
-        ".github/workflows/fortress-interop.yml",
-    ] {
-        assert_eq!(
-            workflow.matches(&format!("- \"{required_path}\"")).count(),
-            2,
-            "fortress-interop.yml must trigger on `{required_path}` for both push and pull_request"
-        );
-    }
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "fortress-interop.yml",
+        &[
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "clients/fortress/**",
+            "scripts/run-fortress-interop.sh",
+            "scripts/read-toml-string.sh",
+            ".github/workflows/fortress-interop.yml",
+        ],
+    );
 
     for required in [
         "cargo build --locked --bin signal-fish-server",
@@ -23196,22 +23196,20 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     let runner = read_file(&root.join("scripts/run-turn-interop.sh"));
     let test = read_file(&root.join("clients/native/tests/turn_interop_e2e.rs"));
 
-    for required_path in [
-        "src/**",
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain.toml",
-        "clients/native/**",
-        "scripts/run-turn-interop.sh",
-        "scripts/read-toml-string.sh",
-        ".github/workflows/turn-interop.yml",
-    ] {
-        assert_eq!(
-            workflow.matches(&format!("- \"{required_path}\"")).count(),
-            2,
-            "turn-interop.yml must trigger on `{required_path}` for push and pull_request"
-        );
-    }
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "turn-interop.yml",
+        &[
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "clients/native/**",
+            "scripts/run-turn-interop.sh",
+            "scripts/read-toml-string.sh",
+            ".github/workflows/turn-interop.yml",
+        ],
+    );
 
     for required in [
         "permissions:\n  contents: read",
@@ -23297,6 +23295,547 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
             .lines()
             .any(|line| line.trim_start().starts_with("docker pull")),
         "TURN execution phase must never contact the image registry"
+    );
+}
+
+/// Assert both the `push` and `pull_request` events trigger on exactly
+/// `required_paths`.
+///
+/// Parsed, not counted: a substring count of `- "<path>"` cannot tell which key
+/// the list sits under, so renaming `paths:` to `paths-ignore:` — which INVERTS
+/// the filter and stops the workflow running on precisely the changes it exists
+/// to cover — passes a counting check untouched.
+fn assert_workflow_triggers_on_paths(workflow: &str, name: &str, required_paths: &[&str]) {
+    let documents = Yaml::load_from_str(workflow)
+        .unwrap_or_else(|error| panic!("{name} must parse as YAML: {error}"));
+    let document = documents.first().expect("a workflow has one document");
+    // `on` is a YAML 1.1 boolean keyword; saphyr keeps it a string key here,
+    // but accept the boolean spelling too rather than depend on that.
+    let triggers = document
+        .as_mapping_get("on")
+        .or_else(|| document.as_mapping_get("true"))
+        .unwrap_or_else(|| panic!("{name} must define workflow triggers"));
+    let expected: BTreeSet<&str> = required_paths.iter().copied().collect();
+    for event in ["push", "pull_request"] {
+        let block = triggers
+            .as_mapping_get(event)
+            .unwrap_or_else(|| panic!("{name} must define an `{event}` trigger"));
+        assert!(
+            block.as_mapping_get("paths-ignore").is_none(),
+            "{name}: `{event}.paths-ignore` inverts the filter; the gate would stop \
+             running on exactly the changes it covers"
+        );
+        // A branch or event-type filter disables the gate exactly as
+        // completely as deleting a path, and just as quietly.
+        assert!(
+            block.as_mapping_get("branches-ignore").is_none(),
+            "{name}: `{event}.branches-ignore` inverts the branch filter"
+        );
+        let branches: Vec<&str> = block
+            .as_mapping_get("branches")
+            .and_then(|branches| branches.as_sequence())
+            .unwrap_or_else(|| panic!("{name}: `{event}` must scope to a branch"))
+            .iter()
+            .map(|value| value.as_str().expect("each branch is a string"))
+            .collect();
+        assert_eq!(
+            branches,
+            vec!["main"],
+            "{name}: `{event}.branches` drifted; narrowing it disables this gate \
+             as completely as deleting it"
+        );
+        if event == "pull_request" {
+            assert!(
+                block.as_mapping_get("types").is_none(),
+                "{name}: a `types:` filter can drop this gate off the default \
+                 opened/synchronize/reopened events without touching a path"
+            );
+        }
+        let configured: BTreeSet<&str> = block
+            .as_mapping_get("paths")
+            .and_then(|paths| paths.as_sequence())
+            .unwrap_or_else(|| panic!("{name}: `{event}` must filter on paths"))
+            .iter()
+            .map(|value| value.as_str().expect("each trigger path is a string"))
+            .collect();
+        assert_eq!(
+            configured, expected,
+            "{name}: `{event}.paths` drifted; dropping one path silently disables \
+             this gate for changes that only touch it"
+        );
+    }
+}
+
+/// Records whether a syntax subtree calls a function whose path ends in
+/// `name`. Walking the tree means comments and strings cannot match.
+struct CallFinder<'a> {
+    name: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for CallFinder<'_> {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = call.func.as_ref() {
+            if path
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == self.name)
+            {
+                self.found = true;
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+/// Statement index of the first statement whose subtree calls `name`.
+fn position_of(body: &syn::Block, name: &str) -> Option<usize> {
+    body.stmts.iter().position(|statement| {
+        let mut finder = CallFinder { name, found: false };
+        finder.visit_stmt(statement);
+        finder.found
+    })
+}
+
+/// Like [`position_of`], but only accepts a statement of the exact shape
+/// `<expr containing the call>?;` — an expression statement whose value is a
+/// `?` propagation. `let _ = call();` (a `Stmt::Local`) and
+/// `if cond { call()?; }` (a `Stmt::Expr(Expr::If, _)`) are rejected, because
+/// both keep the call in place while discarding or skipping its failure.
+fn position_of_propagating(body: &syn::Block, name: &str) -> Option<usize> {
+    body.stmts.iter().position(|statement| {
+        let syn::Stmt::Expr(syn::Expr::Try(propagated), Some(_semicolon)) = statement else {
+            return false;
+        };
+        let mut finder = CallFinder { name, found: false };
+        finder.visit_expr(&propagated.expr);
+        finder.found
+    })
+}
+
+/// The client must resolve an explicitly requested address family BEFORE it
+/// opens its WebSocket; otherwise the process creates or joins a room it could
+/// never have used, and the per-pair failure it would hit instead is non-fatal
+/// (issue #271 review).
+///
+/// This walks the syntax tree rather than comparing source offsets: a textual
+/// check is satisfied by a helper function *defined* above `run_inner` and
+/// *called* after the handshake, which is exactly the defect it exists to
+/// forbid.
+fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
+    let source = read_file(&root.join("clients/native/src/client.rs"));
+    let file = syn::parse_file(&source).expect("client.rs must parse as Rust");
+
+    let run_inner = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "run_inner" => Some(function),
+            _ => None,
+        })
+        .expect("client.rs must define run_inner");
+
+    // Position alone is not the property. `let _ = preflight(..);` and
+    // `if flag { preflight(..)?; }` both keep the call at statement 0 while
+    // discarding or skipping it, and clippy accepts both. Require the
+    // statement to BE `<expr>?;` at the top level of `run_inner`, so the
+    // failure necessarily propagates out of the function.
+    let preflight = position_of_propagating(&run_inner.block, "preflight_ip_family").expect(
+        "run_inner must call engine::preflight_ip_family as a top-level `?` \
+         statement, so an unservable --ip-family aborts the run",
+    );
+    let connect = position_of(&run_inner.block, "connect")
+        .expect("run_inner must open the WebSocket with wire::connect");
+    assert!(
+        preflight < connect,
+        "preflight_ip_family must run before wire::connect, so an unservable \
+         --ip-family fails without creating or joining a room"
+    );
+
+    // One call site: the check cannot be satisfied by a second, later call
+    // while the effective path skips it.
+    let call_sites = source.matches("preflight_ip_family(").count();
+    assert_eq!(
+        call_sites, 1,
+        "client.rs must call the pre-flight exactly once; found {call_sites}"
+    );
+
+    // ...applying the engine's real bind selection. The pre-flight takes its
+    // resolver as an argument precisely so the unit-tested function IS the
+    // production one; what remains to pin is that this call site passes the
+    // real rule. It must be the EXACT qualified path: a closure such as
+    // `|s| Ok(engine::local_udp_addrs(s).unwrap_or_default())` mentions the
+    // rule while swallowing its failure, and a bare `local_udp_addrs` can be a
+    // local stand-in shadowing it — both compile clean under
+    // `clippy -D warnings`.
+    let arguments = preflight_arguments(&run_inner.block.stmts[preflight])
+        .expect("the pre-flight call must pass its arguments");
+
+    // The settings argument carries the requested family. A constant such as
+    // `EngineSettings::default()` is `IpFamily::Any`, for which the pre-flight
+    // returns before it ever consults the resolver — a permanent no-op that no
+    // live cell can catch, since the failure needs a family the host lacks.
+    let settings = arguments
+        .first()
+        .expect("the pre-flight takes the invocation's settings");
+    let syn::Expr::MethodCall(settings) = settings else {
+        panic!(
+            "the pre-flight must be handed THIS invocation's settings \
+             (`cli.engine_settings()`), not a constant"
+        );
+    };
+    assert_eq!(
+        settings.method, "engine_settings",
+        "the pre-flight must resolve the family this invocation asked for"
+    );
+
+    // The resolver must be the engine's own rule, spelled from the crate root
+    // so that neither a local definition nor a re-imported `engine` alias can
+    // stand in for it.
+    let resolver = arguments
+        .get(1)
+        .expect("the pre-flight takes a resolver argument");
+    let syn::Expr::Path(path) = resolver else {
+        panic!(
+            "the pre-flight's resolver must be the path \
+             `crate::engine::local_udp_addrs`, not a closure or adapter that \
+             can swallow its failure"
+        );
+    };
+    let segments: Vec<String> = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect();
+    assert_eq!(
+        segments,
+        vec![
+            "crate".to_string(),
+            "engine".to_string(),
+            "local_udp_addrs".to_string()
+        ],
+        "the pre-flight must use the engine's own bind selection, spelled from \
+         the crate root so no alias or local definition can shadow it"
+    );
+}
+
+/// The arguments of the `preflight_ip_family` call inside `statement`.
+fn preflight_arguments(statement: &syn::Stmt) -> Option<Vec<&syn::Expr>> {
+    struct Finder<'ast> {
+        arguments: Option<Vec<&'ast syn::Expr>>,
+    }
+
+    impl<'ast> Visit<'ast> for Finder<'ast> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref() {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "preflight_ip_family")
+                {
+                    self.arguments = Some(call.args.iter().collect());
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    let mut finder = Finder { arguments: None };
+    finder.visit_stmt(statement);
+    finder.arguments
+}
+
+/// A job or step must propagate its failure: `continue-on-error` is either
+/// absent or the literal boolean `false`. A string (`"true"`) or an expression
+/// (`${{ true }}`) is truthy to GitHub but not to `as_bool`, so treating a
+/// non-boolean as "false" would let a swallowed failure through.
+fn assert_failure_is_not_swallowed(node: &Yaml, what: &str) {
+    let Some(value) = node.as_mapping_get("continue-on-error") else {
+        return;
+    };
+    assert_eq!(
+        value.as_bool(),
+        Some(false),
+        "{what} must fail its workflow, not report success; `continue-on-error` \
+         must be absent or literally false"
+    );
+}
+
+/// The native reference client is a standalone crate that no other lane
+/// compiles: the root CI matrix builds only the root package, and the interop
+/// cells run on Linux. Issue #271 added two proofs that must not silently
+/// disappear — a Windows/macOS compile + unit matrix (Linux is the `interop`
+/// job's job), and one live IPv6 data-channel cell that fails loudly instead of
+/// skipping when the runner cannot serve IPv6.
+///
+/// Both source files are read with `read_live_file`, so a marker satisfied only
+/// by a comment or a commented-out line does not count as coverage.
+#[test]
+fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/webrtc-interop.yml"));
+    let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
+    let cli = read_live_file(&root.join("clients/native/src/cli.rs"));
+
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "webrtc-interop.yml",
+        &[
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "clients/native/**",
+            "scripts/run-webrtc-interop.sh",
+            "scripts/read-toml-string.sh",
+            ".github/workflows/webrtc-interop.yml",
+        ],
+    );
+
+    // Parse the jobs rather than substring-match them: `contains` cannot see an
+    // `if: false` that disables a whole job, a `continue-on-error: true` that
+    // swallows its result, or a `|| true` appended to a pinned command.
+    let documents = Yaml::load_from_str(&workflow).expect("webrtc-interop.yml must parse as YAML");
+
+    // The job that RUNS the live proofs (including the IPv6 cell) needs the
+    // same treatment as the matrix: an `if: false` on it deletes every
+    // live-transport proof this test pins, with every command untouched.
+    let interop_job = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("interop"))
+        .expect("webrtc-interop.yml must define the interop job");
+    assert!(
+        interop_job.as_mapping_get("if").is_none(),
+        "the interop job must not be conditional; the IPv6 cell and every other \
+         live-transport cell run only there"
+    );
+    assert!(
+        interop_job.as_mapping_get("needs").is_none(),
+        "the interop job must not depend on another job: a skipped dependency \
+         skips it, and a workflow whose jobs all skip still concludes success"
+    );
+    assert_eq!(
+        interop_job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some("ubuntu-latest"),
+        "the live-transport proof runs on Linux; the README platform table and \
+         the CHANGELOG both say so"
+    );
+    assert_failure_is_not_swallowed(interop_job, "the interop job");
+    let interop_steps: Vec<&Yaml> = interop_job
+        .as_mapping_get("steps")
+        .and_then(|steps| steps.as_sequence())
+        .expect("the interop job must define steps")
+        .iter()
+        .collect();
+    for step in &interop_steps {
+        assert_failure_is_not_swallowed(step, "every interop step");
+        assert!(
+            step.as_mapping_get("if").is_none(),
+            "no step in the interop job may be conditional"
+        );
+    }
+    assert!(
+        interop_steps.iter().any(|step| {
+            step.as_mapping_get("run")
+                .and_then(Yaml::as_str)
+                .is_some_and(|run| run.trim() == "bash scripts/run-webrtc-interop.sh")
+        }),
+        "the interop job must still run the suite via scripts/run-webrtc-interop.sh"
+    );
+    // ...and that script must still run the WHOLE suite. A token blocklist is
+    // not enough — `--test=interop_e2e`, `-- --skip ipv6_only`, `-p`, and an
+    // added earlier `cargo test` line all narrow it past such a list — so pin
+    // the invocation exactly, and pin that there is only one of them.
+    let runner = read_live_file(&root.join("scripts/run-webrtc-interop.sh"));
+    let suite_commands: Vec<&str> = runner
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("cargo test"))
+        .collect();
+    assert_eq!(
+        suite_commands,
+        vec![
+            r#"SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}""#
+        ],
+        "the interop runner must run the WHOLE client suite as exactly one \
+         unnarrowed `cargo test`; any narrowing silently drops the \
+         multi-process cells, including the IPv6 proof"
+    );
+    // That pinned line expands an array, so pin the array too: `(--lib)` on an
+    // existing assignment is the cheapest way to narrow the suite while the
+    // command itself stays byte-identical.
+    let profile_assignments: Vec<&str> = runner
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("CARGO_PROFILE_ARGS"))
+        .collect();
+    assert_eq!(
+        profile_assignments,
+        vec!["CARGO_PROFILE_ARGS=()", "CARGO_PROFILE_ARGS=(--release)"],
+        "the interop runner's profile arguments must select a profile and \
+         nothing else"
+    );
+
+    let job = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("native-platforms"))
+        .expect("webrtc-interop.yml must define the native-platforms job (issue #271)");
+    assert!(
+        job.as_mapping_get("if").is_none(),
+        "the native platform matrix must not be conditional; an `if:` can disable \
+         every non-Linux proof without touching a single command"
+    );
+    assert!(
+        job.as_mapping_get("needs").is_none(),
+        "the platform proof must not be gated on another job's result: `needs:` \
+         skips this matrix whenever that job fails, which is the same outcome \
+         `fail-fast: false` exists to prevent"
+    );
+    // `runs-on` is the whole point: pointing it at ubuntu-latest keeps every
+    // command and both matrix legs while deleting the non-Linux proof entirely.
+    assert_eq!(
+        job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some(MATRIX_OS_PLACEHOLDER),
+        "each matrix leg must run on its own platform"
+    );
+    // Absent, or the literal boolean false. A string "true" or an expression
+    // is truthy to GitHub but not to `as_bool`, so anything else is rejected.
+    assert_failure_is_not_swallowed(job, "the native-platforms job");
+    let strategy = job
+        .as_mapping_get("strategy")
+        .expect("the native platform job must define a strategy");
+    assert_eq!(
+        strategy.as_mapping_get("fail-fast").and_then(Yaml::as_bool),
+        Some(false),
+        "one red platform must not cancel the other platform's evidence"
+    );
+    let matrix = strategy
+        .as_mapping_get("matrix")
+        .expect("the native platform job must define a strategy matrix");
+    for filter in ["include", "exclude"] {
+        assert!(
+            matrix.as_mapping_get(filter).is_none(),
+            "`strategy.matrix.{filter}` can silently remove every leg while the \
+             `os` list still reads as complete"
+        );
+    }
+    let platforms: Vec<&str> = matrix
+        .as_mapping_get("os")
+        .and_then(|os| os.as_sequence())
+        .expect("the native platform job must define strategy.matrix.os")
+        .iter()
+        .map(|value| value.as_str().expect("each matrix os is a string"))
+        .collect();
+    assert_eq!(
+        platforms,
+        vec!["windows-latest", "macos-latest"],
+        "the platforms clients/native is proved on must not shrink; Linux is the \
+         separate `interop` job, which runs the same commands plus the live suite"
+    );
+
+    // Exact `run` values: a trailing `|| true` (or any other suffix) would keep
+    // a `contains` check green while discarding the command's exit status.
+    let steps: Vec<&Yaml> = job
+        .as_mapping_get("steps")
+        .and_then(|steps| steps.as_sequence())
+        .expect("the native platform job must define steps")
+        .iter()
+        .collect();
+    // Every pinned command must run unconditionally, against the standalone
+    // crate, with its failure propagated. Checking these per step closes the
+    // gap a whole-file `contains` leaves: a step that keeps its command but
+    // loses `working-directory` silently checks the ROOT package instead.
+    for step in &steps {
+        assert_failure_is_not_swallowed(step, "every native-platforms step");
+        assert!(
+            step.as_mapping_get("if").is_none(),
+            "no step in the native platform matrix may be conditional"
+        );
+    }
+    let crate_commands: Vec<&str> = steps
+        .iter()
+        .filter(|step| {
+            step.as_mapping_get("working-directory")
+                .and_then(Yaml::as_str)
+                == Some("clients/native")
+        })
+        .filter_map(|step| step.as_mapping_get("run").and_then(Yaml::as_str))
+        .map(str::trim)
+        .collect();
+    for required in [
+        "cargo metadata --locked --format-version 1 > /dev/null",
+        "cargo fmt --check",
+        "cargo clippy --locked --all-targets -- -D warnings",
+        // Clippy never links the integration cells; this is what proves they
+        // build on the platform.
+        "cargo test --locked --all-targets --no-run",
+        "cargo test --locked --lib --bins",
+    ] {
+        assert!(
+            crate_commands.contains(&required),
+            "the native platform matrix lost the exact command `{required}` \
+             running in clients/native; commands present: {crate_commands:?} \
+             (issue #271)"
+        );
+    }
+    assert!(
+        workflow.contains("name: Native Client Build (${{ matrix.os }})"),
+        "the per-platform check name is what a reader (and any future branch \
+         protection rule) identifies this proof by"
+    );
+
+    assert_ip_family_preflight_precedes_the_socket(&root);
+
+    // Structural facts, not loose tokens: each of these is a line the proof
+    // cannot lose while still proving anything.
+    for required in [
+        // The clients really run IPv6-only, and the args really reach them.
+        r#"const IPV6_ARGS: [&str; 2] = ["--ip-family", "ipv6"];"#,
+        "extra_args: &IPV6_ARGS,",
+        // The precondition applies the client's own rule and never skips.
+        "fn require_ipv6_ice_interface()",
+        "require_ipv6_ice_interface();",
+        "local_udp_addrs(settings).unwrap_or_else",
+        "The lane must not be skipped silently.",
+        // The path is asserted to be direct IPv6 toward the planned peer.
+        "fn assert_ipv6_host_path(",
+        "assert_ipv6_host_path(window, who, peer_id);",
+        r#"fn selected_ipv6_address(event: &Value, field: &str, who: &str) -> Ipv6Addr {"#,
+        r#"IpAddr::V4(address) => {"#,
+        r#"for field in ["local_candidate_type", "remote_candidate_type"] {"#,
+        r#"for field in ["local_candidate_address", "remote_candidate_address"] {"#,
+        // ...carrying a real session on both labels, not the relay floor.
+        "assert_exchange_sent_to(window, who, &peers);",
+        "assert_exchange_received_from(window, who, &peers);",
+        "assert_pair_connected_exactly(window, who, &peers);",
+        r#"events_named(&client.events[..live_end], "fallback_engaged").is_empty(),"#,
+    ] {
+        assert!(
+            interop.contains(required),
+            "the IPv6 interop proof lost acceptance marker `{required}`"
+        );
+    }
+    // Absence checks must NOT read the stripped view: `read_live_file` drops
+    // every line starting with `#`, which includes Rust attributes, so
+    // `!live.contains("#[ignore]")` would pass even with every cell ignored.
+    // Read the raw file and match only a real attribute line, so a commented
+    // `// #[ignore]` cannot false-positive either.
+    let interop_raw = read_file(&root.join("clients/native/tests/interop_e2e.rs"));
+    assert!(
+        !interop_raw
+            .lines()
+            .any(|line| line.trim_start().starts_with("#[ignore")),
+        "the interop cells must never become opt-in; that would silently drop \
+         every live-transport proof in this file"
+    );
+    assert!(
+        cli.contains("pub ip_family: IpFamily"),
+        "the client must keep the --ip-family selector the IPv6 proof drives"
     );
 }
 

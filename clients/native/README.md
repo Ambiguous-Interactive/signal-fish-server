@@ -62,6 +62,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
 | `--cripple-ice` | off | Deterministically break ICE: bind an isolated dummy UDP transport while allowing only unconfigured TCP candidates in the ICE agent, then drop all outbound/inbound `IceCandidate` signals (SDP offer/answer and gathering completion still flow). Forces the relay fallback |
 | `--disable-mdns` | off | Test harness only: disable resolution of remote `.local` candidates so packet-loss experiments do not fault their mDNS discovery control plane. Native host candidates are raw IPs in either mode; normal mode retains mDNS query support for browser peers |
+| `--ip-family <FAMILY>` | `any` | Restrict the ICE sockets this client binds — and therefore the family of every host candidate it advertises — to `ipv4` or `ipv6`. `any` binds every usable interface address. webrtc 0.20 turns each supplied bind directly into a host candidate, so this is what pins the negotiated path's family. A requested family the host cannot serve fails the process before the WebSocket opens (exit 2), instead of falling back to the other one or degrading to the relay floor. `--cripple-ice` is exempt: that transport is a deliberate dead end and always binds the IPv4 loopback |
 | `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
 | `--ice-transport-policy <POLICY>` | `all` | ICE candidate policy: `all` permits every gathered candidate type; `relay` requires a TURN-relayed path. The repository's local coturn gate uses `relay` to prove production-minted TURN credentials rather than a direct host path |
 | `--p2p-release-file <PATH>` | — | Test harness only: keep processing WebSocket traffic but defer peer-connection creation until PATH exists. The TURN gate uses this to prove the relay floor before ICE establishment begins |
@@ -137,7 +138,7 @@ process continues to its normal bounded exit.
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
 | `p2p_pair_reconnected` | `peer` | BOTH channels reopened for a coordinated PairRetry generation |
-| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay` |
+| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only selected ICE pair after both channels open; the local TURN gate requires both candidate types to be `relay`, and the IPv6 cell requires both addresses to be concrete dialable IPv6. Either address is `null` when the stack redacts or omits it — a harness asserting on the family must treat that as a failure |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `exchange_reliable_ready` | — | Loss-harness barrier: every planned pair has sent and received its exact reliable exchange, while `--unreliable-exchange-release-file` still holds the unreliable half |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out (Appendix G) |
@@ -155,7 +156,7 @@ process continues to its normal bounded exit.
 |------|---------|
 | `0` | All flag-driven success criteria met within the run window |
 | `1` | `--run-for-secs` elapsed with unmet criteria (the `error` event lists them) |
-| `2` | Protocol error (auth/join rejection, malformed frame). Exit 2 is **also** clap's default exit code for CLI-usage errors (unknown/missing flags); on that path the usage message goes to stderr and NO `exiting` event is emitted (the event stream never starts) |
+| `2` | Protocol error (auth/join rejection, malformed frame), or a local pre-flight failure such as an `--ip-family` the host cannot serve. Exit 2 is **also** clap's default exit code for CLI-usage errors (unknown/missing flags); on that path the usage message goes to stderr and NO `exiting` event is emitted (the event stream never starts) |
 | `3` | Transport failure (connect failed, socket died mid-session) |
 | `4` | `--max-runtime-secs` watchdog fired (hard abort) |
 
@@ -226,10 +227,19 @@ client processes (loopback only; the interop server config disables TURN with ze
 | Mid-handshake close → one `error` + prompt exit 3 | n/a | ✅ `browser_cli_mid_handshake_close_single_error_exit_3` |
 | SIGTERM/SIGKILL Chromium teardown (orphan reaper) | n/a | ✅ `browser_cli_signal_teardown_reaps_chromium` |
 | TURN-only pair + mismatched-secret fallback controls | ✅ `turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live`; `mismatched_turn_secret_fails_p2p_and_uses_websocket_fallback` | — |
+| IPv6-only host path (both channels over IPv6) | ✅ `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` | — |
 
 The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop_e2e.rs) behind the
 `browser-interop` cargo feature (this crate's default suite never compiles them; they additionally need
 `SIGNAL_FISH_BROWSER_CLI` pointing at the built [browser client](../browser/README.md) bundle).
+
+Scenario 6 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
+advertised, and the assertions require a host/host pair of concrete dialable IPv6 addresses plus the exact
+exchange on both channel labels. It shares the file's scenario-serialization guard, so it never overlaps another
+multi-process cell. Signaling still runs over the harness server's IPv4 loopback listener, so the IPv6 claim is
+about the WebRTC data path (ICE, DTLS, SCTP), not the WebSocket. Its precondition applies the client's own
+interface-selection rule, so a runner that cannot serve IPv6 fails the cell with an actionable message; it is
+never skipped.
 
 CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run-webrtc-interop.sh) in
 `.github/workflows/webrtc-interop.yml`, and the browser cells via
@@ -238,6 +248,26 @@ CI runs the native suite via [`scripts/run-webrtc-interop.sh`](../../scripts/run
 [`scripts/run-turn-interop.sh`](../../scripts/run-turn-interop.sh) in
 `.github/workflows/turn-interop.yml`; they start a digest-pinned local coturn
 container and never depend on a public STUN/TURN service.
+
+## Platform coverage
+
+The two kinds of evidence this crate carries are deliberately distinct — a green lane means only what its column
+says:
+
+| Platform | Compile + unit suite | Live WebRTC transport |
+|----------|----------------------|-----------------------|
+| Linux (`ubuntu-latest`) | ✅ `Native Client Interop (Linux)` | ✅ every native, browser, TURN-only, and IPv6 cell |
+| Windows (`windows-latest`) | ✅ `Native Client Build (windows-latest)` | ❌ not proved |
+| macOS (`macos-latest`) | ✅ `Native Client Build (macos-latest)` | ❌ not proved |
+
+The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs, on the repository MSRV:
+`cargo metadata --locked`, `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+`cargo test --locked --all-targets --no-run`, and `cargo test --locked --lib --bins`. The `--no-run` step is
+what actually builds and links the multi-process cells — clippy only type-checks them (`--emit=metadata`, no
+codegen). Those cells are built but not run off Linux: they spawn the server binary, which is the Linux lane's
+job. Linux is absent from the matrix because the `interop` job already runs that same command set there, plus
+the live suite. Interface enumeration, socket binding, and ICE behavior on Windows and macOS are therefore
+**build-verified only**.
 
 ## Troubleshooting
 
