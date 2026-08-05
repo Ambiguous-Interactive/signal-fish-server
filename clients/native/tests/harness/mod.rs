@@ -744,6 +744,46 @@ pub fn str_field<'a>(event: &'a Value, field: &str) -> &'a str {
         .unwrap_or_else(|| panic!("event missing string field `{field}`: {event}"))
 }
 
+/// The local ICE candidates this client advertised, as `type address:port`
+/// strings in emission order.
+///
+/// The advertised set is the only record of *why* ICE had nothing to pair: a
+/// session that gathers no candidate otherwise reports just "no candidate
+/// pairs", which is exactly how issue #276 presented. Rendered as strings so a
+/// failing assertion prints the whole set (issues #275, #276).
+pub fn advertised_candidates(events: &[Value]) -> Vec<String> {
+    events_named(events, "local_candidate")
+        .into_iter()
+        .map(|event| {
+            format!(
+                "{} {}:{}",
+                str_field(event, "candidate_type"),
+                str_field(event, "address"),
+                event
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| panic!("local_candidate has no `port`: {event}")),
+            )
+        })
+        .collect()
+}
+
+/// The address of each advertised local ICE candidate, parsed.
+///
+/// A candidate whose address is not an IP fails loudly: it would otherwise let
+/// a family assertion pass over something it never checked.
+pub fn advertised_candidate_addresses(events: &[Value], who: &str) -> Vec<std::net::IpAddr> {
+    events_named(events, "local_candidate")
+        .into_iter()
+        .map(|event| {
+            let raw = str_field(event, "address");
+            raw.parse().unwrap_or_else(|error| {
+                panic!("{who}: advertised candidate address `{raw}` is not an IP ({error})")
+            })
+        })
+        .collect()
+}
+
 /// This client's own player id (from its `room_joined` event).
 pub fn player_id_of(events: &[Value], who: &str) -> String {
     str_field(single_event(events, "room_joined", who), "player_id").to_string()

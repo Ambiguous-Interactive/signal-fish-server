@@ -74,8 +74,9 @@ use std::net::{IpAddr, Ipv6Addr, UdpSocket};
 use std::time::Duration;
 
 use harness::{
-    events_named, player_id_of, scenario_window, single_event, spawn_client, spawn_server,
-    str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
+    advertised_candidate_addresses, events_named, player_id_of, scenario_window, single_event,
+    spawn_client, spawn_server, str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT,
+    EVENT_TIMEOUT,
 };
 use serde_json::Value;
 use signal_fish_reference_native::engine::{local_udp_addrs, EngineSettings, IpFamily};
@@ -1558,6 +1559,32 @@ fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str) {
     }
 }
 
+/// Assert the *advertised* candidate set carries no IPv4 entry.
+///
+/// The selected pair alone cannot prove `--ip-family`: on a dual-stack host a
+/// regression that made the flag a no-op would still let ICE choose IPv6, and
+/// the cell would pass while proving nothing (issue #275, gap 2). What the
+/// flag actually controls is the *bind set*, and the advertised candidates are
+/// its observable image — one candidate per bound socket under the zero-STUN,
+/// zero-TURN configuration this scenario runs.
+fn assert_no_ipv4_candidate_advertised(events: &[Value], who: &str) {
+    let advertised = advertised_candidate_addresses(events, who);
+    assert!(
+        !advertised.is_empty(),
+        "{who}: the run advertised no local candidate, so there is nothing to \
+         prove the family of"
+    );
+    let ipv4: Vec<&IpAddr> = advertised
+        .iter()
+        .filter(|address| address.is_ipv4())
+        .collect();
+    assert!(
+        ipv4.is_empty(),
+        "{who}: --ip-family ipv6 must bind no IPv4 socket, but the run advertised \
+         {ipv4:?} among {advertised:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
     let _serial = acquire_serial().await;
@@ -1656,6 +1683,7 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
 
         // ...over IPv6, with the exact exchange on both channel labels.
         assert_ipv6_host_path(window, who, peer_id);
+        assert_no_ipv4_candidate_advertised(window, who);
         assert_exchange_sent_to(window, who, &peers);
         assert_exchange_received_from(window, who, &peers);
     }

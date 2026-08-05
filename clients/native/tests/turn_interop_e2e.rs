@@ -10,7 +10,7 @@ mod harness;
 use std::collections::BTreeMap;
 
 use harness::{
-    events_named, player_id_of, scenario_window, single_event, spawn_client,
+    advertised_candidates, events_named, player_id_of, scenario_window, single_event, spawn_client,
     spawn_server_with_turn, str_field, ClientProcess, ClientSpec, ServerProcess,
     CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
 };
@@ -141,6 +141,31 @@ fn assert_turn_plan(events: &[Value], who: &str) {
     );
 }
 
+/// Under `--ice-transport-policy relay` the only candidate a client may
+/// advertise is one a TURN allocation produced.
+///
+/// This is the oracle issue #276 lacked. Run 30962028644 gathered nothing —
+/// every Allocate left from a socket that could not route to the coturn
+/// container — and the only symptom the cell could report was
+/// "expected exactly one `p2p_pair_connected` event, got 0: []", with no
+/// evidence naming the cause. Asserting the advertised set makes a failed
+/// allocation self-describing, and forbids a host or reflexive candidate from
+/// silently carrying a run this lane exists to prove relayed.
+fn assert_only_relay_candidates_advertised(events: &[Value], who: &str) {
+    let advertised = advertised_candidates(events);
+    assert!(
+        !advertised.is_empty(),
+        "{who}: the relay-only session advertised no ICE candidate at all, so the \
+         TURN allocation produced none (issue #276); the client's stderr carries \
+         the allocation errors"
+    );
+    assert!(
+        advertised.iter().all(|entry| entry.starts_with("relay ")),
+        "{who}: --ice-transport-policy relay must advertise relay candidates only, \
+         got {advertised:?}"
+    );
+}
+
 fn assert_relay_floor(run: &TurnRun, index: usize) {
     let events = scenario_window(&run.logs[index]);
     single_event(events, "game_data_sent", CLIENT_NAMES[index]);
@@ -239,6 +264,7 @@ async fn turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live(
     for (index, who) in CLIENT_NAMES.iter().copied().enumerate() {
         let events = scenario_window(&run.logs[index]);
         assert_turn_plan(events, who);
+        assert_only_relay_candidates_advertised(events, who);
         single_event(events, "p2p_pair_connected", who);
         let selected = single_event(events, "selected_candidate_pair", who);
         assert_eq!(str_field(selected, "peer"), run.ids[1 - index]);
@@ -269,6 +295,15 @@ async fn mismatched_turn_secret_fails_p2p_and_uses_websocket_fallback() {
         assert_turn_plan(events, who);
         assert!(events_named(events, "p2p_pair_connected").is_empty());
         assert!(events_named(events, "selected_candidate_pair").is_empty());
+        // The complement of the positive control: a rejected allocation yields
+        // no relay candidate, and the relay policy admits no other kind. An
+        // advertised candidate here would mean the fallback was reached with a
+        // usable path still in hand.
+        assert!(
+            advertised_candidates(events).is_empty(),
+            "{who}: a rejected TURN allocation must advertise no candidate, got {:?}",
+            advertised_candidates(events)
+        );
         let status = single_event(events, "transport_status_sent", who);
         assert_eq!(str_field(status, "transport"), "webrtc");
         assert_eq!(

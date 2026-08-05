@@ -25,13 +25,13 @@
 //! they forward through an unbounded [`EngineEvent`] channel back to the orchestrator.
 
 use std::collections::{BTreeSet, HashMap};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use clap::ValueEnum;
-use rtc::ice::{mdns::MulticastDnsMode, network_type::NetworkType};
+use rtc::ice::{mdns::MulticastDnsMode, network_type::NetworkType, url::SchemeType, url::Url};
 use signal_fish_server::protocol::{IceServer, PlayerId};
 use tokio::sync::mpsc;
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
@@ -52,11 +52,13 @@ pub const UNRELIABLE_LABEL: &str = "unreliable";
 /// (No `Debug` derive: `RTCDataChannel` is not `Debug`.)
 pub enum EngineEvent {
     /// A local ICE candidate was gathered; `candidate_json` is the serialized
-    /// `RTCIceCandidateInit` to relay as `{"IceCandidate": candidate_json}`.
+    /// `RTCIceCandidateInit` to relay as `{"IceCandidate": candidate_json}`,
+    /// and `gathered` its typed projection for the JSONL event stream.
     LocalCandidate {
         peer: PlayerId,
         generation: u64,
         candidate_json: String,
+        gathered: GatheredCandidate,
     },
     /// This peer connection emitted the end-of-gathering marker after all
     /// local candidates for its generation.
@@ -301,7 +303,11 @@ impl Engine {
             events: self.events.clone(),
             runtime: self.runtime.clone(),
         });
-        let udp_addrs = local_udp_addrs(self.settings)?;
+        let udp_addrs = session_udp_addrs(
+            self.settings,
+            local_udp_addrs,
+            ice_server_source_addrs(ice_servers).await,
+        )?;
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
                 .with_configuration(config)
@@ -544,6 +550,25 @@ impl Engine {
     }
 }
 
+/// A local ICE candidate this client gathered and advertised to a peer.
+///
+/// Taken from the stack's typed candidate rather than re-parsed out of the SDP
+/// attribute line, so the fields cannot drift from what was actually
+/// advertised. A harness asserts on the advertised *set*: that a relay-only
+/// session gathered a relay candidate at all (issue #276 had none, and the
+/// only evidence was "no candidate pairs"), and that an `--ip-family` run
+/// advertised nothing of the other family (issue #275).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatheredCandidate {
+    /// `host`, `srflx`, `prflx` or `relay`.
+    pub candidate_type: String,
+    /// The candidate's own address, as the stack renders it.
+    pub address: String,
+    pub port: u16,
+    /// `udp` or `tcp`.
+    pub protocol: String,
+}
+
 /// The ICE candidate pair that carries a connected peer's data channels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedCandidatePair {
@@ -571,6 +596,12 @@ impl PeerConnectionEventHandler for PeerHandler {
         if self.crippled {
             return;
         }
+        let gathered = GatheredCandidate {
+            candidate_type: event.candidate.typ.to_string(),
+            address: event.candidate.address.clone(),
+            port: event.candidate.port,
+            protocol: event.candidate.protocol.to_string(),
+        };
         match event
             .candidate
             .to_json()
@@ -582,6 +613,7 @@ impl PeerConnectionEventHandler for PeerHandler {
                     peer: self.peer,
                     generation: self.generation,
                     candidate_json,
+                    gathered,
                 });
             }
             Err(error) => {
@@ -736,6 +768,132 @@ fn select_udp_addrs(
     Ok(addrs.into_iter().collect())
 }
 
+/// The complete bind set for one peer connection: every address the interface
+/// table offers, plus the local address the host's own routing table selects
+/// for each configured ICE server.
+///
+/// Interface enumeration alone is not sufficient. webrtc 0.20 starts a STUN
+/// binding and a TURN allocation from *every* socket the application supplies,
+/// and a socket that cannot route to the server either fails outright at
+/// `sendto` (`EINVAL` from a loopback source toward a routed destination) or is
+/// dropped in transit. When no bound address routes to the server, the run
+/// gathers no relay candidate — and under `--ice-transport-policy relay`, no
+/// candidate at all, which is issue #276. The kernel's own source address for
+/// a server is routable by construction, so it belongs in the bind set whether
+/// or not interface enumeration happened to report it.
+///
+/// `enumerate` is the interface rule (production passes [`local_udp_addrs`])
+/// and `sources` the routing-table answers (production passes
+/// [`ice_server_source_addrs`]). Both halves of the union are arguments of the
+/// production entry point, so the unit-tested function *is* the shipped one.
+pub fn session_udp_addrs(
+    settings: EngineSettings,
+    enumerate: impl Fn(EngineSettings) -> Result<Vec<SocketAddr>>,
+    sources: impl IntoIterator<Item = IpAddr>,
+) -> Result<Vec<SocketAddr>> {
+    let enumerated = enumerate(settings)?;
+    if settings.crippled {
+        // The crippled transport exists to be unusable. A routable source
+        // address would hand it exactly the reachability it must never have.
+        return Ok(enumerated);
+    }
+    // One rule governs both halves: `select_udp_addrs` drops what cannot serve
+    // as a host candidate and enforces `--ip-family`, so a routing answer can
+    // never smuggle in an address the family pin excludes.
+    let merged = select_udp_addrs(
+        enumerated.iter().map(SocketAddr::ip).chain(sources),
+        settings.ip_family,
+    )?;
+    if merged.len() > enumerated.len() {
+        // The exact condition behind issue #276. Without this line a failed run
+        // shows only "no candidate pairs", with nothing naming the cause.
+        tracing::info!(
+            enumerated = enumerated.len(),
+            bound = merged.len(),
+            "interface enumeration missed a route to a configured ICE server; \
+             binding the kernel's source address for it as well"
+        );
+    }
+    Ok(merged)
+}
+
+/// Kernel-selected source addresses for every configured STUN/TURN server.
+///
+/// A server this host cannot resolve or route to contributes nothing and is
+/// reported as a diagnostic rather than an error: the enumerated interface
+/// addresses still stand, and webrtc applies its own URL validation to the
+/// same list.
+pub async fn ice_server_source_addrs(ice_servers: &[IceServer]) -> Vec<IpAddr> {
+    let mut sources = BTreeSet::new();
+    for (host, port) in ice_server_endpoints(ice_servers) {
+        let resolved = match tokio::net::lookup_host((host.as_str(), port)).await {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::debug!(%host, port, %error, "ICE server did not resolve; no route probe");
+                continue;
+            }
+        };
+        for server in resolved {
+            match route_source_addr(server) {
+                Ok(source) => {
+                    sources.insert(source);
+                }
+                Err(error) => {
+                    tracing::debug!(%server, %error, "no local route to this ICE server");
+                }
+            }
+        }
+    }
+    sources.into_iter().collect()
+}
+
+/// Host and port of every STUN or TURN URL a session plan carried.
+///
+/// Unparsable or non-STUN/TURN URLs are skipped rather than rejected: this
+/// client is not the authority on the URL grammar, and an entry it cannot read
+/// must not cost the session the servers it can.
+fn ice_server_endpoints(ice_servers: &[IceServer]) -> Vec<(String, u16)> {
+    let mut endpoints = BTreeSet::new();
+    for server in ice_servers {
+        for raw in &server.urls {
+            match Url::parse_url(raw) {
+                Ok(url)
+                    if matches!(
+                        url.scheme,
+                        SchemeType::Stun | SchemeType::Stuns | SchemeType::Turn | SchemeType::Turns
+                    ) =>
+                {
+                    endpoints.insert((url.host.clone(), url.port));
+                }
+                Ok(url) => {
+                    tracing::debug!(%raw, scheme = %url.scheme, "ignoring non-STUN/TURN ICE URL");
+                }
+                Err(error) => {
+                    tracing::debug!(%raw, %error, "ignoring unparsable ICE URL");
+                }
+            }
+        }
+    }
+    endpoints.into_iter().collect()
+}
+
+/// The local address this host would send from to reach `server`, as chosen by
+/// its routing table.
+///
+/// Connecting an unbound UDP socket performs the route lookup and assigns the
+/// source address without sending a packet, which is the portable way to ask
+/// "which of my addresses reaches this peer?" on Linux, macOS and Windows.
+fn route_source_addr(server: SocketAddr) -> std::io::Result<IpAddr> {
+    let wildcard = if server.is_ipv4() {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    };
+    let probe = UdpSocket::bind(wildcard)?;
+    probe.connect(server)?;
+    Ok(probe.local_addr()?.ip())
+}
+
 fn spawn_channel_event_loop(
     runtime: &Arc<dyn Runtime>,
     events: &mpsc::UnboundedSender<EngineEvent>,
@@ -807,9 +965,38 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Only the fixtures need the IPv6 constructors; production selection is
-    // family-agnostic.
-    use std::net::Ipv6Addr;
+    use std::time::Duration;
+
+    /// Payload of the routing probes below. Its exact bytes are compared on
+    /// arrival, so a datagram from anything else cannot be mistaken for it.
+    const ROUTE_PROBE: &[u8] = b"signal-fish-route-probe";
+
+    /// Bind each candidate address and try to send [`ROUTE_PROBE`] to `server`,
+    /// reporting what the kernel did for every one of them.
+    ///
+    /// This is the operation issue #276 observed failing in production: webrtc
+    /// starts its TURN allocation from each bound socket, and a socket that
+    /// cannot route to the server fails here (`EINVAL` for a loopback source
+    /// toward a routed destination) rather than at any protocol layer.
+    fn probe_route(binds: &[SocketAddr], server: SocketAddr) -> Vec<(SocketAddr, String)> {
+        binds
+            .iter()
+            .map(|bind| {
+                let outcome = UdpSocket::bind(*bind)
+                    .and_then(|socket| socket.send_to(ROUTE_PROBE, server))
+                    .map_or_else(|error| format!("{error}"), |_sent| "sent".to_string());
+                (*bind, outcome)
+            })
+            .collect()
+    }
+
+    /// The first bind address whose socket reached `server`, if any.
+    fn source_that_reaches(binds: &[SocketAddr], server: SocketAddr) -> Option<SocketAddr> {
+        probe_route(binds, server)
+            .into_iter()
+            .find(|(_bind, outcome)| outcome == "sent")
+            .map(|(bind, _outcome)| bind)
+    }
 
     /// Deterministic ICE failure in the given family.
     fn crippled_settings(ip_family: IpFamily) -> EngineSettings {
@@ -1104,6 +1291,233 @@ mod tests {
         // `tests/ci_config_tests.rs`.
     }
 
+    #[test]
+    fn the_bind_set_reaches_a_configured_server_the_interface_table_misses() {
+        // Stand-in for the configured TURN server: a socket this test owns, on
+        // the IPv6 loopback every supported platform provides. Using a real
+        // socket means "reachable" is decided by the kernel, not by the test.
+        let server = UdpSocket::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)))
+            .expect("the IPv6 loopback must be bindable");
+        let server_addr = server.local_addr().expect("a bound socket has an address");
+        server
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("probe reads must not block a failing run forever");
+
+        // Run 30962028644's condition reduced to its essence: interface
+        // enumeration produced no address that can reach the configured
+        // server. There, every Allocate either failed with `EINVAL` from the
+        // loopback source or was dropped before coturn, and the relay-only
+        // session gathered no candidate at all.
+        let missing_the_route = vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))];
+        assert!(
+            source_that_reaches(&missing_the_route, server_addr).is_none(),
+            "precondition: the enumerated set must not already reach {server_addr}, \
+             otherwise this proves nothing: {:?}",
+            probe_route(&missing_the_route, server_addr)
+        );
+
+        let source = route_source_addr(server_addr)
+            .expect("every host routes to its own loopback by definition");
+        let bound = session_udp_addrs(
+            EngineSettings::default(),
+            |_settings| Ok(missing_the_route.clone()),
+            [source],
+        )
+        .expect("merging one routing answer into a non-empty set resolves");
+
+        // Every address the interface rule offered is still bound: host
+        // candidates are not sacrificed to reach a TURN server.
+        for addr in &missing_the_route {
+            assert!(bound.contains(addr), "{addr} must stay in {bound:?}");
+        }
+        let reaching = source_that_reaches(&bound, server_addr).unwrap_or_else(|| {
+            panic!(
+                "the merged bind set still cannot reach {server_addr}: {:?}",
+                probe_route(&bound, server_addr)
+            )
+        });
+
+        // A successful `send_to` is not delivery. Read the datagram back, so a
+        // kernel that accepted the write but dropped the packet still fails.
+        let mut buffer = [0_u8; 64];
+        let (read, from) = server
+            .recv_from(&mut buffer)
+            .expect("the probe datagram must arrive");
+        assert_eq!(&buffer[..read], ROUTE_PROBE);
+        assert_eq!(
+            from.ip(),
+            reaching.ip(),
+            "the datagram must come from the address the merge added"
+        );
+    }
+
+    #[tokio::test]
+    async fn ice_server_source_addrs_routes_the_production_turn_url_shape() {
+        let server = UdpSocket::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)))
+            .expect("the IPv6 loopback must be bindable");
+        let port = server.local_addr().expect("bound socket").port();
+        // Exactly the shape scripts/run-turn-interop.sh mints, so URL parsing,
+        // resolution and the route probe are proven on the production string.
+        let ice_servers = vec![IceServer {
+            urls: vec![format!("turn:[::1]:{port}?transport=udp")],
+            username: Some("interop".to_string()),
+            credential: Some("interop".to_string()),
+        }];
+        assert_eq!(
+            ice_server_source_addrs(&ice_servers).await,
+            vec![IpAddr::from(Ipv6Addr::LOCALHOST)],
+            "the routing answer for a reachable TURN URL is its own loopback"
+        );
+
+        // A server this host cannot resolve costs the session nothing.
+        let unresolvable = vec![IceServer {
+            urls: vec!["turn:invalid.invalid:3478?transport=udp".to_string()],
+            username: None,
+            credential: None,
+        }];
+        assert!(ice_server_source_addrs(&unresolvable).await.is_empty());
+    }
+
+    #[test]
+    fn ice_server_endpoints_reads_every_stun_and_turn_shape() {
+        let cases: [(&str, Option<(&str, u16)>); 8] = [
+            // The production TURN interop URL, and its IPv6 literal form.
+            (
+                "turn:10.254.124.2:3478?transport=udp",
+                Some(("10.254.124.2", 3478)),
+            ),
+            (
+                "turn:[2001:db8::1]:3478?transport=udp",
+                Some(("2001:db8::1", 3478)),
+            ),
+            (
+                "turns:turn.example.com:5349?transport=tcp",
+                Some(("turn.example.com", 5349)),
+            ),
+            // Default ports differ by scheme and must not be invented here.
+            ("stun:stun.example.com", Some(("stun.example.com", 3478))),
+            ("stuns:stun.example.com", Some(("stun.example.com", 5349))),
+            // Neither a scheme this client probes...
+            ("http:example.com", None),
+            // ...nor an unparsable entry may cost the session its real servers.
+            ("nonsense", None),
+            ("", None),
+        ];
+        for (raw, expected) in cases {
+            let servers = [IceServer {
+                urls: vec![raw.to_string()],
+                username: None,
+                credential: None,
+            }];
+            let endpoints = ice_server_endpoints(&servers);
+            match expected {
+                Some((host, port)) => assert_eq!(
+                    endpoints,
+                    vec![(host.to_string(), port)],
+                    "endpoint for {raw:?}"
+                ),
+                None => assert!(
+                    endpoints.is_empty(),
+                    "{raw:?} must contribute no endpoint, got {endpoints:?}"
+                ),
+            }
+        }
+
+        // Every URL of every server is probed, deduplicated across entries.
+        let repeated = [
+            IceServer {
+                urls: vec![
+                    "stun:stun.example.com:3478".to_string(),
+                    "turn:turn.example.com:3478?transport=udp".to_string(),
+                ],
+                username: None,
+                credential: None,
+            },
+            IceServer {
+                urls: vec!["stun:stun.example.com:3478".to_string()],
+                username: None,
+                credential: None,
+            },
+        ];
+        assert_eq!(
+            ice_server_endpoints(&repeated),
+            vec![
+                ("stun.example.com".to_string(), 3478),
+                ("turn.example.com".to_string(), 3478),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_routing_answer_can_never_defeat_the_requested_ip_family() {
+        let loopback_v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let loopback_v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, 0));
+        for (family, enumerated, rejected_source) in [
+            (
+                IpFamily::Ipv4,
+                loopback_v4,
+                IpAddr::from(Ipv6Addr::LOCALHOST),
+            ),
+            (
+                IpFamily::Ipv6,
+                loopback_v6,
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+            ),
+        ] {
+            let settings = EngineSettings {
+                ip_family: family,
+                ..EngineSettings::default()
+            };
+            assert_eq!(
+                session_udp_addrs(
+                    settings,
+                    |_settings| Ok(vec![enumerated]),
+                    [rejected_source]
+                )
+                .expect("the pinned family still resolves"),
+                vec![enumerated],
+                "--ip-family {} must reject the {rejected_source} routing answer",
+                family.as_str()
+            );
+        }
+
+        // Addresses no peer could dial are dropped from a routing answer for
+        // the same reasons they are dropped from the interface table.
+        let undialable = [
+            IpAddr::from(Ipv4Addr::UNSPECIFIED),
+            IpAddr::from(Ipv6Addr::UNSPECIFIED),
+            IpAddr::from([224, 0, 0, 1]),
+            IpAddr::from([0xfe80, 0, 0, 0, 0, 0, 0, 1]),
+        ];
+        assert_eq!(
+            session_udp_addrs(
+                EngineSettings::default(),
+                |_settings| Ok(vec![loopback_v4]),
+                undialable,
+            )
+            .expect("undialable answers are filtered, not fatal"),
+            vec![loopback_v4]
+        );
+    }
+
+    #[test]
+    fn the_crippled_transport_never_gains_a_routable_source() {
+        // `--cripple-ice` exists to be unreachable. Applying the real interface
+        // rule proves the guard is the crippled flag, not a fixture.
+        assert_eq!(
+            session_udp_addrs(
+                crippled_settings(IpFamily::Any),
+                local_udp_addrs,
+                [
+                    IpAddr::from(Ipv6Addr::LOCALHOST),
+                    IpAddr::from([203, 0, 113, 1])
+                ],
+            )
+            .expect("the crippled transport resolves"),
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))]
+        );
+    }
+
     #[tokio::test]
     async fn gathered_host_candidates_never_advertise_wildcard_addresses() {
         let udp_addrs =
@@ -1243,6 +1657,12 @@ mod tests {
                 peer,
                 generation: stale_generation,
                 candidate_json: "{}".to_string(),
+                gathered: GatheredCandidate {
+                    candidate_type: "host".to_string(),
+                    address: Ipv4Addr::LOCALHOST.to_string(),
+                    port: 1,
+                    protocol: "udp".to_string(),
+                },
             },
             EngineEvent::IceGatheringComplete {
                 peer,
