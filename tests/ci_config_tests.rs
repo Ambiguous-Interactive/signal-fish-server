@@ -23300,6 +23300,79 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     );
 }
 
+/// The client must resolve an explicitly requested address family BEFORE it
+/// opens its WebSocket; otherwise the process creates or joins a room it could
+/// never have used, and the per-pair failure it would hit instead is non-fatal
+/// (issue #271 review).
+///
+/// This walks the syntax tree rather than comparing source offsets: a textual
+/// check is satisfied by a helper function *defined* above `run_inner` and
+/// *called* after the handshake, which is exactly the defect it exists to
+/// forbid.
+fn assert_ip_family_preflight_precedes_the_socket(root: &Path) {
+    let source = read_file(&root.join("clients/native/src/client.rs"));
+    let file = syn::parse_file(&source).expect("client.rs must parse as Rust");
+
+    /// Records whether a syntax subtree calls a function whose path ends in
+    /// `name`. Walking the tree means comments and strings cannot match.
+    struct CallFinder<'a> {
+        name: &'a str,
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for CallFinder<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref() {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == self.name)
+                {
+                    self.found = true;
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    /// Statement index of the first call whose path ends in `name`.
+    fn position_of(body: &syn::Block, name: &str) -> Option<usize> {
+        body.stmts.iter().position(|statement| {
+            let mut finder = CallFinder { name, found: false };
+            finder.visit_stmt(statement);
+            finder.found
+        })
+    }
+
+    let run_inner = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "run_inner" => Some(function),
+            _ => None,
+        })
+        .expect("client.rs must define run_inner");
+
+    let preflight = position_of(&run_inner.block, "preflight_ip_family")
+        .expect("run_inner must call engine::preflight_ip_family");
+    let connect = position_of(&run_inner.block, "connect")
+        .expect("run_inner must open the WebSocket with wire::connect");
+    assert!(
+        preflight < connect,
+        "preflight_ip_family must run before wire::connect, so an unservable \
+         --ip-family fails without creating or joining a room"
+    );
+
+    // One call site: the check cannot be satisfied by a second, later call
+    // while the effective path skips it.
+    let call_sites = source.matches("preflight_ip_family(").count();
+    assert_eq!(
+        call_sites, 1,
+        "client.rs must call the pre-flight exactly once; found {call_sites}"
+    );
+}
+
 /// A job or step must propagate its failure: `continue-on-error` is either
 /// absent or the literal boolean `false`. A string (`"true"`) or an expression
 /// (`${{ true }}`) is truthy to GitHub but not to `as_bool`, so treating a
@@ -23332,6 +23405,25 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
     let cli = read_live_file(&root.join("clients/native/src/cli.rs"));
 
+    for required_path in [
+        "src/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "clients/native/**",
+        "scripts/run-webrtc-interop.sh",
+        "scripts/read-toml-string.sh",
+        ".github/workflows/webrtc-interop.yml",
+    ] {
+        assert_eq!(
+            workflow.matches(&format!("- \"{required_path}\"")).count(),
+            2,
+            "webrtc-interop.yml must trigger on `{required_path}` for push and \
+             pull_request; dropping one path silently disables BOTH the platform \
+             matrix and the Linux live-transport job for changes that only touch it"
+        );
+    }
+
     // Parse the job rather than substring-match it: `contains` cannot see an
     // `if: false` that disables the whole matrix, a `continue-on-error: true`
     // that swallows its result, or a `|| true` appended to a pinned command.
@@ -23345,6 +23437,12 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         job.as_mapping_get("if").is_none(),
         "the native platform matrix must not be conditional; an `if:` can disable \
          every non-Linux proof without touching a single command"
+    );
+    assert!(
+        job.as_mapping_get("needs").is_none(),
+        "the platform proof must not be gated on another job's result: `needs:` \
+         skips this matrix whenever that job fails, which is the same outcome \
+         `fail-fast: false` exists to prevent"
     );
     // `runs-on` is the whole point: pointing it at ubuntu-latest keeps every
     // command and both matrix legs while deleting the non-Linux proof entirely.
@@ -23435,24 +23533,11 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     }
     assert!(
         workflow.contains("name: Native Client Build (${{ matrix.os }})"),
-        "the per-platform check name is API surface for branch protection"
+        "the per-platform check name is what a reader (and any future branch \
+         protection rule) identifies this proof by"
     );
 
-    // The client must resolve an explicitly requested address family BEFORE it
-    // opens its WebSocket; otherwise the process creates or joins a room it
-    // could never have used (issue #271 review).
-    let client = read_live_file(&root.join("clients/native/src/client.rs"));
-    let engine_built = client
-        .find("Engine::new(")
-        .expect("the client must construct the WebRTC engine");
-    let socket_opened = client
-        .find("wire::connect(")
-        .expect("the client must open a WebSocket");
-    assert!(
-        engine_built < socket_opened,
-        "Engine::new must run before wire::connect so an unservable \
-         --ip-family fails without creating or joining a room"
-    );
+    assert_ip_family_preflight_precedes_the_socket(&root);
 
     // Structural facts, not loose tokens: each of these is a line the proof
     // cannot lose while still proving anything.

@@ -53,7 +53,7 @@ use webrtc::peer_connection::RTCPeerConnectionState;
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
-use crate::engine::{Engine, EngineEvent, RELIABLE_LABEL, UNRELIABLE_LABEL};
+use crate::engine::{self, Engine, EngineEvent, RELIABLE_LABEL, UNRELIABLE_LABEL};
 use crate::events::{emit, Event, PlanPeer, SignalKind};
 use crate::wire::{self, WsStream, HANDSHAKE_TIMEOUT};
 
@@ -258,13 +258,11 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     validate_p2p_rebuild_retry_count(cli.p2p_rebuild_release_file.is_some(), cli.p2p_retry_count)
         .map_err(FatalError::protocol)?;
 
-    // Build the WebRTC engine BEFORE touching the network: an explicitly
-    // requested `--ip-family` is resolved in `Engine::new`, and failing it
-    // here means the process never creates or joins a server-side room it
-    // could not have used.
-    let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-    let engine = Engine::new(cli.engine_settings(), engine_tx)
-        .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
+    // Resolve an explicitly requested `--ip-family` BEFORE touching the
+    // network, so a host that cannot serve it fails the process instead of
+    // creating or joining a server-side room it could never have used.
+    engine::preflight_ip_family(cli.engine_settings())
+        .map_err(|error| FatalError::protocol(format!("{error:#}")))?;
 
     // The soft run window starts at process start, handshake included.
     let run_deadline = checked_deadline(Instant::now(), Duration::from_secs(cli.run_for_secs));
@@ -280,6 +278,10 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     let negotiated_version = authenticate(&mut ws, cli).await?;
     let (my_id, mut present, lobby_state, accountability) =
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
+
+    let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+    let engine = Engine::new(cli.engine_settings(), engine_tx)
+        .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
     present.insert(my_id);
     let members_seen = present.clone();

@@ -204,28 +204,10 @@ impl Engine {
     /// Build the engine with the default runtime and the invocation's
     /// [`EngineSettings`].
     ///
-    /// An explicitly requested [`IpFamily`] is resolved here. The client
-    /// builds the engine before it opens its WebSocket, so a host that cannot
-    /// serve the family fails the process before any server-side room exists,
-    /// instead of failing every pair later — a per-pair failure would degrade
-    /// to the relay floor and still exit successfully, which is exactly the
-    /// silent pass `--ip-family` exists to prevent.
     pub fn new(
         settings: EngineSettings,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Result<Self> {
-        Self::with_bind_resolver(settings, events, local_udp_addrs)
-    }
-
-    /// [`Engine::new`] with an injectable bind-selection rule, so the
-    /// unservable-family path is reachable in a test on a host that serves
-    /// every family.
-    fn with_bind_resolver(
-        settings: EngineSettings,
-        events: mpsc::UnboundedSender<EngineEvent>,
-        resolve: impl Fn(EngineSettings) -> Result<Vec<SocketAddr>>,
-    ) -> Result<Self> {
-        ensure_requested_family_is_available(settings, resolve)?;
         let runtime = default_runtime()
             .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
         Ok(Self {
@@ -659,11 +641,21 @@ fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> 
     serde_json::to_string(&candidate).context("serialize ICE candidate wire projection")
 }
 
-/// Fail when an explicitly requested [`IpFamily`] cannot be served.
+/// Fail before any session work when an explicitly requested [`IpFamily`]
+/// cannot be served.
 ///
-/// `resolve` is the bind-selection rule (production passes
-/// [`local_udp_addrs`]); injecting it keeps the failure path reachable in a
-/// unit test on a host that happens to serve every family.
+/// The client calls this before it opens its WebSocket, so a host that cannot
+/// serve the family fails the process before a server-side room exists. The
+/// alternative — discovering it per pair — is non-fatal there: the run would
+/// degrade to the relay floor and still exit successfully, which is exactly
+/// the silent pass `--ip-family` exists to prevent.
+pub fn preflight_ip_family(settings: EngineSettings) -> Result<()> {
+    ensure_requested_family_is_available(settings, local_udp_addrs)
+}
+
+/// [`preflight_ip_family`] with an injectable bind-selection rule, so the
+/// failure path is reachable in a unit test on a host that serves every
+/// family.
 fn ensure_requested_family_is_available(
     settings: EngineSettings,
     resolve: impl Fn(EngineSettings) -> Result<Vec<SocketAddr>>,
@@ -1081,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unservable_requested_family_fails_construction_not_one_pair() {
+    fn an_unservable_requested_family_fails_preflight_not_one_pair() {
         // Injected so the failure path is exercised on every host, including
         // the ones that serve both families.
         let unservable = |settings: EngineSettings| {
@@ -1091,14 +1083,8 @@ mod tests {
             ip_family: IpFamily::Ipv6,
             ..EngineSettings::default()
         };
-        // Drive the real constructor, so removing the check from `Engine::new`
-        // fails this test rather than only the free function's contract.
-        let (tx, _rx) = mpsc::unbounded_channel();
-        // `Engine` is not `Debug` (it owns webrtc handles), so match instead
-        // of `expect_err`.
-        let Err(error) = Engine::with_bind_resolver(requested, tx, unservable) else {
-            panic!("an unservable family must fail construction");
-        };
+        let error = ensure_requested_family_is_available(requested, unservable)
+            .expect_err("an unservable family must fail the pre-flight");
         let rendered = format!("{error:#}");
         assert!(
             rendered.contains("--ip-family ipv6"),
@@ -1107,11 +1093,19 @@ mod tests {
 
         // The default never consults the resolver at all, so a host with no
         // usable interface still fails later (per pair) exactly as before.
-        let (tx, _rx) = mpsc::unbounded_channel();
-        Engine::with_bind_resolver(EngineSettings::default(), tx, |_settings| {
+        ensure_requested_family_is_available(EngineSettings::default(), |_settings| {
             panic!("--ip-family any must not be resolved eagerly")
         })
         .expect("the default family imposes no startup requirement");
+
+        // The production entry point applies the real rule. Whatever this host
+        // serves, the two must agree — so a pre-flight that stopped consulting
+        // the selection rule fails here.
+        assert_eq!(
+            preflight_ip_family(requested).is_ok(),
+            local_udp_addrs(requested).is_ok(),
+            "the pre-flight must mirror the engine's own bind selection"
+        );
     }
 
     #[tokio::test]
