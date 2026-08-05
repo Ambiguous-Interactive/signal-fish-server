@@ -7,13 +7,14 @@
 # brokered by the server's protocol v3 signaling. Scenarios cover the mesh
 # and host-star topologies, the crippled-ICE relay fallback, late-join
 # NewPeer pairing, mixed v2/v3 relay-floor rooms, and an IPv6-only pair
-# (scenario 6 of clients/native/tests/interop_e2e.rs). The interop server
+# (scenario 7 of clients/native/tests/interop_e2e.rs). The interop server
 # config disables TURN and configures zero STUN URLs, so the suite performs no
 # external network access.
 #
-# Live transport is proved on Linux only; `native-platforms` adds the
-# compile + unit-test proof for Windows and macOS, because neither the interop
-# cells nor the root CI matrix ever build clients/native on those platforms.
+# The full seven-scenario matrix runs on Linux. `native-platforms` adds the
+# compile + unit-test proof and the smallest complete live WebRTC mesh on
+# Windows and macOS, so every supported desktop platform executes real ICE,
+# DTLS, SCTP, process, and socket behavior rather than stopping at linkage.
 #
 # The reference client is a standalone crate OUTSIDE the root package (its
 # own Cargo.lock and deny.toml), so this workflow also runs cargo-deny over
@@ -114,20 +115,12 @@ jobs:
         run: bash scripts/run-webrtc-interop.sh
 
   native-platforms:
-    # The interop job above proves the LIVE transport, but only on Linux: the
-    # multi-process cells and the root matrix never compile clients/native on
-    # Windows or macOS, so a platform-specific break in the client (its
-    # interface enumeration is the obvious candidate — see issue #271) would
-    # reach users undetected. This matrix is the compile-and-unit-test proof for
-    # the other two supported desktop platforms. Linux is deliberately absent:
-    # the `interop` job above already runs this exact command set there (via
-    # scripts/run-webrtc-interop.sh) plus the live suite, so it is the control
-    # and a duplicate ubuntu leg would only pay for a second cold build of the
-    # webrtc graph.
-    #
-    # Cold-cache durations on the first run of this job: windows 4m06s,
-    # macos 2m04s — the 30-minute ceiling is a runaway guard, not a budget.
-    name: Native Client Build (${{ matrix.os }})
+    # The full suite above is the Linux proof. The other supported desktop
+    # platforms run the smallest complete live mesh in addition to their build
+    # and unit checks: two real client processes and the real server negotiate a
+    # direct host/host pair, then exchange on both SCTP data channels. Linux is
+    # deliberately absent because its full suite includes this exact selector.
+    name: Native Client Build + Live WebRTC (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -156,8 +149,11 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2.9.1
         with:
-          # Only the standalone client graph: this job never builds the server.
-          workspaces: clients/native
+          # Cover both compilation graphs: the live smoke spawns the root
+          # server binary from the standalone native-client test crate.
+          workspaces: |
+            .
+            clients/native
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Show Rust tool versions
         shell: bash
@@ -187,12 +183,25 @@ jobs:
         working-directory: clients/native
         run: cargo test --locked --all-targets --no-run
       - name: Run the native unit suite
-        # Library + binary unit tests only: the integration cells spawn the
-        # real server binary, and running them is the Linux interop job's
-        # live-transport proof.
+        # Library + binary unit tests remain separate from the selected live
+        # integration cell below so a failure identifies its evidence class.
         shell: bash
         working-directory: clients/native
         run: cargo test --locked --lib --bins
+      - name: Build the signaling server for live transport
+        shell: bash
+        run: cargo build --locked --bin signal-fish-server
+      - name: Run two-peer live WebRTC transport
+        shell: bash
+        working-directory: clients/native
+        run: |
+          SERVER_SUFFIX=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            SERVER_SUFFIX=".exe"
+          fi
+          SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVER_SUFFIX}" \
+            cargo test --locked --test interop_e2e \
+              two_peer_mesh_exchanges_over_live_webrtc -- --exact --nocapture
 
   client-deny:
     name: Client Dependency Audit

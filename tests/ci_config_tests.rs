@@ -23573,15 +23573,15 @@ fn assert_failure_is_not_swallowed(node: &Yaml, what: &str) {
 
 /// The native reference client is a standalone crate that no other lane
 /// compiles: the root CI matrix builds only the root package, and the interop
-/// cells run on Linux. Issue #271 added two proofs that must not silently
-/// disappear — a Windows/macOS compile + unit matrix (Linux is the `interop`
-/// job's job), and one live IPv6 data-channel cell that fails loudly instead of
-/// skipping when the runner cannot serve IPv6.
+/// cells historically ran only on Linux. Issues #271 and #275 added proofs that
+/// must not silently disappear — a Windows/macOS compile + unit matrix, a live
+/// two-peer data-channel smoke on every desktop platform, and one live IPv6
+/// cell that fails loudly instead of skipping when the runner cannot serve IPv6.
 ///
 /// Both source files are read with `read_live_file`, so a marker satisfied only
 /// by a comment or a commented-out line does not count as coverage.
 #[test]
-fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
+fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/webrtc-interop.yml"));
     let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
@@ -23742,7 +23742,7 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         platforms,
         vec!["windows-latest", "macos-latest"],
         "the platforms clients/native is proved on must not shrink; Linux is the \
-         separate `interop` job, which runs the same commands plus the live suite"
+         separate `interop` job, which runs the full live suite"
     );
 
     // Exact `run` values: a trailing `|| true` (or any other suffix) would keep
@@ -23790,11 +23790,80 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
              (issue #271)"
         );
     }
+
+    let server_build = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Build the signaling server for live transport")
+        })
+        .expect("the non-Linux matrix must build the real signaling server");
     assert!(
-        workflow.contains("name: Native Client Build (${{ matrix.os }})"),
+        server_build.as_mapping_get("working-directory").is_none(),
+        "the signaling server must be built from the root package"
+    );
+    assert_eq!(
+        server_build.as_mapping_get("run").and_then(Yaml::as_str),
+        Some("cargo build --locked --bin signal-fish-server"),
+        "the live smoke must build the exact locked server binary"
+    );
+
+    let live_smoke = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Run two-peer live WebRTC transport")
+        })
+        .expect("the Windows/macOS matrix must run a live WebRTC cell (issue #275)");
+    assert_eq!(
+        live_smoke
+            .as_mapping_get("working-directory")
+            .and_then(Yaml::as_str),
+        Some("clients/native"),
+        "the live smoke selector belongs to the standalone native-client crate"
+    );
+    assert_eq!(
+        live_smoke.as_mapping_get("shell").and_then(Yaml::as_str),
+        Some("bash"),
+        "the Windows/macOS live smoke uses Bash syntax and must explicitly run in Bash"
+    );
+    assert_failure_is_not_swallowed(live_smoke, "the native-platforms live smoke step");
+    let live_run = live_smoke
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("the live smoke step must contain a command");
+    assert_eq!(
+        live_run.trim_end(),
+        r#"SERVER_SUFFIX=""
+if [ "$RUNNER_OS" = "Windows" ]; then
+  SERVER_SUFFIX=".exe"
+fi
+SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVER_SUFFIX}" \
+  cargo test --locked --test interop_e2e \
+    two_peer_mesh_exchanges_over_live_webrtc -- --exact --nocapture"#,
+        "the non-Linux live smoke must keep the exact Windows suffix handling, \
+         server handoff, selector, and failure-propagating command; extra flags \
+         can silently select zero tests"
+    );
+    assert!(
+        workflow.contains("name: Native Client Build + Live WebRTC (${{ matrix.os }})"),
         "the per-platform check name is what a reader (and any future branch \
          protection rule) identifies this proof by"
     );
+
+    for required in [
+        "async fn two_peer_mesh_exchanges_over_live_webrtc()",
+        r#"let run = run_two_peer_mesh("interop-cross-platform-smoke", &[]).await;"#,
+        "assert_direct_host_path(window, who, peer_id);",
+        "assert_exchange_sent_to(window, who, &peers);",
+        "assert_exchange_received_from(window, who, &peers);",
+        "assert_transport_status_true(&run.logs[index], who);",
+    ] {
+        assert!(
+            interop.contains(required),
+            "the cross-platform live WebRTC proof lost acceptance marker `{required}`"
+        );
+    }
 
     assert_ip_family_preflight_precedes_the_socket(&root);
 
@@ -23803,7 +23872,7 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
     for required in [
         // The clients really run IPv6-only, and the args really reach them.
         r#"const IPV6_ARGS: [&str; 2] = ["--ip-family", "ipv6"];"#,
-        "extra_args: &IPV6_ARGS,",
+        r#"run_two_peer_mesh("interop-ipv6", &IPV6_ARGS).await"#,
         // The precondition applies the client's own rule and never skips.
         "fn require_ipv6_ice_interface()",
         "require_ipv6_ice_interface();",
@@ -23812,15 +23881,15 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         // The path is asserted to be direct IPv6 toward the planned peer.
         "fn assert_ipv6_host_path(",
         "assert_ipv6_host_path(window, who, peer_id);",
-        r#"fn selected_ipv6_address(event: &Value, field: &str, who: &str) -> Ipv6Addr {"#,
-        r#"IpAddr::V4(address) => {"#,
+        "fn selected_ip_address(event: &Value, field: &str, who: &str) -> IpAddr {",
+        "let IpAddr::V6(address) = address else {",
         r#"for field in ["local_candidate_type", "remote_candidate_type"] {"#,
-        r#"for field in ["local_candidate_address", "remote_candidate_address"] {"#,
+        r#"selected_ip_address(selected, "local_candidate_address", who)"#,
         // ...carrying a real session on both labels, not the relay floor.
         "assert_exchange_sent_to(window, who, &peers);",
         "assert_exchange_received_from(window, who, &peers);",
         "assert_pair_connected_exactly(window, who, &peers);",
-        r#"events_named(&client.events[..live_end], "fallback_engaged").is_empty(),"#,
+        r#"events_named(&run.logs[index][..live_end], "fallback_engaged").is_empty(),"#,
     ] {
         assert!(
             interop.contains(required),

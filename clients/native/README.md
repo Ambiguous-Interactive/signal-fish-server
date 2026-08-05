@@ -223,6 +223,7 @@ client processes (loopback only; the interop server config disables TURN with ze
 | Pairwise ICE partition with healthy partial mesh + relay floor | ✅ nightly `pairwise_ice_partition_preserves_partial_mesh_and_relay_floor` | — |
 | Late join (authoritative full-plan seat fill) | ✅ `late_join_authoritative_replan_real_webrtc_n3` | — (native-only cell) |
 | Mixed v2/v3 relay floor | ✅ `mixed_v2_v3_n3_relay_floor_with_reference_client` | ✅ `mixed_v2_browser_v3_native_relay_floor` |
+| Cross-platform two-peer live WebRTC | ✅ `two_peer_mesh_exchanges_over_live_webrtc` | — |
 | Browser ↔ browser mesh (Chromium↔Chromium pair) | n/a | ✅ `browser_pair_mesh_n3` |
 | mDNS `.local` obfuscation trap | n/a | ✅ `mesh_n3_browser_mdns_obfuscation` |
 | Mid-handshake close → one `error` + prompt exit 3 | n/a | ✅ `browser_cli_mid_handshake_close_single_error_exit_3` |
@@ -234,7 +235,10 @@ The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop
 `browser-interop` cargo feature (this crate's default suite never compiles them; they additionally need
 `SIGNAL_FISH_BROWSER_CLI` pointing at the built [browser client](../browser/README.md) bundle).
 
-Scenario 6 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
+Scenario 6 is the smallest complete live WebRTC cell: two real clients negotiate a direct host/host pair and
+exchange exact messages on both SCTP channel labels. CI runs that selector on Linux, Windows, and macOS.
+
+Scenario 7 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
 advertised, and the assertions require a host/host pair of concrete dialable IPv6 addresses plus the exact
 exchange on both channel labels. It shares the file's scenario-serialization guard, so it never overlaps another
 multi-process cell. Signaling still runs over the harness server's IPv4 loopback listener, so the IPv6 claim is
@@ -283,17 +287,19 @@ says:
 | Platform | Compile + unit suite | Live WebRTC transport |
 |----------|----------------------|-----------------------|
 | Linux (`ubuntu-latest`) | ✅ `Native Client Interop (Linux)` | ✅ every native, browser, TURN-only, and IPv6 cell |
-| Windows (`windows-latest`) | ✅ `Native Client Build (windows-latest)` | ❌ not proved |
-| macOS (`macos-latest`) | ✅ `Native Client Build (macos-latest)` | ❌ not proved |
+| Windows (`windows-latest`) | ✅ `Native Client Build + Live WebRTC (windows-latest)` | ✅ two-peer direct host/host pair + both SCTP channels |
+| macOS (`macos-latest`) | ✅ `Native Client Build + Live WebRTC (macos-latest)` | ✅ two-peer direct host/host pair + both SCTP channels |
 
 The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs, on the repository MSRV:
 `cargo metadata --locked`, `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
 `cargo test --locked --all-targets --no-run`, and `cargo test --locked --lib --bins`. The `--no-run` step is
 what actually builds and links the multi-process cells — clippy only type-checks them (`--emit=metadata`, no
-codegen). Those cells are built but not run off Linux: they spawn the server binary, which is the Linux lane's
-job. Linux is absent from the matrix because the `interop` job already runs that same command set there, plus
-the live suite. Interface enumeration, socket binding, and ICE behavior on Windows and macOS are therefore
-**build-verified only**.
+codegen). The matrix then builds the real server binary and runs
+`two_peer_mesh_exchanges_over_live_webrtc` on each host. That cell executes the platform's interface
+enumeration, UDP binding, ICE, DTLS, SCTP, child-process, and path semantics and requires an exact exchange on
+both data channels. Linux is absent from the matrix because the `interop` job runs the full seven-scenario suite,
+including the same two-peer cell. Windows and macOS now carry a live transport proof, while the larger topology,
+fault-injection, TURN, browser, and IPv6 matrices remain Linux-specific evidence.
 
 ## Troubleshooting
 
