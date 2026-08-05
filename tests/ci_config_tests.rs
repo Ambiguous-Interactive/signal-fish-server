@@ -23300,6 +23300,22 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     );
 }
 
+/// A job or step must propagate its failure: `continue-on-error` is either
+/// absent or the literal boolean `false`. A string (`"true"`) or an expression
+/// (`${{ true }}`) is truthy to GitHub but not to `as_bool`, so treating a
+/// non-boolean as "false" would let a swallowed failure through.
+fn assert_failure_is_not_swallowed(node: &Yaml, what: &str) {
+    let Some(value) = node.as_mapping_get("continue-on-error") else {
+        return;
+    };
+    assert_eq!(
+        value.as_bool(),
+        Some(false),
+        "{what} must fail its workflow, not report success; `continue-on-error` \
+         must be absent or literally false"
+    );
+}
+
 /// The native reference client is a standalone crate that no other lane
 /// compiles: the root CI matrix builds only the root package, and the interop
 /// cells run on Linux. Issue #271 added two proofs that must not silently
@@ -23330,12 +23346,16 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         "the native platform matrix must not be conditional; an `if:` can disable \
          every non-Linux proof without touching a single command"
     );
-    assert!(
-        !job.as_mapping_get("continue-on-error")
-            .and_then(Yaml::as_bool)
-            .unwrap_or(false),
-        "the native platform matrix must fail its workflow, not report success"
+    // `runs-on` is the whole point: pointing it at ubuntu-latest keeps every
+    // command and both matrix legs while deleting the non-Linux proof entirely.
+    assert_eq!(
+        job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some(MATRIX_OS_PLACEHOLDER),
+        "each matrix leg must run on its own platform"
     );
+    // Absent, or the literal boolean false. A string "true" or an expression
+    // is truthy to GitHub but not to `as_bool`, so anything else is rejected.
+    assert_failure_is_not_swallowed(job, "the native-platforms job");
     let strategy = job
         .as_mapping_get("strategy")
         .expect("the native platform job must define a strategy");
@@ -23344,9 +23364,18 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         Some(false),
         "one red platform must not cancel the other platform's evidence"
     );
-    let platforms: Vec<&str> = strategy
+    let matrix = strategy
         .as_mapping_get("matrix")
-        .and_then(|matrix| matrix.as_mapping_get("os"))
+        .expect("the native platform job must define a strategy matrix");
+    for filter in ["include", "exclude"] {
+        assert!(
+            matrix.as_mapping_get(filter).is_none(),
+            "`strategy.matrix.{filter}` can silently remove every leg while the \
+             `os` list still reads as complete"
+        );
+    }
+    let platforms: Vec<&str> = matrix
+        .as_mapping_get("os")
         .and_then(|os| os.as_sequence())
         .expect("the native platform job must define strategy.matrix.os")
         .iter()
@@ -23367,8 +23396,24 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         .expect("the native platform job must define steps")
         .iter()
         .collect();
-    let commands: Vec<&str> = steps
+    // Every pinned command must run unconditionally, against the standalone
+    // crate, with its failure propagated. Checking these per step closes the
+    // gap a whole-file `contains` leaves: a step that keeps its command but
+    // loses `working-directory` silently checks the ROOT package instead.
+    for step in &steps {
+        assert_failure_is_not_swallowed(step, "every native-platforms step");
+        assert!(
+            step.as_mapping_get("if").is_none(),
+            "no step in the native platform matrix may be conditional"
+        );
+    }
+    let crate_commands: Vec<&str> = steps
         .iter()
+        .filter(|step| {
+            step.as_mapping_get("working-directory")
+                .and_then(Yaml::as_str)
+                == Some("clients/native")
+        })
         .filter_map(|step| step.as_mapping_get("run").and_then(Yaml::as_str))
         .map(str::trim)
         .collect();
@@ -23382,27 +23427,31 @@ fn test_native_client_platform_matrix_and_ipv6_proof_are_pinned() {
         "cargo test --locked --lib --bins",
     ] {
         assert!(
-            commands.contains(&required),
-            "the native platform matrix lost the exact command `{required}`; \
-             commands present: {commands:?} (issue #271)"
-        );
-    }
-    for step in &steps {
-        assert!(
-            !step
-                .as_mapping_get("continue-on-error")
-                .and_then(Yaml::as_bool)
-                .unwrap_or(false),
-            "no step in the native platform matrix may swallow its failure"
+            crate_commands.contains(&required),
+            "the native platform matrix lost the exact command `{required}` \
+             running in clients/native; commands present: {crate_commands:?} \
+             (issue #271)"
         );
     }
     assert!(
         workflow.contains("name: Native Client Build (${{ matrix.os }})"),
         "the per-platform check name is API surface for branch protection"
     );
+
+    // The client must resolve an explicitly requested address family BEFORE it
+    // opens its WebSocket; otherwise the process creates or joins a room it
+    // could never have used (issue #271 review).
+    let client = read_live_file(&root.join("clients/native/src/client.rs"));
+    let engine_built = client
+        .find("Engine::new(")
+        .expect("the client must construct the WebRTC engine");
+    let socket_opened = client
+        .find("wire::connect(")
+        .expect("the client must open a WebSocket");
     assert!(
-        workflow.contains("working-directory: clients/native"),
-        "the matrix must run against the standalone crate, not the root package"
+        engine_built < socket_opened,
+        "Engine::new must run before wire::connect so an unservable \
+         --ip-family fails without creating or joining a room"
     );
 
     // Structural facts, not loose tokens: each of these is a line the proof

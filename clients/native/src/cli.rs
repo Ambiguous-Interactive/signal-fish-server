@@ -136,7 +136,8 @@ pub struct Cli {
     /// family is resolved before the client opens its WebSocket: a host that
     /// cannot serve it fails the process — without creating or joining a room
     /// — instead of silently negotiating the other family or degrading to the
-    /// relay floor.
+    /// relay floor. `--cripple-ice` is exempt: that transport is a deliberate
+    /// dead end and always binds the IPv4 loopback.
     #[arg(long, value_enum, default_value_t = IpFamily::Any)]
     pub ip_family: IpFamily,
 

@@ -214,7 +214,18 @@ impl Engine {
         settings: EngineSettings,
         events: mpsc::UnboundedSender<EngineEvent>,
     ) -> Result<Self> {
-        ensure_requested_family_is_available(settings, local_udp_addrs)?;
+        Self::with_bind_resolver(settings, events, local_udp_addrs)
+    }
+
+    /// [`Engine::new`] with an injectable bind-selection rule, so the
+    /// unservable-family path is reachable in a test on a host that serves
+    /// every family.
+    fn with_bind_resolver(
+        settings: EngineSettings,
+        events: mpsc::UnboundedSender<EngineEvent>,
+        resolve: impl Fn(EngineSettings) -> Result<Vec<SocketAddr>>,
+    ) -> Result<Self> {
+        ensure_requested_family_is_available(settings, resolve)?;
         let runtime = default_runtime()
             .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
         Ok(Self {
@@ -1080,8 +1091,14 @@ mod tests {
             ip_family: IpFamily::Ipv6,
             ..EngineSettings::default()
         };
-        let error = ensure_requested_family_is_available(requested, unservable)
-            .expect_err("an unservable family must fail before any session work");
+        // Drive the real constructor, so removing the check from `Engine::new`
+        // fails this test rather than only the free function's contract.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // `Engine` is not `Debug` (it owns webrtc handles), so match instead
+        // of `expect_err`.
+        let Err(error) = Engine::with_bind_resolver(requested, tx, unservable) else {
+            panic!("an unservable family must fail construction");
+        };
         let rendered = format!("{error:#}");
         assert!(
             rendered.contains("--ip-family ipv6"),
@@ -1090,7 +1107,8 @@ mod tests {
 
         // The default never consults the resolver at all, so a host with no
         // usable interface still fails later (per pair) exactly as before.
-        ensure_requested_family_is_available(EngineSettings::default(), |_settings| {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Engine::with_bind_resolver(EngineSettings::default(), tx, |_settings| {
             panic!("--ip-family any must not be resolved eagerly")
         })
         .expect("the default family imposes no startup requirement");

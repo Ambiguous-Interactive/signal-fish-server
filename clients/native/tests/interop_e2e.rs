@@ -1624,11 +1624,25 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
             .rposition(|event| {
                 event.get("event").and_then(Value::as_str) == Some("channel_message")
             })
-            .expect("the exchange produced channel messages")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{who}: the exchange produced no channel messages;\n{}",
+                    client.diagnostics()
+                )
+            })
             + 1;
         assert!(
             events_named(&client.events[..live_end], "fallback_engaged").is_empty(),
             "{who}: the IPv6 host path must carry the exchange, not the relay fallback;\n{}",
+            client.diagnostics()
+        );
+        // Teardown produces at most one such transition, so this still catches
+        // a path that collapses right after the exchange (or flaps) without
+        // re-introducing the race the bound above avoids.
+        assert!(
+            events_named(&client.events, "fallback_engaged").len() <= 1,
+            "{who}: at most one fallback transition (the sibling's departure) may \
+             ever occur;\n{}",
             client.diagnostics()
         );
 

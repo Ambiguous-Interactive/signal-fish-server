@@ -43,8 +43,8 @@ const MESSAGES_PER_SENDER: u64 = 30;
 const PAYLOAD_BYTES: usize = 1024;
 const CELL_DEADLINE: Duration = Duration::from_secs(45);
 const FRAME_DEADLINE: Duration = Duration::from_secs(30);
-/// Wall-clock p99 ceiling for the bounded PR-lane cells. Gated to Linux by
-/// [`wall_clock_latency_is_gated`].
+/// Wall-clock p99 ceiling for the bounded PR-lane cells. Enforced everywhere
+/// except hosted macOS — see [`wall_clock_latency_is_gated`].
 const P99_LIMIT_MICROS: u64 = 250_000;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
