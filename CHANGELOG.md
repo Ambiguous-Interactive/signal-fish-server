@@ -115,6 +115,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deliver `Latest` game data that is superseded faster than the configured
+  outbound `batch_interval`. A superseding value continues its key's pendency
+  instead of restarting the coalesce window, so a key updated every 8 ms against
+  a 16 ms interval now reaches the socket once per window; previously such a key
+  delivered no data at all — indefinitely — while still spending one
+  `DeliveryReport` frame per update. Only deployments with
+  `websocket.enable_batching` enabled were affected.
+- Announce the authority cleared by a departure. When the authority player
+  leaves or disconnects, every remaining member now receives
+  `AuthorityChanged` with `authority_player: null`, ordered immediately after
+  the `PlayerLeft` that explains it and replayed to reconnecting members, as
+  `docs/concepts/authority.md` has always specified. Without it a client
+  following the documented host-migration flow never learned the role was
+  vacant.
+- Keep the stored `is_authority` flag equal to the room's `authority_player`.
+  A reconnecting member's pre-disconnect snapshot is no longer restored
+  verbatim, so a room whose authority was claimed by a successor while the
+  original was away can no longer report two authorities in `RoomJoined`,
+  `Reconnected`, and `GameStarting` payloads.
+- Start a rejoining member unready. Readiness belongs to a membership, so
+  leaving and joining the same room again no longer restores the previous
+  ready state — which had inverted that member's next `PlayerReady` toggle and
+  let the remaining members reach `all_ready` (and `StartGame`) without them.
+- Stop issuing TURN credentials to a recipient that cannot join the session.
+  A `SessionPlan` for a member that never negotiated the session's topology and
+  transport already carries an empty peer list and the relay fallback; it now
+  carries no ICE servers either, matching the rule the `RoomJoined` pre-gather
+  path already applied.
+- Fence a closing connection whose undeliverable payload was counted but whose
+  exact range never reached the pending delivery report, which can happen when
+  that report is full and the write that would drain it is cancelled. Teardown
+  now abandons the frames behind the omission instead of flushing past a hole
+  no report describes.
+- Count every TURN credential issued by a finalized-room join in
+  `turn_credentials_issued`, including incumbent refreshes when the joiner is a
+  v2 client or the join forces a host re-plan. The reconnect and host-failover
+  paths already counted theirs unconditionally, so TURN capacity planning
+  systematically undercounted rooms with mixed-version members or host churn.
 - Prevent a classified outbound queue from falsely closing a progressing
   recipient with `4002 slow_consumer` when capacity became and remained
   available before the configured deadline but the waiting producer was not

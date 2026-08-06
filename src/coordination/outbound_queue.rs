@@ -1137,11 +1137,14 @@ impl OutboundSender {
             queued.generation == state.enqueue_generation
                 && queued.metadata.and_then(DataDeliveryMetadata::latest_key) == Some(latest_key)
         }) {
-            let Some(predecessor_metadata) = state
-                .data
-                .get(position)
-                .and_then(|predecessor| predecessor.metadata)
-            else {
+            let Some(predecessor) = state.data.get(position) else {
+                return self.fail_accountability(state, data);
+            };
+            // The successor continues the key's pendency (see
+            // `push_data_arrived_at`), so capture when the key first became
+            // pending before the predecessor is dropped.
+            let key_pending_since = predecessor.enqueued_at;
+            let Some(predecessor_metadata) = predecessor.metadata else {
                 return self.fail_accountability(state, data);
             };
             let gap = predecessor_metadata.gap(DeliveryGapReason::LatestSuperseded);
@@ -1152,11 +1155,12 @@ impl OutboundSender {
             state.counters.latest.superseded = state.counters.latest.superseded.saturating_add(1);
             self.shared.record_superseded();
             enqueue_gap_report(&mut state, gap);
-            push_data(
+            push_data_arrived_at(
                 &mut state,
                 DataLane::Classified,
                 data,
                 DeliveryClass::Latest,
+                key_pending_since,
             );
             self.shared.record_attempted(DeliveryClass::Latest);
             drop(state);
@@ -2337,6 +2341,23 @@ fn push_data(
     data: OutboundData,
     effective_class: DeliveryClass,
 ) {
+    push_data_arrived_at(state, lane, data, effective_class, Instant::now());
+}
+
+/// Queue data that inherits an earlier arrival instant.
+///
+/// A superseding `Latest` value continues its key's pendency rather than
+/// starting a new one: the batched writer releases a `Latest` front once it has
+/// waited `batch_interval`, so stamping each successor with `Instant::now()`
+/// would restart that window on every supersede and a key updated faster than
+/// the interval would never reach the socket.
+fn push_data_arrived_at(
+    state: &mut QueueState,
+    lane: DataLane,
+    data: OutboundData,
+    effective_class: DeliveryClass,
+    arrival: Instant,
+) {
     let payload = match data.delivery.into_parts() {
         (message, None) => OutboundPayload::Message(message),
         (message, relay_frame_cache @ Some(_)) => {
@@ -2347,7 +2368,7 @@ fn push_data(
         payload,
         delivery_class: Some(effective_class),
         metadata: data.metadata,
-        enqueued_at: Instant::now(),
+        enqueued_at: arrival,
         generation: state.enqueue_generation,
         transition_barrier: false,
     };
@@ -2783,6 +2804,63 @@ mod tests {
         let (gap, successor) = waiter.await.unwrap();
         assert_eq!(report(gap).gaps[0].from_seq, 1);
         assert_eq!(message_id(&successor), 2);
+    }
+
+    /// A `Latest` key that is superseded faster than `batch_interval` must
+    /// still reach the socket. The coalesce window measures how long the KEY has
+    /// been pending, not how long the newest value has been: restarting it on
+    /// every supersede starves state sync indefinitely while still spending a
+    /// `DeliveryReport` frame per update.
+    #[tokio::test(start_paused = true)]
+    async fn continuously_superseded_latest_key_still_reaches_the_socket() {
+        let batch_interval = std::time::Duration::from_millis(16);
+        let supersede_gap = std::time::Duration::from_millis(8);
+        let (tx, mut rx) = channel(8, 64);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .unwrap();
+
+        let started = Instant::now();
+        let mut delivered_data = Vec::new();
+        for seq in 2..=20u64 {
+            tokio::time::advance(supersede_gap).await;
+            tx.try_enqueue_data(data(seq, DeliveryClass::Latest, Some(10), seq))
+                .unwrap();
+            // Drain everything releasable at this instant without advancing the
+            // clock, so only the coalesce rule decides what reaches the socket.
+            loop {
+                let mut receive = std::pin::pin!(rx.recv_batched(10, batch_interval));
+                match futures_util::poll!(receive.as_mut()) {
+                    std::task::Poll::Ready(Ok(Some(item))) => {
+                        if item.class() == Some(DeliveryClass::Latest) {
+                            delivered_data.push((message_id(&item), Instant::now()));
+                        }
+                    }
+                    std::task::Poll::Ready(other) => panic!("queue ended early: {other:?}"),
+                    std::task::Poll::Pending => break,
+                }
+            }
+        }
+
+        // The key is pending for the whole run, so no value may wait longer than
+        // one coalesce window past the instant its key became pending. Bounding
+        // the gap BETWEEN releases (rather than counting them) states exactly
+        // that: a release, the next enqueue that reopens the window, and that
+        // window elapsing.
+        let max_wait = batch_interval + supersede_gap;
+        let mut previous = started;
+        for (id, released_at) in &delivered_data {
+            let waited = released_at.duration_since(previous);
+            assert!(
+                waited <= max_wait,
+                "value {id} left the key unsent for {waited:?} (bound {max_wait:?}): {delivered_data:?}"
+            );
+            previous = *released_at;
+        }
+        assert!(
+            !delivered_data.is_empty() && previous.elapsed() <= max_wait,
+            "the key must still be reaching the socket when the run ends: {delivered_data:?}"
+        );
     }
 
     /// Regression: issue #198 — the outbound batch timer must never delay

@@ -1303,9 +1303,17 @@ impl EnhancedGameServer {
             return None;
         }
 
+        // A recipient that never negotiated this session's (topology,
+        // transport) receives an empty peer list and the relay fallback, so it
+        // can never run ICE for this session. Minting for it would hand out
+        // live TURN credentials that can only be spent as free relay capacity —
+        // the same rule `ice_pregather_eligible` already applies to the
+        // `RoomJoined` pre-gather surface.
         let (ice_servers, minted) = match now_unix {
-            Some(now_unix) => self.composed_ice_servers_for(recipient, now_unix),
-            None => (Vec::new(), 0),
+            Some(now_unix) if decision.recipient_pairable(recipient) => {
+                self.composed_ice_servers_for(recipient, now_unix)
+            }
+            _ => (Vec::new(), 0),
         };
         let plan = decision.plan_for(recipient, ice_servers);
         Some((Arc::new(ServerMessage::SessionPlan(Box::new(plan))), minted))

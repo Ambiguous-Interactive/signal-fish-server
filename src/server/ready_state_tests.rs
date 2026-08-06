@@ -103,6 +103,18 @@ async fn recv(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Arc<ServerMe
         .expect("message present")
 }
 
+/// Drain every message already queued for a receiver (used to skip join/lobby
+/// traffic that is not the subject of a test).
+async fn drain_pending(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
+    loop {
+        let pending = timeout(Duration::from_millis(50), receiver.recv()).await;
+        match pending {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
 /// Assert that no message is pending within a short window.
 async fn assert_silent(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
     match timeout(Duration::from_millis(100), receiver.recv()).await {
@@ -382,4 +394,131 @@ async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
         LobbyState::Finalized,
         "a rejected ready toggle must not regress the finalized room"
     );
+}
+
+/// Readiness belongs to a membership, not to a player id. A member who leaves
+/// and joins again is a new, unready member: resurrecting the previous
+/// readiness would both invert their next toggle and let the remaining members
+/// reach `all_ready` (and therefore `StartGame`) without them.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn rejoining_a_room_does_not_restore_stale_readiness() {
+    let server = create_test_server().await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+
+    server
+        .handle_join_room(
+            &player_a,
+            "ready-rejoin-game".to_string(),
+            None,
+            "PlayerA".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let (room_id, room_code) = match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => (payload.room_id, payload.room_code.clone()),
+        other => panic!("player_a expected RoomJoined, got {other:?}"),
+    };
+    server
+        .handle_join_room(
+            &player_b,
+            "ready-rejoin-game".to_string(),
+            Some(room_code.clone()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("player_b expected RoomJoined, got {other:?}"),
+    }
+    // The second join fills the lobby: drain the join/lobby traffic both members
+    // observe before the readiness sequence under test.
+    drain_pending(&mut rx_a).await;
+    drain_pending(&mut rx_b).await;
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .lobby_state,
+        LobbyState::Lobby,
+        "fixture precondition: the room accepts ready toggles"
+    );
+
+    // A readies, then leaves the room entirely.
+    server.handle_player_ready(&player_a).await;
+    for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
+        expect_lobby_state_changed(rx, false, who).await;
+    }
+    server.leave_room(&player_a).await;
+    match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomLeft => {}
+        other => panic!("player_a expected RoomLeft, got {other:?}"),
+    }
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::PlayerLeft { .. } => {}
+        other => panic!("player_b expected PlayerLeft, got {other:?}"),
+    }
+    // The departing member created the room, so its authority is cleared too.
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::AuthorityChanged {
+            authority_player: None,
+            ..
+        } => {}
+        other => panic!("player_b expected the cleared authority, got {other:?}"),
+    }
+
+    // A joins the same room again: a fresh membership starts unready.
+    server
+        .handle_join_room(
+            &player_a,
+            "ready-rejoin-game".to_string(),
+            Some(room_code),
+            "PlayerA".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => {
+            assert_eq!(
+                payload.room_id, room_id,
+                "the rejoin must land in the original room"
+            );
+            assert!(
+                payload.ready_players.is_empty(),
+                "a rejoining member must not be reported ready: {:?}",
+                payload.ready_players
+            );
+            let rejoined = payload
+                .current_players
+                .iter()
+                .find(|player| player.id == player_a)
+                .expect("the rejoining member is present");
+            assert!(
+                !rejoined.is_ready,
+                "a rejoining member's snapshot must show them unready"
+            );
+        }
+        other => panic!("player_a expected RoomJoined on rejoin, got {other:?}"),
+    }
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::PlayerJoined { .. } => {}
+        other => panic!("player_b expected PlayerJoined on rejoin, got {other:?}"),
+    }
+
+    // B is now the only ready member, so the room is NOT all-ready.
+    server.handle_player_ready(&player_b).await;
+    for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
+        expect_lobby_state_changed(rx, false, who).await;
+    }
 }

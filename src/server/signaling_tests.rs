@@ -634,6 +634,78 @@ async fn finalized_v2_join_refreshes_v3_incumbents_without_counting_actor_plan()
     );
 }
 
+/// `turn_credentials_issued` is the total-issuance counter operators size TURN
+/// capacity from, so it must move for every credential the server actually
+/// hands out. A v2 joiner gets no plan of its own, but each v3 incumbent is
+/// re-issued a fresh credential in its refreshed plan.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn finalized_join_counts_incumbent_credentials_without_an_actor_plan() {
+    let turn = TurnConfig {
+        enabled: true,
+        static_auth_secret: "super-secret".to_string(),
+        urls: vec![TURN_URL.to_string()],
+        stun_urls: vec![TURN_STUN_URL.to_string()],
+        credential_ttl_secs: TURN_CREDENTIAL_TTL_SECS,
+    };
+    let server = create_test_server_with_session_and_turn(mesh_session_config(), turn).await;
+    let mut fixture = setup_finalized_join_publication(&server).await;
+    server.set_client_protocol(&fixture.joiner, NegotiatedProtocol::default());
+    let late_before = server
+        .metrics
+        .session_plans_late_join
+        .load(Ordering::Relaxed);
+    let credentials_before = server
+        .metrics
+        .turn_credentials_issued
+        .load(Ordering::Relaxed);
+
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room.id)
+        .await;
+    assert!(
+        server
+            .publish_finalized_join_membership(
+                &fixture.room,
+                fixture.joiner,
+                fixture.joined_player.clone(),
+                guard,
+            )
+            .await
+    );
+
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::PlayerJoined { player } if player.id == fixture.joiner
+    ));
+    match recv(&mut fixture.incumbent_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => assert!(
+            plan.ice_servers
+                .iter()
+                .any(|server| server.username.is_some()),
+            "the incumbent's refreshed plan carries a freshly minted credential"
+        ),
+        other => panic!("v3 incumbent expected authoritative refresh, got {other:?}"),
+    }
+    assert_eq!(
+        server
+            .metrics
+            .session_plans_late_join
+            .load(Ordering::Relaxed),
+        late_before,
+        "late-join metric counts an actor plan, not incumbent refresh frames"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .turn_credentials_issued
+            .load(Ordering::Relaxed),
+        credentials_before + 1,
+        "every committed credential is counted, actor plan or not"
+    );
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_transaction_failure_emits_terminal_boundary() {
@@ -2007,6 +2079,110 @@ async fn reconnect_authority_restore_is_live_and_replay_visible() {
         message,
         ServerMessage::AuthorityChanged { authority_player: Some(player), you_are_authority: false } if *player == authority
     )));
+}
+
+/// A reconnecting member's stored snapshot is a pre-disconnect record, not a
+/// live authority claim: the room's `authority_player` decides who is flagged.
+/// Restoring the snapshot verbatim while a successor holds authority would put
+/// two `is_authority` members in every membership payload.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_does_not_restore_authority_taken_by_a_successor() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (authority, _old_authority_rx) = register_client(&server).await;
+    let (successor, mut _successor_rx) = register_client(&server).await;
+    let (current, _current_rx) = register_client(&server).await;
+    for player in [authority, successor, current] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room_id = create_db_room_with_max(&server, authority, 2).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(successor, "successor"))
+        .await
+        .expect("add successor");
+    for player in [authority, successor] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+    let authority_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("read authority room")
+        .expect("room exists")
+        .players
+        .get(&authority)
+        .cloned()
+        .expect("authority member exists");
+    assert!(
+        authority_info.is_authority,
+        "fixture precondition: the disconnecting member is the stored authority"
+    );
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(
+            authority,
+            room_id,
+            true,
+            Some(authority_info),
+            server
+                .connection_manager
+                .game_data_epoch(&authority)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &authority)
+        .await
+        .expect("remove disconnected authority")
+        .expect("authority was present");
+    server.connection_manager.remove_client(&authority);
+    server
+        .message_coordinator
+        .unregister_local_client(&authority)
+        .await
+        .expect("unroute disconnected authority");
+
+    // The successor claims the vacant authority before the original returns.
+    let (granted, reason) = server
+        .database
+        .request_room_authority(&room_id, &successor, true)
+        .await
+        .expect("successor authority request");
+    assert!(granted, "successor must take vacant authority: {reason:?}");
+
+    assert!(
+        server
+            .handle_reconnect(&current, &authority, &room_id, &token)
+            .await
+    );
+
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("read room after reconnect")
+        .expect("room remains");
+    assert_eq!(
+        room.authority_player,
+        Some(successor),
+        "the successor keeps authority across the original member's reconnect"
+    );
+    let flagged: Vec<PlayerId> = room
+        .players
+        .values()
+        .filter(|player| player.is_authority)
+        .map(|player| player.id)
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![successor],
+        "exactly the room's authority_player may carry the stored is_authority flag"
+    );
 }
 
 #[tokio::test]

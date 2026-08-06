@@ -839,17 +839,32 @@ impl EnhancedGameServer {
             .lock_room_event_mutation(&room_id)
             .await;
 
+        // Whether this departure vacated the room's authority role. Storage
+        // clears `authority_player` on removal without telling anyone, so the
+        // remaining members are notified from here (see the room-event job
+        // below) — the documented "authority player leaves/disconnects" contract
+        // in `docs/concepts/authority.md`.
+        let was_authority;
+
         // Remove player from room in database
         match self
             .database
             .remove_player_from_room(&room_id, player_id)
             .await
         {
-            Ok(Some(_)) => {
+            Ok(Some(removed_player)) => {
+                // The stored flag is kept equal to `authority_player` by
+                // storage (see `GameDatabase::add_player_to_room`), so the
+                // removed record is the authoritative answer.
+                was_authority = removed_player.is_authority;
                 self.pending_durable_player_detaches
                     .remove(&(room_id, *player_id));
             }
             Ok(None) => {
+                // Nothing was removed here, so no authority was vacated here
+                // either: whichever path removed the row already cleared the
+                // role (removal and authority clearing are one storage action).
+                was_authority = false;
                 // Persistence is authoritative. A stale local assignment can
                 // survive a prior removal path, so converge routing and publish
                 // the terminal event below even though this call did not
@@ -876,13 +891,19 @@ impl EnhancedGameServer {
                 tracing::warn!(%player_id, %room_id, error = %e, "Storage removal failed during disconnect; forcing local terminal teardown");
                 self.pending_durable_player_detaches
                     .insert((room_id, *player_id), None);
-                if let Err(authority_error) = self
+                was_authority = match self
                     .database
                     .request_room_authority(&room_id, player_id, false)
                     .await
                 {
-                    tracing::warn!(%player_id, %room_id, error = %authority_error, "Failed to clear disconnected authority after storage removal error");
-                }
+                    // A granted release means this member held the role, so the
+                    // remaining members still need the cleared-authority event.
+                    Ok((released, _)) => released,
+                    Err(authority_error) => {
+                        tracing::warn!(%player_id, %room_id, error = %authority_error, "Failed to clear disconnected authority after storage removal error");
+                        false
+                    }
+                };
             }
         }
 
@@ -953,8 +974,12 @@ impl EnhancedGameServer {
         let acknowledgement_predicate_drain = drain.clone();
         let acknowledgement_delivery_drain = drain.clone();
         let broadcast_predicate_drain = drain.clone();
+        let authority_predicate_drain = drain.clone();
+        let authority_delivery_drain = drain.clone();
         let coordinator = Arc::clone(&self.message_coordinator);
+        let authority_coordinator = Arc::clone(&self.message_coordinator);
         let reconnection_manager = self.reconnection_manager.clone();
+        let authority_reconnection_manager = self.reconnection_manager.clone();
         let committed = Arc::new(AtomicBool::new(false));
         let committed_in_hook = Arc::clone(&committed);
         let completion = self.message_coordinator.enqueue_room_event(
@@ -974,7 +999,7 @@ impl EnhancedGameServer {
                     }
 
                     let should_broadcast = || !*broadcast_predicate_drain.borrow();
-                    coordinator
+                    let departure = coordinator
                         .broadcast_to_room_except_if_with_hook(
                             &room_id_for_replay,
                             &departed_player,
@@ -995,7 +1020,55 @@ impl EnhancedGameServer {
                                 })
                             }),
                         )
-                        .await
+                        .await;
+
+                    if was_authority {
+                        // Storage already cleared `authority_player`; announce it
+                        // inside this same FIFO job so it can never precede the
+                        // `PlayerLeft` that explains it. `authority_player: None`
+                        // makes the per-recipient projection uniform, so every
+                        // remaining member sees `you_are_authority: false` and can
+                        // claim the vacant role with `AuthorityRequest`.
+                        let authority_cleared = Arc::new(ServerMessage::AuthorityChanged {
+                            authority_player: None,
+                            you_are_authority: false,
+                        });
+                        let replay_authority = Arc::clone(&authority_cleared);
+                        let should_announce = || !*authority_predicate_drain.borrow();
+                        if let Err(error) = authority_coordinator
+                            .broadcast_to_room_except_if_with_hook(
+                                &room_id_for_replay,
+                                &departed_player,
+                                authority_cleared,
+                                &should_announce,
+                                authority_delivery_drain,
+                                Box::new(move || {
+                                    Box::pin(async move {
+                                        if let Some(reconnection_manager) =
+                                            authority_reconnection_manager
+                                        {
+                                            reconnection_manager
+                                                .record_room_event(
+                                                    &room_id_for_replay,
+                                                    replay_authority.as_ref(),
+                                                )
+                                                .await;
+                                        }
+                                    })
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                player_id = %departed_player,
+                                room_id = %room_id_for_replay,
+                                %error,
+                                "Failed to announce authority cleared by departure"
+                            );
+                        }
+                    }
+
+                    departure
                 })
             }),
         );
@@ -1259,6 +1332,14 @@ impl EnhancedGameServer {
                             Ok(true) => {
                                 self.metrics.increment_rooms_joined();
                                 self.metrics.increment_players_joined();
+                                // A join is a new membership, and readiness
+                                // belongs to a membership: drop any readiness
+                                // this id left behind in an earlier one, which
+                                // the membership filter on reads would otherwise
+                                // reinstate.
+                                self.room_coordinator
+                                    .forget_player_ready(&room.id, player_id)
+                                    .await;
                                 room.players.insert(*player_id, player_info);
                                 Ok((
                                     room,

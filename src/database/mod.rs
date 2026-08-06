@@ -151,7 +151,13 @@ pub trait GameDatabase: Send + Sync {
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
 
-    /// Add player to room (atomic operation)
+    /// Add player to room (atomic operation).
+    ///
+    /// Implementations must store `is_authority` derived from the room's
+    /// `authority_player`, not from the supplied `player`: callers legitimately
+    /// pass pre-disconnect snapshots whose flag can be stale, and a stored
+    /// member that contradicts `authority_player` would surface two authorities
+    /// in `RoomJoined` / `Reconnected` / `GameStarting` payloads.
     async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool>;
 
     /// Remove player from room
@@ -773,10 +779,17 @@ impl GameDatabase for InMemoryDatabase {
         Ok(rooms.get(room_id).cloned())
     }
 
-    async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool> {
+    async fn add_player_to_room(&self, room_id: &RoomId, mut player: PlayerInfo) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if room.players.len() < room.max_players as usize {
+                // `authority_player` is the single source of truth for the room
+                // (see `create_room_classified`). An inbound `PlayerInfo` can be
+                // a pre-disconnect snapshot whose flag went stale while the
+                // member was away — restoring it verbatim would flag a second
+                // authority in every membership payload. Derive the flag here so
+                // no caller can insert a member that contradicts the room.
+                player.is_authority = room.authority_player == Some(player.id);
                 room.players.insert(player.id, player);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
