@@ -962,6 +962,22 @@ impl EnhancedGameServer {
                             _ => true,
                         });
 
+                        // The `Reconnected` snapshot states the room's CURRENT
+                        // authority, so any buffered `AuthorityChanged` naming a
+                        // different holder is already superseded — replaying it
+                        // would contradict the frame that carries it. A
+                        // departing authority's `{null}` and this member's own
+                        // restore are the common case: the reconnector left as
+                        // authority, the departure cleared the role, and the
+                        // restore granted it back before this payload was built.
+                        let current_authority = current_room.authority_player;
+                        missed_events.events.retain(|event| match event {
+                            ServerMessage::AuthorityChanged {
+                                authority_player, ..
+                            } => *authority_player == current_authority,
+                            _ => true,
+                        });
+
                         // AuthorityChanged is recorded once in canonical
                         // room-uniform form. Its `you_are_authority` bit is
                         // recipient-relative, so project it for this

@@ -115,6 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report live readiness in a spectator's room snapshot. `SpectatorJoined`
+  projected the stored player record, whose `is_ready` flag is only written at
+  finalize, so a spectator saw an all-unready lobby however ready the members
+  were — and receives no lobby broadcast that could correct it. It now reads the
+  same coordinator state `RoomJoined` and `Reconnected` do.
 - Deliver `Latest` game data that is superseded faster than the configured
   outbound `batch_interval`. A superseding value continues its key's pendency
   instead of restarting the coalesce window, so a key updated every 8 ms against
@@ -122,6 +127,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivered no data at all — indefinitely — while still spending one
   `DeliveryReport` frame per update. Only deployments with
   `websocket.enable_batching` enabled were affected.
+- Drop a buffered `AuthorityChanged` from a reconnecting member's
+  `missed_events` when the `Reconnected` snapshot already supersedes it, so the
+  frame cannot assert both "you are the authority" and "authority is vacant".
 - Announce the authority cleared by a departure. When the authority player
   leaves or disconnects, every remaining member now receives
   `AuthorityChanged` with `authority_player: null`, ordered immediately after
@@ -141,8 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop issuing TURN credentials to a recipient that cannot join the session.
   A `SessionPlan` for a member that never negotiated the session's topology and
   transport already carries an empty peer list and the relay fallback; it now
-  carries no ICE servers either, matching the rule the `RoomJoined` pre-gather
-  path already applied.
+  carries no ICE servers either, since there is nothing for that member to
+  gather against. The `RoomJoined` pre-gather surface still mints against the
+  game's _desired_ topology, the only information available before a session
+  exists, so a member eligible there can still receive a credential this seam
+  later withholds.
 - Fence a closing connection whose undeliverable payload was counted but whose
   exact range never reached the pending delivery report, which can happen when
   that report is full and the write that would drain it is cancelled. Teardown

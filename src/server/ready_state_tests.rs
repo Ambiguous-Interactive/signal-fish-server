@@ -467,14 +467,10 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
         ServerMessage::PlayerLeft { .. } => {}
         other => panic!("player_b expected PlayerLeft, got {other:?}"),
     }
-    // The departing member created the room, so its authority is cleared too.
-    match recv(&mut rx_b).await.as_ref() {
-        ServerMessage::AuthorityChanged {
-            authority_player: None,
-            ..
-        } => {}
-        other => panic!("player_b expected the cleared authority, got {other:?}"),
-    }
+    // The departing member created the room, so the departure also clears the
+    // authority role. That contract belongs to `room_service_tests`; drain it
+    // here so a regression there cannot masquerade as a readiness failure.
+    drain_pending(&mut rx_b).await;
 
     // A joins the same room again: a fresh membership starts unready.
     server
@@ -520,5 +516,77 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
     server.handle_player_ready(&player_b).await;
     for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
         expect_lobby_state_changed(rx, false, who).await;
+    }
+}
+
+/// A spectator's room snapshot must report readiness from the same source the
+/// members' own snapshots use. Readiness lives in the coordinator, never in the
+/// stored player record during the lobby, so projecting the stored flag shows a
+/// spectator an all-unready lobby no matter what the members did — and the
+/// spectator receives no lobby broadcasts that could correct it.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn spectator_snapshot_reports_live_readiness() {
+    let server = create_test_server().await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    let (observer, mut observer_rx) = register_client(&server).await;
+
+    server
+        .handle_join_room(
+            &player_a,
+            "spectated-game".to_string(),
+            Some("SPECT1".to_string()),
+            "PlayerA".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "spectated-game".to_string(),
+            Some("SPECT1".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a).await;
+    drain_pending(&mut rx_b).await;
+
+    server.handle_player_ready(&player_a).await;
+    server.handle_player_ready(&player_b).await;
+    drain_pending(&mut rx_a).await;
+    drain_pending(&mut rx_b).await;
+
+    server
+        .handle_join_as_spectator(
+            &observer,
+            "spectated-game".to_string(),
+            "SPECT1".to_string(),
+            "Observer".to_string(),
+        )
+        .await;
+
+    match recv(&mut observer_rx).await.as_ref() {
+        ServerMessage::SpectatorJoined(payload) => {
+            assert_eq!(
+                payload.lobby_state,
+                LobbyState::Lobby,
+                "fixture precondition: the observed room is still in its lobby"
+            );
+            assert_eq!(payload.current_players.len(), 2);
+            for player in &payload.current_players {
+                assert!(
+                    player.is_ready,
+                    "the spectator snapshot must report the live ready state: {:?}",
+                    payload.current_players
+                );
+            }
+        }
+        other => panic!("observer expected SpectatorJoined, got {other:?}"),
     }
 }

@@ -1305,10 +1305,14 @@ impl EnhancedGameServer {
 
         // A recipient that never negotiated this session's (topology,
         // transport) receives an empty peer list and the relay fallback, so it
-        // can never run ICE for this session. Minting for it would hand out
-        // live TURN credentials that can only be spent as free relay capacity —
-        // the same rule `ice_pregather_eligible` already applies to the
-        // `RoomJoined` pre-gather surface.
+        // can never run ICE for this session: it gets no ICE list at all, TURN
+        // or STUN, because there is nothing for it to gather against.
+        // `ice_pregather_eligible` applies the same reasoning one step earlier
+        // and with the only information available then — the GAME'S DESIRED
+        // topology, because no session exists during the lobby. A member
+        // eligible there can still end up non-pairable here if the ladder
+        // settles below its negotiated rung, so pre-gather can hand out a
+        // credential this seam later withholds.
         let (ice_servers, minted) = match now_unix {
             Some(now_unix) if decision.recipient_pairable(recipient) => {
                 self.composed_ice_servers_for(recipient, now_unix)

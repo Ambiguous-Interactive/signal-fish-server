@@ -571,11 +571,21 @@ impl<'a> SendAccounting<'a> {
     }
 
     /// Hold an omission whose range only fits once the pending report is written.
+    ///
+    /// The omission stays outstanding — and therefore still fences the queue on
+    /// drop — unless the range is genuinely stored.
     fn hold_unsupported(&mut self, metadata: Option<DataDeliveryMetadata>) {
-        if let Some(metadata) = metadata {
-            self.receiver.hold_unsupported_format(metadata);
+        let held = match metadata {
+            Some(metadata) => self.receiver.hold_unsupported_format(metadata),
+            None => true,
+        };
+        if !held {
+            tracing::error!(
+                player_id = %self.player_id,
+                "Undeliverable range did not fit the emptied report; fencing the queue"
+            );
         }
-        self.unheld_omission = false;
+        self.unheld_omission = !held;
     }
 
     fn record_drop_metrics(&self) {

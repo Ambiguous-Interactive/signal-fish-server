@@ -2137,13 +2137,17 @@ impl OutboundReceiver {
 
     /// Hold an already-counted omission whose range could not be coalesced
     /// until the pending report was written.
-    pub fn hold_unsupported_format(&self, metadata: DataDeliveryMetadata) {
+    ///
+    /// Returns whether the range is now held. `false` means it still exists
+    /// nowhere — the caller must fence rather than assume the write made room.
+    #[must_use]
+    pub fn hold_unsupported_format(&self, metadata: DataDeliveryMetadata) -> bool {
         if !self.shared.v3() {
-            return;
+            return true;
         }
         let gap = metadata.gap(DeliveryGapReason::UnsupportedFormat);
         let mut state = self.shared.state();
-        state.pending_unsupported.append(&gap, metadata.class);
+        state.pending_unsupported.append(&gap, metadata.class)
     }
 
     /// The coalesced unsupported-format report to write before any other frame,
@@ -2860,6 +2864,20 @@ mod tests {
         assert!(
             !delivered_data.is_empty() && previous.elapsed() <= max_wait,
             "the key must still be reaching the socket when the run ends: {delivered_data:?}"
+        );
+        // ...and the window must still coalesce. Under the paused clock the
+        // cadence is exact: a value is released one window after its key became
+        // pending, and the next enqueue reopens the window, so releases are
+        // `batch_interval + supersede_gap` apart. A regression that abandons
+        // coalescing — releasing on every supersede, spending exactly the
+        // per-update frame the window exists to avoid — exceeds this.
+        let elapsed = supersede_gap.saturating_mul(19);
+        let max_releases = elapsed.as_millis() / max_wait.as_millis() + 1;
+        assert!(
+            delivered_data.len() as u128 <= max_releases,
+            "the coalesce window must still hold values back: {} releases over {elapsed:?} \
+             (at most {max_releases} at one per {max_wait:?})",
+            delivered_data.len()
         );
     }
 
@@ -3880,7 +3898,10 @@ mod tests {
         rx.commit_pending_unsupported_report(&full);
 
         // The writer holds the displaced omission only after that write landed.
-        rx.hold_unsupported_format(displaced.expect("an omission was displaced"));
+        assert!(
+            rx.hold_unsupported_format(displaced.expect("an omission was displaced")),
+            "the emptied report has room for the displaced range"
+        );
         let remainder = rx
             .pending_unsupported_report()
             .expect("the displaced omission is still accounted for");

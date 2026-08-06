@@ -2081,6 +2081,107 @@ async fn reconnect_authority_restore_is_live_and_replay_visible() {
     )));
 }
 
+/// A `Reconnected` frame must not carry a buffered `AuthorityChanged` that its
+/// own snapshot contradicts. The departure of an authority now records a
+/// cleared-authority event, and that member's own reconnect re-grants the role,
+/// so the replay would otherwise assert "authority is vacant" inside the frame
+/// that says "you are the authority".
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (authority, _old_authority_rx) = register_client(&server).await;
+    let (existing, mut _existing_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    for player in [authority, existing, current] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room_id = create_db_room_with_max(&server, authority, 2).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(existing, "existing"))
+        .await
+        .expect("add incumbent");
+    for player in [authority, existing] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+    let authority_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("read authority room")
+        .expect("room exists")
+        .players
+        .get(&authority)
+        .cloned()
+        .expect("authority member exists");
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(
+            authority,
+            room_id,
+            true,
+            Some(authority_info),
+            server
+                .connection_manager
+                .game_data_epoch(&authority)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &authority)
+        .await
+        .expect("remove disconnected authority")
+        .expect("authority was present");
+    server.connection_manager.remove_client(&authority);
+    server
+        .message_coordinator
+        .unregister_local_client(&authority)
+        .await
+        .expect("unroute disconnected authority");
+    // The departure that vacated the role is buffered for replay.
+    manager
+        .record_room_event(
+            &room_id,
+            &ServerMessage::AuthorityChanged {
+                authority_player: None,
+                you_are_authority: false,
+            },
+        )
+        .await;
+
+    assert!(
+        server
+            .handle_reconnect(&current, &authority, &room_id, &token)
+            .await
+    );
+
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert!(
+                payload.is_authority,
+                "the restored member holds the vacant role again"
+            );
+            assert!(
+                !payload.missed_events.iter().any(|event| matches!(
+                    event,
+                    ServerMessage::AuthorityChanged {
+                        authority_player: None,
+                        ..
+                    }
+                )),
+                "a superseded cleared-authority event must not contradict the snapshot: {:?}",
+                payload.missed_events
+            );
+        }
+        other => panic!("expected Reconnected, got {other:?}"),
+    }
+}
+
 /// A reconnecting member's stored snapshot is a pre-disconnect record, not a
 /// live authority claim: the room's `authority_player` decides who is flagged.
 /// Restoring the snapshot verbatim while a successor holds authority would put

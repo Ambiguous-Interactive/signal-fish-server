@@ -1417,7 +1417,9 @@ Fields:
   client plans, `false` on the client entries in the host's plan).
 - `ice_servers` — STUN/TURN servers for WebRTC; omitted (empty) for non-WebRTC plans, and also for a
   recipient that did not negotiate this session's topology and transport (its `peers` list is empty and its
-  data path is the relay fallback, so it can never run ICE for this session).
+  data path is the relay fallback, so it has nothing to gather against). Such a recipient may still hold ICE
+  servers from an earlier `RoomJoined` pre-gather, which is decided before a session exists — see
+  [ICE pre-gather](#ice-pre-gather).
 - `fallback` — the universal fallback transport, always `relay` (the floor).
 
 #### TransportStatus

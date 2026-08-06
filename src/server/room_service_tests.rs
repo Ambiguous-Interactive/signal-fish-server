@@ -126,6 +126,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
     let room_applications = Arc::new(DashMap::new());
     let spectator_service = SpectatorService::new(
         Arc::clone(&database),
+        Arc::clone(&room_coordinator),
         Arc::clone(&message_coordinator),
         Arc::clone(&room_applications),
         protocol_config.clone(),

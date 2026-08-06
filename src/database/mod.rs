@@ -790,6 +790,11 @@ impl GameDatabase for InMemoryDatabase {
                 // authority in every membership payload. Derive the flag here so
                 // no caller can insert a member that contradicts the room.
                 player.is_authority = room.authority_player == Some(player.id);
+                // Same reasoning for readiness: the room's list is pruned on
+                // removal, so a snapshot's flag can outlive the membership it
+                // described. (Wire payloads read live readiness from the
+                // coordinator; this keeps the stored record self-consistent.)
+                player.is_ready = room.ready_players.contains(&player.id);
                 room.players.insert(player.id, player);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
@@ -837,8 +842,11 @@ impl GameDatabase for InMemoryDatabase {
             // readiness, so the departing id must be removed directly.
             room.ready_players.retain(|id| id != player_id);
 
-            // If removed player was authority, CLEAR authority (don't auto-reassign per protocol)
-            if room.authority_player == Some(*player_id) {
+            // If removed player was authority, CLEAR authority (don't auto-reassign per protocol).
+            // Guarded by an ACTUAL removal: `leave_room_locked` reports the
+            // vacated role from this call's returned record, so a no-op remove
+            // must not silently clear a role nobody is told about.
+            if removed_player.is_some() && room.authority_player == Some(*player_id) {
                 room.authority_player = None;
                 // Clear authority flag from all players to maintain consistency
                 for player in room.players.values_mut() {

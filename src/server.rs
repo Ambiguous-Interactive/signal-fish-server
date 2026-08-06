@@ -392,6 +392,7 @@ impl EnhancedGameServer {
         let room_applications = Arc::new(DashMap::new());
         let spectator_service = SpectatorService::new(
             database.clone(),
+            Arc::clone(&room_coordinator),
             message_coordinator.clone(),
             room_applications.clone(),
             protocol_config.clone(),
