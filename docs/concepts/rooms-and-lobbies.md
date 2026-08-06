@@ -202,9 +202,10 @@ more players and need not be full to start.
   unready — but its lobby readiness can be dropped while it is away (any other
   member's `PlayerReady` prunes absent members from the ready set). Treat the
   `Reconnected` snapshot's `ready_players` / `is_ready` as authoritative rather
-  than assuming the pre-disconnect state survived. A member that reconnects into
-  a room that has already **started** is still one of the members that started
-  it, and is reported ready.
+  than assuming the pre-disconnect state survived. A member that was in the room
+  when the game **started** is still reported ready when it reconnects into that
+  running game; a member that joins or returns to a room that started without it
+  is reported unready, exactly like any other seat-filler.
 - More players may keep joining until the room reaches `max_players`.
 
 **LobbyStateChanged example (one player ready):**

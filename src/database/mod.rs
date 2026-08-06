@@ -798,9 +798,13 @@ impl GameDatabase for InMemoryDatabase {
                 // started the game, and removal prunes a departing member from
                 // it — so a membership being RESTORED carries the only surviving
                 // evidence that it started. A fresh joiner cannot smuggle
-                // readiness in that way: the join path constructs its record
-                // with `is_ready: false`, and readiness cannot be toggled in a
-                // finalized room at all.
+                // readiness in that way, and the guarantee rests on three
+                // properties this file and the join path own: the join record is
+                // constructed with `is_ready: false`; readiness cannot be
+                // toggled in a finalized room (`toggle_player_ready` requires
+                // `Lobby`); and no production path writes `is_ready = true` into
+                // an open room's record, so a member that disconnected before
+                // the start reconnects as the seat-filler it is.
                 let finalized = room.lobby_state == crate::protocol::LobbyState::Finalized;
                 player.is_ready =
                     room.ready_players.contains(&player.id) || (finalized && player.is_ready);

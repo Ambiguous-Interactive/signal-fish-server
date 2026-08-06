@@ -105,12 +105,17 @@ async fn recv(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Arc<ServerMe
 
 /// Drain every message already queued for a receiver (used to skip join/lobby
 /// traffic that is not the subject of a test).
-async fn drain_pending(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
+///
+/// Every operation these tests drain after is fully awaited, so the frames are
+/// already enqueued: draining what is present is deterministic, where waiting on
+/// a silence window would be a wall-clock heuristic.
+fn drain_pending(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
     loop {
-        let pending = timeout(Duration::from_millis(50), receiver.recv()).await;
-        match pending {
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => return,
+        match receiver.try_recv() {
+            Ok(_) => {}
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                return;
+            }
         }
     }
 }
@@ -439,8 +444,8 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
     }
     // The second join fills the lobby: drain the join/lobby traffic both members
     // observe before the readiness sequence under test.
-    drain_pending(&mut rx_a).await;
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
     assert_eq!(
         server
             .database
@@ -470,7 +475,7 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
     // The departing member created the room, so the departure also clears the
     // authority role. That contract belongs to `room_service_tests`; drain it
     // here so a regression there cannot masquerade as a readiness failure.
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_b);
 
     // A joins the same room again: a fresh membership starts unready.
     server
@@ -557,13 +562,13 @@ async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
             None,
         )
         .await;
-    drain_pending(&mut rx_a).await;
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
     server.handle_player_ready(&player_a).await;
     server.handle_player_ready(&player_b).await;
     server.handle_start_game(&player_a).await;
-    drain_pending(&mut rx_a).await;
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
 
     let room_id = server
         .get_client_room(&player_b)
@@ -579,6 +584,11 @@ async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
         .get(&player_b)
         .cloned()
         .expect("member is stored");
+    assert!(
+        player_b_info.is_ready,
+        "premise: finalization marks every member of the started game ready in \
+         the record the disconnect capture reads"
+    );
     let manager = server.reconnection_manager().expect("reconnection enabled");
     let token = manager
         .register_disconnection(
@@ -670,14 +680,14 @@ async fn snapshots_of_a_finalized_room_report_its_final_readiness() {
             None,
         )
         .await;
-    drain_pending(&mut rx_a).await;
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
 
     server.handle_player_ready(&player_a).await;
     server.handle_player_ready(&player_b).await;
     server.handle_start_game(&player_a).await;
-    drain_pending(&mut rx_a).await;
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
 
     let room_id = server
         .get_client_room(&player_a)
@@ -754,13 +764,13 @@ async fn spectator_snapshot_reports_live_readiness() {
             None,
         )
         .await;
-    drain_pending(&mut rx_a).await;
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
 
     server.handle_player_ready(&player_a).await;
     server.handle_player_ready(&player_b).await;
-    drain_pending(&mut rx_a).await;
-    drain_pending(&mut rx_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
 
     server
         .handle_join_as_spectator(

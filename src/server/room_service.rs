@@ -989,6 +989,7 @@ impl EnhancedGameServer {
         let authority_reconnection_manager = self.reconnection_manager.clone();
         let committed = Arc::new(AtomicBool::new(false));
         let committed_in_hook = Arc::clone(&committed);
+        let committed_for_authority = Arc::clone(&committed);
         let completion = self.message_coordinator.enqueue_room_event(
             room_event_guard,
             Box::new(move || {
@@ -1030,11 +1031,14 @@ impl EnhancedGameServer {
                         .await;
 
                     // Only announce a cleared role behind a `PlayerLeft` that
-                    // actually reached the room: the event is defined as the
-                    // explanation of that departure, and replaying a cleared
-                    // authority with no departure in front of it would leave a
-                    // client unable to attribute it.
-                    if was_authority && matches!(departure, Ok(true)) {
+                    // committed: the event is defined as the explanation of that
+                    // departure, and a cleared authority with no departure in
+                    // front of it leaves a client unable to attribute it. The
+                    // commit hook is the predicate — the broadcast's `Ok(true)`
+                    // means a live recipient was enqueued, which is false for a
+                    // room whose remaining members are all awaiting reconnect,
+                    // exactly when the replay record matters most.
+                    if was_authority && committed_for_authority.load(Ordering::Acquire) {
                         // Storage already cleared `authority_player`; announce it
                         // inside this same FIFO job so it can never precede the
                         // `PlayerLeft` that explains it. `authority_player: None`

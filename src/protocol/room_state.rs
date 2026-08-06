@@ -305,6 +305,11 @@ impl Room {
     pub fn remove_player(&mut self, player_id: &PlayerId) -> Option<PlayerInfo> {
         let removed = self.players.remove(player_id);
 
+        // Readiness follows the membership: leaving an id in `ready_players`
+        // would let a later admission read it back as readiness this membership
+        // never declared (see `GameDatabase::add_player_to_room`).
+        self.ready_players.retain(|id| id != player_id);
+
         // If the authority player left, clear authority
         if self.authority_player == Some(*player_id) {
             self.authority_player = None;
