@@ -152,11 +152,17 @@ message with `authority_player` set to `null`:
 
 ### Authority Player Disconnects
 
-If the authority player disconnects from the room, authority is
+If the authority player leaves or disconnects from the room, authority is
 **cleared** -- there is no automatic reassignment. All remaining players
-receive an `AuthorityChanged` message with `authority_player: null`. Your
+receive an `AuthorityChanged` message with `authority_player: null`, ordered
+immediately after the `PlayerLeft` that explains it (and replayed to a member
+that reconnects across it). Your
 game logic should handle this case, either by prompting another player to
 claim authority or by pausing the game until someone does.
+
+If the departed member reconnects while another player has since claimed the
+role, the successor keeps it: the returning member is restored as an ordinary,
+non-authority member.
 
 ## Key Rules
 
