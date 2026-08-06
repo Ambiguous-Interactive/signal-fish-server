@@ -460,6 +460,8 @@ struct H14Diagnostics<'a> {
     fallback_proxy: &'a ProxyObservation,
     compatible_proxy: &'a ProxyObservation,
     burst: u64,
+    sender_elapsed: Duration,
+    proxy_recv_buffer_bytes: u32,
     backpressure: u64,
     slow_consumer_evictions: u64,
 }
@@ -468,7 +470,8 @@ impl std::fmt::Display for H14Diagnostics<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "fallback accounted={}/{} reports={} advisories={} player_left={:?} errors=[{}] \
+            "sender burst_elapsed={:?} proxy_upstream_recv_buffer_request={} bytes; \
+             fallback accounted={}/{} reports={} advisories={} player_left={:?} errors=[{}] \
              terminal={} wire_bytes={} elapsed={:?}; compatible delivered={}/{} \
              player_left={:?} errors=[{}] terminal={} wire_bytes={} elapsed={:?}; \
              proxy destination_bytes: fallback={} over {:?} ({:.0} B/s), compatible={} \
@@ -479,6 +482,8 @@ impl std::fmt::Display for H14Diagnostics<'_> {
              natural_wait={:?} terminations_after_teardown={:?} teardown_wait={:?} \
              control_errors={:?}; amplification={:.2}x backpressure_events={} \
              slow_consumer_evictions={}",
+            self.sender_elapsed,
+            self.proxy_recv_buffer_bytes,
             self.fallback.accounted,
             self.burst,
             self.fallback.reports,
@@ -688,12 +693,16 @@ async fn h14_red_diagnostics_preserve_both_recipients_and_proxy_outcomes() {
         fallback_proxy: &fallback_proxy,
         compatible_proxy: &compatible_proxy,
         burst: 5_000,
+        sender_elapsed: Duration::from_secs(2),
+        proxy_recv_buffer_bytes: 4 * 1_024,
         backpressure: 7,
         slow_consumer_evictions: 1,
     }
     .to_string();
 
     for expected in [
+        "sender burst_elapsed=2s",
+        "proxy_upstream_recv_buffer_request=4096 bytes",
         "fallback accounted=4999/5000",
         "player_left=[00000000-0000-0000-0000-000000000000]",
         "terminal=complete",
@@ -790,6 +799,10 @@ async fn h14_red_diagnostics_preserve_both_recipients_and_proxy_outcomes() {
 async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     const BURST: u64 = 5_000;
     const THROTTLE_BYTES_PER_SEC: u64 = 32 * 1_024;
+    // Keep localhost TCP autotuning from hiding more than one production
+    // full-queue deadline of already accepted bytes in the proxy's
+    // server-facing socket. H10 uses the same bound for its 32 KiB/s lane.
+    const PROXY_RECV_BUFFER_BYTES: u32 = 4 * 1_024;
     const EXPERIMENT_DEADLINE: Duration = Duration::from_secs(90);
 
     let mut config = test_server_config();
@@ -804,8 +817,16 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     let router = create_router("http://localhost:3000").with_state(server.clone());
     let running_server = RunningTestServer::spawn(server, router).await;
 
-    let compatible_proxy = ChaosProxy::spawn(running_server.addr()).await;
-    let fallback_proxy = ChaosProxy::spawn(running_server.addr()).await;
+    let compatible_proxy = ChaosProxy::spawn_with_upstream_recv_buffer(
+        running_server.addr(),
+        Some(PROXY_RECV_BUFFER_BYTES),
+    )
+    .await;
+    let fallback_proxy = ChaosProxy::spawn_with_upstream_recv_buffer(
+        running_server.addr(),
+        Some(PROXY_RECV_BUFFER_BYTES),
+    )
+    .await;
     let endpoints = [
         running_server.addr(),
         compatible_proxy.addr(),
@@ -1076,6 +1097,7 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
         )
     });
 
+    let sender_started = std::time::Instant::now();
     let mut sender_error = None;
     for seq in 0..BURST {
         // 0xc1 is MessagePack's reserved/invalid marker. The server correctly
@@ -1086,6 +1108,7 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
             break;
         }
     }
+    let sender_elapsed = sender_started.elapsed();
 
     // Both recipients must complete their streams while the bandwidth fault is
     // still applied. Lifting the throttle as soon as the fallback recipient
@@ -1221,6 +1244,8 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
             fallback_proxy: &fallback_proxy_observation,
             compatible_proxy: &compatible_proxy_observation,
             burst: BURST,
+            sender_elapsed,
+            proxy_recv_buffer_bytes: PROXY_RECV_BUFFER_BYTES,
             backpressure,
             slow_consumer_evictions,
         }

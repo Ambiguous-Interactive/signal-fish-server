@@ -532,7 +532,7 @@ fn enqueue_farewell_message(
     let _ = close_signal;
     match tx.try_enqueue_control(Arc::new(message)) {
         Ok(_) => {}
-        Err(TryEnqueueError::Full(_)) => {
+        Err(TryEnqueueError::Full(_, _)) => {
             tracing::debug!(
                 %player_id,
                 context,
@@ -1421,7 +1421,7 @@ pub(super) async fn handle_socket(
                                     "RelayStats skipped: preserving causal report capacity"
                                 );
                             }
-                            Err(TryEnqueueError::Full(_)) => {
+                            Err(TryEnqueueError::Full(_, _)) => {
                                 tracing::debug!(
                                     %current_player_id,
                                     "Delivery advisories skipped: control queue full"

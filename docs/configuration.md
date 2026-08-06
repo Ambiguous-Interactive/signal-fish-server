@@ -397,6 +397,9 @@ candidate codes or changing the behavior of explicit room-code requests.
   a slow consumer (default: 5000; must be > 0 and ≤ 600000). A connection that
   cannot absorb reliable traffic for this long is closed with authoritative
   WebSocket code `4002 slow_consumer`; the `SLOW_CONSUMER` error is best effort.
+  Capacity that becomes available strictly before the exclusive deadline and
+  remains continuously available may be claimed after a delayed producer poll;
+  capacity first available at or after the deadline may not.
   `latest` and `volatile` do not use this wait.
 - `max_sojourn_ms` - Reliable messages are closed loudly with `4002
   slow_consumer` when the oldest reliable queue/batch item cannot complete its

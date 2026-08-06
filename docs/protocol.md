@@ -584,7 +584,11 @@ The v2 contract and an unclassified v3 `GameData` are reliable: a full data
 queue applies backpressure for at most
 `websocket.slow_consumer_timeout_ms` (default 5000). If space does not become
 available, the recipient is closed loudly as a slow consumer. Raw binary game
-data is also always reliable.
+data is also always reliable. The capacity boundary uses the queue writer's
+continuous-availability timestamp: capacity that becomes available strictly
+before the deadline and remains non-full may be claimed after a delayed
+producer poll, while capacity first available at or after the exclusive
+boundary remains expired.
 
 Negotiated v3 adds two explicitly lossy JSON classes. Loss is never silent:
 every omitted server-stamped sequence range is named by a prior

@@ -41,8 +41,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 
 use outbound_queue::{
-    DataDeliveryMetadata, DeliveryMessage, EnqueueOutcome as QueueEnqueueOutcome, OutboundData,
-    OutboundPermit, OutboundSender, TryEnqueueError,
+    CapacityReleaseWitness, DataDeliveryMetadata, DeliveryMessage,
+    EnqueueOutcome as QueueEnqueueOutcome, OutboundData, OutboundPermit, OutboundSender,
+    TryEnqueueError,
 };
 
 /// An owned room-event job. The closure is enqueued synchronously, and its
@@ -728,10 +729,10 @@ impl DeliverySender {
                     })
                     .map_err(|error| match error {
                         tokio::sync::mpsc::error::TrySendError::Full(message) => {
-                            DeliveryTrySendError::Full(DeliveryMessage::from_parts(
-                                message,
-                                relay_frame_cache,
-                            ))
+                            DeliveryTrySendError::Full(
+                                DeliveryMessage::from_parts(message, relay_frame_cache),
+                                None,
+                            )
                         }
                         tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                             DeliveryTrySendError::Closed
@@ -808,6 +809,66 @@ impl DeliverySender {
         }
     }
 
+    /// Retry a classified delivery only when deadline evidence and admission
+    /// can be checked under the same queue-state lock.
+    pub(crate) fn try_send_delivery_released_before(
+        &self,
+        delivery: DeliveryMessage,
+        room_id: Option<RoomId>,
+        capacity_witness: Option<&CapacityReleaseWitness>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<QueueEnqueueOutcome>, DeliveryTrySendError> {
+        match (&self.0, capacity_witness) {
+            (DeliverySenderKind::Legacy(sender), _) => {
+                if sender.is_closed() {
+                    Err(DeliveryTrySendError::Closed)
+                } else {
+                    Ok(None)
+                }
+            }
+            (DeliverySenderKind::Classified { sender, generation }, Some(witness)) => {
+                let result = if is_delivery_transition(delivery.message()) {
+                    let (message, _) = delivery.into_parts();
+                    sender
+                        .try_enqueue_transition_released_before(
+                            message,
+                            *generation,
+                            witness,
+                            deadline,
+                        )
+                        .map_err(map_control_queue_error)
+                } else if matches!(
+                    delivery.message(),
+                    ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+                ) {
+                    let data = classify_outbound_data(delivery, room_id)
+                        .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
+                    sender
+                        .try_enqueue_data_scoped_released_before(
+                            data,
+                            *generation,
+                            witness,
+                            deadline,
+                        )
+                        .map_err(map_data_queue_error)
+                } else {
+                    let (message, _) = delivery.into_parts();
+                    sender
+                        .try_enqueue_control_scoped_released_before(
+                            message,
+                            room_id,
+                            *generation,
+                            witness,
+                            deadline,
+                        )
+                        .map_err(map_control_queue_error)
+                };
+                result.map(Some)
+            }
+            (DeliverySenderKind::Classified { .. }, None) => Ok(None),
+        }
+    }
+
     pub(crate) fn try_reserve_control(
         &self,
         room_id: Option<RoomId>,
@@ -818,7 +879,9 @@ impl DeliverySender {
                 .try_reserve_owned()
                 .map(DeliveryPermit::Legacy)
                 .map_err(|error| match error {
-                    tokio::sync::mpsc::error::TrySendError::Full(_) => DeliveryReserveError::Full,
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                        DeliveryReserveError::Full(None)
+                    }
                     tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                         DeliveryReserveError::Closed
                     }
@@ -831,7 +894,9 @@ impl DeliverySender {
                     room_id,
                 })
                 .map_err(|error| match error {
-                    outbound_queue::ReserveError::Full => DeliveryReserveError::Full,
+                    outbound_queue::ReserveError::Full(witness) => {
+                        DeliveryReserveError::Full(Some(witness))
+                    }
                     outbound_queue::ReserveError::Closed => DeliveryReserveError::Closed,
                     outbound_queue::ReserveError::Canceled => DeliveryReserveError::Canceled,
                 }),
@@ -858,10 +923,46 @@ impl DeliverySender {
                     room_id,
                 })
                 .map_err(|error| match error {
-                    outbound_queue::ReserveError::Full => DeliveryReserveError::Full,
+                    outbound_queue::ReserveError::Full(witness) => {
+                        DeliveryReserveError::Full(Some(witness))
+                    }
                     outbound_queue::ReserveError::Closed => DeliveryReserveError::Closed,
                     outbound_queue::ReserveError::Canceled => DeliveryReserveError::Canceled,
                 }),
+        }
+    }
+
+    /// Claim control capacity only when the matching lane's deadline witness
+    /// remains valid at the instant the reservation is made.
+    pub(crate) fn try_reserve_control_released_before(
+        &self,
+        room_id: Option<RoomId>,
+        capacity_witness: Option<&CapacityReleaseWitness>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<DeliveryPermit>, DeliveryReserveError> {
+        match (&self.0, capacity_witness) {
+            (DeliverySenderKind::Legacy(sender), _) => {
+                if sender.is_closed() {
+                    Err(DeliveryReserveError::Closed)
+                } else {
+                    Ok(None)
+                }
+            }
+            (DeliverySenderKind::Classified { sender, generation }, Some(witness)) => sender
+                .try_reserve_control_scoped_released_before(*generation, room_id, witness, deadline)
+                .map(|permit| {
+                    permit.map(|permit| DeliveryPermit::Classified {
+                        permit,
+                        generation: *generation,
+                        room_id,
+                    })
+                })
+                .map_err(|error| match error {
+                    outbound_queue::ReserveError::Full(_) => DeliveryReserveError::Full(None),
+                    outbound_queue::ReserveError::Closed => DeliveryReserveError::Closed,
+                    outbound_queue::ReserveError::Canceled => DeliveryReserveError::Canceled,
+                }),
+            (DeliverySenderKind::Classified { .. }, None) => Ok(None),
         }
     }
 }
@@ -900,15 +1001,15 @@ impl DeliveryPermit {
 
 #[derive(Debug)]
 pub(crate) enum DeliveryTrySendError {
-    Full(DeliveryMessage),
+    Full(DeliveryMessage, Option<CapacityReleaseWitness>),
     Closed,
     AccountabilityUnavailable,
     InvalidMetadata,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum DeliveryReserveError {
-    Full,
+    Full(Option<CapacityReleaseWitness>),
     Closed,
     Canceled,
 }
@@ -1014,7 +1115,9 @@ fn is_delivery_transition(message: &ServerMessage) -> bool {
 
 fn map_data_queue_error(error: TryEnqueueError<OutboundData>) -> DeliveryTrySendError {
     match error {
-        TryEnqueueError::Full(data) => DeliveryTrySendError::Full(data.delivery),
+        TryEnqueueError::Full(data, witness) => {
+            DeliveryTrySendError::Full(data.delivery, Some(witness))
+        }
         TryEnqueueError::Closed(_) => DeliveryTrySendError::Closed,
         TryEnqueueError::AccountabilityUnavailable(_) => {
             DeliveryTrySendError::AccountabilityUnavailable
@@ -1025,7 +1128,9 @@ fn map_data_queue_error(error: TryEnqueueError<OutboundData>) -> DeliveryTrySend
 
 fn map_control_queue_error(error: TryEnqueueError<Arc<ServerMessage>>) -> DeliveryTrySendError {
     match error {
-        TryEnqueueError::Full(message) => DeliveryTrySendError::Full(DeliveryMessage::new(message)),
+        TryEnqueueError::Full(message, witness) => {
+            DeliveryTrySendError::Full(DeliveryMessage::new(message), Some(witness))
+        }
         TryEnqueueError::Closed(_) => DeliveryTrySendError::Closed,
         TryEnqueueError::AccountabilityUnavailable(_) => {
             DeliveryTrySendError::AccountabilityUnavailable
@@ -1145,6 +1250,7 @@ pub(crate) struct BackpressuredDelivery {
     delivery: DeliveryMessage,
     room_id: Option<RoomId>,
     deadline: tokio::time::Instant,
+    capacity_witness: Option<CapacityReleaseWitness>,
     timeout: std::time::Duration,
     connection_stats: Option<Arc<crate::metrics::ConnectionDeliveryStats>>,
     pending_class: Option<crate::protocol::DeliveryClass>,
@@ -1180,7 +1286,7 @@ pub(crate) fn start_message_delivery_in_room(
     // are monotonic diagnostics, never synchronization.
     let connection_stats = metrics.connection_delivery_stats(player_id);
     let offered_class = handle.sender.effective_data_class(delivery.message());
-    let delivery = match handle.sender.try_send_delivery(delivery, room_id) {
+    let (delivery, capacity_witness) = match handle.sender.try_send_delivery(delivery, room_id) {
         Ok(outcome) => {
             #[cfg(feature = "trace-validation")]
             if trace_queue_outcome_supported(outcome) {
@@ -1219,14 +1325,14 @@ pub(crate) fn start_message_delivery_in_room(
             );
             return DeliveryStart::Complete(DeliveryOutcome::ChannelClosed);
         }
-        Err(DeliveryTrySendError::Full(delivery)) => {
+        Err(DeliveryTrySendError::Full(delivery, capacity_witness)) => {
             #[cfg(feature = "trace-validation")]
             handle.close.record_trace(
                 crate::trace_validation::DeliveryTraceAction::SendFull,
                 trace_delivery_id,
                 None,
             );
-            delivery
+            (delivery, capacity_witness)
         }
         Err(DeliveryTrySendError::AccountabilityUnavailable) => {
             #[cfg(feature = "trace-validation")]
@@ -1270,14 +1376,19 @@ pub(crate) fn start_message_delivery_in_room(
             .backpressure_events
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+    let full_observed_at = capacity_witness
+        .as_ref()
+        .map(CapacityReleaseWitness::full_observed_at)
+        .unwrap_or_else(tokio::time::Instant::now);
     DeliveryStart::Backpressured(BackpressuredDelivery {
         player_id: *player_id,
         handle: handle.clone(),
         delivery,
         room_id,
-        deadline: tokio::time::Instant::now()
+        deadline: full_observed_at
             .checked_add(slow_consumer_timeout)
-            .unwrap_or_else(tokio::time::Instant::now),
+            .unwrap_or(full_observed_at),
+        capacity_witness,
         timeout: slow_consumer_timeout,
         connection_stats,
         pending_class: offered_class,
@@ -1301,6 +1412,7 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
         delivery,
         room_id,
         deadline,
+        capacity_witness,
         timeout,
         connection_stats,
         pending_class,
@@ -1308,6 +1420,7 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
         trace_delivery_id,
     } = pending;
     let sender = handle.sender.clone();
+    let deadline_retry = delivery.clone();
     let send = handle.sender.send_delivery(delivery, room_id);
     tokio::pin!(send);
     // Tokio's Timeout polls its inner future before its timer. A biased select
@@ -1315,7 +1428,18 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
     // after expiry cannot revive the expired logical delivery.
     let wait_result = tokio::select! {
         biased;
-        _ = tokio::time::sleep_until(deadline) => WaitResult::TimedOut,
+        _ = tokio::time::sleep_until(deadline) => {
+            match handle.sender.try_send_delivery_released_before(
+                deadline_retry,
+                room_id,
+                capacity_witness.as_ref(),
+                deadline,
+            ) {
+                Ok(Some(outcome)) => WaitResult::Complete(Ok(outcome)),
+                Ok(None) | Err(DeliveryTrySendError::Full(_, _)) => WaitResult::TimedOut,
+                Err(error) => WaitResult::Complete(Err(error)),
+            }
+        },
         result = &mut send => WaitResult::Complete(result),
     };
     let outcome = match wait_result {
@@ -1384,7 +1508,7 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
                 "Invalid internal delivery metadata; closing recipient fail-closed",
             )
         }
-        WaitResult::Complete(Err(DeliveryTrySendError::Full(_))) => {
+        WaitResult::Complete(Err(DeliveryTrySendError::Full(_, _))) => {
             #[cfg(feature = "trace-validation")]
             handle.close.record_trace(
                 crate::trace_validation::DeliveryTraceAction::Unsupported,
@@ -1801,7 +1925,7 @@ pub trait MessageCoordinator: Send + Sync {
             Ok(_) => DeliveryOutcome::Canceled,
             Err(DeliveryTrySendError::Closed) => DeliveryOutcome::ChannelClosed,
             Err(
-                DeliveryTrySendError::Full(_)
+                DeliveryTrySendError::Full(_, _)
                 | DeliveryTrySendError::AccountabilityUnavailable
                 | DeliveryTrySendError::InvalidMetadata,
             ) => {
@@ -1890,6 +2014,7 @@ pub struct MembershipUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordination::outbound_queue::OutboundPayload;
     use crate::metrics::{ConnectionDeliveryStats, ServerMetrics};
     use crate::protocol::{DeliveryClass, GameDataEncoding, LobbyState, SpectatorJoinedPayload};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3386,6 +3511,201 @@ mod tests {
         assert_eq!(
             metrics.websocket_messages_dropped.load(Ordering::Relaxed),
             0
+        );
+        assert_conservation(&metrics);
+    }
+
+    /// Regression for #290: capacity returned before the grace deadline must
+    /// not be reclassified as a timeout merely because the producer task was
+    /// not polled again until after that deadline.
+    #[tokio::test(start_paused = true)]
+    async fn capacity_returned_before_deadline_survives_delayed_producer_poll() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = test_player();
+        let (sender, mut receiver) = outbound_queue::channel(1, 1);
+        sender.set_protocol_version(3);
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        handle
+            .sender
+            .try_send(game_data_message(None, None, None, None), None)
+            .expect("prefill the classified data lane");
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(game_data_message(None, None, None, None)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+        let mut wait = Box::pin(finish_backpressured_delivery_in_room(&metrics, pending));
+        assert!(
+            futures_util::poll!(wait.as_mut()).is_pending(),
+            "delivery must register its full-queue wait"
+        );
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let prefill = receiver
+            .try_recv()
+            .expect("the writer returns capacity before the deadline");
+        drop(prefill);
+
+        // Model a hosted worker that is not scheduled while another worker
+        // continues draining the socket. Both the capacity notification and
+        // timer are ready when the producer is finally polled again.
+        tokio::time::advance(Duration::from_millis(501)).await;
+        assert_eq!(
+            wait.await.2,
+            DeliveryOutcome::Delivered,
+            "pre-deadline queue progress must win over delayed timer polling"
+        );
+        let delivered = receiver
+            .try_recv()
+            .expect("the pending delivery must consume the returned capacity");
+        drop(delivered);
+        assert_eq!(listener.requested_reason(), None);
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            metrics
+                .websocket_deliveries_enqueued
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_conservation(&metrics);
+    }
+
+    /// The witness records the first full-to-non-full transition, not the most
+    /// recent pop. A later drain must not move timely progress past expiry.
+    #[tokio::test(start_paused = true)]
+    async fn continuously_available_capacity_keeps_first_release_timestamp() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = test_player();
+        let (sender, mut receiver) = outbound_queue::channel(2, 1);
+        sender.set_protocol_version(3);
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        for _ in 0..2 {
+            handle
+                .sender
+                .try_send(game_data_message(None, None, None, None), None)
+                .expect("prefill the two-slot classified data lane");
+        }
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(game_data_message(None, None, None, None)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+        let mut wait = Box::pin(finish_backpressured_delivery_in_room(&metrics, pending));
+        assert!(futures_util::poll!(wait.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let first = receiver
+            .try_recv()
+            .expect("first drain returns capacity before the deadline");
+        assert!(matches!(
+            &first.payload,
+            OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::GameData { .. })
+        ));
+        tokio::time::advance(Duration::from_millis(501)).await;
+        let second = receiver
+            .try_recv()
+            .expect("second drain must not overwrite the first release time");
+        assert!(matches!(
+            &second.payload,
+            OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::GameData { .. })
+        ));
+
+        assert_eq!(wait.await.2, DeliveryOutcome::Delivered);
+        assert_eq!(listener.requested_reason(), None);
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_conservation(&metrics);
+    }
+
+    /// A pre-deadline release is no longer usable when another producer fills
+    /// the lane again. Historical progress alone must not revive the wait.
+    #[tokio::test(start_paused = true)]
+    async fn postdeadline_capacity_after_refill_does_not_revive_expired_delivery() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = test_player();
+        let (sender, mut receiver) = outbound_queue::channel(1, 1);
+        sender.set_protocol_version(3);
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        handle
+            .sender
+            .try_send(game_data_message(None, None, None, None), None)
+            .expect("prefill the classified data lane");
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(game_data_message(None, None, None, None)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+        let mut wait = Box::pin(finish_backpressured_delivery_in_room(&metrics, pending));
+        assert!(futures_util::poll!(wait.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let first = receiver
+            .try_recv()
+            .expect("writer briefly returns capacity before the deadline");
+        assert!(matches!(
+            &first.payload,
+            OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::GameData { .. })
+        ));
+        handle
+            .sender
+            .try_send(game_data_message(None, None, None, None), None)
+            .expect("another producer refills the lane");
+        tokio::time::advance(Duration::from_millis(501)).await;
+        let refilled = receiver
+            .try_recv()
+            .expect("the refilled item drains only after the deadline");
+        assert!(matches!(
+            &refilled.payload,
+            OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::GameData { .. })
+        ));
+
+        assert_eq!(wait.await.2, DeliveryOutcome::SlowConsumer);
+        assert_eq!(listener.requested_reason(), Some(CloseReason::SlowConsumer));
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            1
         );
         assert_conservation(&metrics);
     }

@@ -289,6 +289,154 @@ async fn expired_control_capacity_waits_cannot_revive_after_capacity_returns() {
     }
 }
 
+/// Regression for #290's deadline-arbitration class across every classified
+/// control-capacity wait: a writer release strictly before expiry remains
+/// valid even if the producer is not scheduled again until after expiry.
+#[tokio::test(start_paused = true)]
+async fn predeadline_control_capacity_release_survives_delayed_producer_poll() {
+    let cases = [
+        ControlCapacityWait::InitialTransition,
+        ControlCapacityWait::ConditionalDelivery,
+        ControlCapacityWait::ConditionalReservation,
+    ];
+
+    for (index, case) in cases.into_iter().enumerate() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        ));
+        let player_id =
+            PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_1800 + index as u128);
+        let (handle, close_listener, mut receiver) =
+            full_control_queue(ControlQueueKind::Classified);
+        let mut wait = start_control_capacity_wait(case, coordinator, player_id, handle);
+
+        assert!(
+            futures_util::poll!(wait.as_mut()).is_pending(),
+            "{case:?} must register its classified full-queue wait"
+        );
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let prefill = receiver.pop_message("release classified capacity before the deadline");
+        assert!(matches!(prefill.as_ref(), ServerMessage::Pong));
+
+        tokio::time::advance(Duration::from_millis(501)).await;
+        assert_eq!(
+            wait.await,
+            DeliveryOutcome::Delivered,
+            "{case:?} must retain capacity released before its deadline"
+        );
+        assert_eq!(
+            close_listener.requested_reason(),
+            None,
+            "{case:?} must not request a slow-consumer close after timely progress"
+        );
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0,
+            "{case:?} must not count a timely writer as a slow consumer"
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            0,
+            "{case:?} must not abandon a delivery after timely progress"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn predeadline_permit_release_survives_delayed_producer_poll() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_1900);
+    let (sender, _receiver) = crate::coordination::outbound_queue::channel(1, 1);
+    sender.set_protocol_version(3);
+    let held_permit = sender
+        .try_reserve_control_scoped(0, None)
+        .expect("occupy the only classified control slot with a permit");
+    let (close, close_listener) = ConnectionCloseSignal::channel();
+    let handle = ClientDeliveryHandle::classified(sender, close);
+    let mut wait = start_control_capacity_wait(
+        ControlCapacityWait::InitialTransition,
+        coordinator,
+        player_id,
+        handle,
+    );
+
+    assert!(
+        futures_util::poll!(wait.as_mut()).is_pending(),
+        "initial transition must wait behind the held permit"
+    );
+    tokio::time::advance(Duration::from_millis(500)).await;
+    drop(held_permit);
+    tokio::time::advance(Duration::from_millis(501)).await;
+
+    assert_eq!(wait.await, DeliveryOutcome::Delivered);
+    assert_eq!(close_listener.requested_reason(), None);
+    assert_eq!(
+        metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+/// Deadline evidence and the reservation must be one atomic queue-state
+/// operation. Otherwise a pre-deadline drain followed by a refill can leave a
+/// stale boolean that incorrectly admits capacity released only after expiry.
+#[tokio::test(start_paused = true)]
+async fn refilled_control_capacity_released_after_deadline_cannot_be_claimed() {
+    let cases = [
+        ControlCapacityWait::InitialTransition,
+        ControlCapacityWait::ConditionalDelivery,
+        ControlCapacityWait::ConditionalReservation,
+    ];
+
+    for (index, case) in cases.into_iter().enumerate() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        ));
+        let player_id =
+            PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_1A00 + index as u128);
+        let (handle, close_listener, mut receiver) =
+            full_control_queue(ControlQueueKind::Classified);
+        let mut wait = start_control_capacity_wait(case, coordinator, player_id, handle.clone());
+        assert!(futures_util::poll!(wait.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        drop(receiver.pop_message("briefly return control capacity before the deadline"));
+        handle
+            .sender
+            .try_send(Arc::new(ServerMessage::Pong), None)
+            .expect("another producer refills the control lane");
+        tokio::time::advance(Duration::from_millis(501)).await;
+        drop(receiver.pop_message("refilled control capacity returns after the deadline"));
+
+        assert_eq!(wait.await, DeliveryOutcome::SlowConsumer);
+        assert_eq!(
+            close_listener.requested_reason(),
+            Some(CloseReason::SlowConsumer)
+        );
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            1
+        );
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn queue_closure_at_or_after_the_deadline_precedes_slow_consumer_expiry() {
     let cases = [
