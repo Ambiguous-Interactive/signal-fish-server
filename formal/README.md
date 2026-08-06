@@ -32,6 +32,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | ----------------------------- | --------------------------------------------------------------------------------- |
 | `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late-join, reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor`) |
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
+| `tla/CapacityDeadlineArbitration.tla` | P56's classified queue deadline: continuous pre-deadline capacity, refill invalidation, and lock-atomic late admission |
 | `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
@@ -608,6 +609,47 @@ a **wider** shape (deeper send budget, 2-slot queue/buffer/ring, two cycles) und
 bounded random simulation, sampling interleavings the exhaustive model cannot
 afford. Both are green with all three bugs pinned `FALSE`.
 
+## Capacity-deadline arbitration
+
+`CapacityDeadlineArbitration.tla` is the bounded state-space counterpart of
+P56's deterministic #290 regressions. One producer observes a full classified
+lane and may then remain unscheduled while the writer drains before, exactly
+at, or after the exclusive deadline. A competing enqueue or reservation may
+refill the lane before that producer runs.
+
+The model carries the same evidence as `CapacityReleaseWitness`: the instant
+the lane first became non-full is retained only while capacity remains
+continuously available. `ProducerAdmit` validates that evidence and claims the
+slot in one atomic action, corresponding to one queue-state mutex hold. It
+therefore explores both orders of the admission-versus-refill race without
+granting stale evidence to the loser. The claim abstracts either a direct
+enqueue or a control permit reservation; post-reservation send, cancel, and
+drop are separate lifecycle concerns and are deliberately out of scope.
+
+| Model action / predicate | Production correspondence |
+| ------------------------ | ------------------------- |
+| `WriterDrain` | `OutboundReceiver` pop paths followed by `QueueState::refresh_capacity_availability` |
+| `CompetingRefill` | enqueue/reservation paths followed by the same capacity refresh |
+| `TimelyContinuousCapacity` | `CapacityReleaseWitness::permits_locked` |
+| `ProducerAdmit` | capacity admission in `try_enqueue_*_released_before` and `try_reserve_control_scoped_released_before` |
+| `ProducerExpire` | the timer-first branches in data and control capacity waits (`src/coordination/mod.rs`, `src/server.rs`) |
+
+`NoFalseSlowConsumer` proves scheduler delay alone cannot evict a waiter after
+capacity became and remained available strictly before its deadline.
+`NoLateRevival` proves a drain at or after the deadline cannot revive the
+expired wait. `AvailabilityExact` makes a refill erase the release timestamp,
+and `QueueBounded` plus `AdmissionConservation` cover atomic capacity admission
+and exact wait-resolution accounting. They do not claim conservation after a
+reserved permit is returned to its caller.
+
+`_Small` exhaustively checks the two-slot, three-tick shape: 76 distinct states
+at graph depth 9 with TLC 2.19. `_ExpectedFailure` sets
+`TimerFirstBug = TRUE`; the runner accepts it only when TLC reports the exact
+`NoFalseSlowConsumer` violation for a retained strictly pre-deadline release
+followed by a deadline-or-later poll. The oracle intentionally pins the
+invariant diagnostic rather than one scheduler-equivalent trace's exact ticks.
+A clean run, parse failure, or unrelated violation fails CI.
+
 ## Additional disconnect/outage exposure bound
 
 `ReconnectLossBound.tla` supplies the quantitative half deliberately absent
@@ -651,8 +693,8 @@ parse failure, or unrelated violation fails CI.
 
 ## Intentionally not modeled (and why)
 
-- **Rate limits / relay backpressure** — quantitative throttling and queue dynamics,
-  orthogonal to the session state machine this spec checks. Note what this does **not**
+- **Rate limits / complete relay backpressure dynamics** — quantitative throttling and
+  multi-message queue dynamics are orthogonal to the session state machine. Note what this does **not**
   mean: since the slow-consumer hardening (issue #131), per-connection delivery is _not_
   best-effort — the server never silently drops a relayed message. A full recipient queue
   backpressures the sender for up to `websocket.slow_consumer_timeout_ms`; a recipient
@@ -666,12 +708,14 @@ parse failure, or unrelated violation fails CI.
   conservation, no-silent-loss, first-close-reason-wins, close preemption against a
   wedged writer, and bounded sender blocking. Its `SilentDropBug` constant reintroduces
   the pre-#131 drop and makes TLC exhibit the `Conservation` counterexample, so the
-  invariant is demonstrably non-vacuous. `ReconnectLossBound.tla` separately
+  invariant is demonstrably non-vacuous. `CapacityDeadlineArbitration.tla`
+  separately checks one full-queue wait's scheduler-delay, continuous-capacity,
+  refill-invalidation, and atomic-admission boundary. `ReconnectLossBound.tla` separately
   proves the additional disconnect/outage-exposure arithmetic once queue,
   complete post-queue pipeline, burst, rate, and window bounds are supplied.
-  Actual scheduler timing, end-to-end pipeline capacity, and
-  deployment-specific arrival curves remain external assumptions rather than
-  model constants inferred from defaults.
+  Actual scheduler-delay distributions, end-to-end pipeline capacity, and
+  deployment-specific arrival curves remain external evidence/assumptions
+  rather than model constants inferred from defaults.
 - **`Signal` payload relay and wire generation** — `handle_signal` is
   transport-only plumbing over opaque payloads and their generation UUID
   (deliberately weaker than the session predicate, see

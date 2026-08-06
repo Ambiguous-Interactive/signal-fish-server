@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# run-tla-model-check.sh - Model-check the Protocol v3 session-lifecycle TLA+ spec.
+# run-tla-model-check.sh - Model-check the repository's TLA+ specification suite.
 #
 # Downloads a version-pinned, SHA256-verified tla2tools.jar into a cache
 # directory, then runs TLC over every model configuration in formal/tla/:
-# the session-lifecycle spec (SignalFishSession_{Mesh,Host,HostDirect,Floor})
-# and the delivery-contract spec (DeliveryContract_Small). Configurations are
+# the session lifecycle, delivery/accountability contracts, capacity-deadline
+# arbitration, and bounded resilience models. Configurations are
 # named <Module>_<Scenario>.cfg and the default run globs them all, so a new
 # spec or scenario is picked up automatically. Any invariant or property
 # violation exits nonzero; success is quiet (one summary line per
