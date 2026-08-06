@@ -212,8 +212,9 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
     ///
     /// Readiness belongs to a membership, not to a player id: reads filter the
     /// set by current membership, which silently reinstates a departed member's
-    /// readiness if that same id joins the room again. Admission calls this so a
-    /// new membership always starts unready.
+    /// readiness if that same id joins the room again. The JOIN path calls this
+    /// so a new membership always starts unready. Reconnection deliberately does
+    /// not: it resumes the same membership rather than creating a new one.
     async fn forget_player_ready(&self, room_id: &RoomId, player_id: &PlayerId);
 
     /// Snapshot the room ids that currently hold a ready-state entry.

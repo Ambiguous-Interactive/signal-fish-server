@@ -1029,7 +1029,12 @@ impl EnhancedGameServer {
                         )
                         .await;
 
-                    if was_authority {
+                    // Only announce a cleared role behind a `PlayerLeft` that
+                    // actually reached the room: the event is defined as the
+                    // explanation of that departure, and replaying a cleared
+                    // authority with no departure in front of it would leave a
+                    // client unable to attribute it.
+                    if was_authority && matches!(departure, Ok(true)) {
                         // Storage already cleared `authority_player`; announce it
                         // inside this same FIFO job so it can never precede the
                         // `PlayerLeft` that explains it. `authority_player: None`

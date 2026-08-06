@@ -115,6 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep a member that reconnects into a running game marked ready. Removal
+  prunes the departing id from a finalized room's ready list, so the restored
+  membership carries the only surviving evidence that it started the game — and
+  readiness cannot be re-established by hand, because a finalized room rejects
+  `PlayerReady`.
 - Report the right readiness in every room snapshot. Readiness lives in the
   coordinator while a room is open and moves into the room record at
   finalization, so reading either source alone is wrong half the time:
@@ -126,9 +131,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deliver `Latest` game data that is superseded faster than the configured
   outbound `batch_interval`. A superseding value continues its key's pendency
   instead of restarting the coalesce window, so a key updated every 8 ms against
-  a 16 ms interval now reaches the socket once per window; previously such a key
-  delivered no data at all — indefinitely — while still spending one
-  `DeliveryReport` frame per update. Only deployments with
+  a 16 ms interval now reaches the socket about once per coalesce window (a
+  release, the next update reopening the window, and that window elapsing);
+  previously such a key delivered no data at all — indefinitely — while still
+  spending one `DeliveryReport` frame per update. Only deployments with
   `websocket.enable_batching` enabled were affected.
 - Drop a buffered `AuthorityChanged` from a reconnecting member's
   `missed_events` when the `Reconnected` snapshot already supersedes it, so the
@@ -136,9 +142,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Announce the authority cleared by a departure. When the authority player
   leaves or disconnects, every remaining member now receives
   `AuthorityChanged` with `authority_player: null`, ordered immediately after
-  the `PlayerLeft` that explains it, as `docs/concepts/authority.md` has always
-  specified. A member reconnecting across the change is told the holder as it
-  stands on return. Without it a client
+  the `PlayerLeft` that explains it. `docs/concepts/authority.md` specified this
+  for the disconnect case and now covers `LeaveRoom` and the ordering as well. A
+  member reconnecting across the change is told the holder as it stands on
+  return. Without it a client
   following the documented host-migration flow never learned the role was
   vacant.
 - Keep the stored `is_authority` flag equal to the room's `authority_player`.

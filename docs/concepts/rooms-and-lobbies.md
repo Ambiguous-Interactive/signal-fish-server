@@ -197,9 +197,14 @@ more players and need not be full to start.
   player is ready, a member finalizes the lobby with an explicit
   [`StartGame`](../protocol.md#startgame).
 - Readiness belongs to a **membership**: a player who leaves and joins the
-  room again starts unready and must send `PlayerReady` again. (A member who
-  reconnects within the reconnection window keeps their readiness — that is
-  the same membership resumed, not a new one.)
+  room again starts unready and must send `PlayerReady` again.
+- A member who **reconnects** resumes the same membership, so it is not forced
+  unready — but its lobby readiness can be dropped while it is away (any other
+  member's `PlayerReady` prunes absent members from the ready set). Treat the
+  `Reconnected` snapshot's `ready_players` / `is_ready` as authoritative rather
+  than assuming the pre-disconnect state survived. A member that reconnects into
+  a room that has already **started** is still one of the members that started
+  it, and is reported ready.
 - More players may keep joining until the room reaches `max_players`.
 
 **LobbyStateChanged example (one player ready):**

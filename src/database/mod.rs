@@ -790,11 +790,23 @@ impl GameDatabase for InMemoryDatabase {
                 // authority in every membership payload. Derive the flag here so
                 // no caller can insert a member that contradicts the room.
                 player.is_authority = room.authority_player == Some(player.id);
-                // Same reasoning for readiness: the room's list is pruned on
-                // removal, so a snapshot's flag can outlive the membership it
-                // described. (Wire payloads read live readiness from the
-                // coordinator; this keeps the stored record self-consistent.)
-                player.is_ready = room.ready_players.contains(&player.id);
+                // Readiness has two regimes. While the room is open it is
+                // coordinator state and every stored flag is `false`, so the
+                // room's own list decides and a snapshot's flag must not
+                // resurrect readiness the membership it described has lost.
+                // Once the room is finalized the list is the frozen fact of who
+                // started the game, and removal prunes a departing member from
+                // it — so a membership being RESTORED carries the only surviving
+                // evidence that it started. A fresh joiner cannot smuggle
+                // readiness in that way: the join path constructs its record
+                // with `is_ready: false`, and readiness cannot be toggled in a
+                // finalized room at all.
+                let finalized = room.lobby_state == crate::protocol::LobbyState::Finalized;
+                player.is_ready =
+                    room.ready_players.contains(&player.id) || (finalized && player.is_ready);
+                if player.is_ready && !room.ready_players.contains(&player.id) {
+                    room.ready_players.push(player.id);
+                }
                 room.players.insert(player.id, player);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).

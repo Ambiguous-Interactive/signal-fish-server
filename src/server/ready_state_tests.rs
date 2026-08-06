@@ -519,6 +519,120 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
     }
 }
 
+/// A member that reconnects into a running game is still one of the members
+/// that started it. Removal prunes the departing id from the finalized room's
+/// ready list, so the restored membership carries the only surviving evidence —
+/// and readiness cannot be re-established by hand, because a finalized room
+/// rejects `PlayerReady`.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    let (returning, mut returning_rx) = register_client(&server).await;
+    for player in [player_a, player_b, returning] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+
+    server
+        .handle_join_room(
+            &player_a,
+            "finalized-reconnect".to_string(),
+            Some("FINAL2".to_string()),
+            "PlayerA".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "finalized-reconnect".to_string(),
+            Some("FINAL2".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a).await;
+    drain_pending(&mut rx_b).await;
+    server.handle_player_ready(&player_a).await;
+    server.handle_player_ready(&player_b).await;
+    server.handle_start_game(&player_a).await;
+    drain_pending(&mut rx_a).await;
+    drain_pending(&mut rx_b).await;
+
+    let room_id = server
+        .get_client_room(&player_b)
+        .await
+        .expect("member has a room");
+    let player_b_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists")
+        .players
+        .get(&player_b)
+        .cloned()
+        .expect("member is stored");
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(
+            player_b,
+            room_id,
+            false,
+            Some(player_b_info),
+            server
+                .connection_manager
+                .game_data_epoch(&player_b)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &player_b)
+        .await
+        .expect("remove disconnected member")
+        .expect("member was present");
+    server.connection_manager.remove_client(&player_b);
+    server
+        .message_coordinator
+        .unregister_local_client(&player_b)
+        .await
+        .expect("unroute disconnected member");
+
+    assert!(
+        server
+            .handle_reconnect(&returning, &player_b, &room_id, &token)
+            .await
+    );
+
+    match recv(&mut returning_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert!(
+                payload.ready_players.contains(&player_b),
+                "the restored member is one of the members that started the game: {:?}",
+                payload.ready_players
+            );
+            let restored = payload
+                .current_players
+                .iter()
+                .find(|player| player.id == player_b)
+                .expect("the restored member is in its own snapshot");
+            assert!(
+                restored.is_ready,
+                "a member of a running game is not unready: {:?}",
+                payload.current_players
+            );
+        }
+        other => panic!("expected Reconnected, got {other:?}"),
+    }
+}
+
 /// Finalization moves readiness: the coordinator's entry is dropped and the
 /// final set is written into the room record. A snapshot taken after the game
 /// starts must read the record, or every member of a running game is reported
