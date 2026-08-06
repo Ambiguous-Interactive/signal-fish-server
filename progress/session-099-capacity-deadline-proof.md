@@ -89,3 +89,14 @@ pass re-read the complete diff and reported zero findings.
   pre-push checks: pass.
 - Hook/local-policy suites: 309 CI configuration tests pass (1 intentionally
   ignored), plus all 10 document-policy and 5 document-script tests.
+
+## Publication
+
+The aggregate change was published on branch
+`codex/session-099-capacity-deadline-model` as pull request
+[#292](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/292).
+Implementation commit `fc35448` contains the reviewed model and validation
+record. The PR was marked ready and both Cursor and Copilot reviews were
+requested. Exact final-head CI and review state remains authoritative on the PR;
+writing that terminal result back into this file would create a new head and
+invalidate the evidence it claimed to record.
