@@ -115,11 +115,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Report live readiness in a spectator's room snapshot. `SpectatorJoined`
-  projected the stored player record, whose `is_ready` flag is only written at
-  finalize, so a spectator saw an all-unready lobby however ready the members
-  were — and receives no lobby broadcast that could correct it. It now reads the
-  same coordinator state `RoomJoined` and `Reconnected` do.
+- Report the right readiness in every room snapshot. Readiness lives in the
+  coordinator while a room is open and moves into the room record at
+  finalization, so reading either source alone is wrong half the time:
+  `SpectatorJoined` read the record and showed an all-unready lobby however
+  ready the members were (and spectators receive no lobby broadcast that could
+  correct it), while `RoomJoined` and `Reconnected` read the coordinator and
+  showed an all-unready game after it started. All three now select by lobby
+  state.
 - Deliver `Latest` game data that is superseded faster than the configured
   outbound `batch_interval`. A superseding value continues its key's pendency
   instead of restarting the coalesce window, so a key updated every 8 ms against
@@ -133,8 +136,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Announce the authority cleared by a departure. When the authority player
   leaves or disconnects, every remaining member now receives
   `AuthorityChanged` with `authority_player: null`, ordered immediately after
-  the `PlayerLeft` that explains it and replayed to reconnecting members, as
-  `docs/concepts/authority.md` has always specified. Without it a client
+  the `PlayerLeft` that explains it, as `docs/concepts/authority.md` has always
+  specified. A member reconnecting across the change is told the holder as it
+  stands on return. Without it a client
   following the documented host-migration flow never learned the role was
   vacant.
 - Keep the stored `is_authority` flag equal to the room's `authority_player`.

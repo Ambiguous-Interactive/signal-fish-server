@@ -889,10 +889,11 @@ impl EnhancedGameServer {
                                 Some((current_room.clone(), response_players.clone()));
                         }
 
-                        let ready_players = server
-                            .room_coordinator
-                            .current_ready_players(&response_room_id)
-                            .await;
+                        let ready_players = super::ready_state::snapshot_ready_players(
+                            &current_room,
+                            server.room_coordinator.as_ref(),
+                        )
+                        .await;
                         for player in &mut response_players {
                             player.is_ready = ready_players.contains(&player.id);
                             player.epoch = None;

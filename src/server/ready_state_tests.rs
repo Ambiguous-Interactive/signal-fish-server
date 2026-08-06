@@ -519,6 +519,92 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
     }
 }
 
+/// Finalization moves readiness: the coordinator's entry is dropped and the
+/// final set is written into the room record. A snapshot taken after the game
+/// starts must read the record, or every member of a running game is reported
+/// unready — the state a spectator joining a live game sees.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn snapshots_of_a_finalized_room_report_its_final_readiness() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    let (observer, mut observer_rx) = register_client(&server).await;
+    for player in [player_a, player_b] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+
+    server
+        .handle_join_room(
+            &player_a,
+            "finalized-spectate".to_string(),
+            Some("FINAL1".to_string()),
+            "PlayerA".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "finalized-spectate".to_string(),
+            Some("FINAL1".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a).await;
+    drain_pending(&mut rx_b).await;
+
+    server.handle_player_ready(&player_a).await;
+    server.handle_player_ready(&player_b).await;
+    server.handle_start_game(&player_a).await;
+    drain_pending(&mut rx_a).await;
+    drain_pending(&mut rx_b).await;
+
+    let room_id = server
+        .get_client_room(&player_a)
+        .await
+        .expect("member has a room");
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .lobby_state,
+        LobbyState::Finalized,
+        "fixture precondition: the game has started"
+    );
+
+    server
+        .handle_join_as_spectator(
+            &observer,
+            "finalized-spectate".to_string(),
+            "FINAL1".to_string(),
+            "Observer".to_string(),
+        )
+        .await;
+
+    match recv(&mut observer_rx).await.as_ref() {
+        ServerMessage::SpectatorJoined(payload) => {
+            assert_eq!(payload.current_players.len(), 2);
+            for player in &payload.current_players {
+                assert!(
+                    player.is_ready,
+                    "a finalized room's members are ready: {:?}",
+                    payload.current_players
+                );
+            }
+        }
+        other => panic!("observer expected SpectatorJoined, got {other:?}"),
+    }
+}
+
 /// A spectator's room snapshot must report readiness from the same source the
 /// members' own snapshots use. Readiness lives in the coordinator, never in the
 /// stored player record during the lobby, so projecting the stored flag shows a

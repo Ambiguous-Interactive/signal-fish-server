@@ -283,7 +283,11 @@ impl SpectatorService {
                         ));
                     }
                 };
-                let ready_players = self.room_coordinator.current_ready_players(&room.id).await;
+                let ready_players = crate::server::ready_state::snapshot_ready_players(
+                    &current_room,
+                    self.room_coordinator.as_ref(),
+                )
+                .await;
                 let current_players: Vec<PlayerInfo> = current_room
                     .players
                     .values()

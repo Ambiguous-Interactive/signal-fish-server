@@ -460,10 +460,11 @@ impl EnhancedGameServer {
                                     ));
                                 }
 
-                                let mut ready_players = server
-                                    .room_coordinator
-                                    .current_ready_players(&response_room_id)
-                                    .await;
+                                let mut ready_players = super::ready_state::snapshot_ready_players(
+                                    &current_room,
+                                    server.room_coordinator.as_ref(),
+                                )
+                                .await;
                                 for player in &mut current_players {
                                     player.is_ready = ready_players.contains(&player.id);
                                     player.epoch = None;
@@ -900,6 +901,12 @@ impl EnhancedGameServer {
                     // remaining members still need the cleared-authority event.
                     Ok((released, _)) => released,
                     Err(authority_error) => {
+                        // Two consecutive storage failures: the role may still
+                        // be held by a member that is gone. The durable-detach
+                        // backlog repairs the row later and clears the role with
+                        // it, but that repair is silent, so this room can end up
+                        // authority-less without the event. Announcing here
+                        // would be a guess — storage never confirmed the state.
                         tracing::warn!(%player_id, %room_id, error = %authority_error, "Failed to clear disconnected authority after storage removal error");
                         false
                     }

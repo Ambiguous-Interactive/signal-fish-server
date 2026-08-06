@@ -155,8 +155,10 @@ message with `authority_player` set to `null`:
 If the authority player leaves or disconnects from the room, authority is
 **cleared** -- there is no automatic reassignment. All remaining players
 receive an `AuthorityChanged` message with `authority_player: null`, ordered
-immediately after the `PlayerLeft` that explains it (and replayed to a member
-that reconnects across it). Your
+immediately after the `PlayerLeft` that explains it. A member that reconnects
+across the change is told the room's authority as it stands when it returns:
+its `Reconnected` snapshot carries the current holder, and any buffered
+authority event that snapshot already supersedes is not replayed. Your
 game logic should handle this case, either by prompting another player to
 claim authority or by pausing the game until someone does.
 

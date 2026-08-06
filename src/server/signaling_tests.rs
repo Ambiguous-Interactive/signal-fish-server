@@ -2143,13 +2143,22 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
         .unregister_local_client(&authority)
         .await
         .expect("unroute disconnected authority");
-    // The departure that vacated the role is buffered for replay.
+    // The departure that vacated the role is buffered for replay, as is an
+    // unrelated room event that the snapshot does not supersede.
     manager
         .record_room_event(
             &room_id,
             &ServerMessage::AuthorityChanged {
                 authority_player: None,
                 you_are_authority: false,
+            },
+        )
+        .await;
+    manager
+        .record_room_event(
+            &room_id,
+            &ServerMessage::PlayerJoined {
+                player: player_info(existing, "existing"),
             },
         )
         .await;
@@ -2175,6 +2184,14 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
                     }
                 )),
                 "a superseded cleared-authority event must not contradict the snapshot: {:?}",
+                payload.missed_events
+            );
+            assert!(
+                payload
+                    .missed_events
+                    .iter()
+                    .any(|event| matches!(event, ServerMessage::PlayerJoined { .. })),
+                "the filter must drop only what the snapshot supersedes: {:?}",
                 payload.missed_events
             );
         }
