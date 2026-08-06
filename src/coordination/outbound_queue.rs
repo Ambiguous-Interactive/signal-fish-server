@@ -517,7 +517,10 @@ impl QueueState {
             Lane::Control => self.control_capacity,
         };
         let available = self.lane_len_with_reservations(lane) < capacity;
-        let available_since = &mut self.capacity_available_since[lane.index()];
+        let Some(available_since) = self.capacity_available_since.get_mut(lane.index()) else {
+            tracing::error!(?lane, "outbound queue lane is missing capacity state");
+            return;
+        };
         if available {
             if available_since.is_none() {
                 *available_since = Some(Instant::now());
@@ -743,9 +746,14 @@ impl CapacityReleaseWitness {
     ) -> bool {
         Arc::ptr_eq(&self.shared, shared)
             && self.lane == lane
-            && state.capacity_available_since[self.lane.index()].is_some_and(|available_since| {
-                available_since >= self.full_observed_at && available_since < deadline
-            })
+            && state
+                .capacity_available_since
+                .get(self.lane.index())
+                .copied()
+                .flatten()
+                .is_some_and(|available_since| {
+                    available_since >= self.full_observed_at && available_since < deadline
+                })
     }
 }
 
