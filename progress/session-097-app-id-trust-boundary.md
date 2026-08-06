@@ -8,6 +8,9 @@
   branch and repaired its Prettier/changelog failures.
 - Left P53 collecting hosted timing evidence: 0 of 20 eligible scheduled
   attempts per OS exist, so its evidence gate cannot honestly be closed yet.
+- Opened issue #290 and P56 after exact-head hosted diagnostics captured the
+  second intermittent H14 compatible-control eviction without weakening its
+  production-default oracle.
 
 ## Contract
 
@@ -65,5 +68,13 @@ dependency, compatibility, or terminology blockers.
 - The first hosted Panic Policy run found two direct indexes in legacy env-path
   normalization; both now use checked mutable access, and the full local panic
   policy passes.
-- Aggregate PR and hosted exact-head CI/review: tracked by the session PR after
-  publication.
+- Aggregate PR #289 implementation head `4d5fb283` completed all 18 substantive
+  workflows successfully; Dependabot auto-merge was the only intentional skip.
+- Verification Nightly's first H14 attempt evicted only the compatible control
+  despite measured on-rate proxy delivery and 0.01x fallback amplification.
+  Its identical-SHA retry passed; issue #290 retains the decisive evidence and
+  requires a first-attempt hosted distribution rather than accepting a retry as
+  the fix.
+- Cursor Bugbot reported zero findings on the exact implementation head, no
+  review threads remain, and both explicit Copilot requests returned the
+  repository account's quota-limit response.
