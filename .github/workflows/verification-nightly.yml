@@ -90,6 +90,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  SIGNAL_FISH_H14_CONTRACT_VERSION: h14-capacity-v1
 
 jobs:
   soak:
@@ -437,6 +438,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
         id: toolchain
@@ -449,6 +451,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
+        id: install-rust
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -457,6 +460,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
+        id: install-nextest
         uses: taiki-e/install-action@v2.85.7
         with:
           tool: cargo-nextest
@@ -482,12 +486,103 @@ jobs:
             --skip hosted_relay_timing_observations_preserve_semantic_oracles \
             2>&1 | tee relay-matrix-output.txt
       - name: Run mixed-encoding amplification experiment
+        id: h14
+        if: >-
+          ${{ always() && !cancelled() &&
+              steps.checkout.outcome == 'success' &&
+              steps.toolchain.outcome == 'success' &&
+              steps.install-rust.outcome == 'success' &&
+              steps.install-nextest.outcome == 'success' }}
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
+          : > mixed-encoding-output.txt
+          : > h14-started
+          set +e
           cargo nextest run --profile ci --locked --all-features \
             --test mixed_encoding_relay_e2e --run-ignored ignored-only \
+            -E 'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
+            --no-tests fail \
             --success-output final 2>&1 | tee mixed-encoding-output.txt
+          h14_status=$?
+          set -e
+          printf '%s\n' "$h14_status" > h14-exit-code.txt
+          exit "$h14_status"
+      - name: Write H14 attempt manifest
+        if: always()
+        shell: bash
+        env:
+          H14_OUTCOME: ${{ steps.h14.outcome }}
+          JOB_STATUS: ${{ job.status }}
+          SIGNAL_FISH_RUST_TOOLCHAIN: ${{ steps.toolchain.outputs.channel }}
+        run: |
+          set -euo pipefail
+          h14_started=false
+          if [ -f h14-started ]; then
+            h14_started=true
+          fi
+          h14_finished=false
+          h14_exit_code=null
+          if [ -f h14-exit-code.txt ]; then
+            h14_finished=true
+            read -r h14_exit_code < h14-exit-code.txt
+          fi
+          raw_log_present=false
+          raw_log_bytes=0
+          if [ -f mixed-encoding-output.txt ]; then
+            raw_log_present=true
+            raw_log_bytes=$(wc -c < mixed-encoding-output.txt | tr -d ' ')
+          fi
+          terminal_outcome=false
+          if [ "$H14_OUTCOME" = "success" ] || [ "$H14_OUTCOME" = "failure" ]; then
+            terminal_outcome=true
+          fi
+          evidence_complete=false
+          if [ "$h14_started" = true ] && [ "$h14_finished" = true ] \
+            && [ "$raw_log_present" = true ] && [ "$raw_log_bytes" -gt 0 ] \
+            && [ "$terminal_outcome" = true ]; then
+            evidence_complete=true
+          fi
+          passed=false
+          if [ "$evidence_complete" = true ] && [ "$H14_OUTCOME" = "success" ] \
+            && [ "$h14_exit_code" = "0" ]; then
+            passed=true
+          fi
+          eligible=false
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ "$GITHUB_RUN_ATTEMPT" = "1" ]; then
+            eligible=true
+          fi
+          {
+            printf '{"schema_version":1,'
+            printf '"contract_version":"%s",' "$SIGNAL_FISH_H14_CONTRACT_VERSION"
+            printf '"event_name":"%s","run_id":"%s",' \
+              "$GITHUB_EVENT_NAME" "$GITHUB_RUN_ID"
+            printf '"run_attempt":"%s","commit_sha":"%s",' \
+              "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA"
+            printf '"runner_os":"%s","runner_image_os":"%s",' \
+              "$RUNNER_OS" "${ImageOS:-unknown}"
+            printf '"runner_image_version":"%s","rust_toolchain":"%s",' \
+              "${ImageVersion:-unknown}" "${SIGNAL_FISH_RUST_TOOLCHAIN:-unknown}"
+            printf '"h14_outcome":"%s","job_status":"%s",' \
+              "$H14_OUTCOME" "$JOB_STATUS"
+            printf '"h14_started":%s,"h14_finished":%s,' \
+              "$h14_started" "$h14_finished"
+            printf '"h14_exit_code":%s,"raw_log_present":%s,' \
+              "$h14_exit_code" "$raw_log_present"
+            printf '"raw_log_bytes":%s,"evidence_complete":%s,' \
+              "$raw_log_bytes" "$evidence_complete"
+            printf '"passed":%s,"eligible":%s}\n' "$passed" "$eligible"
+          } > h14-attempt.json
+      - name: Upload H14 attempt evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: h14-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            mixed-encoding-output.txt
+            h14-attempt.json
+          retention-days: 30
+          if-no-files-found: error
       - name: Run asymmetric-bandwidth flap experiment
         shell: bash
         run: |

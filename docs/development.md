@@ -304,9 +304,13 @@ all-feature clean-grid repetitions in a dedicated process on Linux, Windows,
 and macOS, keeps every delivery, conformance, zero-backpressure, and
 zero-eviction oracle, but deliberately does not gate the observed wall clock.
 Each job retains raw output, one JSONL row per completed cell, and an explicit
-attempt manifest for 90 days, including RED-run artifacts. Records identify the
-event, attempt, commit, exact Rust toolchain, workload schema, runner image, and
-completion state.
+attempt manifest for 30 days, the repository's configured maximum, including
+RED-run artifacts. At the nominal daily cadence, that covers the 20-allocation
+cohort plus a 10-day audit margin. Because missed or delayed schedules can
+stretch the cohort, maintainers audit it incrementally and download an attempt
+before its artifact expires when collection will exceed 30 days. Records
+identify the event, attempt, commit, exact Rust toolchain, workload schema,
+runner image, and completion state.
 
 Issue #274's platform decision uses the first 20 consecutive scheduled,
 first-attempt allocations per operating system after `relay-clean-v1` lands
@@ -324,6 +328,30 @@ isolated job only if every eligible observation is below it and the largest
 retains at least 2x headroom (at most 125 ms). Otherwise the platform stays
 correctness-only. A new ceiling must not be invented from one outlier or one
 shared-runner sample.
+
+P56's H14 validation uses the existing `scenario-profiles` job in
+`Verification Nightly`, preserving the same profile-CI runner and precursor
+context as the post-fix baseline. The exact
+`unsupported_message_pack_fallback_does_not_flap_weaker_recipient` selector
+runs after unrelated scenario or relay-matrix failures when checkout, the Rust
+toolchain, and Nextest setup succeeded. Its raw log and versioned attempt
+manifest are uploaded immediately afterward for the repository's 30-day
+maximum, before a later experiment can fail or consume the job timeout.
+That retention covers the 20-allocation cohort plus a 10-day margin only at the
+nominal daily cadence; maintainers audit incrementally and download attempts
+before expiry if schedule gaps stretch collection beyond 30 days.
+
+The fixed cohort is `h14-capacity-v1`: the first 20 consecutive scheduled,
+first-attempt allocations after the P56 production fix. Eligibility depends
+only on the scheduled event and first run attempt, never on test outcome,
+artifact presence, or completeness. A RED, cancelled, skipped, missing, or
+incomplete attempt therefore breaks acceptance instead of creating a sliding
+green-only window; reruns and manual/PR runs are diagnostic. Scheduled run
+`31070254464` was manually audited before manifests existed and remains the
+first eligible observation because this evidence-only instrumentation changes
+neither production code, workload, runner context, nor test oracle. A cohort
+restart requires a documented causal fix or workload change and a new contract
+version.
 
 ## Code Coverage
 
