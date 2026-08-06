@@ -141,8 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame cannot assert both "you are the authority" and "authority is vacant".
 - Announce the authority cleared by a departure. When the authority player
   leaves or disconnects, every remaining member now receives
-  `AuthorityChanged` with `authority_player: null`, ordered immediately after
-  the `PlayerLeft` that explains it. `docs/concepts/authority.md` specified this
+  `AuthorityChanged` with `authority_player: null`, ordered after the
+  `PlayerLeft` that explains it and never before it. `docs/concepts/authority.md` specified this
   for the disconnect case and now covers `LeaveRoom` and the ordering as well. A
   member reconnecting across the change is told the holder as it stands on
   return. Without it a client

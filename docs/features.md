@@ -324,9 +324,9 @@ carries an opaque publication `generation`, the chosen `topology` and
 topology), a validated `direct_endpoint` when the selected transport is
 `direct`, the `peers` this recipient should connect to (each with an `initiate`
 flag so exactly one side of every pair sends the offer), the `ice_servers` to
-gather against (empty for a recipient whose `peers` list is empty, because it
-did not negotiate this session's topology and transport and so has nothing to
-gather against), and a universal `fallback` transport that is always `relay`.
+gather against (omitted for a recipient that did not negotiate this session's
+topology and transport, which therefore has nothing to gather against), and a
+universal `fallback` transport that is always `relay`.
 `host + direct` is eligible only when at least one capable host has supplied a
 syntactically usable endpoint; the endpoint remains self-declared, so clients
 must retain the relay fallback.
