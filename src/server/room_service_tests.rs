@@ -126,6 +126,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
     let room_applications = Arc::new(DashMap::new());
     let spectator_service = SpectatorService::new(
         Arc::clone(&database),
+        Arc::clone(&room_coordinator),
         Arc::clone(&message_coordinator),
         Arc::clone(&room_applications),
         protocol_config.clone(),
@@ -2532,6 +2533,16 @@ async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
         replacement.as_deref(),
         Some(ServerMessage::RoomJoined(_))
     ));
+    let cleared_authority = timeout(Duration::from_secs(1), survivor_rx.recv())
+        .await
+        .expect("the departing authority clears the role");
+    assert!(matches!(
+        cleared_authority.as_deref(),
+        Some(ServerMessage::AuthorityChanged {
+            authority_player: None,
+            you_are_authority: false
+        })
+    ));
     assert!(matches!(
         timeout(Duration::from_secs(1), survivor_rx.recv())
             .await
@@ -2784,6 +2795,19 @@ async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reach
         &mut fixture.survivor_rx,
         "storage-failed disconnect still publishes its terminal epoch",
         |message| matches!(message, ServerMessage::PlayerLeft { player_id, epoch: Some(_), final_seq: Some(_), } if *player_id == fixture.leaver),
+    );
+    assert_next_message_matches(
+        &mut fixture.survivor_rx,
+        "the forced teardown released authority, so remaining members are told",
+        |message| {
+            matches!(
+                message,
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    you_are_authority: false
+                }
+            )
+        },
     );
 
     let stored_players = fixture
@@ -4951,5 +4975,68 @@ async fn draining_cleanup_task_skips_activity_farewell_when_drain_starts_during_
             .load(Ordering::Relaxed),
         0,
         "no expired-player metric should be recorded when drain cancels eviction"
+    );
+}
+
+/// `docs/concepts/authority.md` promises that a departing authority clears the
+/// role and that every remaining member observes `AuthorityChanged` with a null
+/// `authority_player`. Without it, clients keep treating the departed member as
+/// host and nobody claims the vacant role, while the server already lets any
+/// member start the game.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn departing_authority_notifies_remaining_members() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    assert_eq!(
+        fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .authority_player,
+        Some(fixture.leaver),
+        "fixture precondition: the departing member holds authority"
+    );
+    let _ = drain_queued_messages(&mut fixture.survivor_rx);
+
+    fixture.server.leave_room(&fixture.leaver).await;
+
+    let survivor_messages = drain_queued_messages(&mut fixture.survivor_rx);
+    let left_at = survivor_messages
+        .iter()
+        .position(|message| {
+            matches!(message.as_ref(), ServerMessage::PlayerLeft { player_id, .. }
+                if *player_id == fixture.leaver)
+        })
+        .expect("the remaining member observes the departure");
+    let authority_at = survivor_messages
+        .iter()
+        .position(|message| {
+            matches!(
+                message.as_ref(),
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    you_are_authority: false
+                }
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!("a departing authority must clear the role for remaining members: {survivor_messages:?}")
+        });
+    assert!(
+        left_at < authority_at,
+        "the cleared authority follows the departure it explains: {survivor_messages:?}"
+    );
+    assert_eq!(
+        fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .authority_player,
+        None,
+        "storage clears authority on departure"
     );
 }

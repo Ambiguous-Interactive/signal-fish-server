@@ -152,11 +152,23 @@ message with `authority_player` set to `null`:
 
 ### Authority Player Disconnects
 
-If the authority player disconnects from the room, authority is
+If the authority player leaves or disconnects from the room, authority is
 **cleared** -- there is no automatic reassignment. All remaining players
-receive an `AuthorityChanged` message with `authority_player: null`. Your
+receive an `AuthorityChanged` message with `authority_player: null`, ordered
+after the `PlayerLeft` that explains it. (One exception: if storage is
+unavailable at the moment of the disconnect _and_ the compensating release also
+fails, the durable removal is retried in the background and the role is cleared
+when that repair lands, without a further notification.) A member that reconnects
+across the change is told the room's authority as it stands when it returns:
+its `Reconnected` snapshot reports whether it holds the role (`is_authority`)
+and flags the holder in `current_players`, and any buffered authority event
+that snapshot already supersedes is not replayed. Your
 game logic should handle this case, either by prompting another player to
 claim authority or by pausing the game until someone does.
+
+If the departed member reconnects while another player has since claimed the
+role, the successor keeps it: the returning member is restored as an ordinary,
+non-authority member.
 
 ## Key Rules
 

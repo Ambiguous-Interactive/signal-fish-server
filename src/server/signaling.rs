@@ -633,10 +633,14 @@ impl EnhancedGameServer {
                                         }
                                         if joiner_has_plan && !is_replan {
                                             metrics.increment_session_plans_late_join();
-                                            metrics.add_turn_credentials_issued(
-                                                turn_credentials_issued,
-                                            );
                                         }
+                                        // Total issuance, not actor issuance:
+                                        // incumbents are re-issued credentials
+                                        // even when the joiner gets no plan (v2)
+                                        // or the join forces a re-plan, and the
+                                        // reconnect and host-replan paths count
+                                        // theirs unconditionally too.
+                                        metrics.add_turn_credentials_issued(turn_credentials_issued);
                                         if let Some(reconnection_manager) = reconnection_manager {
                                             reconnection_manager
                                                 .record_room_event(

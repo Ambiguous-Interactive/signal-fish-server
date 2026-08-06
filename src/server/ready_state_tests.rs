@@ -103,6 +103,23 @@ async fn recv(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Arc<ServerMe
         .expect("message present")
 }
 
+/// Drain every message already queued for a receiver (used to skip join/lobby
+/// traffic that is not the subject of a test).
+///
+/// Every operation these tests drain after is fully awaited, so the frames are
+/// already enqueued: draining what is present is deterministic, where waiting on
+/// a silence window would be a wall-clock heuristic.
+fn drain_pending(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
+    loop {
+        match receiver.try_recv() {
+            Ok(_) => {}
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                return;
+            }
+        }
+    }
+}
+
 /// Assert that no message is pending within a short window.
 async fn assert_silent(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
     match timeout(Duration::from_millis(100), receiver.recv()).await {
@@ -382,4 +399,404 @@ async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
         LobbyState::Finalized,
         "a rejected ready toggle must not regress the finalized room"
     );
+}
+
+/// Readiness belongs to a membership, not to a player id. A member who leaves
+/// and joins again is a new, unready member: resurrecting the previous
+/// readiness would both invert their next toggle and let the remaining members
+/// reach `all_ready` (and therefore `StartGame`) without them.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn rejoining_a_room_does_not_restore_stale_readiness() {
+    let server = create_test_server().await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+
+    server
+        .handle_join_room(
+            &player_a,
+            "ready-rejoin-game".to_string(),
+            None,
+            "PlayerA".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let (room_id, room_code) = match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => (payload.room_id, payload.room_code.clone()),
+        other => panic!("player_a expected RoomJoined, got {other:?}"),
+    };
+    server
+        .handle_join_room(
+            &player_b,
+            "ready-rejoin-game".to_string(),
+            Some(room_code.clone()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("player_b expected RoomJoined, got {other:?}"),
+    }
+    // The second join fills the lobby: drain the join/lobby traffic both members
+    // observe before the readiness sequence under test.
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .lobby_state,
+        LobbyState::Lobby,
+        "fixture precondition: the room accepts ready toggles"
+    );
+
+    // A readies, then leaves the room entirely.
+    server.handle_player_ready(&player_a).await;
+    for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
+        expect_lobby_state_changed(rx, false, who).await;
+    }
+    server.leave_room(&player_a).await;
+    match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomLeft => {}
+        other => panic!("player_a expected RoomLeft, got {other:?}"),
+    }
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::PlayerLeft { .. } => {}
+        other => panic!("player_b expected PlayerLeft, got {other:?}"),
+    }
+    // The departing member created the room, so the departure also clears the
+    // authority role. That contract belongs to `room_service_tests`; drain it
+    // here so a regression there cannot masquerade as a readiness failure.
+    drain_pending(&mut rx_b);
+
+    // A joins the same room again: a fresh membership starts unready.
+    server
+        .handle_join_room(
+            &player_a,
+            "ready-rejoin-game".to_string(),
+            Some(room_code),
+            "PlayerA".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => {
+            assert_eq!(
+                payload.room_id, room_id,
+                "the rejoin must land in the original room"
+            );
+            assert!(
+                payload.ready_players.is_empty(),
+                "a rejoining member must not be reported ready: {:?}",
+                payload.ready_players
+            );
+            let rejoined = payload
+                .current_players
+                .iter()
+                .find(|player| player.id == player_a)
+                .expect("the rejoining member is present");
+            assert!(
+                !rejoined.is_ready,
+                "a rejoining member's snapshot must show them unready"
+            );
+        }
+        other => panic!("player_a expected RoomJoined on rejoin, got {other:?}"),
+    }
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::PlayerJoined { .. } => {}
+        other => panic!("player_b expected PlayerJoined on rejoin, got {other:?}"),
+    }
+
+    // B is now the only ready member, so the room is NOT all-ready.
+    server.handle_player_ready(&player_b).await;
+    for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
+        expect_lobby_state_changed(rx, false, who).await;
+    }
+}
+
+/// A member that reconnects into a running game is still one of the members
+/// that started it. Removal prunes the departing id from the finalized room's
+/// ready list, so the restored membership carries the only surviving evidence —
+/// and readiness cannot be re-established by hand, because a finalized room
+/// rejects `PlayerReady`.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    let (returning, mut returning_rx) = register_client(&server).await;
+    for player in [player_a, player_b, returning] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+
+    server
+        .handle_join_room(
+            &player_a,
+            "finalized-reconnect".to_string(),
+            Some("FINAL2".to_string()),
+            "PlayerA".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "finalized-reconnect".to_string(),
+            Some("FINAL2".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+    server.handle_player_ready(&player_a).await;
+    server.handle_player_ready(&player_b).await;
+    server.handle_start_game(&player_a).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    let room_id = server
+        .get_client_room(&player_b)
+        .await
+        .expect("member has a room");
+    let player_b_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists")
+        .players
+        .get(&player_b)
+        .cloned()
+        .expect("member is stored");
+    assert!(
+        player_b_info.is_ready,
+        "premise: finalization marks every member of the started game ready in \
+         the record the disconnect capture reads"
+    );
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(
+            player_b,
+            room_id,
+            false,
+            Some(player_b_info),
+            server
+                .connection_manager
+                .game_data_epoch(&player_b)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &player_b)
+        .await
+        .expect("remove disconnected member")
+        .expect("member was present");
+    server.connection_manager.remove_client(&player_b);
+    server
+        .message_coordinator
+        .unregister_local_client(&player_b)
+        .await
+        .expect("unroute disconnected member");
+
+    assert!(
+        server
+            .handle_reconnect(&returning, &player_b, &room_id, &token)
+            .await
+    );
+
+    match recv(&mut returning_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert!(
+                payload.ready_players.contains(&player_b),
+                "the restored member is one of the members that started the game: {:?}",
+                payload.ready_players
+            );
+            let restored = payload
+                .current_players
+                .iter()
+                .find(|player| player.id == player_b)
+                .expect("the restored member is in its own snapshot");
+            assert!(
+                restored.is_ready,
+                "a member of a running game is not unready: {:?}",
+                payload.current_players
+            );
+        }
+        other => panic!("expected Reconnected, got {other:?}"),
+    }
+}
+
+/// Finalization moves readiness: the coordinator's entry is dropped and the
+/// final set is written into the room record. A snapshot taken after the game
+/// starts must read the record, or every member of a running game is reported
+/// unready — the state a spectator joining a live game sees.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn snapshots_of_a_finalized_room_report_its_final_readiness() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    let (observer, mut observer_rx) = register_client(&server).await;
+    for player in [player_a, player_b] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+
+    server
+        .handle_join_room(
+            &player_a,
+            "finalized-spectate".to_string(),
+            Some("FINAL1".to_string()),
+            "PlayerA".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "finalized-spectate".to_string(),
+            Some("FINAL1".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    server.handle_player_ready(&player_a).await;
+    server.handle_player_ready(&player_b).await;
+    server.handle_start_game(&player_a).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    let room_id = server
+        .get_client_room(&player_a)
+        .await
+        .expect("member has a room");
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .lobby_state,
+        LobbyState::Finalized,
+        "fixture precondition: the game has started"
+    );
+
+    server
+        .handle_join_as_spectator(
+            &observer,
+            "finalized-spectate".to_string(),
+            "FINAL1".to_string(),
+            "Observer".to_string(),
+        )
+        .await;
+
+    match recv(&mut observer_rx).await.as_ref() {
+        ServerMessage::SpectatorJoined(payload) => {
+            assert_eq!(payload.current_players.len(), 2);
+            for player in &payload.current_players {
+                assert!(
+                    player.is_ready,
+                    "a finalized room's members are ready: {:?}",
+                    payload.current_players
+                );
+            }
+        }
+        other => panic!("observer expected SpectatorJoined, got {other:?}"),
+    }
+}
+
+/// A spectator's room snapshot must report readiness from the same source the
+/// members' own snapshots use. Readiness lives in the coordinator, never in the
+/// stored player record during the lobby, so projecting the stored flag shows a
+/// spectator an all-unready lobby no matter what the members did — and the
+/// spectator receives no lobby broadcasts that could correct it.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn spectator_snapshot_reports_live_readiness() {
+    let server = create_test_server().await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    let (observer, mut observer_rx) = register_client(&server).await;
+
+    server
+        .handle_join_room(
+            &player_a,
+            "spectated-game".to_string(),
+            Some("SPECT1".to_string()),
+            "PlayerA".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "spectated-game".to_string(),
+            Some("SPECT1".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    server.handle_player_ready(&player_a).await;
+    server.handle_player_ready(&player_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    server
+        .handle_join_as_spectator(
+            &observer,
+            "spectated-game".to_string(),
+            "SPECT1".to_string(),
+            "Observer".to_string(),
+        )
+        .await;
+
+    match recv(&mut observer_rx).await.as_ref() {
+        ServerMessage::SpectatorJoined(payload) => {
+            assert_eq!(
+                payload.lobby_state,
+                LobbyState::Lobby,
+                "fixture precondition: the observed room is still in its lobby"
+            );
+            assert_eq!(payload.current_players.len(), 2);
+            for player in &payload.current_players {
+                assert!(
+                    player.is_ready,
+                    "the spectator snapshot must report the live ready state: {:?}",
+                    payload.current_players
+                );
+            }
+        }
+        other => panic!("observer expected SpectatorJoined, got {other:?}"),
+    }
 }

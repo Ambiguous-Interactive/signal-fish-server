@@ -208,6 +208,15 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
     /// Clear ready players for a room
     async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()>;
 
+    /// Forget one player's readiness in a room.
+    ///
+    /// Readiness belongs to a membership, not to a player id: reads filter the
+    /// set by current membership, which silently reinstates a departed member's
+    /// readiness if that same id joins the room again. The JOIN path calls this
+    /// so a new membership always starts unready. Reconnection deliberately does
+    /// not: it resumes the same membership rather than creating a new one.
+    async fn forget_player_ready(&self, room_id: &RoomId, player_id: &PlayerId);
+
     /// Snapshot the room ids that currently hold a ready-state entry.
     ///
     /// The maintenance prune sweep uses this to reclaim entries for rooms that
@@ -1059,6 +1068,22 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         ready_map.remove(room_id);
         tracing::info!(%room_id, "Cleared ready players from coordinator (in-memory)");
         Ok(())
+    }
+
+    async fn forget_player_ready(&self, room_id: &RoomId, player_id: &PlayerId) {
+        let mut ready_map = self.ready_players.write().await;
+        let Some(room_ready_players) = ready_map.get_mut(room_id) else {
+            return;
+        };
+        if !room_ready_players.remove(player_id) {
+            return;
+        }
+        // Keep the map free of empty sets so a lobby that fully un-readies costs
+        // nothing until the room-scoped entry is needed again.
+        if room_ready_players.is_empty() {
+            ready_map.remove(room_id);
+        }
+        tracing::debug!(%room_id, %player_id, "Dropped stale readiness for a new membership");
     }
 
     async fn ready_player_room_ids(&self) -> Vec<RoomId> {

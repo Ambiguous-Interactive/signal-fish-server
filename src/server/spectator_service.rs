@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::ProtocolConfig;
-use crate::coordination::MessageCoordinator;
+use crate::coordination::{MessageCoordinator, RoomOperationCoordinatorTrait};
 use crate::database::GameDatabase;
 use crate::protocol::{
     validation, ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage, SpectatorInfo,
@@ -25,6 +25,10 @@ use crate::protocol::Room;
 pub(crate) struct SpectatorService {
     spectator_rooms: Arc<DashMap<PlayerId, RoomId>>,
     database: Arc<dyn GameDatabase>,
+    /// Readiness is coordinator state, not room-record state, until finalize
+    /// writes it through. The spectator snapshot reads it from here so it
+    /// reports the same lobby the members themselves see.
+    room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
     message_coordinator: Arc<dyn MessageCoordinator>,
     room_applications: Arc<DashMap<RoomId, Uuid>>,
     protocol_config: ProtocolConfig,
@@ -54,6 +58,7 @@ impl SpectatorError {
 impl SpectatorService {
     pub(crate) fn new(
         database: Arc<dyn GameDatabase>,
+        room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
         message_coordinator: Arc<dyn MessageCoordinator>,
         room_applications: Arc<DashMap<RoomId, Uuid>>,
         protocol_config: ProtocolConfig,
@@ -64,6 +69,7 @@ impl SpectatorService {
         Self {
             spectator_rooms: Arc::new(DashMap::new()),
             database,
+            room_coordinator,
             message_coordinator,
             room_applications,
             protocol_config,
@@ -277,11 +283,19 @@ impl SpectatorService {
                         ));
                     }
                 };
+                let ready_players = crate::server::ready_state::snapshot_ready_players(
+                    &current_room,
+                    self.room_coordinator.as_ref(),
+                )
+                .await;
                 let current_players: Vec<PlayerInfo> = current_room
                     .players
                     .values()
                     .cloned()
                     .filter_map(|mut player| {
+                        // Same derivation as `RoomJoined` / `Reconnected`: the
+                        // stored flag is only written at finalize.
+                        player.is_ready = ready_players.contains(&player.id);
                         let relay_stamp = self
                             .connection_manager
                             .current_relay_stamp_in_room(&player.id, &room.id);
@@ -1142,8 +1156,16 @@ mod tests {
             coordinator.clone(),
             false,
         ));
+        let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
+            Arc::new(crate::coordination::InMemoryRoomOperationCoordinator::new(
+                coordinator.clone(),
+                Arc::new(crate::distributed::InMemoryDistributedLock::new()),
+                database.clone() as Arc<dyn GameDatabase>,
+                None,
+            ));
         let spectator_service = SpectatorService::new(
             database.clone() as Arc<dyn GameDatabase>,
+            room_coordinator,
             coordinator.clone(),
             Arc::new(DashMap::new()),
             ProtocolConfig::default(),

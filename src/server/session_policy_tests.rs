@@ -1889,6 +1889,84 @@ async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() 
     assert!(expiry > chrono::Utc::now().timestamp());
 }
 
+/// A recipient that never negotiated this session's (topology, transport) is
+/// told the truth — `peers: []` and the relay fallback — so it can never run
+/// ICE for this session. Minting for it hands out live TURN credentials that
+/// can only be used as free relay capacity, the exact reason the pre-gather
+/// path refuses to mint for such a recipient.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn non_pairable_recipient_receives_no_minted_turn_credentials() {
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let (capable, _capable_rx) = register_client(&server).await;
+    let (seat_filler, _seat_filler_rx) = register_client(&server).await;
+    server.set_client_protocol(&capable, v3_webrtc());
+    server.set_client_protocol(&seat_filler, v3_relay_only());
+
+    // A mesh + WebRTC session whose late joiner negotiated relay only.
+    let decision = SessionPlanDecision {
+        generation: uuid::Uuid::new_v4(),
+        topology: Topology::Mesh,
+        transport: Transport::WebRtc,
+        host: None,
+        members: vec![
+            v3_full(capable, "Capable"),
+            member(
+                seat_filler,
+                "SeatFiller",
+                3,
+                vec![Transport::Relay],
+                vec![Topology::Relay],
+            ),
+        ],
+    };
+    assert!(
+        !decision.recipient_pairable(seat_filler),
+        "fixture precondition: the seat filler can never appear in this session's pairs"
+    );
+    let now_unix = chrono::Utc::now().timestamp();
+
+    let (capable_message, capable_minted) = server
+        .build_session_plan_message(&decision, capable, Some(now_unix))
+        .expect("a v3 recipient receives a plan");
+    assert_eq!(
+        capable_minted, 1,
+        "a pairable recipient still receives its own TURN credential"
+    );
+    match capable_message.as_ref() {
+        ServerMessage::SessionPlan(plan) => assert!(
+            plan.ice_servers
+                .iter()
+                .any(|server| server.username.is_some()),
+            "a pairable recipient's plan carries credentials"
+        ),
+        other => panic!("expected SessionPlan, got {other:?}"),
+    }
+
+    let (message, minted) = server
+        .build_session_plan_message(&decision, seat_filler, Some(now_unix))
+        .expect("a v3 recipient receives a plan even when it cannot pair");
+    match message.as_ref() {
+        ServerMessage::SessionPlan(plan) => {
+            assert!(
+                plan.peers.is_empty(),
+                "a non-pairable recipient has no P2P peers"
+            );
+            assert!(
+                plan.ice_servers.is_empty(),
+                "a non-pairable recipient must receive no ICE it could never use: {:?}",
+                plan.ice_servers
+            );
+        }
+        other => panic!("expected SessionPlan, got {other:?}"),
+    }
+    assert_eq!(
+        minted, 0,
+        "no TURN credential may be issued to a recipient that cannot join the session"
+    );
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn emit_webrtc_room_with_turn_disabled_carries_only_public_stun() {
@@ -3627,6 +3705,15 @@ async fn leave_room_host_disconnect_triggers_failover_replan() {
         match recv(rx).await.as_ref() {
             ServerMessage::PlayerLeft { player_id, .. } => assert_eq!(*player_id, host),
             other => panic!("{who} expected PlayerLeft first, got {other:?}"),
+        }
+        // The departing host was the room's authority: the cleared role is
+        // announced before the session is re-planned around the new host.
+        match recv(rx).await.as_ref() {
+            ServerMessage::AuthorityChanged {
+                authority_player: None,
+                you_are_authority: false,
+            } => {}
+            other => panic!("{who} expected the cleared authority, got {other:?}"),
         }
         let plan = expect_plan(rx, who).await;
         assert_eq!(plan.topology, Topology::Host);

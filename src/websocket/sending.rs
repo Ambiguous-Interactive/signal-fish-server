@@ -515,6 +515,11 @@ pub(super) struct SendAccounting<'a> {
     player_id: PlayerId,
     class: Option<crate::protocol::DeliveryClass>,
     resolved: bool,
+    /// An omission counted here whose exact range has not been held yet.
+    /// Cleared by [`Self::hold_unsupported`]; a drop while it is set means the
+    /// write that would have made room was cancelled, leaving a hole nothing
+    /// describes.
+    unheld_omission: bool,
 }
 
 impl<'a> SendAccounting<'a> {
@@ -532,6 +537,7 @@ impl<'a> SendAccounting<'a> {
             player_id,
             class,
             resolved: false,
+            unheld_omission: false,
         }
     }
 
@@ -560,14 +566,26 @@ impl<'a> SendAccounting<'a> {
         }
         self.record_drop_metrics();
         self.resolved = true;
+        self.unheld_omission = !coalesced;
         coalesced
     }
 
     /// Hold an omission whose range only fits once the pending report is written.
-    fn hold_unsupported(&self, metadata: Option<DataDeliveryMetadata>) {
-        if let Some(metadata) = metadata {
-            self.receiver.hold_unsupported_format(metadata);
+    ///
+    /// The omission stays outstanding — and therefore still fences the queue on
+    /// drop — unless the range is genuinely stored.
+    fn hold_unsupported(&mut self, metadata: Option<DataDeliveryMetadata>) {
+        let held = match metadata {
+            Some(metadata) => self.receiver.hold_unsupported_format(metadata),
+            None => true,
+        };
+        if !held {
+            tracing::error!(
+                player_id = %self.player_id,
+                "Undeliverable range did not fit the emptied report; fencing the queue"
+            );
         }
+        self.unheld_omission = !held;
     }
 
     fn record_drop_metrics(&self) {
@@ -588,6 +606,15 @@ impl<'a> SendAccounting<'a> {
 impl Drop for SendAccounting<'_> {
     fn drop(&mut self) {
         if self.resolved {
+            if self.unheld_omission {
+                // The omission was counted but its exact range never reached the
+                // pending report, because the write that would have made room
+                // was cancelled. The counter is clamped to the written frontier,
+                // so nothing would ever describe this hole: fence the queue so
+                // teardown abandons the frames behind it instead of showing the
+                // recipient a sequence that skips an unreported omission.
+                self.receiver.record_abandoned_in_flight_write();
+            }
             return;
         }
         // The payload was owned by a socket write that never resolved, so the
@@ -1107,6 +1134,78 @@ mod tests {
                 "{resolution:?}: the teardown fence must reflect exactly this terminal state"
             );
         }
+    }
+
+    /// An omission whose exact range did not fit the pending report is only
+    /// safe once that range is held. Until then the recipient has a hole that
+    /// nothing describes: the counter is clamped to the written frontier, so a
+    /// teardown that flushed the rest of the queue would show a sequence
+    /// skipping an omission it was never told about.
+    #[tokio::test]
+    async fn an_unheld_undeliverable_range_fences_the_queue() {
+        use crate::coordination::outbound_queue::{channel, DataDeliveryMetadata};
+        use crate::database::DatabaseConfig;
+        use crate::protocol::{RoomId, DELIVERY_REPORT_MAX_GAPS};
+        use crate::server::ServerConfig;
+
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct unheld-range test server");
+        let (tx, rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let room_id = RoomId::from_u128(5);
+        let metadata = |sender: u128| DataDeliveryMetadata {
+            class: crate::protocol::DeliveryClass::Reliable,
+            key: None,
+            from_player: PlayerId::from_u128(sender),
+            room_id,
+            epoch: 1,
+            seq: 7,
+        };
+
+        // Fill the pending report so the next omission cannot coalesce: each
+        // range comes from a different sender, so none of them merge.
+        for sender in 0..DELIVERY_REPORT_MAX_GAPS as u128 {
+            assert!(
+                rx.record_unsupported_format(metadata(sender)),
+                "range {sender} should fit the pending report"
+            );
+        }
+        let overflow = metadata(DELIVERY_REPORT_MAX_GAPS as u128);
+
+        {
+            let mut accounting = SendAccounting::new(
+                &rx,
+                &server,
+                &probe_state,
+                overflow.from_player,
+                Some(crate::protocol::DeliveryClass::Reliable),
+            );
+            assert!(
+                !accounting.complete_unsupported(Some(overflow)),
+                "the overflow range must require the pending report to be written first"
+            );
+            // The write that would make room is cancelled here: the send task's
+            // close `select!` can drop it at any await, so `hold_unsupported`
+            // never runs.
+        }
+
+        assert!(
+            rx.abandoned_in_flight_write(),
+            "an omission whose range was never held must fence the remaining queue"
+        );
     }
 
     #[test]

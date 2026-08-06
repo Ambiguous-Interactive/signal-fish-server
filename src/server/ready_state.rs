@@ -1,8 +1,26 @@
-use crate::coordination::{PlayerReadyError, StartGameOutcome};
-use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
+use crate::coordination::{PlayerReadyError, RoomOperationCoordinatorTrait, StartGameOutcome};
+use crate::protocol::{ErrorCode, LobbyState, PlayerId, Room, ServerMessage};
 use std::sync::Arc;
 
 use super::EnhancedGameServer;
+
+/// The readiness a room snapshot (`RoomJoined`, `Reconnected`, `SpectatorJoined`)
+/// must report for `room`.
+///
+/// Readiness lives in the coordinator while the room is open — the stored player
+/// records stay `false` for the whole lobby. Finalization moves it: the
+/// coordinator's entry is dropped and the final set is written into the room
+/// record. Reading only one of the two would report an all-unready lobby before
+/// the game starts, or an all-unready game after it.
+pub(crate) async fn snapshot_ready_players(
+    room: &Room,
+    room_coordinator: &dyn RoomOperationCoordinatorTrait,
+) -> Vec<PlayerId> {
+    if room.lobby_state == LobbyState::Finalized {
+        return room.ready_players.clone();
+    }
+    room_coordinator.current_ready_players(&room.id).await
+}
 
 impl EnhancedGameServer {
     /// Handle a player ready-state toggle under process-local room coordination.

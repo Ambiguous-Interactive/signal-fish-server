@@ -151,10 +151,24 @@ pub trait GameDatabase: Send + Sync {
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
 
-    /// Add player to room (atomic operation)
+    /// Add player to room (atomic operation).
+    ///
+    /// Implementations must store `is_authority` derived from the room's
+    /// `authority_player`, not from the supplied `player`: callers legitimately
+    /// pass pre-disconnect snapshots whose flag can be stale, and a stored
+    /// member that contradicts `authority_player` would surface two authorities
+    /// in `RoomJoined` / `Reconnected` / `GameStarting` payloads.
     async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool>;
 
-    /// Remove player from room
+    /// Remove player from room.
+    ///
+    /// The returned record reports whether this removal vacated the room's
+    /// authority: implementations must return it with `is_authority` true
+    /// exactly when they cleared `authority_player` for this member, because
+    /// the departure path announces the cleared role from that flag (see
+    /// `EnhancedGameServer::leave_room_locked`). Keeping the stored flag in
+    /// lockstep with `authority_player` — as [`Self::add_player_to_room`]
+    /// requires on the way in — satisfies this.
     async fn remove_player_from_room(
         &self,
         room_id: &RoomId,
@@ -773,10 +787,39 @@ impl GameDatabase for InMemoryDatabase {
         Ok(rooms.get(room_id).cloned())
     }
 
-    async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool> {
+    async fn add_player_to_room(&self, room_id: &RoomId, mut player: PlayerInfo) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if room.players.len() < room.max_players as usize {
+                // `authority_player` is the single source of truth for the room
+                // (see `create_room_classified`). An inbound `PlayerInfo` can be
+                // a pre-disconnect snapshot whose flag went stale while the
+                // member was away — restoring it verbatim would flag a second
+                // authority in every membership payload. Derive the flag here so
+                // no caller can insert a member that contradicts the room.
+                player.is_authority = room.authority_player == Some(player.id);
+                // Readiness has two regimes. While the room is open it is
+                // coordinator state and every stored flag is `false`, so the
+                // room's own list decides and a snapshot's flag must not
+                // resurrect readiness the membership it described has lost.
+                // Once the room is finalized the list is the frozen fact of who
+                // started the game, and removal prunes a departing member from
+                // it — so a membership being RESTORED carries the only surviving
+                // evidence that it started. A fresh joiner cannot smuggle
+                // readiness in that way, and the guarantee rests on three
+                // properties this file and the join path own: the join record is
+                // constructed with `is_ready: false`; readiness cannot be
+                // toggled in a finalized room (`toggle_player_ready` requires
+                // `Lobby`); and no production caller writes `is_ready = true`
+                // into an open room's record — `toggle_player_ready`, the only
+                // method that could, has none. So a member that disconnected
+                // before the start reconnects as the seat-filler it is.
+                let finalized = room.lobby_state == crate::protocol::LobbyState::Finalized;
+                player.is_ready =
+                    room.ready_players.contains(&player.id) || (finalized && player.is_ready);
+                if player.is_ready && !room.ready_players.contains(&player.id) {
+                    room.ready_players.push(player.id);
+                }
                 room.players.insert(player.id, player);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
@@ -824,8 +867,11 @@ impl GameDatabase for InMemoryDatabase {
             // readiness, so the departing id must be removed directly.
             room.ready_players.retain(|id| id != player_id);
 
-            // If removed player was authority, CLEAR authority (don't auto-reassign per protocol)
-            if room.authority_player == Some(*player_id) {
+            // If removed player was authority, CLEAR authority (don't auto-reassign per protocol).
+            // Guarded by an ACTUAL removal: `leave_room_locked` reports the
+            // vacated role from this call's returned record, so a no-op remove
+            // must not silently clear a role nobody is told about.
+            if removed_player.is_some() && room.authority_player == Some(*player_id) {
                 room.authority_player = None;
                 // Clear authority flag from all players to maintain consistency
                 for player in room.players.values_mut() {

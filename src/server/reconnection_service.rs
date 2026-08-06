@@ -889,10 +889,11 @@ impl EnhancedGameServer {
                                 Some((current_room.clone(), response_players.clone()));
                         }
 
-                        let ready_players = server
-                            .room_coordinator
-                            .current_ready_players(&response_room_id)
-                            .await;
+                        let ready_players = super::ready_state::snapshot_ready_players(
+                            &current_room,
+                            server.room_coordinator.as_ref(),
+                        )
+                        .await;
                         for player in &mut response_players {
                             player.is_ready = ready_players.contains(&player.id);
                             player.epoch = None;
@@ -959,6 +960,22 @@ impl EnhancedGameServer {
                             ServerMessage::PlayerJoined { player } => {
                                 player.id != response_player_id
                             }
+                            _ => true,
+                        });
+
+                        // The `Reconnected` snapshot states the room's CURRENT
+                        // authority, so any buffered `AuthorityChanged` naming a
+                        // different holder is already superseded — replaying it
+                        // would contradict the frame that carries it. A
+                        // departing authority's `{null}` and this member's own
+                        // restore are the common case: the reconnector left as
+                        // authority, the departure cleared the role, and the
+                        // restore granted it back before this payload was built.
+                        let current_authority = current_room.authority_player;
+                        missed_events.events.retain(|event| match event {
+                            ServerMessage::AuthorityChanged {
+                                authority_player, ..
+                            } => *authority_player == current_authority,
                             _ => true,
                         });
 

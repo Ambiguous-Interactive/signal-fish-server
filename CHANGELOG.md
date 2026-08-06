@@ -115,6 +115,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep a member that reconnects into a running game marked ready. Removal
+  prunes the departing id from a finalized room's ready list, so the restored
+  membership carries the only surviving evidence that it started the game — and
+  readiness cannot be re-established by hand, because a finalized room rejects
+  `PlayerReady`.
+- Report the right readiness in every room snapshot. Readiness lives in the
+  coordinator while a room is open and moves into the room record at
+  finalization, so reading either source alone is wrong half the time:
+  `SpectatorJoined` read the record and showed an all-unready lobby however
+  ready the members were (and spectators receive no lobby broadcast that could
+  correct it), while `RoomJoined` and `Reconnected` read the coordinator and
+  showed an all-unready game after it started. All three now select by lobby
+  state.
+- Deliver `Latest` game data that is superseded faster than the configured
+  outbound `batch_interval`. A superseding value continues its key's pendency
+  instead of restarting the coalesce window, so a key updated every 8 ms against
+  a 16 ms interval now reaches the socket about once per coalesce window (a
+  release, the next update reopening the window, and that window elapsing);
+  previously such a key delivered no data at all — indefinitely — while still
+  spending one `DeliveryReport` frame per update. Only deployments with
+  `websocket.enable_batching` enabled were affected.
+- Drop a buffered `AuthorityChanged` from a reconnecting member's
+  `missed_events` when the `Reconnected` snapshot already supersedes it, so the
+  frame cannot assert both "you are the authority" and "authority is vacant".
+- Announce the authority cleared by a departure. When the authority player
+  leaves or disconnects, every remaining member now receives
+  `AuthorityChanged` with `authority_player: null`, ordered after the
+  `PlayerLeft` that explains it and never before it. `docs/concepts/authority.md` specified this
+  for the disconnect case and now covers `LeaveRoom` and the ordering as well. A
+  member reconnecting across the change is told the holder as it stands on
+  return. Without it a client
+  following the documented host-migration flow never learned the role was
+  vacant.
+- Keep the stored `is_authority` flag equal to the room's `authority_player`.
+  A reconnecting member's pre-disconnect snapshot is no longer restored
+  verbatim, so a room whose authority was claimed by a successor while the
+  original was away can no longer report two authorities in `RoomJoined`,
+  `Reconnected`, and `GameStarting` payloads.
+- Start a rejoining member unready. Readiness belongs to a membership, so
+  leaving and joining the same room again no longer restores the previous
+  ready state — which had inverted that member's next `PlayerReady` toggle and
+  let the remaining members reach `all_ready` (and `StartGame`) without them.
+- Stop issuing TURN credentials to a recipient that cannot join the session.
+  A `SessionPlan` for a member that never negotiated the session's topology and
+  transport already carries an empty peer list and the relay fallback; it now
+  carries no ICE servers either, since there is nothing for that member to
+  gather against. The `RoomJoined` pre-gather surface still mints against the
+  game's _desired_ topology, the only information available before a session
+  exists, so a member eligible there can still receive a credential this seam
+  later withholds.
+- Fence a closing connection whose undeliverable payload was counted but whose
+  exact range never reached the pending delivery report, which can happen when
+  that report is full and the write that would drain it is cancelled. Teardown
+  now abandons the frames behind the omission instead of flushing past a hole
+  no report describes.
+- Count every TURN credential issued by a finalized-room join in
+  `turn_credentials_issued`, including incumbent refreshes when the joiner is a
+  v2 client or the join forces a host re-plan. The reconnect and host-failover
+  paths already counted theirs unconditionally, so TURN capacity planning
+  systematically undercounted rooms with mixed-version members or host churn.
 - Prevent a classified outbound queue from falsely closing a progressing
   recipient with `4002 slow_consumer` when capacity became and remained
   available before the configured deadline but the waiting producer was not
