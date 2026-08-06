@@ -2349,7 +2349,9 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
     assert_eq!(
         with.as_mapping_get("retention-days")
             .and_then(Yaml::as_integer),
-        Some(90)
+        Some(30),
+        "the repository caps artifact retention at 30 days; the workflow must request the \n\
+         effective value instead of emitting a warning while claiming 90 days"
     );
     assert_eq!(
         with.as_mapping_get("if-no-files-found")
@@ -2393,6 +2395,356 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
         "nightly must retain its complete matrix/fault/knee selection and exclude only the \
          dedicated hosted observation selector"
     );
+}
+
+#[test]
+fn test_verification_nightly_retains_h14_hosted_attempt_evidence() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/verification-nightly.yml");
+    let workflow = read_live_file(&workflow_path);
+    let documents = Yaml::load_from_str(&workflow).expect("verification nightly must parse");
+    let document = documents.first().expect("workflow YAML document");
+    let job = document
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("scenario-profiles"))
+        .expect("verification nightly must retain the scenario-profiles job");
+    assert!(
+        job.as_mapping_get("needs").is_none(),
+        "a skipped dependency must not erase an eligible H14 attempt"
+    );
+    assert_eq!(
+        document
+            .as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("SIGNAL_FISH_H14_CONTRACT_VERSION"))
+            .and_then(Yaml::as_str),
+        Some("h14-capacity-v1"),
+        "the hosted cohort needs a stable contract identifier"
+    );
+
+    let steps = job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("scenario-profiles steps");
+    let named_step_index = |name: &str| {
+        steps
+            .iter()
+            .position(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("missing `{name}` step"))
+    };
+    for (name, id) in [
+        ("Checkout repository", "checkout"),
+        ("Read Rust toolchain", "toolchain"),
+        ("Install Rust toolchain", "install-rust"),
+        ("Install cargo-nextest", "install-nextest"),
+    ] {
+        let step = &steps[named_step_index(name)];
+        assert_eq!(
+            step.as_mapping_get("id").and_then(Yaml::as_str),
+            Some(id),
+            "`{name}` needs a stable id so H14 can distinguish setup failure from a test RED"
+        );
+    }
+
+    let h14_index = named_step_index("Run mixed-encoding amplification experiment");
+    let h14 = &steps[h14_index];
+    assert_eq!(h14.as_mapping_get("id").and_then(Yaml::as_str), Some("h14"));
+    let h14_condition = h14
+        .as_mapping_get("if")
+        .and_then(Yaml::as_str)
+        .expect("H14 condition");
+    assert_eq!(
+        h14_condition.split_whitespace().collect::<Vec<_>>(),
+        "${{ always() && !cancelled() && steps.checkout.outcome == 'success' && \
+         steps.toolchain.outcome == 'success' && steps.install-rust.outcome == 'success' && \
+         steps.install-nextest.outcome == 'success' }}"
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        "H14 must survive unrelated test failures without running after cancellation or missing setup"
+    );
+    assert!(
+        h14.as_mapping_get("continue-on-error").is_none(),
+        "a RED H14 result must still fail the nightly job"
+    );
+    let h14_run = h14
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("H14 command");
+    for required in ["set -euo pipefail", ": > h14-started", "h14-exit-code.txt"] {
+        assert!(h14_run.contains(required), "H14 step lost `{required}`");
+    }
+    assert!(
+        !h14_run.contains("|| true"),
+        "H14 must propagate the exact selector's exit status"
+    );
+    let h14_cargo_commands: Vec<String> = shell_logical_lines(h14_run)
+        .into_iter()
+        .filter(|line| line.contains("cargo nextest"))
+        .collect();
+    assert_eq!(
+        h14_cargo_commands,
+        vec![
+            "cargo nextest run --profile ci --locked --all-features --test \
+             mixed_encoding_relay_e2e --run-ignored ignored-only -E \
+             'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
+             --no-tests fail --success-output final 2>&1 | tee mixed-encoding-output.txt"
+        ],
+        "the hosted cohort must retain its existing Nextest context and exact H14 selector"
+    );
+    let selector_occurrences = steps
+        .iter()
+        .filter_map(|step| step.as_mapping_get("run").and_then(Yaml::as_str))
+        .map(|run| {
+            run.matches("unsupported_message_pack_fallback_does_not_flap_weaker_recipient")
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(
+        selector_occurrences, 1,
+        "H14 must execute exactly once per scenario-profiles job"
+    );
+
+    let manifest_index = named_step_index("Write H14 attempt manifest");
+    assert_eq!(
+        manifest_index,
+        h14_index + 1,
+        "capture H14 metadata before a later experiment can fail or time out"
+    );
+    let manifest = &steps[manifest_index];
+    assert_eq!(
+        manifest.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    let manifest_env = manifest
+        .as_mapping_get("env")
+        .expect("manifest environment");
+    assert_eq!(
+        manifest_env
+            .as_mapping_get("H14_OUTCOME")
+            .and_then(Yaml::as_str),
+        Some("${{ steps.h14.outcome }}"),
+        "aggregate job.status would misclassify H14 after an unrelated precursor failure"
+    );
+    let manifest_run = manifest
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("manifest command");
+    for required in [
+        "GITHUB_EVENT_NAME",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_ATTEMPT",
+        "GITHUB_SHA",
+        "SIGNAL_FISH_H14_CONTRACT_VERSION",
+        "SIGNAL_FISH_RUST_TOOLCHAIN",
+        "ImageOS",
+        "ImageVersion",
+        "H14_OUTCOME",
+        "raw_log_present",
+        "raw_log_bytes",
+        "evidence_complete",
+        "passed",
+        "eligible",
+        "h14-attempt.json",
+        "[ \"$raw_log_bytes\" -gt 0 ]",
+        "[ \"$evidence_complete\" = true ]",
+    ] {
+        assert!(
+            manifest_run.contains(required),
+            "H14 attempt manifest lost `{required}`"
+        );
+    }
+    assert!(
+        manifest_run.contains(
+            "if [ \"$GITHUB_EVENT_NAME\" = \"schedule\" ] && [ \"$GITHUB_RUN_ATTEMPT\" = \"1\" ]"
+        ),
+        "eligibility must depend only on a scheduled first attempt, never its outcome"
+    );
+
+    let upload_index = named_step_index("Upload H14 attempt evidence");
+    assert_eq!(
+        upload_index,
+        manifest_index + 1,
+        "upload H14 evidence immediately after writing its manifest"
+    );
+    let upload = &steps[upload_index];
+    assert_eq!(
+        upload.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert_eq!(
+        upload.as_mapping_get("uses").and_then(Yaml::as_str),
+        Some("actions/upload-artifact@v7.0.1")
+    );
+    let upload_with = upload.as_mapping_get("with").expect("H14 upload settings");
+    assert_eq!(
+        upload_with.as_mapping_get("name").and_then(Yaml::as_str),
+        Some("h14-${{ github.run_id }}-${{ github.run_attempt }}")
+    );
+    let paths = upload_with
+        .as_mapping_get("path")
+        .and_then(Yaml::as_str)
+        .expect("H14 artifact paths");
+    assert_eq!(
+        paths.lines().map(str::trim).collect::<Vec<_>>(),
+        vec!["mixed-encoding-output.txt", "h14-attempt.json"]
+    );
+    assert_eq!(
+        upload_with
+            .as_mapping_get("retention-days")
+            .and_then(Yaml::as_integer),
+        Some(30),
+        "request the repository's effective retention maximum"
+    );
+    assert_eq!(
+        upload_with
+            .as_mapping_get("if-no-files-found")
+            .and_then(Yaml::as_str),
+        Some("error")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_h14_attempt_manifest_classifies_behavioral_fixtures() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/verification-nightly.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("verification nightly must parse");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("scenario-profiles"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("scenario-profiles steps");
+    let manifest_run = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Write H14 attempt manifest")
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("H14 attempt manifest command");
+
+    struct Case {
+        name: &'static str,
+        started: bool,
+        exit_code: Option<i32>,
+        raw_log: Option<&'static str>,
+        h14_outcome: &'static str,
+        job_status: &'static str,
+        expected_complete: bool,
+        expected_passed: bool,
+    }
+
+    let cases = [
+        Case {
+            name: "success_after_unrelated_failure",
+            started: true,
+            exit_code: Some(0),
+            raw_log: Some("nextest H14 passed\n"),
+            h14_outcome: "success",
+            job_status: "failure",
+            expected_complete: true,
+            expected_passed: true,
+        },
+        Case {
+            name: "h14_failure",
+            started: true,
+            exit_code: Some(101),
+            raw_log: Some("nextest H14 failed\n"),
+            h14_outcome: "failure",
+            job_status: "failure",
+            expected_complete: true,
+            expected_passed: false,
+        },
+        Case {
+            name: "upstream_skipped",
+            started: false,
+            exit_code: None,
+            raw_log: None,
+            h14_outcome: "skipped",
+            job_status: "failure",
+            expected_complete: false,
+            expected_passed: false,
+        },
+        Case {
+            name: "empty_log_cannot_pass",
+            started: true,
+            exit_code: Some(0),
+            raw_log: Some(""),
+            h14_outcome: "success",
+            job_status: "success",
+            expected_complete: false,
+            expected_passed: false,
+        },
+    ];
+
+    for case in cases {
+        let temp_dir = unique_temp_dir(&format!("h14-manifest-{}", case.name));
+        if case.started {
+            write_file(&temp_dir.path().join("h14-started"), "");
+        }
+        if let Some(exit_code) = case.exit_code {
+            write_file(
+                &temp_dir.path().join("h14-exit-code.txt"),
+                &format!("{exit_code}\n"),
+            );
+        }
+        if let Some(raw_log) = case.raw_log {
+            write_file(&temp_dir.path().join("mixed-encoding-output.txt"), raw_log);
+        }
+
+        let output = bash_command()
+            .arg("-c")
+            .arg(manifest_run)
+            .current_dir(temp_dir.path())
+            .env("H14_OUTCOME", case.h14_outcome)
+            .env("JOB_STATUS", case.job_status)
+            .env("SIGNAL_FISH_RUST_TOOLCHAIN", "1.91.0")
+            .env("SIGNAL_FISH_H14_CONTRACT_VERSION", "h14-capacity-v1")
+            .env("GITHUB_EVENT_NAME", "schedule")
+            .env("GITHUB_RUN_ID", "123456")
+            .env("GITHUB_RUN_ATTEMPT", "1")
+            .env("GITHUB_SHA", "0123456789abcdef")
+            .env("RUNNER_OS", "Linux")
+            .env("ImageOS", "ubuntu24")
+            .env("ImageVersion", "20260801.1")
+            .output()
+            .unwrap_or_else(|e| panic!("{}: failed to run manifest script: {e}", case.name));
+        assert!(
+            output.status.success(),
+            "{}: manifest script failed:\nstdout:\n{}\nstderr:\n{}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let manifest_text = read_file(&temp_dir.path().join("h14-attempt.json"));
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
+            .unwrap_or_else(|e| panic!("{}: invalid manifest JSON: {e}", case.name));
+        assert_eq!(manifest["eligible"].as_bool(), Some(true), "{}", case.name);
+        assert_eq!(
+            manifest["evidence_complete"].as_bool(),
+            Some(case.expected_complete),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            manifest["passed"].as_bool(),
+            Some(case.expected_passed),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            manifest["h14_outcome"].as_str(),
+            Some(case.h14_outcome),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            manifest["job_status"].as_str(),
+            Some(case.job_status),
+            "{}",
+            case.name
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
