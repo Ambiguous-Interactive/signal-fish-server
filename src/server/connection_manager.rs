@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::auth::AppInfo;
+use crate::auth::AppContext;
 use crate::coordination::{
     ClientDeliveryHandle, ConnectionCloseSignal, DeliverySender, MessageCoordinator,
 };
@@ -66,7 +66,7 @@ pub(crate) struct ClientConnection {
     pub close: ConnectionCloseSignal,
     pub client_addr: SocketAddr,
     pub game_data_format: GameDataEncoding,
-    pub app_info: Option<AppInfo>,
+    pub app_context: Option<AppContext>,
     /// Protocol version + transport/topology capabilities negotiated at auth.
     pub protocol: NegotiatedProtocol,
     /// Last data-path transport state this client reported via
@@ -311,7 +311,7 @@ impl ConnectionManager {
             close: close.clone(),
             client_addr,
             game_data_format: GameDataEncoding::Json,
-            app_info: None,
+            app_context: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
             membership_generation: Uuid::nil(),
@@ -355,7 +355,7 @@ impl ConnectionManager {
             close: close.clone(),
             client_addr,
             game_data_format: GameDataEncoding::Json,
-            app_info: None,
+            app_context: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
             membership_generation: Uuid::nil(),
@@ -545,20 +545,20 @@ impl ConnectionManager {
             .unwrap_or(false)
     }
 
-    pub fn set_app_info(&self, player_id: &PlayerId, app_info: AppInfo) {
+    pub fn set_app_context(&self, player_id: &PlayerId, app_context: AppContext) {
         if let Some(mut connection) = self.clients.get_mut(player_id) {
-            connection.app_info = Some(app_info);
+            connection.app_context = Some(app_context);
         }
     }
 
-    pub fn app_info(&self, player_id: &PlayerId) -> Option<AppInfo> {
+    pub fn app_context(&self, player_id: &PlayerId) -> Option<AppContext> {
         self.clients
             .get(player_id)
-            .and_then(|conn| conn.app_info.clone())
+            .and_then(|conn| conn.app_context.clone())
     }
 
     pub fn app_id(&self, player_id: &PlayerId) -> Option<Uuid> {
-        self.app_info(player_id).map(|info| info.id)
+        self.app_context(player_id).map(|info| info.id)
     }
 
     /// Capture the terminal relay watermark and clear membership under one
@@ -784,7 +784,7 @@ impl ConnectionManager {
                 close: delivery.close.clone(),
                 client_addr: old_connection.client_addr,
                 game_data_format: old_connection.game_data_format,
-                app_info: old_connection.app_info,
+                app_context: old_connection.app_context,
                 protocol: old_connection.protocol,
                 // Preserve any roomless transient-socket status only as rollback
                 // state. Advancing the membership generation below makes it
@@ -854,7 +854,7 @@ impl ConnectionManager {
             close: delivery.close.clone(),
             client_addr: reassigned_connection.client_addr,
             game_data_format: reassigned_connection.game_data_format,
-            app_info: reassigned_connection.app_info,
+            app_context: reassigned_connection.app_context,
             protocol: reassigned_connection.protocol,
             transport_status: reassigned_connection.transport_status,
             membership_generation,

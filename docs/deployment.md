@@ -39,7 +39,8 @@ docker run -d \
   -p 3536:3536 \
   -e SIGNAL_FISH__PORT=8080 \
   -e SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS=16 \
-  -e SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
+  -e SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true \
+  -e 'SIGNAL_FISH__SECURITY__ALLOWED_APPS=[{"app_id":"my-game","app_name":"My Game"}]' \
   ghcr.io/ambiguous-interactive/signal-fish-server:latest
 
 ```
@@ -63,7 +64,8 @@ services:
     environment:
 
       - RUST_LOG=info
-      - SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true
+      - SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true
+      - 'SIGNAL_FISH__SECURITY__ALLOWED_APPS=[{"app_id":"my-game","app_name":"My Game"}]'
 
     restart: unless-stopped
     healthcheck:
@@ -120,7 +122,8 @@ self-hosted only.
   },
   "security": {
     "cors_origins": "https://yourgame.com",
-    "require_websocket_auth": true,
+    "enforce_app_id_allowlist": true,
+    "allowed_apps": [{"app_id": "my-game", "app_name": "My Game"}],
     "max_message_size": 65536,
     "max_connections_per_ip": 24
   },
@@ -222,8 +225,12 @@ signal.yourgame.com {
       ],
       "environment": [
         {
-          "name": "SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH",
+          "name": "SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST",
           "value": "true"
+        },
+        {
+          "name": "SIGNAL_FISH__SECURITY__ALLOWED_APPS",
+          "value": "[{\"app_id\":\"my-game\",\"app_name\":\"My Game\"}]"
         }
       ],
       "logConfiguration": {
@@ -244,12 +251,16 @@ signal.yourgame.com {
 
 ```bash
 
+signal_fish_env_vars='^@^SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true'
+signal_fish_env_vars+='@SIGNAL_FISH__SECURITY__ALLOWED_APPS='
+signal_fish_env_vars+='[{"app_id":"my-game","app_name":"My Game"}]'
+
 gcloud run deploy signal-fish \
   --image ghcr.io/ambiguous-interactive/signal-fish-server:latest \
   --platform managed \
   --region us-central1 \
   --port 3536 \
-  --set-env-vars SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true \
+  --set-env-vars "$signal_fish_env_vars" \
   --allow-unauthenticated \
   --max-instances 10
 
@@ -284,9 +295,12 @@ spec:
 
         env:
 
-        - name: SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH
+        - name: SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST
 
           value: "true"
+        - name: SIGNAL_FISH__SECURITY__ALLOWED_APPS
+
+          value: '[{"app_id":"my-game","app_name":"My Game"}]'
         volumeMounts:
 
         - name: config
@@ -448,10 +462,10 @@ Enable file logging:
 
 ## Security Checklist
 
-- [ ] Enable app-ID allowlisting (`require_websocket_auth: true`) where per-app
+- [ ] Enable app-ID allowlisting (`enforce_app_id_allowlist: true`) where per-app
       admission policy is needed
-- [ ] Treat app IDs as public labels; the reserved app-secret field is not a
-      current client credential
+- [ ] Treat app IDs as public labels; deprecated `app_secret` input is discarded
+      and is not a client credential
 - [ ] Configure CORS origins (not `*`)
 - [ ] Serve signaling over `wss://` (TLS) — mandatory for WebRTC: DTLS fingerprints travel in the SDP through
       the signaling channel, so plaintext `ws://` lets an on-path attacker defeat WebRTC encryption (see the
@@ -460,13 +474,13 @@ Enable file logging:
 - [ ] Limit max_connections_per_ip
 - [ ] Enable metrics authentication
 - [ ] Use a reverse proxy (nginx/Caddy)
-- [ ] Monitor failed auth attempts
-- [ ] Rotate secrets regularly
+- [ ] Monitor rejected public app-ID attempts
+- [ ] Rotate TURN and metrics secrets regularly
 
 ## Next Steps
 
 - [Configuration](configuration.md) - Full configuration reference
-- [Authentication](authentication.md) - Securing your server
+- [Application identification](authentication.md) - Public app-ID trust boundary
 - [TURN Deployment](deployment-turn.md) - TURN relay for WebRTC sessions
 - [Scaling Architecture](architecture/scaling.md) - Single-process capacity and
   externally routed isolated deployments

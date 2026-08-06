@@ -102,7 +102,7 @@ ws://localhost:3536/v2/ws
 - **Reconnection** -- token-based reconnection with event replay within a configurable window
 - **Message batching** -- configurable batching for high-throughput game data delivery
 - **Delivery classes** -- v3 reliable, keyed-latest, and volatile JSON relay with exact gap accountability
-- **Rate limiting** -- in-memory limits for auth, room creation/join, and WebRTC signaling
+- **Rate limiting** -- in-memory limits for app-ID handshakes, room creation/join, and WebRTC signaling
 - **Metrics** -- Prometheus-compatible metrics at `/metrics/prom` and JSON metrics at `/metrics`
 - **Flexible configuration** -- JSON config file with environment variable overrides
 - **Optional app allowlisting** -- config-file-backed app IDs with per-app room and rate limits
@@ -169,7 +169,7 @@ On startup the server looks for `config.json` in the working directory. See
   },
   "security": {
     "cors_origins": "*",
-    "require_websocket_auth": false,
+    "enforce_app_id_allowlist": false,
     "require_metrics_auth": false,
     "max_message_size": 65536,
     "max_signal_bytes": 16384,
@@ -178,10 +178,9 @@ On startup the server looks for `config.json` in the working directory. See
       "tls": { "enabled": false },
       "token_binding": { "enabled": false }
     },
-    "authorized_apps": [
+    "allowed_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "My Awesome Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
@@ -278,7 +277,7 @@ complete reference.
 | `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING`       | `logging.enable_file_logging`      | `true`    | Enable rolling file logs                            |
 | `SIGNAL_FISH__LOGGING__FORMAT`                    | `logging.format`                   | `json`    | Log output format (`json` or `text`)                |
 | `SIGNAL_FISH__SECURITY__CORS_ORIGINS`             | `security.cors_origins`            | `http://localhost:3000,http://localhost:5173` | Allowed CORS origins (comma-separated or `*`)       |
-| `SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH`   | `security.require_websocket_auth`  | `true`    | Require app authentication on WebSocket connect     |
+| `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST`   | `security.enforce_app_id_allowlist`  | `true`    | Require the public app ID to appear in `allowed_apps` |
 | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`    | `true`    | Require auth token for metrics endpoints            |
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`        | `65536`   | Max WebSocket message size in bytes                 |
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES`         | `security.max_signal_bytes`        | `16384`   | Max serialized size of a v3 `Signal` payload        |
@@ -286,8 +285,8 @@ complete reference.
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `false`   | Opt-in outbound batching (off keeps relay latency low) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch (ceiling: 65,536)            |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
-| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Exclusive auth-input deadline after connect         |
-| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Exclusive post-auth idle deadline (`0` disables)    |
+| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Exclusive app-ID handshake deadline after connect   |
+| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Exclusive post-handshake idle deadline (`0` disables) |
 | `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Server RFC 6455 Ping cadence (`0` disables)       |
 | `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS`       | `websocket.pong_timeout_secs`      | `5`       | Matching Pong deadline before close `4003`          |
 | `SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES` | `websocket.socket_send_buffer_bytes` | `65536` | TCP handoff bound ahead of control (`0` = OS default) |
@@ -333,7 +332,7 @@ Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/cod
 
 | Message            | Description                                                                      |
 | ------------------ | -------------------------------------------------------------------------------- |
-| `Authenticate`     | Authenticate with app ID (required when auth is enabled)                         |
+| `Authenticate`     | Submit a public app ID (required when allowlist enforcement is enabled)          |
 | `JoinRoom`         | Join or create a room (implicit create with no `room_code`, explicit join/create with `room_code`) |
 | `GameData`         | Send arbitrary game data; negotiated v3 JSON may select reliable, keyed-latest, or volatile delivery |
 | `AuthorityRequest` | Request or release game authority                                                |
@@ -379,7 +378,7 @@ Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](.llm/cod
 
 | Message              | Description                                              |
 | -------------------- | -------------------------------------------------------- |
-| `Authenticated`      | Auth succeeded; includes app metadata and rate limits    |
+| `Authenticated`      | Public app ID accepted; includes context and rate limits |
 | `ProtocolInfo`       | SDK/protocol compatibility details and capabilities      |
 | `RoomJoined`         | Successfully joined a room                               |
 | `PlayerJoined`       | Another player joined the room                           |
@@ -502,7 +501,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.metrics.clone(),
         cfg.coordination.clone(),
         cfg.security.transport.clone(),
-        cfg.security.authorized_apps.clone(),
+        cfg.security.allowed_apps.clone(),
     )
     .await?;
 
@@ -604,7 +603,7 @@ signal-fish-server/
 │   ├── reconnection.rs          # Token-based reconnection manager
 │   ├── retry.rs                 # Exponential backoff utility
 │   ├── rkyv_utils.rs            # Zero-copy serialization helpers
-│   ├── auth/                    # In-memory app authentication
+│   ├── auth/                    # In-memory public app-ID allowlist
 │   ├── config/                  # JSON + env var configuration
 │   ├── coordination/            # Room coordination and dedup cache
 │   ├── database/                # GameDatabase trait + InMemoryDatabase
@@ -621,26 +620,25 @@ signal-fish-server/
 └── clippy.toml
 ```
 
-## Authentication
+## Application ID allowlist
 
-The compiled config default requires WebSocket authentication. The development
-example config opts out with `security.require_websocket_auth: false`; remove
+The compiled config default enforces a public app-ID allowlist. The development
+example config opts out with `security.enforce_app_id_allowlist: false`; remove
 that override or set it to `true`, then add entries to the
-`security.authorized_apps` array.
+`security.allowed_apps` array.
 
-When authentication is enabled, clients must send an `Authenticate` message
-immediately after connecting. The server validates the `app_id` against the
-configured authorized apps and enforces per-app rate limiting based on the
+When the allowlist is enforced, clients must send the frozen-wire
+`Authenticate` message immediately after connecting. The server matches its
+public `app_id` against configured apps and enforces per-app rate limiting from the
 `rate_limit_per_minute` field.
 
 ```json
 {
   "security": {
-    "require_websocket_auth": true,
-    "authorized_apps": [
+    "enforce_app_id_allowlist": true,
+    "allowed_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "My Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
@@ -651,11 +649,10 @@ configured authorized apps and enforces per-app rate limiting based on the
 }
 ```
 
-The current client handshake sends and validates only `app_id`; configured
-`app_secret` values are reserved and are not client credentials. Do not ship
-them in game binaries. App IDs provide allowlisting, quota accounting, and
+The client handshake sends and checks only a public `app_id`; no client secret
+exists. App IDs provide allowlisting, quota accounting, and
 accidental room-collision isolation, not protection from a hostile client that
-knows another app's public ID. See [Authentication](docs/authentication.md) for
+knows another app's public ID. See [Application identification](docs/authentication.md) for
 the exact trust boundary.
 
 ## MSRV

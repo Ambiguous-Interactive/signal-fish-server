@@ -40,7 +40,7 @@
   },
   "security": {
     "cors_origins": "*",
-    "require_websocket_auth": false,
+    "enforce_app_id_allowlist": false,
     "require_metrics_auth": false,
     "max_message_size": 65536,
     "max_signal_bytes": 16384,
@@ -53,10 +53,9 @@
         "enabled": false
       }
     },
-    "authorized_apps": [
+    "allowed_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "CHANGE_ME_BEFORE_PRODUCTION",
         "app_name": "My Awesome Game",
         "max_rooms": 100,
         "max_players_per_room": 16,

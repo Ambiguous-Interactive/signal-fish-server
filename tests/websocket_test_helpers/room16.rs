@@ -26,7 +26,7 @@ use super::{next_matching_server_message_within, WsStream};
 /// spends it), never an expected wait.
 const STEP_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
-/// A connected, authenticated, room-joined player: its server-assigned id and
+/// A connected, handshake-complete, room-joined player: its server-assigned id and
 /// the live socket. The socket is retained so the player stays in the room for
 /// the lifetime of the handle (dropping it disconnects the player).
 pub struct PlayerHandle {
@@ -100,7 +100,7 @@ pub async fn authenticate_with_encoding(
     .await;
 }
 
-/// Attempt to join `room_code` as `player_name` on an already-authenticated
+/// Attempt to join `room_code` as `player_name` on an already handshake-complete
 /// socket. Returns the joined handle, or the server's `(reason, error_code)`
 /// on refusal — so a caller can assert admission (the A3 regression) OR the
 /// documented room-cap refusal without a panic in either direction.

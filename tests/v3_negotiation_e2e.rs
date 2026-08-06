@@ -8,7 +8,7 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
-use signal_fish_server::config::AppAuthEntry;
+use signal_fish_server::config::AppRegistrationEntry;
 use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, ServerMessage, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
@@ -22,10 +22,9 @@ use websocket_test_helpers::{next_server_message_within, WsStream};
 const APP_ID: &str = "v3-test-app";
 const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "V3 Test App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -33,20 +32,20 @@ fn app_entry() -> AppAuthEntry {
     }
 }
 
-async fn start_auth_server() -> RunningTestServer {
-    start_server_with_auth_and_stats(true, 0).await
+async fn start_allowlist_server() -> RunningTestServer {
+    start_server_with_app_policy_and_stats(true, 0).await
 }
 
-async fn start_auth_disabled_server() -> RunningTestServer {
-    start_server_with_auth_and_stats(false, 0).await
+async fn start_open_policy_server() -> RunningTestServer {
+    start_server_with_app_policy_and_stats(false, 0).await
 }
 
-async fn start_server_with_auth_and_stats(
-    auth_enabled: bool,
+async fn start_server_with_app_policy_and_stats(
+    app_id_allowlist_enabled: bool,
     delivery_stats_interval_secs: u64,
 ) -> RunningTestServer {
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = auth_enabled;
+    server_config.app_id_allowlist_enabled = app_id_allowlist_enabled;
     server_config.websocket_config.delivery_stats_interval_secs = delivery_stats_interval_secs;
 
     let mut protocol_config = test_protocol_config();
@@ -62,7 +61,10 @@ async fn start_server_with_auth_and_stats(
         signal_fish_server::config::MetricsConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
         signal_fish_server::config::TransportSecurityConfig::default(),
-        auth_enabled.then(app_entry).into_iter().collect(),
+        app_id_allowlist_enabled
+            .then(app_entry)
+            .into_iter()
+            .collect(),
     )
     .await
     .expect("server builds");
@@ -70,9 +72,9 @@ async fn start_server_with_auth_and_stats(
     start_server(game_server).await
 }
 
-async fn start_v3_only_server(auth_enabled: bool) -> RunningTestServer {
+async fn start_v3_only_server(app_id_allowlist_enabled: bool) -> RunningTestServer {
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = auth_enabled;
+    server_config.app_id_allowlist_enabled = app_id_allowlist_enabled;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
@@ -89,7 +91,10 @@ async fn start_v3_only_server(auth_enabled: bool) -> RunningTestServer {
         signal_fish_server::config::MetricsConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
         signal_fish_server::config::TransportSecurityConfig::default(),
-        auth_enabled.then(app_entry).into_iter().collect(),
+        app_id_allowlist_enabled
+            .then(app_entry)
+            .into_iter()
+            .collect(),
     )
     .await
     .expect("server builds");
@@ -142,7 +147,7 @@ async fn authenticate(ws: &mut WsStream, auth: ClientMessage) -> ServerMessage {
 
 #[tokio::test]
 async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
@@ -176,9 +181,10 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
 }
 
 #[tokio::test]
-async fn delivery_advisories_wait_for_authenticated_protocol_info() {
-    for auth_enabled in [true, false] {
-        let running_server = start_server_with_auth_and_stats(auth_enabled, 1).await;
+async fn delivery_advisories_wait_for_handshake_complete_protocol_info() {
+    for app_id_allowlist_enabled in [true, false] {
+        let running_server =
+            start_server_with_app_policy_and_stats(app_id_allowlist_enabled, 1).await;
         let addr = running_server.addr();
         let mut ws = connect(addr, "/v3/ws").await;
 
@@ -186,7 +192,7 @@ async fn delivery_advisories_wait_for_authenticated_protocol_info() {
             tokio::time::timeout(tokio::time::Duration::from_millis(1_200), ws.next()).await;
         assert!(
             early_message.is_err(),
-            "auth_enabled={auth_enabled}: delivery advisory arrived before optional Authenticate"
+            "app_id_allowlist_enabled={app_id_allowlist_enabled}: delivery advisory arrived before optional Authenticate"
         );
 
         match authenticate(&mut ws, version_only_auth(Some(3))).await {
@@ -199,12 +205,12 @@ async fn delivery_advisories_wait_for_authenticated_protocol_info() {
                 next_server_message(&mut ws).await,
                 ServerMessage::RelayStats { .. }
             ),
-            "auth_enabled={auth_enabled}: expected RelayStats after ProtocolInfo"
+            "app_id_allowlist_enabled={app_id_allowlist_enabled}: expected RelayStats after ProtocolInfo"
         );
         match next_server_message(&mut ws).await {
             ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
             other => panic!(
-                "auth_enabled={auth_enabled}: expected trailing counter snapshot, got {other:?}"
+                "app_id_allowlist_enabled={app_id_allowlist_enabled}: expected trailing counter snapshot, got {other:?}"
             ),
         }
         running_server.shutdown().await;
@@ -212,8 +218,8 @@ async fn delivery_advisories_wait_for_authenticated_protocol_info() {
 }
 
 #[tokio::test]
-async fn auth_disabled_endpoint_default_starts_advisories_after_first_application_baseline() {
-    let running_server = start_server_with_auth_and_stats(false, 1).await;
+async fn open_policy_endpoint_default_starts_advisories_after_first_application_baseline() {
+    let running_server = start_server_with_app_policy_and_stats(false, 1).await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
     ws.send(Message::Text(
@@ -238,8 +244,8 @@ async fn auth_disabled_endpoint_default_starts_advisories_after_first_applicatio
 }
 
 #[tokio::test]
-async fn auth_disabled_binary_rejection_starts_endpoint_default_advisories() {
-    let running_server = start_server_with_auth_and_stats(false, 1).await;
+async fn open_policy_binary_rejection_starts_endpoint_default_advisories() {
+    let running_server = start_server_with_app_policy_and_stats(false, 1).await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
     ws.send(Message::Binary(vec![1, 2, 3].into()))
@@ -286,7 +292,7 @@ fn version_only_auth(protocol_version: Option<u16>) -> ClientMessage {
 
 #[tokio::test]
 async fn v3_client_negotiates_v3_on_default_server() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
@@ -309,7 +315,7 @@ async fn v3_client_negotiates_v3_on_default_server() {
 async fn future_v4_client_is_clamped_to_v3() {
     // A stale v3-era (or future) client that still advertises 4/5 negotiates
     // down to the build ceiling (3) — v4+ is not a negotiated version.
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
@@ -335,7 +341,7 @@ async fn future_v4_client_is_clamped_to_v3() {
 
 #[tokio::test]
 async fn v2_client_stays_v2_on_default_server() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
@@ -377,7 +383,7 @@ async fn v3_only_server_rejects_explicit_v2_instead_of_silently_upgrading() {
 }
 
 #[tokio::test]
-async fn auth_disabled_v3_only_server_rejects_v2_endpoint_default() {
+async fn open_policy_v3_only_server_rejects_v2_endpoint_default() {
     let running_server = start_v3_only_server(false).await;
     let mut ws = connect(running_server.addr(), "/v2/ws").await;
 
@@ -392,7 +398,7 @@ async fn auth_disabled_v3_only_server_rejects_v2_endpoint_default() {
 }
 
 #[tokio::test]
-async fn auth_disabled_v3_only_server_closes_after_explicit_v2_authenticate() {
+async fn allowlist_disabled_v3_only_server_closes_after_explicit_v2_authenticate() {
     let running_server = start_v3_only_server(false).await;
     let mut ws = connect(running_server.addr(), "/v3/ws").await;
 
@@ -409,10 +415,10 @@ async fn auth_disabled_v3_only_server_closes_after_explicit_v2_authenticate() {
 
     let closed = tokio::time::timeout(SERVER_MESSAGE_TIMEOUT, ws.next())
         .await
-        .expect("server must close the provisionally authenticated socket");
+        .expect("server must close the provisionally handshake-complete socket");
     assert!(
         matches!(closed, None | Some(Ok(Message::Close(_)))),
-        "unsupported auth-disabled negotiation must close without application processing: {closed:?}"
+        "unsupported allowlist-disabled negotiation must close without application processing: {closed:?}"
     );
     running_server.shutdown().await;
 }
@@ -422,7 +428,7 @@ async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
     // Deployment clamps `protocol.max_protocol_version` back to 2 (pure v2): a
     // v3 client is negotiated down to 2 and told so via ProtocolInfo.
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
@@ -465,7 +471,7 @@ async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
 
 #[tokio::test]
 async fn v2_client_omitting_fields_is_recorded_as_v2() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
@@ -501,7 +507,7 @@ async fn v2_client_omitting_fields_is_recorded_as_v2() {
 
 #[tokio::test]
 async fn v3_ws_alias_defaults_to_v3_when_client_omits_version() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     // Connect to the /v3/ws alias and omit protocol_version entirely.
     let mut ws = connect(addr, "/v3/ws").await;
@@ -535,7 +541,7 @@ async fn v3_ws_alias_defaults_to_v3_when_client_omits_version() {
 
 #[tokio::test]
 async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     // Connect to /v3/ws but explicitly advertise v2: the explicit client value
     // must take precedence over the path default (3).
@@ -568,7 +574,7 @@ async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
 
 #[tokio::test]
 async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v2/ws").await;
 
@@ -593,8 +599,8 @@ async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
 }
 
 #[tokio::test]
-async fn auth_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
-    let running_server = start_auth_disabled_server().await;
+async fn allowlist_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
+    let running_server = start_open_policy_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
 
@@ -613,7 +619,7 @@ async fn auth_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
             assert_eq!(
                 info.protocol_version,
                 Some(3),
-                "auth-disabled /v3/ws Authenticate must still apply the path default"
+                "allowlist-disabled /v3/ws Authenticate must still apply the path default"
             );
             assert_eq!(
                 info.transports,
@@ -626,8 +632,8 @@ async fn auth_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
 }
 
 #[tokio::test]
-async fn auth_disabled_v3_ws_respects_explicit_v2_without_version_fields() {
-    let running_server = start_auth_disabled_server().await;
+async fn open_policy_v3_ws_respects_explicit_v2_without_version_fields() {
+    let running_server = start_open_policy_server().await;
     let addr = running_server.addr();
     let mut ws = connect(addr, "/v3/ws").await;
 

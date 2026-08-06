@@ -15,7 +15,7 @@
 //!   the port is ALSO pinned via `SIGNAL_FISH__PORT` (belt and braces), and
 //!   every inherited `SIGNAL_FISH*` variable is scrubbed from the child env.
 //!   The config keeps the binary zero-dependency: in-memory storage (the only
-//!   backend), `require_websocket_auth: false`, SDK enforcement off, and the
+//!   backend), `enforce_app_id_allowlist: false`, SDK enforcement off, and the
 //!   per-scenario `session.default_topology`.
 //! - **Ports**: a `std::net::TcpListener` bound to `0.0.0.0:0` (matching the
 //!   server's bind address) reserves a free port which is then released and
@@ -69,7 +69,7 @@ use websocket_test_helpers::server_process::{
 };
 use websocket_test_helpers::{deadline_after, next_matching_server_message_within, WsStream};
 
-/// Arbitrary app id: the spawned server runs with WebSocket auth disabled.
+/// Arbitrary public app ID: the spawned server uses an open app-ID policy.
 const APP_ID: &str = "multiprocess-conformance-app";
 /// How long a client socket may take to observe the death of the server.
 ///

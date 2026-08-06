@@ -69,7 +69,7 @@ pub struct Cli {
     #[arg(long, default_value = "RefNative")]
     pub player_name: String,
 
-    /// App id sent in Authenticate (interop servers run with WebSocket auth disabled).
+    /// Public app ID sent in Authenticate (interop servers use an open app-ID policy).
     #[arg(long, default_value = "reference-native-app")]
     pub app_id: String,
 

@@ -24,16 +24,16 @@ pub struct WebSocketConfig {
     /// Maximum time in milliseconds to wait before flushing batch
     #[serde(default = "default_batch_interval_ms")]
     pub batch_interval_ms: u64,
-    /// Exclusive authentication-input deadline in seconds.
+    /// Exclusive app-ID handshake-input deadline in seconds.
     #[serde(default = "default_auth_timeout_secs")]
     pub auth_timeout_secs: u64,
-    /// Exclusive post-authentication idle-input deadline in seconds; `0`
+    /// Exclusive post-handshake idle-input deadline in seconds; `0`
     /// disables the timeout.
     ///
-    /// An authenticated connection that produces no inbound WebSocket frame of
+    /// A handshake-complete connection that produces no inbound WebSocket frame of
     /// any kind (including Ping/Pong) for this long is closed (normal
     /// disconnect path, so the reconnection grace period still applies). The
-    /// pre-auth handshake is bounded separately by
+    /// app-ID handshake is bounded separately by
     /// [`auth_timeout_secs`](Self::auth_timeout_secs).
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
@@ -121,7 +121,7 @@ impl WebSocketConfig {
     /// Validate WebSocket configuration
     ///
     /// `idle_timeout_secs` is deliberately unconstrained: `0` disables the
-    /// post-auth idle timeout, and any positive value is a valid operator
+    /// post-handshake idle timeout, and any positive value is a valid operator
     /// choice (aggressive timeouts are useful for tests and hardened
     /// deployments alike).
     pub fn validate(&self) -> anyhow::Result<()> {

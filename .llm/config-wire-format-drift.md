@@ -28,7 +28,7 @@ binary game-data transport.
   `SIGNAL_FISH_CONFIG_JSON`, not config fields.
 - Env override values are parsed as JSON before any legacy shorthand. Do not add
   generic comma splitting: it corrupts string fields such as
-  `security.cors_origins` and JSON arrays/maps such as `authorized_apps`.
+  `security.cors_origins` and JSON arrays/maps such as `allowed_apps`.
 - Comma-list shorthand must stay type-scoped to simple list fields.
 
 ## Binary Game Data

@@ -83,13 +83,13 @@ Configure per-game room limits:
 
 ```
 
-When auth is enabled, per-app limits apply:
+When app-ID allowlisting is enabled, per-app limits apply:
 
 ```json
 
 {
   "security": {
-    "authorized_apps": [
+    "allowed_apps": [
       {
         "app_id": "my-game",
         "max_rooms": 100,
@@ -431,13 +431,13 @@ Signal dispatch attempts, and detailed rejected-signal error responses.
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per window
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 
-When auth is enabled, per-app rate limits apply:
+When app-ID allowlist enforcement is enabled, per-app rate limits apply:
 
 ```json
 
 {
   "security": {
-    "authorized_apps": [
+    "allowed_apps": [
       {
         "app_id": "my-game",
         "rate_limit_per_minute": 60
@@ -548,8 +548,8 @@ Protect metrics endpoints:
 `metrics_auth_token` must be set — it defaults to `null`, and when
 `require_metrics_auth` is `true` but no token is configured, every request is
 rejected with HTTP 401. The server compares the bearer token against
-`metrics_auth_token` as a single opaque string (constant-time), not against an
-`app_id:app_secret` pair.
+`metrics_auth_token` as a single opaque string (constant-time); the public app-ID
+allowlist is unrelated to metrics authentication.
 
 Access with:
 
@@ -560,21 +560,21 @@ curl -H "Authorization: Bearer your-secret-token" \
 
 ```
 
-## Authentication
+## Application ID allowlist
 
 Optional app-ID allowlisting with per-app room, player, and request limits. The
-current client handshake validates `app_id` only; see the authentication guide
+current client handshake checks a public `app_id` only; see the application
+identification guide
 for the exact trust boundary.
 
 ```json
 
 {
   "security": {
-    "require_websocket_auth": true,
-    "authorized_apps": [
+    "enforce_app_id_allowlist": true,
+    "allowed_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "max_rooms": 100,
         "max_players_per_room": 16,
         "rate_limit_per_minute": 60
@@ -585,7 +585,7 @@ for the exact trust boundary.
 
 ```
 
-See [Authentication](authentication.md) for full details.
+See [Application identification](authentication.md) for the exact trust boundary.
 
 ## MessagePack Support
 
@@ -760,7 +760,7 @@ Activity-based decisions use
 
 ## Idle Timeout
 
-A separate, socket-level idle cap closes authenticated connections that go
+A separate, socket-level idle cap closes handshake-complete connections that go
 quiet, independent of `server.ping_timeout`:
 
 ```json
@@ -773,7 +773,7 @@ quiet, independent of `server.ping_timeout`:
 
 ```
 
-`idle_timeout_secs` (default 300; `0` disables) closes an authenticated
+`idle_timeout_secs` (default 300; `0` disables) closes a handshake-complete
 connection that produces no inbound WebSocket frame of any kind (including
 Ping/Pong) for that long, surfacing the
 [`CONNECTION_IDLE_TIMEOUT`](reference/error-codes.md) error and disconnecting

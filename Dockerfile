@@ -137,10 +137,11 @@ USER appuser
 
 # Default environment (can be overridden at runtime)
 ENV RUST_LOG=info
-# Disable auth by default so the container starts without a config file.
-# Production deployments should mount a config.json or set auth env vars.
+# Disable metrics authentication and app-ID allowlisting by default so the
+# container starts without a config file. Production deployments should mount
+# a config.json or set the corresponding security environment variables.
 ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
-ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
+ENV SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false
 
 # Run the server
 CMD ["./signal-fish-server"]

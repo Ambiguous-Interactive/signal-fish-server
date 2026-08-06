@@ -74,7 +74,6 @@ impl Config {
     /// Redacted fields (keep in sync with `redaction_covers_every_secret_field`
     /// in this module's tests when adding credential-like config):
     /// - `security.metrics_auth_token`
-    /// - `security.authorized_apps[*].app_secret`
     /// - `session.ice_servers[*].credential` (static TURN credentials)
     /// - `turn.static_auth_secret`
     ///
@@ -84,9 +83,6 @@ impl Config {
     pub fn redacted_for_display(&self) -> Self {
         let mut redacted = self.clone();
         redact_optional(&mut redacted.security.metrics_auth_token);
-        for app in &mut redacted.security.authorized_apps {
-            redact(&mut app.app_secret);
-        }
         for ice_server in &mut redacted.session.ice_servers {
             redact_optional(&mut ice_server.credential);
         }
@@ -114,13 +110,12 @@ fn redact_optional(value: &mut Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppAuthEntry;
+    use crate::config::AppRegistrationEntry;
     use crate::protocol::IceServer;
 
     /// Sentinel secret literals that must never survive redaction.
-    const SECRETS: [&str; 4] = [
+    const SECRETS: [&str; 3] = [
         "metrics-token-sentinel",
-        "app-secret-sentinel",
         "ice-credential-sentinel",
         "turn-static-secret-sentinel",
     ];
@@ -129,9 +124,8 @@ mod tests {
     fn config_with_all_secrets() -> Config {
         let mut config = Config::default();
         config.security.metrics_auth_token = Some(SECRETS[0].to_string());
-        config.security.authorized_apps = vec![AppAuthEntry {
+        config.security.allowed_apps = vec![AppRegistrationEntry {
             app_id: "app-id-not-secret".to_string(),
-            app_secret: SECRETS[1].to_string(),
             app_name: "Test App".to_string(),
             max_rooms: None,
             max_players_per_room: None,
@@ -140,10 +134,10 @@ mod tests {
         config.session.ice_servers = vec![IceServer {
             urls: vec!["turn:turn.example.com:3478".to_string()],
             username: Some("ice-username".to_string()),
-            credential: Some(SECRETS[2].to_string()),
+            credential: Some(SECRETS[1].to_string()),
         }];
         config.turn.enabled = true;
-        config.turn.static_auth_secret = SECRETS[3].to_string();
+        config.turn.static_auth_secret = SECRETS[2].to_string();
         config.turn.urls = vec!["turn:turn.example.com:3478".to_string()];
         config
     }
@@ -174,10 +168,6 @@ mod tests {
             Some(REDACTED_SECRET)
         );
         assert_eq!(
-            redacted.security.authorized_apps[0].app_secret,
-            REDACTED_SECRET
-        );
-        assert_eq!(
             redacted.session.ice_servers[0].credential.as_deref(),
             Some(REDACTED_SECRET)
         );
@@ -191,10 +181,10 @@ mod tests {
 
         assert_eq!(redacted.port, original.port);
         assert_eq!(
-            redacted.security.authorized_apps[0].app_id,
+            redacted.security.allowed_apps[0].app_id,
             "app-id-not-secret"
         );
-        assert_eq!(redacted.security.authorized_apps[0].app_name, "Test App");
+        assert_eq!(redacted.security.allowed_apps[0].app_name, "Test App");
         assert_eq!(
             redacted.session.ice_servers[0].urls,
             original.session.ice_servers[0].urls
@@ -214,7 +204,7 @@ mod tests {
         let redacted = Config::default().redacted_for_display();
 
         assert!(redacted.security.metrics_auth_token.is_none());
-        assert!(redacted.security.authorized_apps.is_empty());
+        assert!(redacted.security.allowed_apps.is_empty());
         assert!(redacted.turn.static_auth_secret.is_empty());
 
         let json = serde_json::to_string(&redacted).expect("default config serializes");
@@ -281,7 +271,7 @@ mod tests {
         walk("", &redacted, &mut hits);
 
         assert!(
-            hits.len() >= 4,
+            hits.len() >= SECRETS.len(),
             "the sweep must visit every known secret field (found only {hits:?})"
         );
         for (path, value) in hits {

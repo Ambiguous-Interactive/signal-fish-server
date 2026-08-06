@@ -11,7 +11,7 @@
 //! - [`crate::config::types`]: Root `Config` struct
 //! - [`crate::config::server`]: Server behavior configuration (rooms, players, timeouts)
 //! - [`crate::config::protocol`]: Protocol settings (SDK compatibility, player names)
-//! - [`crate::config::security`]: Security and authentication settings
+//! - [`crate::config::security`]: Security, app-ID allowlist, and metrics authentication settings
 //! - [`crate::config::relay`]: Relay type configuration
 //! - [`crate::config::session`]: Session topology / transport selection (protocol v3)
 //! - [`crate::config::turn`]: TURN / STUN ICE-server configuration (protocol v3)
@@ -59,7 +59,7 @@ pub use protocol::{
 pub use relay::RelayTypeConfig;
 
 pub use security::{
-    AppAuthEntry, ClientAuthMode, SecurityConfig, TlsServerConfig, TokenBindingConfig,
+    AppRegistrationEntry, ClientAuthMode, SecurityConfig, TlsServerConfig, TokenBindingConfig,
     TransportSecurityConfig,
 };
 

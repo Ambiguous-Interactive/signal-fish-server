@@ -85,7 +85,7 @@ pub type RoomId = Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
-    /// Authenticate with an app ID (required when auth is enabled).
+    /// Send the public app ID (it must be allowlisted when enforcement is enabled).
     Authenticate {
         app_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,7 +196,7 @@ pub struct PeerConnectionInfo {
     pub connection_info: Option<serde_json::Value>,
 }
 
-/// Rate limit information for an authenticated app.
+/// Rate-limit context for an accepted public app ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitInfo {
     /// Enforced when the app configures a per-minute limit.
@@ -265,7 +265,7 @@ pub struct ProtocolInfoPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
-    /// Authentication succeeded.
+    /// Public app ID accepted (frozen legacy wire name).
     Authenticated {
         app_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,7 +274,7 @@ pub enum ServerMessage {
     },
     /// Protocol/capability info sent immediately after `Authenticated`.
     ProtocolInfo(ProtocolInfoPayload),
-    /// Authentication failed.
+    /// App-ID handshake rejected (frozen legacy wire name).
     AuthenticationError {
         error: String,
         error_code: String,
@@ -1817,11 +1817,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Authentication (Optional)
+## Application ID handshake (optional)
 
-When the server has `require_websocket_auth` enabled, you must send an
+When the server has `enforce_app_id_allowlist` enabled, you must send an
 `Authenticate` message as the very first message after connecting. The server
-will close the connection if authentication is not received within the
+will close the connection if the handshake is not received within the
 configured timeout (default: 10 seconds).
 
 ```rust
@@ -1836,7 +1836,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ws_stream, _) = connect_async(url).await?;
     let (mut write, mut read) = ws_stream.split();
 
-    // Authenticate immediately after connecting
+    // Submit the public app ID immediately after connecting. `Authenticate` is
+    // the frozen protocol name; it does not carry a client credential.
     let auth = ClientMessage::Authenticate {
         app_id: "my-game".to_string(),
         sdk_version: Some("1.0.0".to_string()),
@@ -1846,7 +1847,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let json = serde_json::to_string(&auth)?;
     write.send(Message::Text(json.into())).await?;
 
-    // Wait for authentication response
+    // Wait for the app-ID handshake response
     if let Some(Ok(Message::Text(text))) = read.next().await {
         let msg: ServerMessage =
             serde_json::from_str(&text)?;
@@ -1857,7 +1858,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 println!(
-                    "Authenticated as: {app_name}"
+                    "App label accepted: {app_name}"
                 );
                 println!(
                     "Rate limit: {}/min (advisory: {}/hr, {}/day)",
@@ -1896,20 +1897,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-On a successful authentication the server sends `Authenticated` and then,
-immediately after, a `ProtocolInfo` frame on every authenticated connection
+When the app label is accepted, the server sends the frozen-wire
+`Authenticated` frame and then `ProtocolInfo`
 (both v2 and v3; v3-only fields such as `protocol_version` and `transports` are
 omitted on v2). Read and handle (or intentionally skip) the `ProtocolInfo` frame
 rather than treating it as unexpected.
 
-The `app_id` is a public identifier, not a secret. It is safe to embed in
-game builds. The server matches it against the `authorized_apps` list in the
-server configuration.
+The `app_id` is a public identifier, not a secret. It is safe to embed in game
+builds, but any client can replay it. The server matches it against
+`allowed_apps` for access, quota accounting, and accidental room separation;
+this is not hostile-client tenant isolation.
 
 ## Next Steps
 
 - [Protocol](../protocol.md) -- complete message documentation
 - [Features](../features.md) -- full feature overview
-- [Authentication](../authentication.md) -- server-side auth configuration
+- [Application identification](../authentication.md) -- exact app-ID trust boundary
 - [Platform Integration](platform-integration.md) -- upgrade this relay-floor client to peer-to-peer (protocol v3)
 - [Protocol v3 additions](../protocol.md#protocol-v3-additions) -- v3 wire messages (`Signal`, `SessionPlan`)

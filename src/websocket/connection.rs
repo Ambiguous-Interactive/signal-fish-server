@@ -202,13 +202,13 @@ struct InboundDeadline {
 
 impl InboundDeadline {
     fn for_connection(
-        authenticated: bool,
+        app_handshake_complete: bool,
         auth_deadline: Instant,
         auth_timeout_secs: u64,
         idle_timeout: Option<Duration>,
         idle_timeout_secs: u64,
     ) -> Self {
-        if authenticated {
+        if app_handshake_complete {
             Self {
                 at: idle_timeout.map(|window| checked_deadline(Instant::now(), window)),
                 kind: InboundDeadlineKind::Idle,
@@ -1120,10 +1120,10 @@ pub(super) async fn handle_socket(
         }
     };
 
-    // Auth-disabled endpoints normally use their path version immediately. A
+    // Open app-ID-policy endpoints normally use their path version immediately. A
     // deployment floor above that endpoint cannot be satisfied without lying
     // about the client's capabilities, so reject before starting socket tasks.
-    if !server.config().auth_enabled
+    if !server.config().app_id_allowlist_enabled
         && default_protocol_version < server.protocol_config().min_protocol_version
     {
         let minimum = server.protocol_config().min_protocol_version;
@@ -1142,21 +1142,21 @@ pub(super) async fn handle_socket(
         server.unregister_client(&player_id).await;
         return;
     }
-    // Track authentication state.
-    let mut authenticated = !server.config().auth_enabled; // Auto-authenticated if auth disabled
+    // Track the frozen wire handshake state; open policy starts complete.
+    let mut app_handshake_complete = !server.config().app_id_allowlist_enabled;
     let mut authenticate_processed = false;
     let mut received_application_message = false;
     // Capability publication can precede the two handshake responses in the
-    // auth-disabled endpoint-default path. Delivery advisories must wait until
+    // open app-ID-policy endpoint-default path. Delivery advisories must wait until
     // both responses are queued; clients cannot interpret v3 accountability
     // before ProtocolInfo establishes the negotiated mode.
     let protocol_handshake_complete = Arc::new(AtomicBool::new(false));
 
-    // When auth is disabled, legacy clients may skip Authenticate entirely. In
+    // With an open app-ID policy, legacy clients may skip Authenticate entirely. In
     // that mode the endpoint default still applies, so `/v3/ws` starts as v3
     // relay-only while `/v2/ws` remains pure v2. A later first Authenticate can
     // still refine transports/topologies.
-    if authenticated {
+    if app_handshake_complete {
         let cfg = server.protocol_config();
         let negotiated_version = cfg.negotiate_protocol_version(Some(default_protocol_version));
         let (negotiated_transports, negotiated_topologies) =
@@ -1714,16 +1714,16 @@ pub(super) async fn handle_socket(
         let close_signal = close_signal_for_receive;
         let auth_deadline = checked_deadline(connection_start, auth_timeout);
 
-        // Post-auth idle timeout (0 = disabled). Wrapping each `receiver.next()`
+        // Post-handshake idle timeout (0 = disabled). Wrapping each `receiver.next()`
         // means ANY inbound frame — Text, Binary, Ping, Pong, Close — counts as
-        // activity and resets the window. The pre-auth phase below is bounded
-        // by the (stricter) auth deadline instead.
+        // activity and resets the window. The pre-handshake phase below is
+        // bounded by the (stricter) handshake deadline instead.
         let idle_timeout_secs = server_clone.config().websocket_config.idle_timeout_secs;
         let idle_timeout = (idle_timeout_secs > 0).then(|| Duration::from_secs(idle_timeout_secs));
 
         loop {
             let inbound_deadline = InboundDeadline::for_connection(
-                authenticated,
+                app_handshake_complete,
                 auth_deadline,
                 auth_timeout_secs,
                 idle_timeout,
@@ -1860,11 +1860,13 @@ pub(super) async fn handle_socket(
                             supported_transports,
                             supported_topologies,
                         } => {
-                            if server_clone.config().auth_enabled && authenticated {
-                                tracing::warn!(%active_player_id, "Client already authenticated");
+                            if server_clone.config().app_id_allowlist_enabled
+                                && app_handshake_complete
+                            {
+                                tracing::warn!(%active_player_id, "App-ID handshake already completed");
                                 continue;
                             }
-                            if !server_clone.config().auth_enabled
+                            if !server_clone.config().app_id_allowlist_enabled
                                 && (authenticate_processed || received_application_message)
                             {
                                 tracing::warn!(
@@ -1875,7 +1877,7 @@ pub(super) async fn handle_socket(
                             }
 
                             // Validate App ID
-                            match server_clone.auth_middleware.validate_app_id(&app_id).await {
+                            match server_clone.app_id_allowlist.resolve_app_id(&app_id).await {
                                 Ok(info) => {
                                     let compatibility = match server_clone
                                         .protocol_config()
@@ -1943,23 +1945,23 @@ pub(super) async fn handle_socket(
                                             "protocol version compatibility error",
                                         )
                                         .await;
-                                        // Auth-disabled sockets were provisionally
-                                        // authenticated from the endpoint default.
+                                        // Open-policy sockets provisionally completed
+                                        // the handshake from the endpoint default.
                                         // Once an optional Authenticate contradicts
                                         // that default below the deployment floor,
                                         // continuing would leave a declared-v2 client
-                                        // usable as v3. Auth-enabled clients may retry
-                                        // their not-yet-authenticated handshake.
-                                        if !server_clone.config().auth_enabled {
+                                        // usable as v3. Enforced-policy clients may retry
+                                        // their incomplete app-ID handshake.
+                                        if !server_clone.config().app_id_allowlist_enabled {
                                             break;
                                         }
                                         continue;
                                     }
 
-                                    authenticated = true;
+                                    app_handshake_complete = true;
                                     authenticate_processed = true;
                                     server_clone
-                                        .set_client_app_info(&active_player_id, info.clone());
+                                        .set_client_app_context(&active_player_id, info.clone());
                                     server_clone.apply_app_bandwidth_policy(&info);
                                     let supported_formats = server_clone
                                         .protocol_config()
@@ -2037,7 +2039,7 @@ pub(super) async fn handle_socket(
                                         protocol_version = negotiated_version,
                                         ?negotiated_transports,
                                         ?negotiated_topologies,
-                                        "Client authenticated"
+                                        "Public app ID accepted"
                                     );
 
                                     // Send success response
@@ -2115,15 +2117,18 @@ pub(super) async fn handle_socket(
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!(%active_player_id, %app_id, "Authentication failed: {:?}", e);
+                                    tracing::warn!(%active_player_id, %app_id, "Public app ID rejected: {:?}", e);
 
                                     // Send error response.
                                     // The AppIdExpired, AppIdRevoked, and AppIdSuspended
                                     // variants are not currently returned by
-                                    // `validate_app_id`, but are retained for future
+                                    // `resolve_app_id`, but are retained for future
                                     // backend implementations (e.g., app status management
                                     // or admin-controlled app suspension).
                                     let error_code = match e {
+                                        crate::auth::AuthError::DuplicateAppId => {
+                                            ErrorCode::InternalError
+                                        }
                                         crate::auth::AuthError::InvalidAppId => {
                                             ErrorCode::InvalidAppId
                                         }
@@ -2139,7 +2144,6 @@ pub(super) async fn handle_socket(
                                         crate::auth::AuthError::RateLimitExceeded => {
                                             ErrorCode::RateLimitExceeded
                                         }
-                                        _ => ErrorCode::InternalError,
                                     };
 
                                     // Farewell semantics: the connection is
@@ -2162,8 +2166,8 @@ pub(super) async fn handle_socket(
                             }
                         }
                         other => {
-                            if !authenticated {
-                                tracing::warn!(%active_player_id, "Received message before authentication");
+                            if !app_handshake_complete {
+                                tracing::warn!(%active_player_id, "Received message before app-ID handshake");
                                 // Farewell semantics: closing immediately.
                                 enqueue_farewell_message(
                                     &tx_clone,
@@ -2204,15 +2208,17 @@ pub(super) async fn handle_socket(
                                         .await;
                                 }
                             }
-                            if !server_clone.config().auth_enabled && !authenticate_processed {
+                            if !server_clone.config().app_id_allowlist_enabled
+                                && !authenticate_processed
+                            {
                                 protocol_handshake_complete.store(true, Ordering::Release);
                             }
                         }
                     }
                 }
                 Message::Binary(payload) => {
-                    if !authenticated {
-                        tracing::warn!(%active_player_id, "Received binary message before authentication");
+                    if !app_handshake_complete {
+                        tracing::warn!(%active_player_id, "Received binary message before app-ID handshake");
                         // Farewell semantics: closing immediately.
                         enqueue_farewell_message(
                             &tx_clone,
@@ -2242,7 +2248,9 @@ pub(super) async fn handle_socket(
                                 Some(ErrorCode::InvalidInput),
                             )
                             .await;
-                        if !server_clone.config().auth_enabled && !authenticate_processed {
+                        if !server_clone.config().app_id_allowlist_enabled
+                            && !authenticate_processed
+                        {
                             protocol_handshake_complete.store(true, Ordering::Release);
                         }
                         continue;
@@ -2252,7 +2260,7 @@ pub(super) async fn handle_socket(
                     server_clone
                         .handle_game_data_binary(&active_player_id, encoding, payload)
                         .await;
-                    if !server_clone.config().auth_enabled && !authenticate_processed {
+                    if !server_clone.config().app_id_allowlist_enabled && !authenticate_processed {
                         protocol_handshake_complete.store(true, Ordering::Release);
                     }
                 }

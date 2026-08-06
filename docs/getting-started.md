@@ -114,4 +114,4 @@ curl http://localhost:3536/v2/health
 
 - [Configuration](configuration.md) - Customize server settings
 - [Protocol Reference](protocol.md) - Complete message documentation
-- [Authentication](authentication.md) - Secure your server
+- [Application identification](authentication.md) - Configure the public app-ID boundary

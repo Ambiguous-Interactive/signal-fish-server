@@ -22,10 +22,10 @@ Then confirm the resolved posture (secrets are redacted):
 cargo run -- --print-config
 ```
 
-## Authentication
+## Application identification
 
-- [ ] WebSocket auth enabled — `security.require_websocket_auth=true`.
-- [ ] At least one real app registered in `security.authorized_apps` with a
+- [ ] App-ID allowlist enabled — `security.enforce_app_id_allowlist=true`.
+- [ ] At least one real app registered in `security.allowed_apps` with a
   meaningful `app_id` / `app_name`.
 - [ ] CORS locked down — `security.cors_origins` set to your origin(s), **not**
   `*`.
@@ -33,9 +33,9 @@ cargo run -- --print-config
 
 ## Secrets protected
 
-- [ ] The reserved `authorized_apps[*].app_secret` field is not exposed to
-  clients or treated as a current WebSocket credential; the handshake validates
-  only the public `app_id` (see [Authentication](authentication.md)).
+- [ ] Allowed app IDs are treated as public accounting labels, not credentials
+  or hostile-client tenant isolation (see
+  [Application identification](authentication.md)).
 - [ ] `turn.static_auth_secret` (if TURN is enabled) is a strong random value,
   supplied via `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET`, not committed to the
   repo.
@@ -69,7 +69,7 @@ cargo run -- --print-config
 - [ ] `rate_limit.*` values fit your traffic — `max_room_creations`,
   `max_join_attempts`, `max_signals`, `max_signal_errors`, and `time_window`
   (see [when to adjust](configuration-recipes.md#rate-limits)).
-- [ ] Per-app overrides (`authorized_apps[*].rate_limit_per_minute`,
+- [ ] Per-app overrides (`allowed_apps[*].rate_limit_per_minute`,
   `max_rooms`, `max_players_per_room`) set where an app needs different limits.
 - [ ] `security.max_signal_bytes` and `security.max_message_size` left at sane
   caps (`max_signal_bytes` must be `> 0` and `≤ max_message_size`).
@@ -134,5 +134,5 @@ cargo run -- --print-config
 - [Configuration recipes](configuration-recipes.md) — per-feature config
 - [Configuration reference](configuration.md) — every key and default
 - [Deployment](deployment.md) — Docker, reverse proxies, cloud providers
-- [Authentication](authentication.md) — client handshake and error codes
+- [Application identification](authentication.md) — public app-ID trust boundary and wire errors
 - [TURN Deployment](deployment-turn.md) — self-hosted coturn and rotation

@@ -3,5 +3,5 @@ pub mod middleware;
 pub mod rate_limiter;
 
 pub use error::AuthError;
-pub use middleware::{AppInfo, AuthMiddleware};
+pub use middleware::{AppContext, AppIdAllowlist};
 pub use rate_limiter::InMemoryRateLimiter;

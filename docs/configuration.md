@@ -151,7 +151,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING` | `logging.enable_file_logging` | `true` | Enable rolling file logs |
 | `SIGNAL_FISH__LOGGING__FORMAT` | `logging.format` | `json` | Log output format (`json` or `text`) |
 | `SIGNAL_FISH__SECURITY__CORS_ORIGINS` | `security.cors_origins` | `http://localhost:3000,http://localhost:5173` | Allowed CORS origins (comma-separated or `*`) |
-| `SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH` | `security.require_websocket_auth` | `true` | Require app authentication on WebSocket connect |
+| `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST` | `security.enforce_app_id_allowlist` | `true` | Require the public client app ID to appear in `allowed_apps` |
 | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH` | `security.require_metrics_auth` | `true` | Require auth token for metrics endpoints |
 | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN` | `security.metrics_auth_token` | `null` | Bearer token for metrics endpoints |
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE` | `security.max_message_size` | `65536` | Max WebSocket message size in bytes |
@@ -167,7 +167,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__REQUIRE_CLIENT_FINGERPRINT` | `security.transport.token_binding.require_client_fingerprint` | `false` | Require mTLS fingerprint in token-bound frames |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SUBPROTOCOL` | `security.transport.token_binding.subprotocol` | `signalfish.tokenbinding.v1` | Token-binding WebSocket subprotocol |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SCHEME` | `security.transport.token_binding.scheme` | `sec_websocket_key_sha256` | Token-binding signing scheme |
-| `SIGNAL_FISH__SECURITY__AUTHORIZED_APPS` | `security.authorized_apps` | `[]` | JSON array of authorized app entries |
+| `SIGNAL_FISH__SECURITY__ALLOWED_APPS` | `security.allowed_apps` | `[]` | JSON array of public app-ID registrations and accounting limits |
 | `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CAPACITY` | `coordination.dedup_cache.capacity` | `100000` | In-memory coordinator dedup cache capacity (future-backend seam; not cross-process coordination) |
 | `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__TTL_SECS` | `coordination.dedup_cache.ttl_secs` | `60` | In-memory coordinator dedup cache TTL |
 | `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CLEANUP_INTERVAL_SECS` | `coordination.dedup_cache.cleanup_interval_secs` | `30` | In-memory coordinator dedup cache cleanup interval |
@@ -192,8 +192,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `false` | Opt-in outbound message batching (off keeps real-time relay latency low; on trades up to `batch_interval_ms` per hop for fewer writes) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch (maximum: 65,536) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
-| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Exclusive deadline for authentication input after connect |
-| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Exclusive inbound-frame deadline for authenticated connections (`0` disables) |
+| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Exclusive deadline for the initial app-ID/protocol handshake after connect (legacy key name) |
+| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Exclusive inbound-frame deadline after handshake completion (`0` disables) |
 | `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Cadence for server-initiated RFC 6455 Ping frames (`0` disables; must be ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS` | `websocket.pong_timeout_secs` | `5` | Seconds allowed for the matching Pong before close `4003 activity_timeout` (must be > `0` and ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES` | `websocket.socket_send_buffer_bytes` | `65536` | Requested TCP send-buffer bound ahead of WebSocket control traffic (`0` keeps the platform default; must be ≤ `16777216`) |
@@ -220,7 +220,7 @@ Complete reference of all configuration options with environment variable overri
   },
   "security": {
     "cors_origins": "*",
-    "require_websocket_auth": false
+    "enforce_app_id_allowlist": false
   }
 }
 
@@ -250,7 +250,7 @@ Complete reference of all configuration options with environment variable overri
   },
   "security": {
     "cors_origins": "https://yourgame.com",
-    "require_websocket_auth": true,
+    "enforce_app_id_allowlist": true,
     "max_connections_per_ip": 24
   }
 }
@@ -341,10 +341,10 @@ candidate codes or changing the behavior of explicit room-code requests.
 - `enable_batching` - Opt-in outbound batching (off by default; on adds up to `batch_interval_ms` latency per hop)
 - `batch_size` - Max messages per batch (maximum: 65,536)
 - `batch_interval_ms` - Batch flush interval
-- `auth_timeout_secs` - Exclusive deadline for authentication input after
+- `auth_timeout_secs` - Exclusive deadline for app-ID handshake input after
   connect
-- `idle_timeout_secs` - Exclusive post-authentication inbound-frame deadline
-  (default: 300; `0` disables). An authenticated connection that produces no inbound WebSocket
+- `idle_timeout_secs` - Exclusive post-handshake inbound-frame deadline
+  (default: 300; `0` disables). A handshake-complete connection that produces no inbound WebSocket
   frame of any kind (including Ping/Pong) for this long receives a
   `CONNECTION_IDLE_TIMEOUT` error and is closed through the normal disconnect
   path, so the reconnection grace period still applies. The error is delivered
@@ -524,5 +524,5 @@ cargo run -- --print-config
 
 ## Next Steps
 
-- [Authentication](authentication.md) - Set up app authentication
+- [Application identification](authentication.md) - Configure the public app-ID allowlist
 - [Deployment](deployment.md) - Production deployment guide

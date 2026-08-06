@@ -1,12 +1,13 @@
-//! In-memory authentication middleware for signal-fish-server.
+//! In-memory application-ID allowlist for Signal Fish Server.
 //!
-//! Validates application credentials against a static configuration loaded at
-//! startup. When auth is disabled the middleware returns a default `AppInfo` for
-//! every request.
+//! Resolves public application IDs against static configuration loaded at
+//! startup. This module does not authenticate a client or validate a client
+//! secret: any client can replay a known app ID. When enforcement is disabled,
+//! every app ID receives a default [`AppContext`].
 
 use super::error::AuthError;
 use super::rate_limiter::InMemoryRateLimiter;
-use crate::config::AppAuthEntry;
+use crate::config::AppRegistrationEntry;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,27 +16,23 @@ use uuid::Uuid;
 
 /// Per-application rate limit information returned to clients.
 ///
-/// Only `per_minute` is actively enforced server-side by the
-/// `InMemoryRateLimiter`. The `per_hour` and `per_day` fields are advisory
-/// projections (computed as multiples of `per_minute`) communicated to clients
-/// so they can implement their own budgeting; they are not enforced by the
-/// server.
+/// With allowlist enforcement on, `per_minute` limits handshake resolution for
+/// a known public ID. The `per_hour` and `per_day` fields are advisory
+/// projections communicated to clients and are not enforced. Open mode uses
+/// fixed legacy values (`1000`, `10000`, `100000`) and enforces none of them.
 #[derive(Debug, Clone)]
 pub struct RateLimits {
-    /// Requests allowed per minute. This is the only limit actively enforced
-    /// by the server-side rate limiter.
+    /// Known-ID handshake attempts allowed per minute in enforced mode.
     pub per_minute: u32,
-    /// Advisory projection: `per_minute * 60`. Communicated to clients for
-    /// budgeting purposes but not enforced server-side.
+    /// Advisory hourly projection; a fixed legacy value in open mode.
     pub per_hour: u32,
-    /// Advisory projection: `per_minute * 1440`. Communicated to clients for
-    /// budgeting purposes but not enforced server-side.
+    /// Advisory daily projection; a fixed legacy value in open mode.
     pub per_day: u32,
 }
 
-/// Application information returned after successful authentication.
+/// Application context attached after a public app ID is accepted.
 #[derive(Debug, Clone)]
-pub struct AppInfo {
+pub struct AppContext {
     pub id: Uuid,
     pub name: String,
     pub organization: Option<String>,
@@ -45,8 +42,8 @@ pub struct AppInfo {
     pub rate_limits: RateLimits,
 }
 
-/// Default rate limits applied when auth is disabled or an application has no
-/// explicit per-minute limit configured.
+/// Default rate limits applied when allowlisting is disabled or an application
+/// has no explicit per-minute limit configured.
 const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 1000;
 const DEFAULT_RATE_LIMIT_PER_HOUR: u32 = 10000;
 const DEFAULT_RATE_LIMIT_PER_DAY: u32 = 100_000;
@@ -73,47 +70,38 @@ fn deterministic_uuid(key: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-/// Constant-time secret comparison to prevent timing attacks.
-///
-/// Delegates to the crate-wide [`crate::security::constant_time_eq`] so every
-/// secret comparison shares one constant-time implementation.
-fn secrets_match(a: &str, b: &str) -> bool {
-    crate::security::constant_time_eq(a, b)
-}
-
-/// In-memory authentication middleware backed by a `HashMap` of configured
-/// application entries.
-pub struct AuthMiddleware {
-    /// Map of app_id -> (app_secret, AppInfo). Empty when auth is disabled.
-    apps: HashMap<String, (String, AppInfo)>,
+/// In-memory public app-ID allowlist backed by configured application entries.
+pub struct AppIdAllowlist {
+    /// Map of public app ID to its accounting and quota context.
+    apps: HashMap<String, AppContext>,
     /// Per-app sliding-window rate limiter.
     rate_limiter: Arc<InMemoryRateLimiter>,
-    /// Whether authentication is enabled.
-    auth_enabled: bool,
+    /// Whether allowlist enforcement is enabled.
+    enforce: bool,
     /// Shared server metrics when constructed by `EnhancedGameServer`.
     metrics: Option<Arc<crate::metrics::ServerMetrics>>,
 }
 
-impl AuthMiddleware {
-    /// Create an auth middleware populated from a list of config entries.
+impl AppIdAllowlist {
+    /// Create an enforced allowlist populated from config entries.
     ///
     /// A background rate-limiter cleanup task is started only when at least one
     /// configured application has a `rate_limit_per_minute` set.
-    pub fn new(entries: Vec<AppAuthEntry>) -> Self {
+    pub fn new(entries: Vec<AppRegistrationEntry>) -> Result<Self, AuthError> {
         Self::new_inner(entries, None)
     }
 
     pub(crate) fn with_metrics(
-        entries: Vec<AppAuthEntry>,
+        entries: Vec<AppRegistrationEntry>,
         metrics: Arc<crate::metrics::ServerMetrics>,
-    ) -> Self {
+    ) -> Result<Self, AuthError> {
         Self::new_inner(entries, Some(metrics))
     }
 
     fn new_inner(
-        entries: Vec<AppAuthEntry>,
+        entries: Vec<AppRegistrationEntry>,
         metrics: Option<Arc<crate::metrics::ServerMetrics>>,
-    ) -> Self {
+    ) -> Result<Self, AuthError> {
         let has_rate_limited_app = entries.iter().any(|e| e.rate_limit_per_minute.is_some());
 
         let mut apps = HashMap::with_capacity(entries.len());
@@ -121,7 +109,7 @@ impl AuthMiddleware {
             let per_minute = entry
                 .rate_limit_per_minute
                 .unwrap_or(DEFAULT_RATE_LIMIT_PER_MINUTE);
-            let info = AppInfo {
+            let info = AppContext {
                 // Deterministic UUID derived from the app_id string so that
                 // the same config always produces the same UUID.
                 id: deterministic_uuid(&entry.app_id),
@@ -136,76 +124,50 @@ impl AuthMiddleware {
                     per_day: per_minute.saturating_mul(60).saturating_mul(24),
                 },
             };
-            apps.insert(entry.app_id, (entry.app_secret, info));
+            if apps.insert(entry.app_id, info).is_some() {
+                return Err(AuthError::DuplicateAppId);
+            }
         }
 
         let rate_limiter = Arc::new(InMemoryRateLimiter::new(Duration::from_secs(60)));
 
         if has_rate_limited_app {
             if let Err(error) = rate_limiter.clone().start_cleanup_task() {
-                tracing::warn!(%error, "Auth rate-limit cleanup requires an active Tokio runtime");
+                tracing::warn!(%error, "App-ID rate-limit cleanup requires an active Tokio runtime");
             }
         }
 
-        Self {
+        Ok(Self {
             apps,
             rate_limiter,
-            auth_enabled: true,
+            enforce: true,
             metrics,
-        }
+        })
     }
 
-    /// Create a disabled auth middleware that accepts all connections with
-    /// default `AppInfo` values.
+    /// Create an open policy that accepts every app ID with default context.
     pub fn disabled() -> Self {
         Self {
             apps: HashMap::new(),
             rate_limiter: Arc::new(InMemoryRateLimiter::new(Duration::from_secs(60))),
-            auth_enabled: false,
+            enforce: false,
             metrics: None,
         }
     }
 
-    /// Validate both app_id and app_secret. Returns `AppInfo` on success.
+    /// Resolve a public app ID. This is the method called by the WebSocket
+    /// `Authenticate` handshake; the legacy wire name does not imply proof of
+    /// client identity.
     ///
     /// This method is `async` for interface compatibility so that future
     /// implementations (e.g., database-backed auth) can perform I/O without
     /// changing the call-site.
-    pub async fn validate_app_credentials(
-        &self,
-        app_id: &str,
-        app_secret: &str,
-    ) -> Result<AppInfo, AuthError> {
-        if !self.auth_enabled {
-            return Ok(self.default_app_info(app_id));
+    pub async fn resolve_app_id(&self, app_id: &str) -> Result<AppContext, AuthError> {
+        if !self.enforce {
+            return Ok(self.default_app_context(app_id));
         }
 
-        let (expected_secret, info) = self.apps.get(app_id).ok_or(AuthError::InvalidAppId)?;
-
-        if !secrets_match(expected_secret, app_secret) {
-            return Err(AuthError::InvalidCredentials);
-        }
-
-        // Enforce per-app rate limit if configured.
-        if let Some(limit) = info.rate_limit_per_minute {
-            self.check_rate_limit(app_id, limit)?;
-        }
-
-        Ok(info.clone())
-    }
-
-    /// Validate app_id only (no secret required). This is the method called
-    /// by `websocket/connection.rs` during the `Authenticate` handshake.
-    ///
-    /// This method is `async` for interface compatibility so that future
-    /// implementations (e.g., database-backed auth) can perform I/O without
-    /// changing the call-site.
-    pub async fn validate_app_id(&self, app_id: &str) -> Result<AppInfo, AuthError> {
-        if !self.auth_enabled {
-            return Ok(self.default_app_info(app_id));
-        }
-
-        let (_secret, info) = self.apps.get(app_id).ok_or(AuthError::InvalidAppId)?;
+        let info = self.apps.get(app_id).ok_or(AuthError::InvalidAppId)?;
 
         // Enforce per-app rate limit if configured.
         if let Some(limit) = info.rate_limit_per_minute {
@@ -225,12 +187,12 @@ impl AuthMiddleware {
             })
     }
 
-    /// Build a default `AppInfo` for use when auth is disabled.
-    fn default_app_info(&self, app_id: &str) -> AppInfo {
+    /// Build a default context for use when allowlist enforcement is disabled.
+    fn default_app_context(&self, app_id: &str) -> AppContext {
         let id = app_id
             .parse::<Uuid>()
             .unwrap_or_else(|_| deterministic_uuid(app_id));
-        AppInfo {
+        AppContext {
             id,
             name: "default".to_string(),
             organization: None,
@@ -250,19 +212,17 @@ impl AuthMiddleware {
 mod tests {
     use super::*;
 
-    fn sample_entries() -> Vec<AppAuthEntry> {
+    fn sample_entries() -> Vec<AppRegistrationEntry> {
         vec![
-            AppAuthEntry {
+            AppRegistrationEntry {
                 app_id: "game-1".to_string(),
-                app_secret: "secret-1".to_string(),
                 app_name: "Test Game".to_string(),
                 max_rooms: Some(50),
                 max_players_per_room: Some(8),
                 rate_limit_per_minute: Some(60),
             },
-            AppAuthEntry {
+            AppRegistrationEntry {
                 app_id: "game-2".to_string(),
-                app_secret: "secret-2".to_string(),
                 app_name: "Another Game".to_string(),
                 max_rooms: None,
                 max_players_per_room: None,
@@ -273,30 +233,40 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_middleware_always_succeeds() {
-        let mw = AuthMiddleware::disabled();
-        let result = mw.validate_app_id("anything").await;
+        let mw = AppIdAllowlist::disabled();
+        let result = mw.resolve_app_id("anything").await;
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.name, "default");
     }
 
-    #[tokio::test]
-    async fn disabled_middleware_validate_credentials_succeeds() {
-        let mw = AuthMiddleware::disabled();
-        let result = mw.validate_app_credentials("any-id", "any-secret").await;
-        assert!(result.is_ok());
+    #[test]
+    fn rate_limited_middleware_can_be_constructed_without_a_runtime() {
+        let middleware = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
+        assert!(middleware.enforce);
     }
 
     #[test]
-    fn rate_limited_middleware_can_be_constructed_without_a_runtime() {
-        let middleware = AuthMiddleware::new(sample_entries());
-        assert!(middleware.auth_enabled);
+    fn duplicate_public_app_ids_are_rejected_by_the_policy_constructor() {
+        let mut entries = sample_entries();
+        entries.push(AppRegistrationEntry {
+            app_id: "game-1".to_string(),
+            app_name: "Conflicting Game".to_string(),
+            max_rooms: Some(999),
+            max_players_per_room: None,
+            rate_limit_per_minute: Some(1),
+        });
+
+        assert!(matches!(
+            AppIdAllowlist::new(entries),
+            Err(AuthError::DuplicateAppId)
+        ));
     }
 
     #[tokio::test]
     async fn valid_app_id_returns_info() {
-        let mw = AuthMiddleware::new(sample_entries());
-        let result = mw.validate_app_id("game-1").await;
+        let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
+        let result = mw.resolve_app_id("game-1").await;
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.name, "Test Game");
@@ -307,64 +277,56 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_app_id_returns_error() {
-        let mw = AuthMiddleware::new(sample_entries());
-        let result = mw.validate_app_id("nonexistent").await;
+        let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
+        let result = mw.resolve_app_id("nonexistent").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AuthError::InvalidAppId));
     }
 
     #[tokio::test]
-    async fn valid_credentials_succeed() {
-        let mw = AuthMiddleware::new(sample_entries());
-        let result = mw.validate_app_credentials("game-1", "secret-1").await;
-        assert!(result.is_ok());
+    async fn public_app_id_is_replayable_and_resolves_the_same_context() {
+        let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
+        let first = mw.resolve_app_id("game-1").await.unwrap();
+        let replay = mw.resolve_app_id("game-1").await.unwrap();
+        assert_eq!(first.id, replay.id);
+        assert_eq!(first.name, replay.name);
     }
 
     #[tokio::test]
-    async fn wrong_secret_returns_invalid_credentials() {
-        let mw = AuthMiddleware::new(sample_entries());
-        let result = mw.validate_app_credentials("game-1", "wrong-secret").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AuthError::InvalidCredentials));
-    }
-
-    #[tokio::test]
-    async fn rate_limit_enforced_on_validate_app_id() {
-        let entries = vec![AppAuthEntry {
+    async fn rate_limit_enforced_on_resolve_app_id() {
+        let entries = vec![AppRegistrationEntry {
             app_id: "limited".to_string(),
-            app_secret: "s".to_string(),
             app_name: "Limited App".to_string(),
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: Some(3),
         }];
-        let mw = AuthMiddleware::new(entries);
+        let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
         // First 3 should succeed
         for _ in 0..3 {
-            assert!(mw.validate_app_id("limited").await.is_ok());
+            assert!(mw.resolve_app_id("limited").await.is_ok());
         }
         // 4th should fail
-        let result = mw.validate_app_id("limited").await;
+        let result = mw.resolve_app_id("limited").await;
         assert!(matches!(result.unwrap_err(), AuthError::RateLimitExceeded));
     }
 
     #[tokio::test]
     async fn rate_limit_rejection_updates_server_metrics() {
-        let entries = vec![AppAuthEntry {
+        let entries = vec![AppRegistrationEntry {
             app_id: "limited".to_string(),
-            app_secret: "s".to_string(),
             app_name: "Limited App".to_string(),
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: Some(1),
         }];
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
-        let mw = AuthMiddleware::with_metrics(entries, metrics.clone());
+        let mw = AppIdAllowlist::with_metrics(entries, metrics.clone()).expect("unique app IDs");
 
-        assert!(mw.validate_app_id("limited").await.is_ok());
+        assert!(mw.resolve_app_id("limited").await.is_ok());
         assert!(matches!(
-            mw.validate_app_id("limited").await,
+            mw.resolve_app_id("limited").await,
             Err(AuthError::RateLimitExceeded)
         ));
 
@@ -376,50 +338,49 @@ mod tests {
 
     #[tokio::test]
     async fn no_rate_limit_when_none_configured() {
-        let entries = vec![AppAuthEntry {
+        let entries = vec![AppRegistrationEntry {
             app_id: "unlimited".to_string(),
-            app_secret: "s".to_string(),
             app_name: "Unlimited App".to_string(),
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: None,
         }];
-        let mw = AuthMiddleware::new(entries);
+        let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
         // Should succeed many times without rate limit
         for _ in 0..100 {
-            assert!(mw.validate_app_id("unlimited").await.is_ok());
+            assert!(mw.resolve_app_id("unlimited").await.is_ok());
         }
     }
 
     #[tokio::test]
     async fn deterministic_uuid_for_same_app_id() {
-        let mw = AuthMiddleware::new(sample_entries());
-        let info1 = mw.validate_app_id("game-1").await.unwrap();
-        let info2 = mw.validate_app_id("game-1").await.unwrap();
+        let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
+        let info1 = mw.resolve_app_id("game-1").await.unwrap();
+        let info2 = mw.resolve_app_id("game-1").await.unwrap();
         assert_eq!(info1.id, info2.id);
     }
 
     #[tokio::test]
     async fn default_rate_limits_for_app_without_explicit_limit() {
-        let mw = AuthMiddleware::new(sample_entries());
-        let info = mw.validate_app_id("game-2").await.unwrap();
+        let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
+        let info = mw.resolve_app_id("game-2").await.unwrap();
         assert_eq!(info.rate_limits.per_minute, DEFAULT_RATE_LIMIT_PER_MINUTE);
     }
 
     #[tokio::test]
     async fn disabled_app_id_parsed_as_uuid_when_valid() {
-        let mw = AuthMiddleware::disabled();
+        let mw = AppIdAllowlist::disabled();
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let info = mw.validate_app_id(uuid_str).await.unwrap();
+        let info = mw.resolve_app_id(uuid_str).await.unwrap();
         assert_eq!(info.id.to_string(), uuid_str);
     }
 
     #[tokio::test]
     async fn disabled_non_uuid_app_id_gets_deterministic_id() {
-        let mw = AuthMiddleware::disabled();
-        let info1 = mw.validate_app_id("my-game").await.unwrap();
-        let info2 = mw.validate_app_id("my-game").await.unwrap();
+        let mw = AppIdAllowlist::disabled();
+        let info1 = mw.resolve_app_id("my-game").await.unwrap();
+        let info2 = mw.resolve_app_id("my-game").await.unwrap();
         assert_eq!(info1.id, info2.id);
     }
 }

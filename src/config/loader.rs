@@ -3,6 +3,7 @@
 use super::validation::validate_config_security;
 use super::Config;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -33,41 +34,49 @@ pub fn load() -> Config {
     let mut merged =
         serde_json::to_value(&defaults).unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
 
-    // 1) Inline JSON via env var
-    if let Ok(json) = env::var("SIGNAL_FISH_CONFIG_JSON") {
-        if let Some(value) = parse_json_document(&json, "SIGNAL_FISH_CONFIG_JSON") {
-            merge_values(&mut merged, value);
-        }
-    }
-
-    // 2) JSON from STDIN (opt-in)
-    if let Ok(val) = env::var("SIGNAL_FISH_CONFIG_STDIN") {
+    let inline_source = env::var("SIGNAL_FISH_CONFIG_JSON")
+        .ok()
+        .and_then(|json| parse_json_document(&json, "SIGNAL_FISH_CONFIG_JSON"));
+    let stdin_source = if let Ok(val) = env::var("SIGNAL_FISH_CONFIG_STDIN") {
         if env_var_truthy(&val) {
             let mut buf = String::new();
             if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
                 eprintln!("Failed to read config from stdin: {e}");
-            } else if let Some(value) = parse_json_document(&buf, "stdin") {
-                merge_values(&mut merged, value);
+                None
+            } else {
+                parse_json_document(&buf, "stdin")
             }
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    // 3) Explicit path via env var
-    if let Ok(path) = env::var("SIGNAL_FISH_CONFIG_PATH") {
-        let path = PathBuf::from(path);
-        merge_file_source(&mut merged, &path);
-    }
+    let explicit_source = env::var("SIGNAL_FISH_CONFIG_PATH")
+        .ok()
+        .and_then(|path| read_file_source(&PathBuf::from(path)));
+    let cwd_source = read_file_source(&PathBuf::from("config.json"));
+    let executable_source = env::current_exe().ok().and_then(|exe_path| {
+        exe_path.parent().and_then(|exe_dir| {
+            let mut path = exe_dir.to_path_buf();
+            path.push("config.json");
+            read_file_source(&path)
+        })
+    });
 
-    // 4) config.json in CWD
-    merge_file_source(&mut merged, &PathBuf::from("config.json"));
-
-    // 5) config.json next to executable
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(mut exe_dir) = exe_path.parent().map(std::path::Path::to_path_buf) {
-            exe_dir.push("config.json");
-            merge_file_source(&mut merged, &exe_dir);
-        }
-    }
+    // `merge_values` gives the later value precedence, so apply the documented
+    // JSON sources from lowest to highest priority.
+    merge_sources_low_to_high(
+        &mut merged,
+        [
+            executable_source,
+            cwd_source,
+            explicit_source,
+            stdin_source,
+            inline_source,
+        ],
+    );
 
     // Environment overrides with prefix SIGNAL_FISH__ and nested separator __
     apply_env_overrides(&mut merged);
@@ -95,7 +104,13 @@ fn parse_json_document(raw: &str, label: &str) -> Option<Value> {
     }
 
     match serde_json::from_str(raw) {
-        Ok(value) => Some(value),
+        Ok(mut value) => match normalize_legacy_app_access_config(&mut value, label) {
+            Ok(()) => Some(value),
+            Err(error) => {
+                eprintln!("Invalid config from {label}: {error}");
+                Some(fail_closed_app_access_source())
+            }
+        },
         Err(err) => {
             eprintln!("Failed to parse config from {label}: {err}");
             None
@@ -103,22 +118,36 @@ fn parse_json_document(raw: &str, label: &str) -> Option<Value> {
     }
 }
 
-fn merge_file_source(target: &mut Value, path: &Path) {
+fn read_file_source(path: &Path) -> Option<Value> {
     if path.as_os_str().is_empty() || !path.exists() {
-        return;
+        return None;
     }
 
     match fs::read_to_string(path) {
-        Ok(contents) => {
-            if let Some(value) = parse_json_document(&contents, &format!("file {}", path.display()))
-            {
-                merge_values(target, value);
-            }
-        }
+        Ok(contents) => parse_json_document(&contents, &format!("file {}", path.display())),
         Err(err) => {
             eprintln!("Failed to read config from {}: {}", path.display(), err);
+            None
         }
     }
+}
+
+fn merge_sources_low_to_high<I>(target: &mut Value, sources: I)
+where
+    I: IntoIterator<Item = Option<Value>>,
+{
+    for source in sources.into_iter().flatten() {
+        merge_values(target, source);
+    }
+}
+
+fn fail_closed_app_access_source() -> Value {
+    serde_json::json!({
+        "security": {
+            "enforce_app_id_allowlist": true,
+            "allowed_apps": []
+        }
+    })
 }
 
 fn merge_values(target: &mut Value, source: Value) {
@@ -149,12 +178,14 @@ where
     K: AsRef<str>,
     V: AsRef<str>,
 {
+    let mut overrides: BTreeMap<Vec<String>, (bool, Value)> = BTreeMap::new();
+
     for (key, raw_value) in vars {
         let Some(stripped) = key.as_ref().strip_prefix("SIGNAL_FISH__") else {
             continue;
         };
 
-        let segments: Vec<String> = stripped
+        let mut segments: Vec<String> = stripped
             .split("__")
             .filter(|segment| !segment.is_empty())
             .map(str::to_ascii_lowercase)
@@ -164,8 +195,103 @@ where
             continue;
         }
 
-        let value = parse_env_value(&segments, raw_value.as_ref());
+        let legacy_name = normalize_legacy_app_access_env_path(&mut segments);
+        let mut value = parse_env_value(&segments, raw_value.as_ref());
+        if segments.as_slice() == ["security", "allowed_apps"] {
+            discard_legacy_app_secrets(&mut value, key.as_ref());
+        }
+
+        match overrides.entry(segments) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((legacy_name, value));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let (existing_legacy, _) = entry.get();
+                eprintln!(
+                    "Conflicting canonical and legacy app-access environment overrides; \
+                     the canonical name takes precedence"
+                );
+                if *existing_legacy && !legacy_name {
+                    entry.insert((false, value));
+                }
+            }
+        }
+    }
+
+    for (segments, (_, value)) in overrides {
         set_nested_value(root, &segments, value);
+    }
+}
+
+fn normalize_legacy_app_access_config(value: &mut Value, label: &str) -> Result<(), String> {
+    let Some(security) = value.get_mut("security").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+
+    normalize_legacy_key(
+        security,
+        "require_websocket_auth",
+        "enforce_app_id_allowlist",
+        label,
+    )?;
+    normalize_legacy_key(security, "authorized_apps", "allowed_apps", label)?;
+
+    if let Some(apps) = security.get_mut("allowed_apps") {
+        discard_legacy_app_secrets(apps, label);
+    }
+    Ok(())
+}
+
+fn normalize_legacy_key(
+    object: &mut serde_json::Map<String, Value>,
+    legacy: &str,
+    canonical: &str,
+    label: &str,
+) -> Result<(), String> {
+    let Some(value) = object.remove(legacy) else {
+        return Ok(());
+    };
+    if object.contains_key(canonical) {
+        return Err(format!(
+            "{label} contains both security.{canonical} and deprecated security.{legacy}"
+        ));
+    }
+    eprintln!("Deprecated config key security.{legacy} in {label}; use security.{canonical}");
+    object.insert(canonical.to_string(), value);
+    Ok(())
+}
+
+fn normalize_legacy_app_access_env_path(segments: &mut [String]) -> bool {
+    if segments.len() != 2 || segments.first().map(String::as_str) != Some("security") {
+        return false;
+    }
+    match segments.get(1).map(String::as_str) {
+        Some("require_websocket_auth") => {
+            segments[1] = "enforce_app_id_allowlist".to_string();
+            true
+        }
+        Some("authorized_apps") => {
+            segments[1] = "allowed_apps".to_string();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn discard_legacy_app_secrets(value: &mut Value, label: &str) {
+    let Some(apps) = value.as_array_mut() else {
+        return;
+    };
+    let mut discarded = false;
+    for app in apps {
+        if let Some(app) = app.as_object_mut() {
+            discarded |= app.remove("app_secret").is_some();
+        }
+    }
+    if discarded {
+        eprintln!(
+            "Deprecated app_secret in {label} was ignored; clients send only public app_id values"
+        );
     }
 }
 
@@ -306,16 +432,14 @@ mod tests {
                 r#"["active_rooms","rooms_created"]"#,
             ),
             (
-                "SIGNAL_FISH__SECURITY__AUTHORIZED_APPS",
+                "SIGNAL_FISH__SECURITY__ALLOWED_APPS",
                 r#"[
                     {
                         "app_id": "game-one",
-                        "app_secret": "game-one-secret-with-32-bytes",
                         "app_name": "Game One"
                     },
                     {
                         "app_id": "game-two",
-                        "app_secret": "game-two-secret-with-32-bytes",
                         "app_name": "Game Two"
                     }
                 ]"#,
@@ -337,9 +461,153 @@ mod tests {
                 DashboardHistoryField::RoomsCreated
             ]
         );
-        assert_eq!(config.security.authorized_apps.len(), 2);
-        assert_eq!(config.security.authorized_apps[0].app_id, "game-one");
-        assert_eq!(config.security.authorized_apps[1].app_name, "Game Two");
+        assert_eq!(config.security.allowed_apps.len(), 2);
+        assert_eq!(config.security.allowed_apps[0].app_id, "game-one");
+        assert_eq!(config.security.allowed_apps[1].app_name, "Game Two");
+    }
+
+    #[test]
+    fn legacy_app_access_env_keys_override_canonical_defaults_without_retaining_secrets() {
+        let config = config_with_env(&[
+            ("SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH", "false"),
+            (
+                "SIGNAL_FISH__SECURITY__AUTHORIZED_APPS",
+                r#"[{
+                    "app_id": "legacy-game",
+                    "app_secret": "must-not-be-retained",
+                    "app_name": "Legacy Game"
+                }]"#,
+            ),
+        ]);
+
+        assert!(!config.security.enforce_app_id_allowlist);
+        assert_eq!(config.security.allowed_apps.len(), 1);
+        assert_eq!(config.security.allowed_apps[0].app_id, "legacy-game");
+
+        let serialized = serde_json::to_string(&config).expect("config serializes");
+        assert!(!serialized.contains("must-not-be-retained"));
+        assert!(!serialized.contains("app_secret"));
+    }
+
+    #[test]
+    fn canonical_app_access_env_keys_win_over_legacy_keys_in_either_order() {
+        for vars in [
+            [
+                ("SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH", "true"),
+                ("SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST", "false"),
+            ],
+            [
+                ("SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST", "false"),
+                ("SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH", "true"),
+            ],
+        ] {
+            let config = config_with_env(&vars);
+            assert!(!config.security.enforce_app_id_allowlist);
+        }
+    }
+
+    #[test]
+    fn canonical_app_list_env_wins_over_legacy_list_in_either_order() {
+        const CANONICAL: (&str, &str) = (
+            "SIGNAL_FISH__SECURITY__ALLOWED_APPS",
+            r#"[{"app_id":"canonical","app_name":"Canonical"}]"#,
+        );
+        const LEGACY: (&str, &str) = (
+            "SIGNAL_FISH__SECURITY__AUTHORIZED_APPS",
+            r#"[{"app_id":"legacy","app_secret":"discard-me","app_name":"Legacy"}]"#,
+        );
+
+        for vars in [[LEGACY, CANONICAL], [CANONICAL, LEGACY]] {
+            let config = config_with_env(&vars);
+            assert_eq!(config.security.allowed_apps.len(), 1);
+            assert_eq!(config.security.allowed_apps[0].app_id, "canonical");
+            let serialized = serde_json::to_string(&config).expect("config serializes");
+            assert!(!serialized.contains("discard-me"));
+            assert!(!serialized.contains("app_secret"));
+        }
+    }
+
+    #[test]
+    fn legacy_json_source_normalizes_before_merging_and_discards_secrets() {
+        let mut merged =
+            serde_json::to_value(Config::default()).expect("default config serializes");
+        let source = parse_json_document(
+            r#"{
+                "security": {
+                    "require_websocket_auth": false,
+                    "authorized_apps": [{
+                        "app_id": "legacy-game",
+                        "app_secret": "must-not-be-retained",
+                        "app_name": "Legacy Game"
+                    }]
+                }
+            }"#,
+            "test source",
+        )
+        .expect("legacy source normalizes");
+        merge_values(&mut merged, source);
+
+        let config: Config = serde_json::from_value(merged).expect("merged config deserializes");
+        assert!(!config.security.enforce_app_id_allowlist);
+        assert_eq!(config.security.allowed_apps[0].app_id, "legacy-game");
+        let serialized = serde_json::to_string(&config).expect("config serializes");
+        assert!(!serialized.contains("must-not-be-retained"));
+        assert!(!serialized.contains("app_secret"));
+    }
+
+    #[test]
+    fn rejected_mixed_alias_source_overrides_lower_sources_with_fail_closed_policy() {
+        let mut merged = serde_json::json!({
+            "security": {
+                "enforce_app_id_allowlist": false,
+                "allowed_apps": [{"app_id": "lower", "app_name": "Lower"}]
+            }
+        });
+        let rejected = parse_json_document(
+            r#"{
+                "security": {
+                    "enforce_app_id_allowlist": false,
+                    "require_websocket_auth": true
+                }
+            }"#,
+            "test source",
+        )
+        .expect("a rejected security source produces a fail-closed override");
+        merge_sources_low_to_high(&mut merged, [Some(rejected)]);
+
+        let config: Config = serde_json::from_value(merged).expect("config deserializes");
+        assert!(config.security.enforce_app_id_allowlist);
+        assert!(config.security.allowed_apps.is_empty());
+    }
+
+    #[test]
+    fn later_json_sources_have_higher_precedence_after_legacy_normalization() {
+        let defaults = serde_json::to_value(Config::default()).expect("defaults serialize");
+        let executable = parse_json_document(
+            r#"{"security":{"enforce_app_id_allowlist":false}}"#,
+            "executable config",
+        );
+        let inline = parse_json_document(
+            r#"{
+                "security": {
+                    "require_websocket_auth": true,
+                    "authorized_apps": [{
+                        "app_id": "inline",
+                        "app_secret": "discard-me",
+                        "app_name": "Inline"
+                    }]
+                }
+            }"#,
+            "SIGNAL_FISH_CONFIG_JSON",
+        );
+        let mut merged = defaults;
+        merge_sources_low_to_high(&mut merged, [executable, inline]);
+
+        let config: Config = serde_json::from_value(merged).expect("config deserializes");
+        assert!(config.security.enforce_app_id_allowlist);
+        assert_eq!(config.security.allowed_apps[0].app_id, "inline");
+        let serialized = serde_json::to_string(&config).expect("config serializes");
+        assert!(!serialized.contains("discard-me"));
     }
 
     #[test]

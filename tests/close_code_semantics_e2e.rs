@@ -8,7 +8,7 @@
 //! (RFC 6455 private range; the assignments are documented protocol surface
 //! and must never be renumbered):
 //!
-//! - `4001 auth_timeout` — never authenticated within
+//! - `4001 auth_timeout` — no app-ID handshake input within
 //!   `websocket.auth_timeout_secs`;
 //! - `4002 slow_consumer` — evicted by the delivery contract;
 //! - `4003 activity_timeout` — server Ping write timed out, the matching Pong
@@ -127,7 +127,7 @@ async fn auth_timeout_closes_with_4001() {
     let mut config = base_config();
     // The test helpers disable auth (connections auto-authenticate and the
     // pre-auth deadline never arms); this scenario is ABOUT that deadline.
-    config.auth_enabled = true;
+    config.app_id_allowlist_enabled = true;
     config.websocket_config.auth_timeout_secs = 5;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let running_server = start_server(server).await;

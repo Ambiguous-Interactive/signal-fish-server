@@ -18,7 +18,7 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
-use signal_fish_server::config::AppAuthEntry;
+use signal_fish_server::config::AppRegistrationEntry;
 use signal_fish_server::protocol::{ClientMessage, PlayerId, ReplayStatus, RoomId, ServerMessage};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_handler_v3};
@@ -34,10 +34,9 @@ use websocket_test_helpers::{
 const APP_ID: &str = "reconnection-replay-app";
 const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "Reconnection Replay App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -51,7 +50,7 @@ async fn start_server_with_config(
     server_config: ServerConfig,
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     let mut server_config = server_config;
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;

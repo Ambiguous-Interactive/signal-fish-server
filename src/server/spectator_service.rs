@@ -33,7 +33,7 @@ pub(crate) struct SpectatorService {
     /// reconnection is disabled.
     reconnection_manager: Option<Arc<ReconnectionManager>>,
     connection_manager: Arc<ConnectionManager>,
-    auth_enabled: bool,
+    app_id_allowlist_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -59,7 +59,7 @@ impl SpectatorService {
         protocol_config: ProtocolConfig,
         reconnection_manager: Option<Arc<ReconnectionManager>>,
         connection_manager: Arc<ConnectionManager>,
-        auth_enabled: bool,
+        app_id_allowlist_enabled: bool,
     ) -> Self {
         Self {
             spectator_rooms: Arc::new(DashMap::new()),
@@ -69,7 +69,7 @@ impl SpectatorService {
             protocol_config,
             reconnection_manager,
             connection_manager,
-            auth_enabled,
+            app_id_allowlist_enabled,
         }
     }
 
@@ -197,7 +197,7 @@ impl SpectatorService {
 
         // Room persistence is authoritative. The process-local room/app map is
         // only a relay cache and may be empty after restart or cache loss.
-        if self.auth_enabled {
+        if self.app_id_allowlist_enabled {
             let Some(client_app_id) = self.connection_manager.app_id(player_id) else {
                 return Err(SpectatorError::new(
                     "Room not found",

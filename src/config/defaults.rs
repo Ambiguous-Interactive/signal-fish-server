@@ -220,7 +220,7 @@ pub fn default_cors_origins() -> String {
 }
 
 pub const fn default_require_auth() -> bool {
-    true // Enforce authentication by default; opt-out only for explicit development scenarios
+    true // Enforce the app-ID allowlist by default; opt out only for explicit development scenarios
 }
 
 pub const fn default_max_message_size() -> usize {
@@ -400,7 +400,7 @@ pub const fn default_auth_timeout_secs() -> u64 {
     10 // Default auth timeout: 10 seconds
 }
 
-/// Default post-authentication idle timeout (5 minutes; `0` disables).
+/// Default post-handshake idle timeout (5 minutes; `0` disables).
 ///
 /// Conservative by construction: the existing server-side activity reaper
 /// (`server.ping_timeout`, default 30s) already unregisters any client that

@@ -142,7 +142,7 @@ nav:
       - Run Modes: run-modes.md
       - Configuration Recipes: configuration-recipes.md
       - Pre-deployment Checklist: pre-deployment-checklist.md
-      - Authentication: authentication.md
+      - Application identification: authentication.md
       - Deployment: deployment.md
       - TURN Deployment: deployment-turn.md
   - Reference:

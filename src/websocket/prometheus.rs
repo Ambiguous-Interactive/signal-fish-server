@@ -252,7 +252,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_rate_limit_auth_rejections_total",
-        "Authentication attempts rejected by the per-app rate limit",
+        "Public app-ID handshakes rejected by the per-app rate limit",
         snapshot.rate_limiting.auth_rejections,
     );
     counter(

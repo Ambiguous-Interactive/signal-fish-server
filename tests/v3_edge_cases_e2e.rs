@@ -32,7 +32,7 @@ mod websocket_test_helpers;
 
 use std::sync::Arc;
 
-use signal_fish_server::config::{AppAuthEntry, SessionConfig};
+use signal_fish_server::config::{AppRegistrationEntry, SessionConfig};
 use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, LobbyState, RoomJoinedPayload, ServerMessage, Topology, Transport,
 };
@@ -45,10 +45,9 @@ use websocket_test_helpers::{next_matching_server_message_within, WsStream};
 
 const APP_ID: &str = "v3-edge-cases-app";
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "V3 Edge Cases App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -67,7 +66,7 @@ fn mesh_session_config() -> SessionConfig {
     }
 }
 
-/// Boot the production router around an auth-enabled in-memory server using the
+/// Boot the production router around an allowlist-enabled in-memory server using the
 /// DEFAULT (relay-floor) `SessionConfig`. Validation / room-lifecycle tests that
 /// never finalize a non-relay session use this.
 async fn start_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
@@ -75,7 +74,7 @@ async fn start_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
 }
 
 /// Boot the production router (`/v2` nest + `/v3/ws` alias) around an
-/// auth-enabled in-memory server built with the given `SessionConfig`,
+/// allowlist-enabled in-memory server built with the given `SessionConfig`,
 /// returning the bound address and the handle (mirrors
 /// `tests/v3_signaling_e2e.rs` / `tests/v3_multipeer_e2e.rs`).
 async fn start_server_with_session(
@@ -84,7 +83,7 @@ async fn start_server_with_session(
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;

@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use signal_fish_server::config::{AppAuthEntry, ProtocolConfig};
+use signal_fish_server::config::{AppRegistrationEntry, ProtocolConfig};
 use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, PlayerId, ReplayStatus, RoomId, ServerMessage,
 };
@@ -717,14 +717,14 @@ async fn backgrounded_tab_profile() {
 const RECONNECT_APP_ID: &str = "scenario-reconnect-app";
 
 /// v3-capable server for the reconnect scenario: nested `/v2` router plus
-/// the `/v3/ws` alias, app auth enabled (mirrors
+/// the `/v3/ws` alias, app-ID allowlist enforcement enabled (mirrors
 /// `tests/reconnection_replay_e2e.rs`, the proven reconnect harness), and
 /// the in-process handle kept for `register_reconnect_token`.
 async fn start_reconnect_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
     let mut server_config = test_server_config();
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = ProtocolConfig::default();
     protocol_config.sdk_compatibility.enforce = false;
@@ -739,9 +739,8 @@ async fn start_reconnect_server() -> (RunningTestServer, Arc<EnhancedGameServer>
         signal_fish_server::config::MetricsConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
         signal_fish_server::config::TransportSecurityConfig::default(),
-        vec![AppAuthEntry {
+        vec![AppRegistrationEntry {
             app_id: RECONNECT_APP_ID.to_string(),
-            app_secret: "secret".to_string(),
             app_name: "Scenario Reconnect App".to_string(),
             max_rooms: Some(10),
             max_players_per_room: Some(8),

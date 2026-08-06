@@ -12,20 +12,19 @@ between nested keys (see
 [environment variable format](configuration.md#environment-variable-format)).
 JSON and environment overrides can be mixed; environment variables win.
 
-## Authentication (authorized_apps)
+## Application ID allowlist (`allowed_apps`)
 
-Require every WebSocket client to authenticate as a registered app, and set
-per-app limits.
+Require every WebSocket client to submit a configured public app ID, and set
+per-app accounting limits. This does not authenticate a hostile client.
 
 ```json
 {
   "security": {
-    "require_websocket_auth": true,
+    "enforce_app_id_allowlist": true,
     "cors_origins": "https://yourgame.com",
-    "authorized_apps": [
+    "allowed_apps": [
       {
         "app_id": "my-game",
-        "app_secret": "RESERVED_NOT_USED_BY_CLIENTS",
         "app_name": "My Awesome Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
@@ -36,15 +35,13 @@ per-app limits.
 }
 ```
 
-Environment equivalent (the app list is a JSON array; `app_secret` is a
-reserved server-side field and is not sent by current clients):
+Environment equivalent (the app list is a JSON array):
 
 ```bash
-export SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=true
+export SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true
 export SIGNAL_FISH__SECURITY__CORS_ORIGINS="https://yourgame.com"
-export SIGNAL_FISH__SECURITY__AUTHORIZED_APPS='[
-  {"app_id":"my-game","app_secret":"RESERVED_NOT_USED_BY_CLIENTS",
-   "app_name":"My Awesome Game","max_rooms":100,
+export SIGNAL_FISH__SECURITY__ALLOWED_APPS='[
+  {"app_id":"my-game","app_name":"My Awesome Game","max_rooms":100,
    "max_players_per_room":16,"rate_limit_per_minute":60}
 ]'
 ```
@@ -52,10 +49,9 @@ export SIGNAL_FISH__SECURITY__AUTHORIZED_APPS='[
 When to use: any non-local deployment. `max_rooms` limits an app's persisted
 rooms across all game names, while `max_players_per_room` caps both new room
 capacity and future admission to existing rooms. Both are enforced only when
-WebSocket auth is enabled; omit them to use the server-wide admission limits.
-`rate_limit_per_minute` is an optional per-app override. Do not expose the
-reserved `app_secret` value to clients. See
-[Authentication](authentication.md) for the client handshake.
+app-ID allowlisting is enabled; omit them to use server-wide admission limits.
+`rate_limit_per_minute` is an optional per-app override. See
+[Application identification](authentication.md) for the exact trust boundary.
 
 ## TURN/STUN
 
@@ -402,13 +398,13 @@ When to adjust:
 - `time_window` — the window (seconds) all the above counts apply over; must be
   `> 0`.
 
-These are global defaults; an `authorized_apps` entry's `rate_limit_per_minute`
-overrides per app (see [Authentication](#authentication-authorized_apps)).
+These are global defaults; an `allowed_apps` entry's `rate_limit_per_minute`
+overrides per app (see [Application ID allowlist](#application-id-allowlist-allowed_apps)).
 
 ## See also
 
 - [Configuration reference](configuration.md) — every key, default, and env override
 - [Run Modes](run-modes.md) — how to run each mode, with commands
 - [Pre-deployment checklist](pre-deployment-checklist.md) — verify before going live
-- [Authentication](authentication.md) — client handshake and error codes
+- [Application identification](authentication.md) — public app-ID trust boundary and wire errors
 - [TURN Deployment](deployment-turn.md) — self-hosted coturn and rotation

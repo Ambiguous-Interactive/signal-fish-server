@@ -62,14 +62,15 @@ wire format uses string codes, not numeric values.
 
 ### Authentication Errors (1xxx)
 
-Errors related to credentials, application identity, and session
-establishment.
+Legacy wire errors related to app-ID admission and session establishment. The
+shipped `Authenticate` message contains only a replayable public app ID; these
+names do not imply client credentials.
 
 | Error Code | Description |
 |---|---|
-| `UNAUTHORIZED` | Access denied. Credentials are missing or invalid. |
+| `UNAUTHORIZED` | Access denied by a policy that uses this legacy wire code. |
 | `INVALID_TOKEN` | The authentication token is invalid, malformed, or expired. |
-| `AUTHENTICATION_REQUIRED` | The operation requires authentication. Provide valid credentials. |
+| `AUTHENTICATION_REQUIRED` | The operation requires the legacy `Authenticate` handshake first. |
 | `INVALID_APP_ID` | The provided application ID is not recognized. |
 | `APP_ID_EXPIRED` | The application ID has expired. Renew your application registration. |
 | `APP_ID_REVOKED` | The application ID has been revoked by an administrator. |
@@ -221,7 +222,7 @@ fn handle_server_error(error: &ServerError) {
             println!("Room not found. It may have been closed.");
         }
         "AUTHENTICATION_REQUIRED" | "UNAUTHORIZED" | "INVALID_TOKEN" => {
-            println!("Authentication error. Re-authenticating.");
+            println!("Handshake or token rejected. Re-establishing the session.");
         }
         code if code.starts_with("INTERNAL") || code.starts_with("SERVICE") => {
             println!("Server issue. Retrying after a delay.");
@@ -291,11 +292,12 @@ metadata. A recognized, well-typed but illegal pairing reaches
 or explicit `null` fails decoding as `INVALID_INPUT`. The invalid message is
 not relayed.
 
-### Authentication failures (`UNAUTHORIZED`, `INVALID_APP_ID`)
+### App-ID admission failures (`UNAUTHORIZED`, `INVALID_APP_ID`)
 
 Verify that your `app_id` is correct and has not expired, been revoked,
 or been suspended. Send an `Authenticate` message before attempting
-room operations when authentication is enabled.
+room operations when app-ID allowlist enforcement is enabled. A recognized ID
+is still public and replayable; see [Application identification](../authentication.md).
 
 ### Spectator join failed (`SPECTATOR_JOIN_FAILED`, `SPECTATOR_NOT_ALLOWED`)
 

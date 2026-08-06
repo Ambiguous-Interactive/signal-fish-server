@@ -858,7 +858,7 @@ async fn test_custom_rate_limiting() {
         event_buffer_size: 100,                        // Buffer 100 events
         enable_reconnection: true,                     // Enable reconnection
         websocket_config: signal_fish_server::config::WebSocketConfig::default(),
-        auth_enabled: false,                // Disable auth for tests
+        app_id_allowlist_enabled: false, // Use an open app-ID policy for tests
         heartbeat_throttle: Duration::ZERO, // No throttling for tests
         region_id: "test".to_string(),
         room_code_prefix: None,

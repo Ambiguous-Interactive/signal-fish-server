@@ -128,13 +128,13 @@ impl ErrorCode {
         match self {
             // Authentication errors (1xxx)
             Self::Unauthorized => {
-                "Access denied. Authentication credentials are missing or invalid."
+                "Access denied by the app-ID handshake policy."
             }
             Self::InvalidToken => {
                 "The authentication token is invalid, malformed, or has expired. Please obtain a new token."
             }
             Self::AuthenticationRequired => {
-                "This operation requires authentication. Please provide valid credentials."
+                "Complete the legacy Authenticate handshake before this operation."
             }
             Self::InvalidAppId => {
                 "The provided application ID is not recognized. Verify your app ID is correct."
@@ -152,7 +152,7 @@ impl ErrorCode {
                 "Application ID is required but was not provided. Include your app ID in the request."
             }
             Self::AuthenticationTimeout => {
-                "Authentication took too long to complete. Please try again."
+                "The app-ID and protocol handshake took too long to complete. Please try again."
             }
             Self::SdkVersionUnsupported => {
                 "The SDK version you are using is no longer supported. Please upgrade to the latest version."

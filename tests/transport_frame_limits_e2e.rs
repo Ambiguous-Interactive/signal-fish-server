@@ -4,7 +4,7 @@
 //! receive loop) can only run AFTER the WebSocket library has buffered the
 //! entire inbound message in memory. Without a transport-layer cap on the
 //! upgrade, the library's defaults (16 MiB frames / 64 MiB messages) let an
-//! unauthenticated peer force the server to buffer megabytes per connection
+//! pre-handshake peer force the server to buffer megabytes per connection
 //! before the polite `MessageTooLarge` rejection ever executes — a memory
 //! amplification window.
 //!

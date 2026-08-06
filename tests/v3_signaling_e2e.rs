@@ -16,7 +16,7 @@ mod websocket_test_helpers;
 
 use futures_util::SinkExt;
 use serde_json::json;
-use signal_fish_server::config::AppAuthEntry;
+use signal_fish_server::config::AppRegistrationEntry;
 use signal_fish_server::protocol::{
     ClientMessage, PlayerId, RoomId, ServerMessage, Topology, Transport,
 };
@@ -32,10 +32,9 @@ use websocket_test_helpers::{
 const APP_ID: &str = "v3-signaling-app";
 const SERVER_MESSAGE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "V3 Signaling App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -43,18 +42,18 @@ fn app_entry() -> AppAuthEntry {
     }
 }
 
-async fn start_auth_server() -> RunningTestServer {
-    start_auth_server_with_handle().await.0
+async fn start_allowlist_server() -> RunningTestServer {
+    start_allowlist_server_with_handle().await.0
 }
 
-async fn start_auth_server_with_handle() -> (RunningTestServer, Arc<EnhancedGameServer>) {
-    start_auth_server_with_config(test_server_config()).await
+async fn start_allowlist_server_with_handle() -> (RunningTestServer, Arc<EnhancedGameServer>) {
+    start_allowlist_server_with_config(test_server_config()).await
 }
 
-async fn start_auth_server_with_config(
+async fn start_allowlist_server_with_config(
     mut server_config: ServerConfig,
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
@@ -194,7 +193,7 @@ async fn next_signal(ws: &mut WsStream) -> (PlayerId, uuid::Uuid, serde_json::Va
 
 #[tokio::test]
 async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
-    let running_server = start_auth_server().await;
+    let running_server = start_allowlist_server().await;
     let addr = running_server.addr();
 
     // Peer 1 creates the room (capacity 2).
@@ -261,7 +260,7 @@ async fn two_v3_peers_relay_offer_answer_ice_byte_preserved() {
 
 #[tokio::test]
 async fn reconnected_websocket_uses_restored_player_id_for_later_signals() {
-    let (running_server, game_server) = start_auth_server_with_handle().await;
+    let (running_server, game_server) = start_allowlist_server_with_handle().await;
     let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;
@@ -353,7 +352,7 @@ async fn oversized_signal_is_rejected_over_the_wire_and_small_signal_still_relay
     // Cap the serialized `signal` payload at 256 bytes (`security.max_signal_bytes`).
     let mut server_config = test_server_config();
     server_config.max_signal_bytes = 256;
-    let (running_server, _server) = start_auth_server_with_config(server_config).await;
+    let (running_server, _server) = start_allowlist_server_with_config(server_config).await;
     let addr = running_server.addr();
 
     let mut peer1 = connect(addr).await;

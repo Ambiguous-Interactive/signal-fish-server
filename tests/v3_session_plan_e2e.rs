@@ -13,7 +13,7 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::SinkExt;
-use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
+use signal_fish_server::config::{AppRegistrationEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
     ClientMessage, ConnectionInfo, DirectEndpoint, IceServer, PlayerId, RoomId, ServerMessage,
     Topology, Transport,
@@ -35,10 +35,9 @@ const POST_GAME_STARTING_SESSION_PLAN_WINDOW: tokio::time::Duration =
 const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
 const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "V3 Session Plan App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -76,7 +75,7 @@ fn mesh_session_config() -> SessionConfig {
 /// production default ICE wiring end to end.
 async fn start_server_with_session(session: SessionConfig) -> RunningTestServer {
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;

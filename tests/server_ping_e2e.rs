@@ -32,7 +32,7 @@ async fn start_server(
     std::sync::Arc<signal_fish_server::server::EnhancedGameServer>,
 ) {
     let config = ServerConfig {
-        auth_enabled: false,
+        app_id_allowlist_enabled: false,
         ping_timeout: std::time::Duration::from_secs(600),
         websocket_config: WebSocketConfig {
             server_ping_interval_secs: ping_interval_secs,

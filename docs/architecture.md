@@ -17,7 +17,7 @@ System design and project structure overview.
 │  │  WebSocket Layer (axum)                       │  │
 │  │  - Upgrade handling                           │  │
 │  │  - Message batching                           │  │
-│  │  - Auth enforcement                           │  │
+│  │  - App-ID allowlist enforcement               │  │
 │  └───────────────┬───────────────────────────────┘  │
 │                  ▼                                   │
 │  ┌───────────────────────────────────────────────┐  │
@@ -133,15 +133,16 @@ Storage abstraction with in-memory implementation.
 
 Designed for extension with custom backends (Redis, PostgreSQL, etc.).
 
-### Authentication
+### Application identification
 
 **Location:** `src/auth/`
 
-App-based authentication and per-app rate limiting.
+Public app-ID allowlisting, connection-bound accounting context, and per-app
+rate limiting. It does not authenticate a hostile client.
 
-- `middleware.rs` - `InMemoryAuthBackend`
+- `middleware.rs` - `AppIdAllowlist`
 - `rate_limiter.rs` - Per-app sliding-window rate limiter
-- `error.rs` - Auth error types
+- `error.rs` - App-ID handshake policy error types
 
 ### Coordination
 
@@ -261,7 +262,7 @@ directory that assigns isolated room homes before WebSocket connection. See
 ### Layers
 
 1. **Transport** - Optional TLS (feature-gated)
-2. **Authentication** - App-based auth (optional)
+2. **Application identification** - Public app-ID allowlist (optional)
 3. **Rate Limiting** - Per-IP and per-app limits
 4. **Validation** - Input validation at protocol boundaries
 5. **Connection Limits** - Max connections per IP
@@ -269,7 +270,8 @@ directory that assigns isolated room homes before WebSocket connection. See
 ### Trust Model
 
 - **Untrusted clients** - All input validated
-- **Semi-trusted apps** - App authentication + rate limits
+- **Public app labels** - App-ID allowlisting + accounting rate limits; not
+  hostile-client identity
 - **Trusted admin** - Metrics endpoints (optional auth)
 
 ## Module Dependencies

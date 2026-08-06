@@ -61,7 +61,7 @@ use crate::wire::{self, WsStream, HANDSHAKE_TIMEOUT};
 pub const EXIT_SUCCESS: i32 = 0;
 /// `--run-for-secs` elapsed with unmet success criteria.
 pub const EXIT_CRITERIA_UNMET: i32 = 1;
-/// The server broke the expected protocol flow (auth/join rejection, bad frame).
+/// The server broke the expected protocol flow (app-ID/join rejection, bad frame).
 /// NOTE: clap also exits 2 on CLI-usage errors, before the event stream
 /// starts (no `exiting` event on that path) — documented in the README.
 pub const EXIT_PROTOCOL_ERROR: i32 = 2;
@@ -380,7 +380,7 @@ async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<u16, FatalError> {
         ServerMessage::Authenticated { .. } => emit(&Event::Authenticated),
         ServerMessage::AuthenticationError { error, error_code } => {
             return Err(FatalError::protocol(format!(
-                "authentication rejected: {error} ({error_code:?})"
+                "app-ID handshake rejected: {error} ({error_code:?})"
             )));
         }
         other => {

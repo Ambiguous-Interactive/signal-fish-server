@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         event_buffer_size: cfg.server.event_buffer_size,
         enable_reconnection: cfg.server.enable_reconnection,
         websocket_config: cfg.websocket.clone(),
-        auth_enabled: cfg.security.require_websocket_auth,
+        app_id_allowlist_enabled: cfg.security.enforce_app_id_allowlist,
         heartbeat_throttle: Duration::from_secs(cfg.server.heartbeat_throttle_secs),
         region_id: cfg.server.region_id.clone(),
         room_code_prefix: cfg.server.room_code_prefix.clone(),
@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.metrics.clone(),
             cfg.coordination.clone(),
             cfg.security.transport.clone(),
-            cfg.security.authorized_apps.clone(),
+            cfg.security.allowed_apps.clone(),
         )
         .await?
     );
@@ -211,7 +211,7 @@ let game_server = EnhancedGameServer::new(
     metrics_config,
     coordination_config,
     transport_config,
-    authorized_apps,
+    allowed_apps,
 )
 .await?;
 
@@ -275,7 +275,7 @@ let config = Config {
     },
     security: SecurityConfig {
         cors_origins: "*".to_string(),
-        require_websocket_auth: false,
+        enforce_app_id_allowlist: false,
         ..Default::default()
     },
     ..Default::default()

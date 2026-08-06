@@ -146,7 +146,7 @@ async fn try_spawn_server(port: u16, knobs: DeliveryKnobs) -> Result<ServerProce
             "reconnection_window": 300
         },
         "security": {
-            "require_websocket_auth": false,
+            "enforce_app_id_allowlist": false,
             "require_metrics_auth": false,
             "cors_origins": "*"
         },
