@@ -129,7 +129,7 @@ Treat these four quantities as one interlocked budget — changing any one witho
 re-checking the others can silently reintroduce the cancellation:
 
 ```text
-{ mutant-count (380), shard-count N, per-shard timeout, per-mutant budget }
+{ mutant-count (384), shard-count N, per-shard timeout, per-mutant budget }
 ```
 
 - **Per-shard target: < 5 min.** `ceil(mutant-count / N) × per-mutant-budget`
@@ -145,7 +145,7 @@ re-checking the others can silently reintroduce the cancellation:
 Measured in CI: shard 22, the worst 12-mutant shard, took 310.12s, or
 25.843s/mutant. Adding ~10% headroom and rounding up gives a conservative
 29s/mutant budget. Using 40 shards caps the modeled largest shard at
-`ceil(380/40) × 29s = 10 × 29s = 290s`, below the 5-minute target. The
+`ceil(384/40) × 29s = 10 × 29s = 290s`, below the 5-minute target. The
 10-minute `timeout-minutes` retains headroom for runner variance or an
 occasional cache miss.
 

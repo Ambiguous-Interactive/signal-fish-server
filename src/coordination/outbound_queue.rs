@@ -289,7 +289,7 @@ impl EnqueueOutcome {
 /// Non-blocking enqueue failure, preserving ownership of the submitted item.
 #[derive(Debug)]
 pub enum TryEnqueueError<T> {
-    Full(T),
+    Full(T, CapacityReleaseWitness),
     Closed(T),
     /// A lossy operation could not reserve causal report capacity. The caller
     /// must close the connection loudly instead of continuing its data stream.
@@ -303,6 +303,12 @@ enum Lane {
     Legacy,
     Control,
     Data,
+}
+
+impl Lane {
+    const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +352,12 @@ struct QueueState {
     enqueue_generation: u64,
     receive_generation: u64,
     active_room: Option<RoomId>,
+    data_capacity: usize,
+    control_capacity: usize,
+    /// When each lane most recently became non-full and then stayed non-full.
+    /// A refill to capacity clears the timestamp; later pops while capacity is
+    /// already available preserve the original transition instant.
+    capacity_available_since: [Option<Instant>; 3],
 }
 
 /// Exact omissions discovered by the socket writer that have not reached the
@@ -473,7 +485,8 @@ impl PendingUnsupported {
 }
 
 impl QueueState {
-    fn new() -> Self {
+    fn new(data_capacity: usize, control_capacity: usize) -> Self {
+        let now = Instant::now();
         Self {
             legacy: VecDeque::new(),
             control: VecDeque::new(),
@@ -492,6 +505,25 @@ impl QueueState {
             enqueue_generation: 0,
             receive_generation: 0,
             active_room: None,
+            data_capacity,
+            control_capacity,
+            capacity_available_since: [Some(now); 3],
+        }
+    }
+
+    fn refresh_capacity_availability(&mut self, lane: Lane) {
+        let capacity = match lane {
+            Lane::Legacy | Lane::Data => self.data_capacity,
+            Lane::Control => self.control_capacity,
+        };
+        let available = self.lane_len_with_reservations(lane) < capacity;
+        let available_since = &mut self.capacity_available_since[lane.index()];
+        if available {
+            if available_since.is_none() {
+                *available_since = Some(Instant::now());
+            }
+        } else {
+            *available_since = None;
         }
     }
 
@@ -529,6 +561,7 @@ impl QueueState {
             Lane::Control => self.reserved_control = self.reserved_control.saturating_add(1),
             Lane::Data => self.reserved_data = self.reserved_data.saturating_add(1),
         }
+        self.refresh_capacity_availability(lane);
     }
 
     fn release_reservation(&mut self, lane: Lane) {
@@ -538,6 +571,7 @@ impl QueueState {
             Lane::Data => &mut self.reserved_data,
         };
         decrement_counter(reserved, "lane_reservation");
+        self.refresh_capacity_availability(lane);
     }
 }
 
@@ -682,6 +716,39 @@ pub struct OutboundSender {
     shared: Arc<SharedQueue>,
 }
 
+/// Queue-local evidence retained for one full-capacity wait.
+///
+/// The writer records when a full lane first becomes non-full while holding
+/// the queue-state lock, and clears that time if the lane fills again. This
+/// witness can therefore prove capacity became and remained available strictly
+/// before the logical deadline, even when the producer is not promptly polled.
+#[derive(Debug, Clone)]
+pub struct CapacityReleaseWitness {
+    shared: Arc<SharedQueue>,
+    lane: Lane,
+    full_observed_at: Instant,
+}
+
+impl CapacityReleaseWitness {
+    pub(crate) fn full_observed_at(&self) -> Instant {
+        self.full_observed_at
+    }
+
+    fn permits_locked(
+        &self,
+        shared: &Arc<SharedQueue>,
+        state: &QueueState,
+        lane: Lane,
+        deadline: Instant,
+    ) -> bool {
+        Arc::ptr_eq(&self.shared, shared)
+            && self.lane == lane
+            && state.capacity_available_since[self.lane.index()].is_some_and(|available_since| {
+                available_since >= self.full_observed_at && available_since < deadline
+            })
+    }
+}
+
 impl Clone for OutboundSender {
     fn clone(&self) -> Self {
         let mut state = self.shared.state();
@@ -746,7 +813,7 @@ fn channel_inner(
     let data_capacity = data_capacity.max(1);
     let control_capacity = control_capacity.max(1);
     let shared = Arc::new(SharedQueue {
-        state: Mutex::new(QueueState::new()),
+        state: Mutex::new(QueueState::new(data_capacity, control_capacity)),
         item_available: Notify::new(),
         capacity_available: Notify::new(),
         protocol_version: AtomicU16::new(crate::config::SERVER_MIN_PROTOCOL_VERSION),
@@ -769,6 +836,14 @@ fn channel_inner(
 }
 
 impl OutboundSender {
+    fn full_witness(&self, lane: Lane) -> CapacityReleaseWitness {
+        CapacityReleaseWitness {
+            shared: Arc::clone(&self.shared),
+            lane,
+            full_observed_at: Instant::now(),
+        }
+    }
+
     pub fn delivery_classes_enabled(&self) -> bool {
         self.shared.v3()
     }
@@ -818,7 +893,7 @@ impl OutboundSender {
         &self,
         message: Arc<ServerMessage>,
     ) -> Result<EnqueueOutcome, TryEnqueueError<Arc<ServerMessage>>> {
-        self.try_enqueue_control_inner(message, None)
+        self.try_enqueue_control_inner(message, None, None)
     }
 
     pub fn try_enqueue_control_scoped(
@@ -827,13 +902,29 @@ impl OutboundSender {
         room_id: Option<RoomId>,
         generation: u64,
     ) -> Result<EnqueueOutcome, TryEnqueueError<Arc<ServerMessage>>> {
-        self.try_enqueue_control_inner(message, Some((generation, room_id)))
+        self.try_enqueue_control_inner(message, Some((generation, room_id)), None)
+    }
+
+    pub(crate) fn try_enqueue_control_scoped_released_before(
+        &self,
+        message: Arc<ServerMessage>,
+        room_id: Option<RoomId>,
+        generation: u64,
+        witness: &CapacityReleaseWitness,
+        deadline: Instant,
+    ) -> Result<EnqueueOutcome, TryEnqueueError<Arc<ServerMessage>>> {
+        self.try_enqueue_control_inner(
+            message,
+            Some((generation, room_id)),
+            Some((witness, deadline)),
+        )
     }
 
     fn try_enqueue_control_inner(
         &self,
         message: Arc<ServerMessage>,
         expected_scope: Option<(u64, Option<RoomId>)>,
+        admission: Option<(&CapacityReleaseWitness, Instant)>,
     ) -> Result<EnqueueOutcome, TryEnqueueError<Arc<ServerMessage>>> {
         if is_data_message(&message) {
             return Err(TryEnqueueError::InvalidMetadata(message));
@@ -852,8 +943,11 @@ impl OutboundSender {
         {
             return Ok(EnqueueOutcome::CANCELED);
         }
-        if !self.shared.has_capacity(&state, lane) {
-            return Err(TryEnqueueError::Full(message));
+        if admission.is_some_and(|(witness, deadline)| {
+            !witness.permits_locked(&self.shared, &state, lane, deadline)
+        }) || !self.shared.has_capacity(&state, lane)
+        {
+            return Err(TryEnqueueError::Full(message, self.full_witness(lane)));
         }
         push_message(&mut state, lane, message, None, None);
         drop(state);
@@ -873,7 +967,7 @@ impl OutboundSender {
             notified.as_mut().enable();
             match self.try_enqueue_control_scoped(message, room_id, generation) {
                 Ok(outcome) => return Ok(outcome),
-                Err(TryEnqueueError::Full(returned)) => message = returned,
+                Err(TryEnqueueError::Full(returned, _witness)) => message = returned,
                 Err(other) => return Err(other),
             }
             notified.as_mut().await;
@@ -885,7 +979,7 @@ impl OutboundSender {
         &self,
         data: OutboundData,
     ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
-        self.try_enqueue_data_inner(data, None)
+        self.try_enqueue_data_inner(data, None, None)
     }
 
     pub fn try_enqueue_data_scoped(
@@ -894,23 +988,37 @@ impl OutboundSender {
         generation: u64,
     ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
         let room_id = data.metadata.map(|metadata| metadata.room_id);
-        self.try_enqueue_data_inner(data, Some((generation, room_id)))
+        self.try_enqueue_data_inner(data, Some((generation, room_id)), None)
+    }
+
+    pub(crate) fn try_enqueue_data_scoped_released_before(
+        &self,
+        data: OutboundData,
+        generation: u64,
+        witness: &CapacityReleaseWitness,
+        deadline: Instant,
+    ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
+        let room_id = data.metadata.map(|metadata| metadata.room_id);
+        self.try_enqueue_data_inner(data, Some((generation, room_id)), Some((witness, deadline)))
     }
 
     fn try_enqueue_data_inner(
         &self,
         data: OutboundData,
         expected_scope: Option<(u64, Option<RoomId>)>,
+        admission: Option<(&CapacityReleaseWitness, Instant)>,
     ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
         if !data.metadata_matches_message() {
             return Err(TryEnqueueError::InvalidMetadata(data));
         }
         if !self.shared.v3() {
-            return self.try_enqueue_legacy_data(data, expected_scope);
+            return self.try_enqueue_legacy_data(data, expected_scope, admission);
         }
 
         match data.class() {
-            DeliveryClass::Reliable => self.try_enqueue_reliable_data(data, expected_scope),
+            DeliveryClass::Reliable => {
+                self.try_enqueue_reliable_data(data, expected_scope, admission)
+            }
             DeliveryClass::Latest => self.try_enqueue_latest(data, expected_scope),
             DeliveryClass::Volatile => self.try_enqueue_volatile(data, expected_scope),
         }
@@ -927,7 +1035,7 @@ impl OutboundSender {
             notified.as_mut().enable();
             match self.try_enqueue_data_scoped(data, generation) {
                 Ok(outcome) => return Ok(outcome),
-                Err(TryEnqueueError::Full(returned)) => data = returned,
+                Err(TryEnqueueError::Full(returned, _witness)) => data = returned,
                 Err(other) => return Err(other),
             }
             notified.as_mut().await;
@@ -938,6 +1046,7 @@ impl OutboundSender {
         &self,
         data: OutboundData,
         expected_scope: Option<(u64, Option<RoomId>)>,
+        admission: Option<(&CapacityReleaseWitness, Instant)>,
     ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
         let mut state = self.shared.state();
         if !state.accepting() {
@@ -948,8 +1057,11 @@ impl OutboundSender {
         {
             return Ok(EnqueueOutcome::CANCELED);
         }
-        if !self.shared.has_capacity(&state, Lane::Legacy) {
-            return Err(TryEnqueueError::Full(data));
+        if admission.is_some_and(|(witness, deadline)| {
+            !witness.permits_locked(&self.shared, &state, Lane::Legacy, deadline)
+        }) || !self.shared.has_capacity(&state, Lane::Legacy)
+        {
+            return Err(TryEnqueueError::Full(data, self.full_witness(Lane::Legacy)));
         }
         push_data(&mut state, DataLane::Legacy, data, DeliveryClass::Reliable);
         self.shared.record_attempted(DeliveryClass::Reliable);
@@ -962,6 +1074,7 @@ impl OutboundSender {
         &self,
         data: OutboundData,
         expected_scope: Option<(u64, Option<RoomId>)>,
+        admission: Option<(&CapacityReleaseWitness, Instant)>,
     ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
         let mut state = self.shared.state();
         if !state.accepting() {
@@ -972,8 +1085,11 @@ impl OutboundSender {
         {
             return Ok(EnqueueOutcome::CANCELED);
         }
-        if !self.shared.has_capacity(&state, Lane::Data) {
-            return Err(TryEnqueueError::Full(data));
+        if admission.is_some_and(|(witness, deadline)| {
+            !witness.permits_locked(&self.shared, &state, Lane::Data, deadline)
+        }) || !self.shared.has_capacity(&state, Lane::Data)
+        {
+            return Err(TryEnqueueError::Full(data, self.full_witness(Lane::Data)));
         }
         push_data(
             &mut state,
@@ -1182,6 +1298,25 @@ impl OutboundSender {
         message: Arc<ServerMessage>,
         target_generation: u64,
     ) -> Result<EnqueueOutcome, TryEnqueueError<Arc<ServerMessage>>> {
+        self.try_enqueue_transition_inner(message, target_generation, None)
+    }
+
+    pub(crate) fn try_enqueue_transition_released_before(
+        &self,
+        message: Arc<ServerMessage>,
+        target_generation: u64,
+        witness: &CapacityReleaseWitness,
+        deadline: Instant,
+    ) -> Result<EnqueueOutcome, TryEnqueueError<Arc<ServerMessage>>> {
+        self.try_enqueue_transition_inner(message, target_generation, Some((witness, deadline)))
+    }
+
+    fn try_enqueue_transition_inner(
+        &self,
+        message: Arc<ServerMessage>,
+        target_generation: u64,
+        admission: Option<(&CapacityReleaseWitness, Instant)>,
+    ) -> Result<EnqueueOutcome, TryEnqueueError<Arc<ServerMessage>>> {
         let Some(target_room) = transition_target(message.as_ref()) else {
             return Err(TryEnqueueError::InvalidMetadata(message));
         };
@@ -1194,8 +1329,11 @@ impl OutboundSender {
         if target_generation != state.enqueue_generation.saturating_add(1) {
             return Ok(EnqueueOutcome::CANCELED);
         }
-        if !self.shared.has_capacity(&state, lane) {
-            return Err(TryEnqueueError::Full(message));
+        if admission.is_some_and(|(witness, deadline)| {
+            !witness.permits_locked(&self.shared, &state, lane, deadline)
+        }) || !self.shared.has_capacity(&state, lane)
+        {
+            return Err(TryEnqueueError::Full(message, self.full_witness(lane)));
         }
 
         let barrier = QueuedOutbound {
@@ -1211,6 +1349,7 @@ impl OutboundSender {
         } else {
             state.legacy.push_back(barrier);
         }
+        state.refresh_capacity_availability(lane);
         state.enqueue_generation = target_generation;
         state.active_room = target_room;
         drop(state);
@@ -1229,7 +1368,7 @@ impl OutboundSender {
             notified.as_mut().enable();
             match self.try_enqueue_transition(message, target_generation) {
                 Ok(outcome) => return Ok(outcome),
-                Err(TryEnqueueError::Full(returned)) => message = returned,
+                Err(TryEnqueueError::Full(returned, _witness)) => message = returned,
                 Err(other) => return Err(other),
             }
             notified.as_mut().await;
@@ -1257,6 +1396,45 @@ impl OutboundSender {
             Lane::Legacy
         };
         self.try_reserve(lane, Some((generation, room_id)))
+    }
+
+    pub(crate) fn try_reserve_control_scoped_released_before(
+        &self,
+        generation: u64,
+        room_id: Option<RoomId>,
+        witness: &CapacityReleaseWitness,
+        deadline: Instant,
+    ) -> Result<Option<OutboundPermit>, ReserveError> {
+        let lane = if self.shared.v3() {
+            Lane::Control
+        } else {
+            Lane::Legacy
+        };
+        let mut state = self.shared.state();
+        if !state.accepting() {
+            return Err(ReserveError::Closed);
+        }
+        let expected_scope = Some((generation, room_id));
+        if expected_scope.is_some_and(|(generation, room_id)| {
+            let current = scope_matches(&state, generation, room_id);
+            let possible_transition =
+                room_id.is_none() && generation == state.enqueue_generation.saturating_add(1);
+            !current && !possible_transition
+        }) {
+            return Err(ReserveError::Canceled);
+        }
+        if !witness.permits_locked(&self.shared, &state, lane, deadline)
+            || !self.shared.has_capacity(&state, lane)
+        {
+            return Ok(None);
+        }
+        state.reserve(lane);
+        state.permit_count = state.permit_count.saturating_add(1);
+        Ok(Some(OutboundPermit {
+            shared: Arc::clone(&self.shared),
+            lane,
+            active: true,
+        }))
     }
 
     pub async fn reserve_control_scoped(
@@ -1290,7 +1468,7 @@ impl OutboundSender {
             return Err(ReserveError::Canceled);
         }
         if !self.shared.has_capacity(&state, lane) {
-            return Err(ReserveError::Full);
+            return Err(ReserveError::Full(self.full_witness(lane)));
         }
         state.reserve(lane);
         state.permit_count = state.permit_count.saturating_add(1);
@@ -1314,7 +1492,7 @@ impl OutboundSender {
                 Ok(permit) => return Ok(permit),
                 Err(ReserveError::Closed) => return Err(ReserveError::Closed),
                 Err(ReserveError::Canceled) => return Err(ReserveError::Canceled),
-                Err(ReserveError::Full) => notified.as_mut().await,
+                Err(ReserveError::Full(_witness)) => notified.as_mut().await,
             }
         }
     }
@@ -1344,7 +1522,7 @@ impl OutboundSender {
             return Err(ReserveError::Closed);
         }
         if !self.shared.has_capacity(&state, Lane::Control) {
-            return Err(ReserveError::Full);
+            return Err(ReserveError::Full(self.full_witness(Lane::Control)));
         }
         enqueue_delivery_report(&mut state, Vec::new());
         drop(state);
@@ -1388,7 +1566,10 @@ impl OutboundSender {
         let available = self.shared.control_capacity.saturating_sub(occupied);
         let report_slots = usize::from(!report_reused);
         if available < report_slots {
-            return Err(TryEnqueueError::Full(relay_stats));
+            return Err(TryEnqueueError::Full(
+                relay_stats,
+                self.full_witness(Lane::Control),
+            ));
         }
         let stats_enqueued = available > report_slots;
         if stats_enqueued {
@@ -1406,9 +1587,9 @@ impl OutboundSender {
 }
 
 /// Reservation error for conditional control delivery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ReserveError {
-    Full,
+    Full(CapacityReleaseWitness),
     Closed,
     Canceled,
 }
@@ -1484,6 +1665,7 @@ impl OutboundPermit {
             } else {
                 state.barriers.push_back(barrier);
             }
+            state.refresh_capacity_availability(self.lane);
             state.enqueue_generation = target_generation;
             state.active_room = target_room;
         } else {
@@ -1623,6 +1805,9 @@ impl OutboundReceiver {
         } else {
             None
         };
+        if item.is_some() {
+            state.refresh_capacity_availability(Lane::Control);
+        }
         drop(state);
         if item.is_some() {
             self.shared.capacity_available.notify_waiters();
@@ -1635,23 +1820,23 @@ impl OutboundReceiver {
         if state.accountability_failed {
             return Err(PopState::Terminal);
         }
-        let item = if let Some(item) = state.legacy.pop_front() {
+        let (item, released_lane) = if let Some(item) = state.legacy.pop_front() {
             if item.transition_barrier {
                 state.receive_generation = item.generation;
             }
-            Some(item)
+            (Some(item), Some(Lane::Legacy))
         } else if state
             .control
             .front()
             .is_some_and(|item| item.generation == state.receive_generation)
         {
-            state.control.pop_front()
+            (state.control.pop_front(), Some(Lane::Control))
         } else if state
             .data
             .front()
             .is_some_and(|item| item.generation == state.receive_generation)
         {
-            state.data.pop_front()
+            (state.data.pop_front(), Some(Lane::Data))
         } else if state
             .barriers
             .front()
@@ -1661,15 +1846,20 @@ impl OutboundReceiver {
             if let Some(item) = &item {
                 state.receive_generation = item.generation;
             }
-            item
+            (item, Some(Lane::Control))
         } else {
-            None
+            (None, None)
         };
         let result = match item {
             Some(item) => Ok(item),
             None if state.receiver_open && state.producers_open() => Err(PopState::Empty),
             None => Err(PopState::Disconnected),
         };
+        if result.is_ok() {
+            if let Some(lane) = released_lane {
+                state.refresh_capacity_availability(lane);
+            }
+        }
         drop(state);
         if result.is_ok() {
             self.shared.capacity_available.notify_waiters();
@@ -1690,7 +1880,7 @@ impl OutboundReceiver {
         let now = Instant::now();
         let mut decrement_batch = false;
         let mut crossed_barrier = false;
-        let item = if let Some(front) = state.legacy.front() {
+        let (item, released_lane) = if let Some(front) = state.legacy.front() {
             // A `Latest` front waits up to `batch_interval` (unless the lane is
             // already `batch_size` deep) so a superseding same-key value can
             // still coalesce. Control, Reliable, and Volatile are
@@ -1717,13 +1907,13 @@ impl OutboundReceiver {
             if item.as_ref().is_some_and(|item| item.transition_barrier) {
                 crossed_barrier = true;
             }
-            item
+            (item, Some(Lane::Legacy))
         } else if state
             .control
             .front()
             .is_some_and(|item| item.generation == state.receive_generation)
         {
-            state.control.pop_front()
+            (state.control.pop_front(), Some(Lane::Control))
         } else if state
             .data
             .front()
@@ -1759,16 +1949,16 @@ impl OutboundReceiver {
                 self.batch_remaining = phase_len.min(batch_size);
             }
             decrement_batch = self.batch_remaining > 0;
-            state.data.pop_front()
+            (state.data.pop_front(), Some(Lane::Data))
         } else if state
             .barriers
             .front()
             .is_some_and(|item| item.generation == state.receive_generation.saturating_add(1))
         {
             crossed_barrier = true;
-            state.barriers.pop_front()
+            (state.barriers.pop_front(), Some(Lane::Control))
         } else {
-            None
+            (None, None)
         };
 
         let result = match item {
@@ -1785,6 +1975,11 @@ impl OutboundReceiver {
             None if state.receiver_open && state.producers_open() => Err(BatchedPopState::Empty),
             None => Err(BatchedPopState::Disconnected),
         };
+        if result.is_ok() {
+            if let Some(lane) = released_lane {
+                state.refresh_capacity_availability(lane);
+            }
+        }
         drop(state);
         if result.is_ok() {
             self.shared.capacity_available.notify_waiters();
@@ -2125,6 +2320,7 @@ fn push_message(
         }
         Lane::Data => state.data.push_back(queued),
     }
+    state.refresh_capacity_availability(lane);
 }
 
 fn push_data(
@@ -2147,10 +2343,17 @@ fn push_data(
         generation: state.enqueue_generation,
         transition_barrier: false,
     };
-    match lane {
-        DataLane::Legacy => state.legacy.push_back(queued),
-        DataLane::Classified => state.data.push_back(queued),
-    }
+    let capacity_lane = match lane {
+        DataLane::Legacy => {
+            state.legacy.push_back(queued);
+            Lane::Legacy
+        }
+        DataLane::Classified => {
+            state.data.push_back(queued);
+            Lane::Data
+        }
+    };
+    state.refresh_capacity_availability(capacity_lane);
 }
 
 fn oldest_volatile_position(data: &VecDeque<QueuedOutbound>, generation: u64) -> Option<usize> {
@@ -2246,6 +2449,7 @@ fn enqueue_delivery_report(state: &mut QueueState, gaps: Vec<DeliveryGap>) {
         generation: state.enqueue_generation,
         transition_barrier: false,
     });
+    state.refresh_capacity_availability(Lane::Control);
 }
 
 fn max_counters(
@@ -2419,7 +2623,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             tx.try_enqueue_control(message(3)),
-            Err(TryEnqueueError::Full(_))
+            Err(TryEnqueueError::Full(_, _))
         ));
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 1);
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 2);
@@ -3145,7 +3349,7 @@ mod tests {
             let result = tx.try_enqueue_delivery_advisories(relay_stats());
             match expected_stats {
                 Some(expected) => assert_eq!(result.unwrap(), expected),
-                None => assert!(matches!(result, Err(TryEnqueueError::Full(_)))),
+                None => assert!(matches!(result, Err(TryEnqueueError::Full(_, _)))),
             }
 
             let state = rx.shared.state();
@@ -3205,7 +3409,7 @@ mod tests {
         let _permit = tx.try_reserve_control().unwrap();
         assert!(matches!(
             tx.try_enqueue_delivery_advisories(relay_stats()),
-            Err(TryEnqueueError::Full(_))
+            Err(TryEnqueueError::Full(_, _))
         ));
         assert_eq!(rx.shared.state().control.len(), 1);
 
@@ -3218,7 +3422,7 @@ mod tests {
             let result = tx.try_enqueue_delivery_advisories(relay_stats());
             match expected_stats {
                 Some(expected) => assert_eq!(result.unwrap(), expected),
-                None => assert!(matches!(result, Err(TryEnqueueError::Full(_)))),
+                None => assert!(matches!(result, Err(TryEnqueueError::Full(_, _)))),
             }
 
             let state = rx.shared.state();
@@ -3402,7 +3606,7 @@ mod tests {
         let permit = tx.try_reserve_control().unwrap();
         assert!(matches!(
             tx.try_enqueue_control(message(1)),
-            Err(TryEnqueueError::Full(_))
+            Err(TryEnqueueError::Full(_, _))
         ));
         drop(permit);
         {

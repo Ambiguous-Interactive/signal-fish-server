@@ -1369,7 +1369,7 @@ impl InMemoryMessageCoordinator {
     ) -> Result<DeliveryPermit, DeliveryOutcome> {
         self.metrics.increment_websocket_delivery_attempts();
         let stats = self.metrics.connection_delivery_stats(&player_id);
-        match delivery.sender.try_reserve_control(None) {
+        let capacity_witness = match delivery.sender.try_reserve_control(None) {
             Ok(permit) => return Ok(permit),
             Err(DeliveryReserveError::Closed) => {
                 self.metrics.increment_websocket_deliveries_channel_closed();
@@ -1379,12 +1379,16 @@ impl InMemoryMessageCoordinator {
                 self.record_canceled_delivery(player_id);
                 return Err(DeliveryOutcome::Canceled);
             }
-            Err(DeliveryReserveError::Full) => {}
-        }
+            Err(DeliveryReserveError::Full(capacity_witness)) => capacity_witness,
+        };
 
-        let deadline = tokio::time::Instant::now()
-            .checked_add(self.slow_consumer_timeout)
+        let full_observed_at = capacity_witness
+            .as_ref()
+            .map(|witness| witness.full_observed_at())
             .unwrap_or_else(tokio::time::Instant::now);
+        let deadline = full_observed_at
+            .checked_add(self.slow_consumer_timeout)
+            .unwrap_or(full_observed_at);
         self.metrics.increment_websocket_backpressure_events();
         if let Some(stats) = &stats {
             stats
@@ -1407,45 +1411,53 @@ impl InMemoryMessageCoordinator {
                 self.record_canceled_delivery(player_id);
                 Err(DeliveryOutcome::Canceled)
             }
-            Some(Err(DeliveryReserveError::Closed | DeliveryReserveError::Full)) => {
+            Some(Err(DeliveryReserveError::Closed | DeliveryReserveError::Full(_))) => {
                 self.metrics.increment_websocket_deliveries_channel_closed();
                 Err(DeliveryOutcome::ChannelClosed)
             }
-            None => match delivery.sender.try_reserve_control(None) {
-                // A terminal queue state that became observable at the
-                // deadline is more specific than backpressure expiry. In
-                // particular, classified queues use `Canceled` to fence stale
-                // generations; that fence must not be rewritten as a
-                // slow-consumer disconnect merely because the timer is also
-                // ready.
-                Err(DeliveryReserveError::Canceled) => {
-                    self.record_canceled_delivery(player_id);
-                    Err(DeliveryOutcome::Canceled)
-                }
-                Err(DeliveryReserveError::Closed) => {
-                    self.metrics.increment_websocket_deliveries_channel_closed();
-                    Err(DeliveryOutcome::ChannelClosed)
-                }
-                Ok(_) | Err(DeliveryReserveError::Full) => {
-                    let initiated_close = delivery.close.request_close(CloseReason::SlowConsumer);
-                    if initiated_close {
-                        self.metrics.increment_websocket_slow_consumer_disconnects();
+            None => {
+                match delivery.sender.try_reserve_control_released_before(
+                    None,
+                    capacity_witness.as_ref(),
+                    deadline,
+                ) {
+                    Ok(Some(permit)) => Ok(permit),
+                    // A terminal queue state that became observable at the
+                    // deadline is more specific than backpressure expiry. In
+                    // particular, classified queues use `Canceled` to fence stale
+                    // generations; that fence must not be rewritten as a
+                    // slow-consumer disconnect merely because the timer is also
+                    // ready.
+                    Err(DeliveryReserveError::Canceled) => {
+                        self.record_canceled_delivery(player_id);
+                        Err(DeliveryOutcome::Canceled)
                     }
-                    self.metrics.increment_websocket_messages_dropped();
-                    if let Some(stats) = &stats {
-                        stats
-                            .dropped_for_you
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err(DeliveryReserveError::Closed) => {
+                        self.metrics.increment_websocket_deliveries_channel_closed();
+                        Err(DeliveryOutcome::ChannelClosed)
                     }
-                    tracing::warn!(
-                        %player_id,
-                        timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
-                        initiated_close,
-                        "Initial room transition queue stayed full; closing recipient"
-                    );
-                    Err(DeliveryOutcome::SlowConsumer)
+                    Ok(None) | Err(DeliveryReserveError::Full(_)) => {
+                        let initiated_close =
+                            delivery.close.request_close(CloseReason::SlowConsumer);
+                        if initiated_close {
+                            self.metrics.increment_websocket_slow_consumer_disconnects();
+                        }
+                        self.metrics.increment_websocket_messages_dropped();
+                        if let Some(stats) = &stats {
+                            stats
+                                .dropped_for_you
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        tracing::warn!(
+                            %player_id,
+                            timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
+                            initiated_close,
+                            "Initial room transition queue stayed full; closing recipient"
+                        );
+                        Err(DeliveryOutcome::SlowConsumer)
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -1481,7 +1493,7 @@ impl InMemoryMessageCoordinator {
 
         self.metrics.increment_websocket_delivery_attempts();
         let connection_stats = self.metrics.connection_delivery_stats(&player_id);
-        let message = match handle.sender.try_send(message, None) {
+        let (message, capacity_witness) = match handle.sender.try_send(message, None) {
             Ok(outcome) => {
                 return Some(crate::coordination::record_queue_outcome(
                     &self.metrics,
@@ -1497,7 +1509,9 @@ impl InMemoryMessageCoordinator {
                 );
                 return Some(DeliveryOutcome::ChannelClosed);
             }
-            Err(DeliveryTrySendError::Full(message)) => message,
+            Err(DeliveryTrySendError::Full(message, capacity_witness)) => {
+                (message, capacity_witness)
+            }
             Err(
                 DeliveryTrySendError::AccountabilityUnavailable
                 | DeliveryTrySendError::InvalidMetadata,
@@ -1511,9 +1525,13 @@ impl InMemoryMessageCoordinator {
                 ));
             }
         };
-        let deadline = tokio::time::Instant::now()
-            .checked_add(self.slow_consumer_timeout)
+        let full_observed_at = capacity_witness
+            .as_ref()
+            .map(|witness| witness.full_observed_at())
             .unwrap_or_else(tokio::time::Instant::now);
+        let deadline = full_observed_at
+            .checked_add(self.slow_consumer_timeout)
+            .unwrap_or(full_observed_at);
         let (message, _) = message.into_parts();
 
         self.metrics.increment_websocket_backpressure_events();
@@ -1544,7 +1562,30 @@ impl InMemoryMessageCoordinator {
                     self.record_canceled_delivery(player_id);
                     return None;
                 }
-                match handle.sender.try_reserve_control(None) {
+                match handle.sender.try_reserve_control_released_before(
+                    None,
+                    capacity_witness.as_ref(),
+                    deadline,
+                ) {
+                    Ok(Some(permit)) =>
+                    {
+                        let outcome = match permit.send(message) {
+                            Ok(outcome) if outcome.enqueued => outcome,
+                            Ok(_) => {
+                                self.record_canceled_delivery(player_id);
+                                return Some(DeliveryOutcome::Canceled);
+                            }
+                            Err(_) => {
+                                self.metrics.increment_websocket_deliveries_channel_closed();
+                                return Some(DeliveryOutcome::ChannelClosed);
+                            }
+                        };
+                        return Some(crate::coordination::record_queue_outcome(
+                            &self.metrics,
+                            connection_stats.as_ref(),
+                            outcome,
+                        ));
+                    }
                     Err(DeliveryReserveError::Canceled) => {
                         self.record_canceled_delivery(player_id);
                         return Some(DeliveryOutcome::Canceled);
@@ -1553,7 +1594,7 @@ impl InMemoryMessageCoordinator {
                         self.metrics.increment_websocket_deliveries_channel_closed();
                         return Some(DeliveryOutcome::ChannelClosed);
                     }
-                    Ok(_) | Err(DeliveryReserveError::Full) => {}
+                    Ok(None) | Err(DeliveryReserveError::Full(_)) => {}
                 }
                 let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
                 if initiated_close {
@@ -1597,7 +1638,7 @@ impl InMemoryMessageCoordinator {
                         outcome,
                     ))
                 }
-                Err(DeliveryReserveError::Closed | DeliveryReserveError::Full) => {
+                Err(DeliveryReserveError::Closed | DeliveryReserveError::Full(_)) => {
                     self.metrics.increment_websocket_deliveries_channel_closed();
                     tracing::debug!(%player_id, "Recipient connection closed while backpressured");
                     Some(DeliveryOutcome::ChannelClosed)
@@ -1644,10 +1685,14 @@ impl InMemoryMessageCoordinator {
                 self.record_canceled_delivery(player_id);
                 ConditionalDeliveryReservation::Canceled
             }
-            Err(DeliveryReserveError::Full) => {
-                let deadline = tokio::time::Instant::now()
-                    .checked_add(self.slow_consumer_timeout)
+            Err(DeliveryReserveError::Full(capacity_witness)) => {
+                let full_observed_at = capacity_witness
+                    .as_ref()
+                    .map(|witness| witness.full_observed_at())
                     .unwrap_or_else(tokio::time::Instant::now);
+                let deadline = full_observed_at
+                    .checked_add(self.slow_consumer_timeout)
+                    .unwrap_or(full_observed_at);
                 self.metrics.increment_websocket_backpressure_events();
                 if let Some(stats) = &stats {
                     stats
@@ -1677,7 +1722,20 @@ impl InMemoryMessageCoordinator {
                             self.record_canceled_delivery(player_id);
                             return ConditionalDeliveryReservation::Canceled;
                         }
-                        match sender.try_reserve_control(room_id) {
+                        match sender.try_reserve_control_released_before(
+                            room_id,
+                            capacity_witness.as_ref(),
+                            deadline,
+                        ) {
+                            Ok(Some(permit)) =>
+                            {
+                                return ConditionalDeliveryReservation::Reserved {
+                                    player_id,
+                                    sender: reserved_sender,
+                                    permit,
+                                    stats,
+                                };
+                            }
                             Err(DeliveryReserveError::Canceled) => {
                                 self.record_canceled_delivery(player_id);
                                 return ConditionalDeliveryReservation::Canceled;
@@ -1689,7 +1747,7 @@ impl InMemoryMessageCoordinator {
                                     sender: reserved_sender,
                                 };
                             }
-                            Ok(_) | Err(DeliveryReserveError::Full) => {}
+                            Ok(None) | Err(DeliveryReserveError::Full(_)) => {}
                         }
                         let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
                         if initiated_close {
@@ -1727,7 +1785,7 @@ impl InMemoryMessageCoordinator {
                                 }
                             }
                         }
-                        Err(DeliveryReserveError::Closed | DeliveryReserveError::Full) => {
+                        Err(DeliveryReserveError::Closed | DeliveryReserveError::Full(_)) => {
                             self.metrics.increment_websocket_deliveries_channel_closed();
                             tracing::debug!(%player_id, "Recipient connection closed while backpressured");
                             ConditionalDeliveryReservation::ChannelClosed {
@@ -2253,7 +2311,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         };
         match handle.sender.try_send(message, None) {
             Ok(outcome) => Ok(outcome.enqueued),
-            Err(DeliveryTrySendError::Full(_)) => {
+            Err(DeliveryTrySendError::Full(_, _)) => {
                 // Advisory frame to a connection that is being closed anyway:
                 // do not wait, do not escalate, do not overwrite the close
                 // reason. The teardown itself is the loud signal.
@@ -2291,7 +2349,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         }
         match handle.sender.try_send(message, None) {
             Ok(outcome) => Ok(outcome.enqueued),
-            Err(DeliveryTrySendError::Full(_)) => {
+            Err(DeliveryTrySendError::Full(_, _)) => {
                 tracing::debug!(
                     %player_id,
                     "Farewell skipped: outbound queue full on a closing connection"

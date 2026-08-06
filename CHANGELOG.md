@@ -109,6 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent a classified outbound queue from falsely closing a progressing
+  recipient with `4002 slow_consumer` when capacity became and remained
+  available before the configured deadline but the waiting producer was not
+  scheduled again until after it. Capacity first available at or after the
+  deadline remains expired. The H14 mixed-encoding experiment now also bounds
+  both proxy receive windows so its equal 32 KiB/s comparison cannot depend on
+  host TCP autotuning (issue #290).
 - Make automatic room creation reliably return an unoccupied, joinable code
   (issues #283 and #284). Invalid length/prefix combinations now fail at startup,
   and a generated-code collision is retried with up to eight independently
