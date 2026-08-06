@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add exhaustive formal verification for classified outbound queue
+  capacity-deadline arbitration (issues #220, #290), proving that continuous
+  pre-deadline progress survives scheduler delay, refills invalidate stale
+  evidence, and deadline validation plus admission remain atomic. A seeded
+  model of the former timer-first defect must still produce the exact false
+  `SlowConsumer` counterexample.
 - Report every advertised local ICE candidate on the client's JSONL event
   stream as `local_candidate` (`peer`, `candidate_type`, `address`, `port`,
   `protocol`), emitted after the relay so the set describes what the remote

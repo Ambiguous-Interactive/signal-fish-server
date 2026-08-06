@@ -23767,6 +23767,32 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     );
 }
 
+#[test]
+fn test_formal_verification_triggers_cover_modeled_sources() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/formal-verification.yml"));
+
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "formal-verification.yml",
+        &[
+            "formal/**",
+            "scripts/run-tla-model-check.sh",
+            "scripts/run-z3-proofs.sh",
+            "src/server/session_policy.rs",
+            "src/server/signaling.rs",
+            "src/server/room_service.rs",
+            "src/server/reconnection_service.rs",
+            "src/database/mod.rs",
+            "src/protocol/room_state.rs",
+            "src/server.rs",
+            "src/coordination/**",
+            "src/websocket/**",
+            ".github/workflows/formal-verification.yml",
+        ],
+    );
+}
+
 /// Assert both the `push` and `pull_request` events trigger on exactly
 /// `required_paths`.
 ///

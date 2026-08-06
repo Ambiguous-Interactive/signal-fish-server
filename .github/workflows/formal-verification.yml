@@ -8,7 +8,9 @@
 #     desired=host with WebRTC disabled, and the relay-floor model) and the
 #     #131 delivery contract (formal/tla/DeliveryContract.tla — bounded queue,
 #     unfair consumer, slow-consumer eviction; message conservation and
-#     no-silent-loss) — exploring reachable states.
+#     no-silent-loss), plus classified queue capacity-deadline arbitration
+#     (continuous availability, refill invalidation, and atomic admission) —
+#     exploring reachable states.
 #   * Z3 discharges universally quantified SMT proofs of the pure decision
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the
 #     all_support relay-floor invariant, the glare/offerer rule, and host
@@ -16,8 +18,9 @@
 #
 # Both mirror the modeled source files action-for-action (the full
 # correspondence table in formal/README.md spans session_policy.rs,
-# signaling.rs, room_service.rs, database/mod.rs, protocol/room_state.rs, and
-# reconnection_service.rs), so this workflow triggers on changes to those files
+# signaling.rs, room_service.rs, database/mod.rs, protocol/room_state.rs,
+# reconnection_service.rs, the top-level server capacity waits, coordination,
+# and WebSocket delivery), so this workflow triggers on changes to those files
 # as well: a behavioral change there must keep the spec and the proofs green or
 # update them deliberately.
 #
@@ -40,6 +43,7 @@ on:
       - "src/server/reconnection_service.rs"
       - "src/database/mod.rs"
       - "src/protocol/room_state.rs"
+      - "src/server.rs"
       - "src/coordination/**"
       - "src/websocket/**"
       - ".github/workflows/formal-verification.yml"
@@ -55,6 +59,7 @@ on:
       - "src/server/reconnection_service.rs"
       - "src/database/mod.rs"
       - "src/protocol/room_state.rs"
+      - "src/server.rs"
       - "src/coordination/**"
       - "src/websocket/**"
       - ".github/workflows/formal-verification.yml"
