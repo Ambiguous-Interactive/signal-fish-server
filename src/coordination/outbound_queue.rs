@@ -2108,13 +2108,11 @@ impl OutboundReceiver {
     /// ([`try_append_gap`]), so the accounting stays exact while the wire cost
     /// collapses to one report per burst.
     ///
-    /// Returns `Some(report)` when the accumulated accountability must be
-    /// written before this omission can be recorded (the pending report is full
-    /// or the new range cannot merge into it). `None` means the omission merged
-    /// into the pending report, which
-    /// [`take_pending_unsupported_report`](Self::take_pending_unsupported_report)
-    /// emits before the next frame of any other kind, alongside the rate-limited
-    /// advisory, or at close.
+    /// A `true` return means the omission's exact range merged into the pending
+    /// report, which [`Self::pending_unsupported_report`] emits before the next
+    /// frame of any other kind, alongside the rate-limited advisory, or at
+    /// close.
+    ///
     /// Returns `false` when the pending report is full or cannot merge this
     /// range: the caller must write the pending report
     /// ([`Self::pending_unsupported_report`] +

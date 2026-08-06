@@ -160,7 +160,15 @@ pub trait GameDatabase: Send + Sync {
     /// in `RoomJoined` / `Reconnected` / `GameStarting` payloads.
     async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool>;
 
-    /// Remove player from room
+    /// Remove player from room.
+    ///
+    /// The returned record reports whether this removal vacated the room's
+    /// authority: implementations must return it with `is_authority` true
+    /// exactly when they cleared `authority_player` for this member, because
+    /// the departure path announces the cleared role from that flag (see
+    /// `EnhancedGameServer::leave_room_locked`). Keeping the stored flag in
+    /// lockstep with `authority_player` — as [`Self::add_player_to_room`]
+    /// requires on the way in — satisfies this.
     async fn remove_player_from_room(
         &self,
         room_id: &RoomId,
@@ -802,9 +810,10 @@ impl GameDatabase for InMemoryDatabase {
                 // properties this file and the join path own: the join record is
                 // constructed with `is_ready: false`; readiness cannot be
                 // toggled in a finalized room (`toggle_player_ready` requires
-                // `Lobby`); and no production path writes `is_ready = true` into
-                // an open room's record, so a member that disconnected before
-                // the start reconnects as the seat-filler it is.
+                // `Lobby`); and no production caller writes `is_ready = true`
+                // into an open room's record — `toggle_player_ready`, the only
+                // method that could, has none. So a member that disconnected
+                // before the start reconnects as the seat-filler it is.
                 let finalized = room.lobby_state == crate::protocol::LobbyState::Finalized;
                 player.is_ready =
                     room.ready_players.contains(&player.id) || (finalized && player.is_ready);

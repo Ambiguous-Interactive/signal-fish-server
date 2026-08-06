@@ -155,7 +155,10 @@ message with `authority_player` set to `null`:
 If the authority player leaves or disconnects from the room, authority is
 **cleared** -- there is no automatic reassignment. All remaining players
 receive an `AuthorityChanged` message with `authority_player: null`, ordered
-immediately after the `PlayerLeft` that explains it. A member that reconnects
+after the `PlayerLeft` that explains it. (One exception: if storage is
+unavailable at the moment of the disconnect, the durable removal is retried in
+the background and the role is cleared when that repair lands, without a further
+notification.) A member that reconnects
 across the change is told the room's authority as it stands when it returns:
 its `Reconnected` snapshot reports whether it holds the role (`is_authority`)
 and flags the holder in `current_players`, and any buffered authority event

@@ -310,9 +310,14 @@ impl Room {
         // never declared (see `GameDatabase::add_player_to_room`).
         self.ready_players.retain(|id| id != player_id);
 
-        // If the authority player left, clear authority
-        if self.authority_player == Some(*player_id) {
+        // If the authority player left, clear authority. Guarded by an actual
+        // removal, and clearing every member's flag, so this mirrors
+        // `InMemoryDatabase::remove_player_from_room` exactly.
+        if removed.is_some() && self.authority_player == Some(*player_id) {
             self.authority_player = None;
+            for player in self.players.values_mut() {
+                player.is_authority = false;
+            }
         }
 
         removed

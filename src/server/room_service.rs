@@ -1119,13 +1119,20 @@ impl EnhancedGameServer {
         // (an explicit `StartGame`, once all current players are ready). A
         // `Finalized` room likewise stays finalized (the running session is
         // re-planned by `handle_session_member_departure` above, not regressed).
-        // The coordinator's in-memory ready set is NOT cleared here: reads filter
-        // it by current membership (so a departed id is never reported ready),
-        // and the entry itself is reclaimed when the room is deleted — promptly
-        // by the empty-room cleanup loop, and as an all-paths backstop by
-        // `prune_ready_players` (see `src/server/maintenance.rs`). Keeping this
-        // hot path free of coordinator coupling mirrors how session plans are
-        // handled (re-planned here, swept for removal elsewhere).
+        // The coordinator's in-memory ready set is NOT cleared here. Reads
+        // filter it by current membership, and the entry itself is reclaimed
+        // when the room is deleted — promptly by the empty-room cleanup loop,
+        // and as an all-paths backstop by `prune_ready_players` (see
+        // `src/server/maintenance.rs`). Keeping this hot path free of
+        // coordinator coupling mirrors how session plans are handled (re-planned
+        // here, swept for removal elsewhere).
+        //
+        // That membership filter is NOT sufficient on its own: the same id can
+        // become a current member again, which re-satisfies it and resurrects
+        // readiness this membership never declared. The join path drops it
+        // instead (`forget_player_ready`, in `join_room_with_coordination`), so
+        // a new membership starts unready while a reconnect — the same
+        // membership resumed — keeps what it had.
         let mut latest_room_code: Option<String> = None;
         if let Ok(Some(room)) = self.database.get_room_by_id(&room_id).await {
             latest_room_code = Some(room.code.clone());
