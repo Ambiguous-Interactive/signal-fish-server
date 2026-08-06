@@ -62,5 +62,8 @@ dependency, compatibility, or terminology blockers.
   duplicate/unmatched-license warnings.
 - Documentation consistency, Markdown, 993 internal links, workflow hygiene,
   LLM policy, hook readiness/preflights, and hook-policy suites: pass.
+- The first hosted Panic Policy run found two direct indexes in legacy env-path
+  normalization; both now use checked mutable access, and the full local panic
+  policy passes.
 - Aggregate PR and hosted exact-head CI/review: tracked by the session PR after
   publication.

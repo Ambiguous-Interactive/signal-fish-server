@@ -265,13 +265,16 @@ fn normalize_legacy_app_access_env_path(segments: &mut [String]) -> bool {
     if segments.len() != 2 || segments.first().map(String::as_str) != Some("security") {
         return false;
     }
-    match segments.get(1).map(String::as_str) {
-        Some("require_websocket_auth") => {
-            segments[1] = "enforce_app_id_allowlist".to_string();
+    let Some(setting) = segments.get_mut(1) else {
+        return false;
+    };
+    match setting.as_str() {
+        "require_websocket_auth" => {
+            *setting = "enforce_app_id_allowlist".to_string();
             true
         }
-        Some("authorized_apps") => {
-            segments[1] = "allowed_apps".to_string();
+        "authorized_apps" => {
+            *setting = "allowed_apps".to_string();
             true
         }
         _ => false,
