@@ -1,5 +1,5 @@
-use crate::auth::AppInfo;
-use crate::config::AppAuthEntry;
+use crate::auth::AppContext;
+use crate::config::AppRegistrationEntry;
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliveryPermit,
     DeliveryReserveError, DeliverySender, DeliveryTrySendError, InMemoryRoomOperationCoordinator,
@@ -128,8 +128,8 @@ pub struct EnhancedGameServer {
     instance_id: Uuid,
     /// Reconnection manager for player reconnection support
     reconnection_manager: Option<Arc<crate::reconnection::ReconnectionManager>>,
-    /// Authentication middleware for App ID validation
-    pub(crate) auth_middleware: Arc<crate::auth::AuthMiddleware>,
+    /// Public app-ID allowlist and accounting-context resolver.
+    pub(crate) app_id_allowlist: Arc<crate::auth::AppIdAllowlist>,
     /// Mapping from room IDs to owning application IDs (for relay policies)
     room_applications: Arc<DashMap<RoomId, Uuid>>,
     /// Sticky per-room session decision recorded at finalize (protocol v3):
@@ -243,7 +243,7 @@ pub struct ServerConfig {
     pub event_buffer_size: usize,
     pub enable_reconnection: bool,
     pub websocket_config: crate::config::WebSocketConfig,
-    pub auth_enabled: bool,
+    pub app_id_allowlist_enabled: bool,
     /// Threshold for heartbeat update throttling.
     /// Only update `last_seen` if this duration has passed since the last update.
     /// Set to Duration::ZERO to disable throttling (update on every heartbeat).
@@ -274,7 +274,7 @@ impl Default for ServerConfig {
             event_buffer_size: 100,
             enable_reconnection: true,
             websocket_config: crate::config::WebSocketConfig::default(),
-            auth_enabled: false, // Disabled by default for backward compatibility
+            app_id_allowlist_enabled: false, // Disabled by default for backward compatibility
             heartbeat_throttle: Duration::from_secs(30), // 30 second update throttle by default
             region_id: "default".to_string(),
             room_code_prefix: None,
@@ -294,7 +294,7 @@ impl EnhancedGameServer {
         metrics_config: crate::config::MetricsConfig,
         _coordination_config: crate::config::CoordinationConfig,
         transport_security: crate::config::TransportSecurityConfig,
-        authorized_apps: Vec<AppAuthEntry>,
+        allowed_apps: Vec<AppRegistrationEntry>,
     ) -> anyhow::Result<Arc<Self>> {
         // Library embedders can construct `ServerConfig` directly without the
         // top-level config loader. Enforce the same generation/join closure
@@ -368,25 +368,25 @@ impl EnhancedGameServer {
                 reconnection_manager.clone(),
             ));
 
-        // Initialize authentication middleware based on configuration.
-        let auth_middleware = if config.auth_enabled {
-            if authorized_apps.is_empty() {
+        // Initialize public app-ID access policy based on configuration.
+        let app_id_allowlist = if config.app_id_allowlist_enabled {
+            if allowed_apps.is_empty() {
                 tracing::warn!(
-                    "Auth is enabled but no authorized_apps are configured; \
-                     all authentication attempts will be rejected"
+                    "App-ID allowlist enforcement is enabled but no allowed_apps are configured; \
+                     every app-ID handshake will be rejected"
                 );
             } else {
                 tracing::info!(
-                    app_count = authorized_apps.len(),
-                    "Auth enabled with configured applications"
+                    app_count = allowed_apps.len(),
+                    "App-ID allowlist enabled with configured applications"
                 );
             }
-            Arc::new(crate::auth::AuthMiddleware::with_metrics(
-                authorized_apps,
+            Arc::new(crate::auth::AppIdAllowlist::with_metrics(
+                allowed_apps,
                 metrics.clone(),
-            ))
+            )?)
         } else {
-            Arc::new(crate::auth::AuthMiddleware::disabled())
+            Arc::new(crate::auth::AppIdAllowlist::disabled())
         };
 
         let room_applications = Arc::new(DashMap::new());
@@ -397,7 +397,7 @@ impl EnhancedGameServer {
             protocol_config.clone(),
             reconnection_manager.clone(),
             Arc::clone(&connection_manager),
-            config.auth_enabled,
+            config.app_id_allowlist_enabled,
         );
 
         let (shutdown_drain_tx, _) = watch::channel(false);
@@ -416,7 +416,7 @@ impl EnhancedGameServer {
             distributed_lock,
             instance_id,
             reconnection_manager,
-            auth_middleware,
+            app_id_allowlist,
             room_applications,
             active_session_plans: Arc::new(DashMap::new()),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
@@ -612,14 +612,15 @@ impl EnhancedGameServer {
             .supports_transport(player_id, transport)
     }
 
-    /// Attach authenticated application context to a connected client.
-    pub fn set_client_app_info(&self, player_id: &PlayerId, app_info: AppInfo) {
-        self.connection_manager.set_app_info(player_id, app_info);
+    /// Attach the accepted public app-ID context to a connected client.
+    pub fn set_client_app_context(&self, player_id: &PlayerId, app_context: AppContext) {
+        self.connection_manager
+            .set_app_context(player_id, app_context);
     }
 
-    /// Fetch full application info for a connected client, if known.
-    pub fn client_app_info(&self, player_id: &PlayerId) -> Option<AppInfo> {
-        self.connection_manager.app_info(player_id)
+    /// Fetch the public app-ID context for a connected client, if known.
+    pub fn client_app_context(&self, player_id: &PlayerId) -> Option<AppContext> {
+        self.connection_manager.app_context(player_id)
     }
 
     /// Fetch just the application UUID for a connected client.
@@ -3266,7 +3267,7 @@ mod relay_projection_cache_tests {
     #[tokio::test]
     async fn production_limiters_export_exact_rejection_categories() {
         let config = super::ServerConfig {
-            auth_enabled: true,
+            app_id_allowlist_enabled: true,
             rate_limit_config: crate::rate_limit::RateLimitConfig {
                 max_room_creations: 0,
                 max_join_attempts: 0,
@@ -3276,9 +3277,8 @@ mod relay_projection_cache_tests {
             },
             ..super::ServerConfig::default()
         };
-        let authorized_apps = vec![crate::config::AppAuthEntry {
+        let allowed_apps = vec![crate::config::AppRegistrationEntry {
             app_id: "limited".to_string(),
-            app_secret: "secret".to_string(),
             app_name: "Limited".to_string(),
             max_rooms: None,
             max_players_per_room: None,
@@ -3294,19 +3294,19 @@ mod relay_projection_cache_tests {
             crate::config::MetricsConfig::default(),
             crate::config::CoordinationConfig::default(),
             crate::config::TransportSecurityConfig::default(),
-            authorized_apps,
+            allowed_apps,
         )
         .await
         .expect("construct production server");
 
         assert!(server
-            .auth_middleware
-            .validate_app_id("limited")
+            .app_id_allowlist
+            .resolve_app_id("limited")
             .await
             .is_ok());
         assert!(server
-            .auth_middleware
-            .validate_app_id("limited")
+            .app_id_allowlist
+            .resolve_app_id("limited")
             .await
             .is_err());
 

@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh the browser reference client's runtime and development toolchain:
+  Playwright Core 1.62.1, TypeScript 7.0.2, Prettier 3.9.6, and Node.js 26 type
+  definitions. The supported Node.js floor remains 20.
 - Exempt macOS from the 16-player matrix's wall-clock p99 relay-latency
   ceiling (issue #274); Linux and Windows still gate it. On hosted macOS the
   same `message_pack-16p-clean-30hz` cell measured 322,391us and
@@ -233,6 +236,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Define the WebSocket application boundary as a public app-ID allowlist, not
+  client authentication (issue #250). Canonical config is now
+  `security.enforce_app_id_allowlist` plus `security.allowed_apps`; legacy
+  `require_websocket_auth` / `authorized_apps` input remains accepted.
+  Deprecated `app_secret` input is discarded and never retained or emitted.
+  Ambiguous mixed-name sources fail closed, documented config precedence is
+  enforced, and duplicate public IDs are rejected instead of using the last
+  entry's limits.
+  **Breaking (Rust API):** `SecurityConfig.require_websocket_auth`,
+  `SecurityConfig.authorized_apps`, `ServerConfig.auth_enabled`, `AppAuthEntry`,
+  `AuthMiddleware`, `AppInfo`, credential-validation methods, and
+  `AuthError::InvalidCredentials` plus the public `*_app_info` helpers are
+  replaced by the corresponding public-ID allowlist fields,
+  `AppRegistrationEntry`, `AppIdAllowlist`, `AppContext`, `resolve_app_id`, and
+  `*_app_context`; `AppIdAllowlist::new` now returns `Result` so duplicate IDs
+  cannot construct an ambiguous policy. Frozen v2/v3 `Authenticate` wire bytes
+  are unchanged.
 - Prevent first-party production panic paths in the server and native reference
   client (issue #255). Invalid queue and host invariants fail closed, oversized
   batch/replay/serialization inputs are bounded or rejected, and runtime-less

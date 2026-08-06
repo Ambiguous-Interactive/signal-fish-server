@@ -187,8 +187,8 @@ browser ↔ native reference-client interop matrix.
 
 - Use `wss://` for signaling in production — it protects the DTLS fingerprints carried in the SDP.
 - Send `Authenticate` before any room operation (`app_id` is your game's public identifier, matched against the
-  server's `authorized_apps`; see the [Rust Client Guide](rust-client.md)). When authentication is enabled the
-  server rejects unauthenticated traffic.
+  server's `allowed_apps`; see the [Rust Client Guide](rust-client.md)). When the app-ID allowlist is enforced,
+  the server rejects messages sent before a known public app label is accepted.
 - Never embed a TURN shared secret in a client. Clients receive only ephemeral, server-minted TURN credentials in
   their `SessionPlan` / ICE list. See [TURN Deployment](../deployment-turn.md).
 - Respect the server's signal payload size cap and rate limits; back off rather than hammering the `Signal` path.

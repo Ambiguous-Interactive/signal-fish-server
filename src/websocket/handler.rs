@@ -71,7 +71,7 @@ async fn websocket_handler_with_default(
     // `security.max_message_size` check in the receive loop can only run after
     // the WebSocket library has buffered an entire inbound message, so without
     // this cap the library defaults (16 MiB frames / 64 MiB messages) let an
-    // unauthenticated peer force megabytes of buffering per connection before
+    // pre-handshake peer force megabytes of buffering per connection before
     // the polite `MessageTooLarge` rejection executes. The 2x headroom keeps
     // the application check the authority for the polite error path
     // (slightly-oversized messages still get an explicit error frame on a

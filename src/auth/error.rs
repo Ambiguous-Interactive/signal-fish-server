@@ -1,17 +1,16 @@
 use thiserror::Error;
 
-/// Authentication errors that may be returned during app credential or ID
-/// validation.
+/// Errors returned while resolving an app ID against the public allowlist.
 ///
 /// The `AppIdExpired`, `AppIdRevoked`, and `AppIdSuspended` variants are
 /// reserved for future extension (e.g., app status management, admin-controlled
 /// app suspension, or external auth backends). They are not currently returned
-/// by the in-memory `AuthMiddleware` but are kept so that client error-handling
-/// code paths remain stable when those features are introduced.
+/// by the in-memory `AppIdAllowlist` but are kept so that legacy wire
+/// error-handling code paths remain stable when those features are introduced.
 #[derive(Debug, Error)]
 pub enum AuthError {
-    #[error("Invalid credentials")]
-    InvalidCredentials,
+    #[error("Duplicate app ID")]
+    DuplicateAppId,
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
     #[error("Invalid app ID")]

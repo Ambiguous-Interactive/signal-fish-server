@@ -131,7 +131,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         protocol_config.clone(),
         reconnection_manager.clone(),
         Arc::clone(&connection_manager),
-        config.auth_enabled,
+        config.app_id_allowlist_enabled,
     );
 
     let (shutdown_drain_tx, _) = watch::channel(false);
@@ -150,7 +150,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         distributed_lock,
         instance_id,
         reconnection_manager,
-        auth_middleware: Arc::new(crate::auth::AuthMiddleware::disabled()),
+        app_id_allowlist: Arc::new(crate::auth::AppIdAllowlist::disabled()),
         room_applications,
         active_session_plans: Arc::new(DashMap::new()),
         pending_durable_player_detaches: Arc::new(DashMap::new()),

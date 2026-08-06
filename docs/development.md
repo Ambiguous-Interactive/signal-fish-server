@@ -379,7 +379,7 @@ signal-fish-server/
 │   ├── main.rs                  # Binary entry point
 │   ├── lib.rs                   # Library crate root
 │   ├── server.rs                # EnhancedGameServer core
-│   ├── auth/                    # Authentication
+│   ├── auth/                    # Public app-ID allowlist
 │   ├── config/                  # Configuration
 │   ├── coordination/            # Room coordination
 │   ├── database/                # Database trait + impl

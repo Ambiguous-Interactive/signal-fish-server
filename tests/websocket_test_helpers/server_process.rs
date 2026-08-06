@@ -20,7 +20,7 @@
 //!   the port is ALSO pinned via `SIGNAL_FISH__PORT` (belt and braces), and
 //!   every inherited `SIGNAL_FISH*` variable is scrubbed from the child env.
 //!   The base config keeps the binary zero-dependency: in-memory storage (the
-//!   only backend), `require_websocket_auth: false`, `require_metrics_auth:
+//!   only backend), `enforce_app_id_allowlist: false`, `require_metrics_auth:
 //!   false` (the delivery suite scrapes `/metrics/prom`), SDK enforcement off,
 //!   reconnection enabled, and file logging off.
 //! - **Per-suite config overlay**: the two suites need DIFFERENT config
@@ -183,7 +183,7 @@ fn base_config(port: u16) -> Value {
             "reconnection_window": 300
         },
         "security": {
-            "require_websocket_auth": false,
+            "enforce_app_id_allowlist": false,
             "require_metrics_auth": false,
             "cors_origins": "*"
         },

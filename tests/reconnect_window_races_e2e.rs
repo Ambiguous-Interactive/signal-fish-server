@@ -35,7 +35,7 @@
 //!
 //! # Facet 2 — duplicate claim, exactly one winner
 //!
-//! Two fresh, authenticated sockets contend for the SAME token/player
+//! Two fresh, handshake-complete sockets contend for the SAME token/player
 //! concurrently (released together by a barrier on a multi-thread runtime).
 //! The claim is lock-serialized in `claim_reconnection`, so the OUTCOME COUNT
 //! is deterministic: EXACTLY ONE gets `Reconnected` and the other gets a
@@ -87,7 +87,7 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::SinkExt;
-use signal_fish_server::config::AppAuthEntry;
+use signal_fish_server::config::AppRegistrationEntry;
 use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, PlayerId, ReconnectedPayload, RoomId, ServerMessage,
 };
@@ -121,10 +121,9 @@ const HUGE_CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
 /// about the lock, not timing, so both attempts must be well inside the window.
 const DUPLICATE_CLAIM_WINDOW: Duration = Duration::from_secs(300);
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "Reconnect Window Races App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -144,7 +143,7 @@ async fn start_server(
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
     server_config.reconnection_window = window;
     server_config.room_cleanup_interval = cleanup_interval;
 
@@ -506,7 +505,7 @@ async fn concurrent_duplicate_reconnect_has_exactly_one_winner() {
     let token = register_reconnect_token(&game_server, dropped.player_id, dropped.room_id).await;
     drop(dropper);
 
-    // Two fresh, authenticated sockets, released together by the barrier so the
+    // Two fresh, handshake-complete sockets, released together by the barrier so the
     // two claims genuinely contend on a multi-thread runtime.
     let mut first = connect(addr).await;
     authenticate_v3(&mut first).await;

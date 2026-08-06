@@ -24,7 +24,7 @@ mod test_helpers;
 mod websocket_test_helpers;
 
 use futures_util::SinkExt;
-use signal_fish_server::config::{AppAuthEntry, SessionConfig, TurnConfig};
+use signal_fish_server::config::{AppRegistrationEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
     ClientMessage, IceServer, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage, Topology,
     Transport,
@@ -44,10 +44,9 @@ const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
 /// Window in which a forbidden message would have arrived if it were going to.
 const SILENCE_WINDOW: tokio::time::Duration = tokio::time::Duration::from_secs(2);
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "V3 Replan App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -112,7 +111,7 @@ async fn start_server_with_session(session: SessionConfig) -> RunningTestServer 
     use axum::routing::get;
 
     let mut server_config: ServerConfig = test_server_config();
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;

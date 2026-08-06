@@ -1580,10 +1580,10 @@ async fn test_e2e_fallback_to_defaults_on_invalid_config() {
 }
 
 // ===========================================================================
-// Post-auth idle timeout (`websocket.idle_timeout_secs`)
+// Post-handshake idle timeout (`websocket.idle_timeout_secs`)
 // ===========================================================================
 
-/// Build a test server config with the given post-auth idle timeout.
+/// Build a test server config with the given post-handshake idle timeout.
 fn idle_timeout_server_config(idle_timeout_secs: u64) -> ServerConfig {
     let mut config = test_server_config();
     config.websocket_config = signal_fish_server::config::WebSocketConfig {
@@ -1619,10 +1619,10 @@ async fn collect_frames_until_closed(
     frames
 }
 
-/// An authenticated connection that sends no frames at all is closed once the
+/// A handshake-complete connection that sends no frames at all is closed once the
 /// socket-level idle timeout elapses, after receiving a
-/// `CONNECTION_IDLE_TIMEOUT` error. (Auth is disabled in `test_server_config`,
-/// so the connection counts as authenticated from the first frame — the idle
+/// `CONNECTION_IDLE_TIMEOUT` error. (The allowlist is disabled in `test_server_config`,
+/// so the app-ID handshake accepts the first frame — the idle
 /// window applies immediately.)
 ///
 /// The maintenance reaper is deliberately NOT running here (the e2e harness
@@ -1806,7 +1806,7 @@ async fn test_active_client_survives_past_idle_timeout_window() {
 }
 
 /// `idle_timeout_secs = 0` disables idle enforcement entirely: a completely
-/// silent authenticated client stays connected for comfortably longer than the
+/// silent handshake-complete client stays connected for comfortably longer than the
 /// small nonzero windows that close the sibling tests' connections.
 /// `ping_timeout` stays at the test default (10s), so the state reaper cannot
 /// reap the client within the silent window and confound the assertion — the

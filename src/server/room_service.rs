@@ -71,14 +71,14 @@ pub(super) enum JoinRoomError {
     /// (→ `MAX_ROOMS_PER_GAME_EXCEEDED`).
     #[error(transparent)]
     MaxRoomsPerGameExceeded(#[from] MaxRoomsPerGameExceededError),
-    /// The authenticated application's cross-game room quota is reached. This
+    /// The accepted app label's cross-game room quota is reached. This
     /// uses the existing v2 room-cap wire code for backward compatibility.
     #[error(transparent)]
     MaxRoomsPerApplicationExceeded(#[from] MaxRoomsPerApplicationExceededError),
     /// A creator requested a capacity above its configured application cap.
     #[error(transparent)]
     MaxPlayersPerApplicationExceeded(#[from] MaxPlayersPerApplicationExceededError),
-    /// The room is absent or belongs to another authenticated application.
+    /// The room is absent or belongs to another accepted app label.
     /// Both cases intentionally share one non-enumerating wire outcome.
     #[error("Room not found")]
     RoomNotFound,
@@ -592,7 +592,7 @@ impl EnhancedGameServer {
                     }
                     return;
                 };
-                if self.config.auth_enabled {
+                if self.config.app_id_allowlist_enabled {
                     if let (Some(application_id), Some(client_application_id)) =
                         (current_room.application_id, self.client_app_id(player_id))
                     {
@@ -1116,15 +1116,15 @@ impl EnhancedGameServer {
         ),
         JoinRoomError,
     > {
-        // Authentication-disabled connections still carry a default AppInfo for
-        // protocol compatibility. Ownership and quotas apply only when auth is
-        // enabled; otherwise newly-created rooms must remain unowned.
-        let client_app_info = if self.config.auth_enabled {
-            match self.client_app_info(player_id) {
-                Some(app_info) => Some(app_info),
+        // Open-policy connections still carry a default AppContext for protocol
+        // compatibility. Ownership and quotas apply only when allowlist enforcement
+        // is enabled; otherwise newly-created rooms must remain unowned.
+        let client_app_context = if self.config.app_id_allowlist_enabled {
+            match self.client_app_context(player_id) {
+                Some(app_context) => Some(app_context),
                 None => {
                     return Err(anyhow::anyhow!(
-                        "authenticated room admission is missing application context"
+                        "allowlisted room admission is missing application context"
                     )
                     .into())
                 }
@@ -1132,7 +1132,7 @@ impl EnhancedGameServer {
         } else {
             None
         };
-        let client_app_id = client_app_info.as_ref().map(|app| app.id);
+        let client_app_id = client_app_context.as_ref().map(|app| app.id);
 
         // Global lock order is room-code -> application-cap -> game-cap. Every
         // release happens in reverse order. Existing-room joins acquire the
@@ -1177,7 +1177,7 @@ impl EnhancedGameServer {
                     }
                 };
 
-                if self.config.auth_enabled
+                if self.config.app_id_allowlist_enabled
                     && room
                         .application_id
                         .is_some_and(|owner| Some(owner) != client_app_id)
@@ -1188,7 +1188,7 @@ impl EnhancedGameServer {
                 {
                     Err(anyhow::anyhow!(reason).into())
                 } else {
-                    let effective_max_players = client_app_info
+                    let effective_max_players = client_app_context
                         .as_ref()
                         .and_then(|app| app.max_players_per_room)
                         .map_or(room.max_players, |app_limit| {
@@ -1209,7 +1209,7 @@ impl EnhancedGameServer {
                         if let Some(app_id) = client_app_id {
                             if claimed_application {
                                 if let Some(app_limit) =
-                                    client_app_info.as_ref().and_then(|app| app.max_rooms)
+                                    client_app_context.as_ref().and_then(|app| app.max_rooms)
                                 {
                                     match self
                                         .acquire_application_room_cap_lock(app_id, app_limit)
@@ -1305,7 +1305,7 @@ impl EnhancedGameServer {
                 if self.is_draining() {
                     Err(JoinRoomError::ServerDraining)
                 } else {
-                    if let Some(app_limit) = client_app_info
+                    if let Some(app_limit) = client_app_context
                         .as_ref()
                         .and_then(|app| app.max_players_per_room)
                         .filter(|limit| max_players > *limit)
@@ -1322,7 +1322,7 @@ impl EnhancedGameServer {
                     let creation_result = async {
                         if let (Some(app_id), Some(app_limit)) = (
                             client_app_id,
-                            client_app_info.as_ref().and_then(|app| app.max_rooms),
+                            client_app_context.as_ref().and_then(|app| app.max_rooms),
                         ) {
                             application_cap_lock = Some(
                                 self.acquire_application_room_cap_lock(app_id, app_limit)

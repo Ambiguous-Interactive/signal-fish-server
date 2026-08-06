@@ -187,7 +187,7 @@ pub fn test_server_config() -> ServerConfig {
         event_buffer_size: 100,                        // Buffer 100 events
         enable_reconnection: true,                     // Enable reconnection in tests
         websocket_config: signal_fish_server::config::WebSocketConfig::default(),
-        auth_enabled: false,                // Disable auth for tests
+        app_id_allowlist_enabled: false, // Keep the app-ID policy open for tests
         heartbeat_throttle: Duration::ZERO, // No throttling in tests for predictable behavior
         region_id: "test".to_string(),
         room_code_prefix: None,

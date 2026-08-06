@@ -12,7 +12,7 @@
 //!   directory set to the temp dir; the port is ALSO pinned via
 //!   `SIGNAL_FISH__PORT` and every inherited `SIGNAL_FISH*` variable is
 //!   scrubbed (env overrides merge last in the server's loader). The config
-//!   keeps everything local: in-memory storage, WebSocket auth off, the
+//!   keeps everything local: in-memory storage, an open app-ID policy, the
 //!   per-scenario `session.default_topology`, and generous rate limits. Normal
 //!   scenarios disable TURN and use no STUN URLs; the dedicated TURN suite
 //!   injects one local coturn URL and exercises the production shared-secret
@@ -277,7 +277,7 @@ async fn try_spawn_server(
             "reconnection_window": 300
         },
         "security": {
-            "require_websocket_auth": false,
+            "enforce_app_id_allowlist": false,
             "require_metrics_auth": false,
             "cors_origins": "*"
         },

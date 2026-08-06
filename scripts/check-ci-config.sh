@@ -96,10 +96,10 @@ if [[ -f Dockerfile ]]; then
         error "Dockerfile missing ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false — server will crash without auth config."
     fi
 
-    if grep -q 'SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false' Dockerfile; then
-        success "Dockerfile sets REQUIRE_WEBSOCKET_AUTH=false."
+    if grep -q 'SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false' Dockerfile; then
+        success "Dockerfile sets ENFORCE_APP_ID_ALLOWLIST=false."
     else
-        error "Dockerfile missing ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false — server will crash without auth config."
+        error "Dockerfile missing ENV SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false — server will reject every app ID without allowlist config."
     fi
 
     # Dockerfile instructions may span physical lines. Assemble them without

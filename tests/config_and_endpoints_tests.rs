@@ -11,7 +11,7 @@ mod test_helpers;
 use axum::routing::get;
 use regex::Regex;
 use signal_fish_server::config::{
-    AppAuthEntry, ClientAuthMode, Config, DashboardHistoryField, LogFormat,
+    AppRegistrationEntry, ClientAuthMode, Config, DashboardHistoryField, LogFormat,
 };
 use signal_fish_server::security::token_binding::TokenBindingScheme;
 use signal_fish_server::websocket::{
@@ -266,8 +266,8 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("http://localhost:3000,http://localhost:5173"),
     },
     ConfigReferenceRow {
-        env: "SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH",
-        path: "security.require_websocket_auth",
+        env: "SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST",
+        path: "security.enforce_app_id_allowlist",
         default: Some("true"),
     },
     ConfigReferenceRow {
@@ -346,8 +346,8 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("sec_websocket_key_sha256"),
     },
     ConfigReferenceRow {
-        env: "SIGNAL_FISH__SECURITY__AUTHORIZED_APPS",
-        path: "security.authorized_apps",
+        env: "SIGNAL_FISH__SECURITY__ALLOWED_APPS",
+        path: "security.allowed_apps",
         default: Some("[]"),
     },
     ConfigReferenceRow {
@@ -569,8 +569,8 @@ const README_REQUIRED_CONFIG_ROWS: &[ConfigReferenceRow] = &[
         default: Some("http://localhost:3000,http://localhost:5173"),
     },
     ConfigReferenceRow {
-        env: "SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH",
-        path: "security.require_websocket_auth",
+        env: "SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST",
+        path: "security.enforce_app_id_allowlist",
         default: Some("true"),
     },
     ConfigReferenceRow {
@@ -813,7 +813,7 @@ fn test_config_default_values() {
     assert_eq!(config.protocol.max_game_name_length, 64);
     assert_eq!(config.protocol.max_player_name_length, 32);
     assert_eq!(config.protocol.max_players_limit, 100);
-    assert!(config.security.require_websocket_auth);
+    assert!(config.security.enforce_app_id_allowlist);
     assert!(config.security.require_metrics_auth);
 }
 
@@ -894,14 +894,13 @@ fn test_config_partial_json_uses_defaults_for_missing_fields() {
 }
 
 #[test]
-fn test_config_security_authorized_apps_deserialization() {
+fn test_config_security_canonical_app_id_allowlist_round_trip() {
     let json = r#"{
         "security": {
-            "require_websocket_auth": true,
-            "authorized_apps": [
+            "enforce_app_id_allowlist": true,
+            "allowed_apps": [
                 {
                     "app_id": "my-game",
-                    "app_secret": "my-secret",
                     "app_name": "My Game",
                     "max_rooms": 100,
                     "max_players_per_room": 4,
@@ -913,16 +912,82 @@ fn test_config_security_authorized_apps_deserialization() {
 
     let config: Config = serde_json::from_str(json).expect("parse should succeed");
 
-    assert!(config.security.require_websocket_auth);
-    assert_eq!(config.security.authorized_apps.len(), 1);
+    assert!(config.security.enforce_app_id_allowlist);
+    assert_eq!(config.security.allowed_apps.len(), 1);
 
-    let app = &config.security.authorized_apps[0];
+    let app = &config.security.allowed_apps[0];
     assert_eq!(app.app_id, "my-game");
-    assert_eq!(app.app_secret, "my-secret");
     assert_eq!(app.app_name, "My Game");
     assert_eq!(app.max_rooms, Some(100));
     assert_eq!(app.max_players_per_room, Some(4));
     assert_eq!(app.rate_limit_per_minute, Some(30));
+
+    let serialized = serde_json::to_value(config).expect("config serializes");
+    let security = serialized
+        .get("security")
+        .and_then(serde_json::Value::as_object)
+        .expect("serialized config has security object");
+    assert!(security.contains_key("enforce_app_id_allowlist"));
+    assert!(security.contains_key("allowed_apps"));
+    assert!(!security.contains_key("require_websocket_auth"));
+    assert!(!security.contains_key("authorized_apps"));
+    assert!(
+        !serialized.to_string().contains("app_secret"),
+        "canonical config must not advertise an unused client secret"
+    );
+}
+
+#[test]
+fn test_config_security_legacy_app_allowlist_input_discards_unused_secret() {
+    let json = r#"{
+        "security": {
+            "require_websocket_auth": true,
+            "authorized_apps": [{
+                "app_id": "legacy-game",
+                "app_secret": "must-not-be-retained",
+                "app_name": "Legacy Game"
+            }]
+        }
+    }"#;
+
+    let config: Config = serde_json::from_str(json).expect("legacy config should remain accepted");
+    assert!(config.security.enforce_app_id_allowlist);
+    assert_eq!(config.security.allowed_apps[0].app_id, "legacy-game");
+
+    let serialized = serde_json::to_string(&config).expect("config serializes");
+    assert!(!serialized.contains("must-not-be-retained"));
+    assert!(!serialized.contains("app_secret"));
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("must-not-be-retained"));
+    assert!(!debug.contains("app_secret"));
+}
+
+#[test]
+fn test_config_security_rejects_mixed_canonical_and_legacy_app_access_keys() {
+    let json = r#"{
+        "security": {
+            "enforce_app_id_allowlist": false,
+            "require_websocket_auth": true
+        }
+    }"#;
+
+    let error = serde_json::from_str::<Config>(json)
+        .expect_err("mixed canonical and legacy keys must be rejected");
+    assert!(error.to_string().contains("duplicate field"));
+}
+
+#[test]
+fn test_config_security_rejects_mixed_canonical_and_legacy_app_lists() {
+    let json = r#"{
+        "security": {
+            "allowed_apps": [],
+            "authorized_apps": []
+        }
+    }"#;
+
+    let error = serde_json::from_str::<Config>(json)
+        .expect_err("mixed canonical and legacy app-list keys must be rejected");
+    assert!(error.to_string().contains("duplicate field"));
 }
 
 #[test]
@@ -1729,7 +1794,7 @@ fn test_default_config_fails_validation() {
     );
 }
 
-/// Data-driven test covering a matrix of auth configuration scenarios.
+/// Data-driven test covering metrics credentials and app-ID policy scenarios.
 #[test]
 fn test_config_validation_scenarios() {
     // (name, config_modifier, expected_ok)
@@ -1742,14 +1807,14 @@ fn test_config_validation_scenarios() {
             false,
         ),
         (
-            "auth disabled → passes",
+            "metrics auth disabled → passes",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = false;
             }),
             true,
         ),
         (
-            "auth enabled with valid long token → passes",
+            "metrics auth enabled with valid long token → passes",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = true;
                 c.security.metrics_auth_token =
@@ -1758,7 +1823,7 @@ fn test_config_validation_scenarios() {
             true,
         ),
         (
-            "auth enabled with short token → passes (warning only)",
+            "metrics auth enabled with short token → passes (warning only)",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = true;
                 c.security.metrics_auth_token = Some("short".to_string());
@@ -1766,7 +1831,7 @@ fn test_config_validation_scenarios() {
             true,
         ),
         (
-            "auth enabled with empty token → fails",
+            "metrics auth enabled with empty token → fails",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = true;
                 c.security.metrics_auth_token = Some(String::new());
@@ -1774,7 +1839,7 @@ fn test_config_validation_scenarios() {
             false,
         ),
         (
-            "auth enabled with whitespace-only token → fails",
+            "metrics auth enabled with whitespace-only token → fails",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = true;
                 c.security.metrics_auth_token = Some(" \t\n".to_string());
@@ -1782,37 +1847,36 @@ fn test_config_validation_scenarios() {
             false,
         ),
         (
-            "both auth fields disabled → passes (Docker/CI scenario)",
+            "metrics auth disabled and app-ID policy open → passes (Docker/CI scenario)",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = false;
-                c.security.require_websocket_auth = false;
+                c.security.enforce_app_id_allowlist = false;
             }),
             true,
         ),
         (
-            "metrics auth enabled, websocket auth disabled → fails without token",
+            "metrics auth enabled, app-ID policy open → fails without token",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = true;
-                c.security.require_websocket_auth = false;
+                c.security.enforce_app_id_allowlist = false;
                 c.security.metrics_auth_token = None;
             }),
             false,
         ),
         (
-            "metrics auth disabled, websocket auth enabled → passes",
+            "metrics auth disabled, app-ID allowlist enforced → passes",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = false;
-                c.security.require_websocket_auth = true;
+                c.security.enforce_app_id_allowlist = true;
             }),
             true,
         ),
         (
-            "authorized app with whitespace-only app_id → fails",
+            "allowed app with whitespace-only app_id → fails",
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = false;
-                c.security.authorized_apps = vec![AppAuthEntry {
+                c.security.allowed_apps = vec![AppRegistrationEntry {
                     app_id: " ".to_string(),
-                    app_secret: "secret".to_string(),
                     app_name: "Game".to_string(),
                     max_rooms: None,
                     max_players_per_room: None,
@@ -1886,19 +1950,19 @@ fn test_config_validation_scenarios() {
     }
 }
 
-/// Regression test: the Docker container disables both auth flags.
+/// Regression test: the Docker container disables metrics auth and opens the app-ID policy.
 /// This configuration MUST pass validation.
 #[test]
 fn test_docker_default_config_passes_validation() {
     let mut config = Config::default();
     config.security.require_metrics_auth = false;
-    config.security.require_websocket_auth = false;
+    config.security.enforce_app_id_allowlist = false;
     config.security.metrics_auth_token = None;
 
     let result = validate_config_security(&config);
     assert!(
         result.is_ok(),
-        "Docker-style config (auth disabled) must pass validation, but got: {:?}",
+        "Docker-style open app-ID/metrics config must pass validation, but got: {:?}",
         result.unwrap_err(),
     );
 }

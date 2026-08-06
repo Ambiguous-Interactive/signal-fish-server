@@ -16,7 +16,7 @@
 //! Zero external dependencies — no database, no cloud services.
 //! Just run the binary and connect via WebSocket.
 
-/// Authentication middleware (in-memory backed)
+/// Public app-ID allowlist and per-label rate limiting.
 pub mod auth;
 
 /// Optimized broadcast message handling

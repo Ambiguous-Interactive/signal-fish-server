@@ -42,8 +42,8 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Arc::new(config::load());
 
     // Handle --print-config: output the loaded configuration as JSON. Secrets
-    // (TURN secrets, metrics/app auth tokens, ICE credentials) are redacted so
-    // credential material never reaches stdout — see Config::redacted_for_display.
+    // (TURN secrets, metrics tokens, ICE credentials) are redacted so credential
+    // material never reaches stdout — see Config::redacted_for_display.
     if cli.print_config {
         let json = serde_json::to_string_pretty(&cfg.redacted_for_display())
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
@@ -141,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
         event_buffer_size: cfg.server.event_buffer_size,
         enable_reconnection: cfg.server.enable_reconnection,
         websocket_config: cfg.websocket.clone(),
-        auth_enabled: cfg.security.require_websocket_auth,
+        app_id_allowlist_enabled: cfg.security.enforce_app_id_allowlist,
         heartbeat_throttle: tokio::time::Duration::from_secs(cfg.server.heartbeat_throttle_secs),
         region_id: cfg.server.region_id.clone(),
         room_code_prefix: cfg.server.room_code_prefix.clone(),
@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.metrics.clone(),
         cfg.coordination.clone(),
         cfg.security.transport.clone(),
-        cfg.security.authorized_apps.clone(),
+        cfg.security.allowed_apps.clone(),
     )
     .await?;
 

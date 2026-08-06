@@ -14,8 +14,8 @@ use super::types::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
-    /// Authenticate with App ID (MUST be first message)
-    /// App ID is a public identifier (not a secret!) that identifies the game application
+    /// Submit a public app ID (MUST be the first application message).
+    /// The frozen `Authenticate` name does not imply a client credential.
     Authenticate {
         /// Public App ID (safe to embed in game builds, e.g., "mb_app_abc123...")
         app_id: String,
@@ -305,7 +305,7 @@ pub struct SpectatorJoinedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
-    /// Authentication successful
+    /// Public app ID accepted (frozen legacy wire name).
     Authenticated {
         /// App name for confirmation
         app_name: String,
@@ -315,9 +315,9 @@ pub enum ServerMessage {
         /// Rate limits for this app
         rate_limits: RateLimitInfo,
     },
-    /// SDK/protocol compatibility details advertised after authentication
+    /// SDK/protocol compatibility details advertised after the app-ID handshake.
     ProtocolInfo(ProtocolInfoPayload),
-    /// Authentication failed
+    /// App-ID handshake rejected (frozen legacy wire name).
     AuthenticationError {
         /// Error message
         error: String,

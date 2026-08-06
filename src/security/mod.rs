@@ -27,10 +27,10 @@ pub use tls::build_rustls_config;
 /// matched.
 ///
 /// This is the single source of truth for secret comparison across the crate —
-/// app shared secrets (`auth::middleware`), the metrics bearer token
-/// (`websocket::metrics`), reconnection tokens (`reconnection`), and
-/// token-binding proofs (`security::token_binding`) all route through it, so the
-/// constant-time guarantee can never silently drift between call sites.
+/// the metrics bearer token (`websocket::metrics`), reconnection tokens
+/// (`reconnection`), and token-binding proofs (`security::token_binding`) all
+/// route through it, so the constant-time guarantee can never silently drift
+/// between call sites.
 ///
 /// Length is intentionally **not** treated as secret: an early length check
 /// short-circuits. Every secret compared here is fixed-width for a given

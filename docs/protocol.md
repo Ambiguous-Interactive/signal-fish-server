@@ -9,8 +9,9 @@ MessagePack encoding is also supported for game data when `enable_message_pack_g
 
 ### Authenticate
 
-Authenticate with app credentials (required when auth is enabled). App ID is a public identifier that identifies
-the game application.
+Submit the application's public app ID (required when app-ID allowlist
+enforcement is enabled). This identifies an accounting/quota context; it is not
+proof of client or tenant identity because any client can replay a known ID.
 
 ```json
 {
@@ -316,7 +317,8 @@ This message has no data payload.
 
 ### Authenticated
 
-Authentication successful. Includes app information and rate limits.
+The public app ID was accepted. Includes its configured context and rate limits;
+this legacy message name does not prove client identity.
 
 ```json
 
@@ -335,7 +337,7 @@ Authentication successful. Includes app information and rate limits.
 
 ```
 
-`per_minute` is enforced when the authenticated app configures
+`per_minute` is enforced when the accepted app entry configures
 `rate_limit_per_minute`. The frozen v2 `per_hour` and `per_day` fields are
 legacy advisory projections for client budgeting and are not enforced by the
 server.
@@ -346,7 +348,7 @@ Optional fields:
 
 ### ProtocolInfo
 
-SDK/protocol compatibility details advertised after authentication.
+SDK/protocol compatibility details advertised after the app-ID handshake.
 
 ```json
 
@@ -362,7 +364,8 @@ SDK/protocol compatibility details advertised after authentication.
 
 ### AuthenticationError
 
-Authentication failed.
+The app-ID handshake was rejected. This frozen legacy message name does not
+mean a client credential was checked.
 
 ```json
 
@@ -1196,7 +1199,7 @@ message:
 The server caps the negotiated version at its configured ceiling:
 `negotiated = min(client_max, max_protocol_version)`. A client that advertises a higher version than the deployment
 speaks is clamped **down** to `max_protocol_version`; the server never raises a client above its declared maximum.
-If the result is below `min_protocol_version`, authentication fails with
+If the result is below `min_protocol_version`, the app-ID handshake fails with
 `UNSUPPORTED_PROTOCOL_VERSION`. An omitted field uses the endpoint default (`/v2/ws` defaults to v2; `/v3/ws`
 defaults to v3). If the negotiated
 version is below 3, the connection is **relay-only** regardless of the advertised `supported_transports` /

@@ -34,7 +34,7 @@ mod websocket_test_helpers;
 use std::sync::Arc;
 
 use serde_json::json;
-use signal_fish_server::config::AppAuthEntry;
+use signal_fish_server::config::AppRegistrationEntry;
 use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, PlayerId, RoomId, ServerMessage, Topology, Transport,
 };
@@ -55,10 +55,9 @@ const APP_ID: &str = "v3-signal-errors-app";
 /// suite brisk.
 const SILENCE_WINDOW: tokio::time::Duration = tokio::time::Duration::from_secs(2);
 
-fn app_entry() -> AppAuthEntry {
-    AppAuthEntry {
+fn app_entry() -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: APP_ID.to_string(),
-        app_secret: "secret".to_string(),
         app_name: "V3 Signal Errors App".to_string(),
         max_rooms: Some(10),
         max_players_per_room: Some(8),
@@ -68,13 +67,13 @@ fn app_entry() -> AppAuthEntry {
 
 /// Boot the production router (`/v2` nest + `/v3/ws` alias) around a server
 /// built from the given `ServerConfig`, returning the bound address and handle.
-/// Same shape as `tests/v3_signaling_e2e.rs::start_auth_server_with_config`.
+/// Same shape as `tests/v3_signaling_e2e.rs::start_allowlist_server_with_config`.
 async fn start_server_with_config(
     mut server_config: ServerConfig,
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     use axum::routing::get;
 
-    server_config.auth_enabled = true;
+    server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
@@ -413,7 +412,7 @@ async fn self_signal_is_rejected_and_not_echoed() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Sender authenticated but never joined a room → NotInRoom.
+// 3. Sender completed the app-ID handshake but never joined a room → NotInRoom.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

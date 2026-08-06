@@ -63,15 +63,19 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         );
     }
 
-    for (index, app) in config.security.authorized_apps.iter().enumerate() {
+    let mut app_ids = std::collections::HashSet::new();
+    for (index, app) in config.security.allowed_apps.iter().enumerate() {
         if app.app_id.trim().is_empty() {
-            anyhow::bail!("security.authorized_apps[{index}].app_id must not be blank");
+            anyhow::bail!("security.allowed_apps[{index}].app_id must not be blank");
         }
-        if app.app_secret.trim().is_empty() {
-            anyhow::bail!("security.authorized_apps[{index}].app_secret must not be blank");
+        if !app_ids.insert(app.app_id.as_str()) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].app_id duplicates an earlier entry: {:?}",
+                app.app_id
+            );
         }
         if app.app_name.trim().is_empty() {
-            anyhow::bail!("security.authorized_apps[{index}].app_name must not be blank");
+            anyhow::bail!("security.allowed_apps[{index}].app_name must not be blank");
         }
     }
 
@@ -333,7 +337,7 @@ pub fn is_production_mode() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppAuthEntry;
+    use crate::config::AppRegistrationEntry;
 
     /// Truth table for the TURN-without-TLS startup warning: it fires exactly
     /// when the server brokers WebRTC (`turn.enabled`) over a plaintext
@@ -363,7 +367,7 @@ mod tests {
     fn signaling_tls_warning_ignores_unrelated_settings() {
         let mut config = Config::default();
         config.turn.enabled = true;
-        config.security.require_websocket_auth = false;
+        config.security.enforce_app_id_allowlist = false;
         config.security.require_metrics_auth = false;
         config.security.transport.token_binding.enabled = true;
         assert!(should_warn_missing_signaling_tls(&config));
@@ -406,17 +410,15 @@ mod tests {
     }
 
     #[test]
-    fn authorized_apps_reject_blank_required_fields_with_indexed_errors() {
-        let cases: [(&str, fn(&mut AppAuthEntry)); 3] = [
+    fn allowed_apps_reject_blank_required_fields_with_indexed_errors() {
+        let cases: [(&str, fn(&mut AppRegistrationEntry)); 2] = [
             ("app_id", |app| app.app_id = " ".to_string()),
-            ("app_secret", |app| app.app_secret = "\t".to_string()),
             ("app_name", |app| app.app_name = "\n".to_string()),
         ];
 
         for (field, mutate) in cases {
-            let mut app = AppAuthEntry {
+            let mut app = AppRegistrationEntry {
                 app_id: "game".to_string(),
-                app_secret: "secret".to_string(),
                 app_name: "Game".to_string(),
                 max_rooms: None,
                 max_players_per_room: None,
@@ -426,10 +428,9 @@ mod tests {
 
             let mut config = Config::default();
             config.security.require_metrics_auth = false;
-            config.security.authorized_apps = vec![
-                AppAuthEntry {
+            config.security.allowed_apps = vec![
+                AppRegistrationEntry {
                     app_id: "valid".to_string(),
-                    app_secret: "valid-secret".to_string(),
                     app_name: "Valid".to_string(),
                     max_rooms: None,
                     max_players_per_room: None,
@@ -439,13 +440,36 @@ mod tests {
             ];
 
             let err = validate_config_security(&config)
-                .expect_err("blank authorized app fields are rejected");
-            let expected = format!("security.authorized_apps[1].{field}");
+                .expect_err("blank allowed app fields are rejected");
+            let expected = format!("security.allowed_apps[1].{field}");
             assert!(
                 err.to_string().contains(&expected),
                 "error must point at the blank field {expected}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn allowed_apps_reject_duplicate_public_ids_before_policy_construction() {
+        let entry = AppRegistrationEntry {
+            app_id: "duplicate".to_string(),
+            app_name: "First".to_string(),
+            max_rooms: Some(1),
+            max_players_per_room: Some(2),
+            rate_limit_per_minute: Some(3),
+        };
+        let mut conflicting = entry.clone();
+        conflicting.app_name = "Conflicting".to_string();
+        conflicting.max_rooms = Some(99);
+
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.allowed_apps = vec![entry, conflicting];
+
+        let error = validate_config_security(&config)
+            .expect_err("duplicate public app IDs must not use last-entry-wins semantics");
+        assert!(error.to_string().contains("allowed_apps[1].app_id"));
+        assert!(error.to_string().contains("duplicates an earlier entry"));
     }
 
     #[test]

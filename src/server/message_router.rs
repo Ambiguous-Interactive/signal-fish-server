@@ -55,7 +55,7 @@ impl EnhancedGameServer {
                     %player_id,
                     %app_id,
                     "Received Authenticate message after connection established - this should not happen. \
-                     Authentication must occur during WebSocket handshake."
+                     App-ID negotiation must occur during the WebSocket handshake."
                 );
             }
             ClientMessage::JoinRoom {

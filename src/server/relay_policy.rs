@@ -1,4 +1,4 @@
-use crate::auth::AppInfo;
+use crate::auth::AppContext;
 
 use super::EnhancedGameServer;
 
@@ -11,7 +11,7 @@ impl EnhancedGameServer {
 
     /// Apply per-application relay bandwidth overrides.
     /// Note: signal-fish-server does not include relay servers - this is a no-op.
-    pub fn apply_app_bandwidth_policy(&self, _app_info: &AppInfo) {
+    pub fn apply_app_bandwidth_policy(&self, _app_context: &AppContext) {
         // No-op: no relay server in signal-fish-server
     }
 

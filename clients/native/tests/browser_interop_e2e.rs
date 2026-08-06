@@ -1051,7 +1051,7 @@ async fn browser_cli_mid_handshake_close_single_error_exit_3() {
     // Mid-handshake means Authenticated never arrived.
     assert!(
         events_named(&client.events, "authenticated").is_empty(),
-        "the stub never authenticates; the close must precede `authenticated`"
+        "the stub never completes the app-ID handshake; the close must precede `authenticated`"
     );
     stub.await.expect("stub server task");
 }

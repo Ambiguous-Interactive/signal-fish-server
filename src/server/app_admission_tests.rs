@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::{
-    AppAuthEntry, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
+    AppRegistrationEntry, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
     SessionConfig, TransportSecurityConfig, TurnConfig,
 };
 use crate::database::{DatabaseConfig, InMemoryDatabase};
@@ -17,10 +17,9 @@ fn app_entry(
     app_id: &str,
     max_rooms: Option<u32>,
     max_players_per_room: Option<u8>,
-) -> AppAuthEntry {
-    AppAuthEntry {
+) -> AppRegistrationEntry {
+    AppRegistrationEntry {
         app_id: app_id.to_string(),
-        app_secret: format!("{app_id}-secret"),
         app_name: app_id.to_string(),
         max_rooms,
         max_players_per_room,
@@ -28,9 +27,12 @@ fn app_entry(
     }
 }
 
-async fn create_server(auth_enabled: bool, apps: Vec<AppAuthEntry>) -> Arc<EnhancedGameServer> {
+async fn create_server(
+    app_id_allowlist_enabled: bool,
+    apps: Vec<AppRegistrationEntry>,
+) -> Arc<EnhancedGameServer> {
     let config = ServerConfig {
-        auth_enabled,
+        app_id_allowlist_enabled,
         max_connections_per_ip: 100,
         ..ServerConfig::default()
     };
@@ -65,12 +67,12 @@ async fn connect_as(
         )
         .await
         .expect("register test client");
-    let app_info = server
-        .auth_middleware
-        .validate_app_id(app_id)
+    let app_context = server
+        .app_id_allowlist
+        .resolve_app_id(app_id)
         .await
         .expect("test application is configured");
-    server.set_client_app_info(&player_id, app_info);
+    server.set_client_app_context(&player_id, app_context);
     server.set_client_protocol(
         &player_id,
         NegotiatedProtocol {
@@ -138,8 +140,8 @@ async fn generated_code_retry_preserves_application_ownership_and_quota() {
     )
     .await;
     let app_b = server
-        .auth_middleware
-        .validate_app_id(APP_B)
+        .app_id_allowlist
+        .resolve_app_id(APP_B)
         .await
         .expect("app B is configured");
     let occupied = server
@@ -167,7 +169,7 @@ async fn generated_code_retry_preserves_application_ownership_and_quota() {
 
     let app_a = server
         .client_app_id(&creator)
-        .expect("authenticated creator retains app identity");
+        .expect("handshake-complete creator retains app identity");
     let created_room = server
         .database
         .get_room_by_id(&created_id)
@@ -196,7 +198,7 @@ async fn generated_code_retry_preserves_application_ownership_and_quota() {
 }
 
 #[tokio::test]
-async fn authenticated_room_owner_gates_seated_spectator_and_reconnect_admission() {
+async fn app_bound_room_owner_gates_seated_spectator_and_reconnect_admission() {
     let server = create_server(
         true,
         vec![
@@ -373,7 +375,7 @@ async fn successful_reconnect_but_not_spectator_adopts_pending_ownership_claim()
 }
 
 #[tokio::test]
-async fn legacy_room_claims_only_on_authenticated_seated_admission() {
+async fn legacy_room_claims_only_on_app_bound_seated_admission() {
     let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(8))]).await;
     let legacy_creator = PlayerId::new_v4();
     let legacy_room = server
@@ -817,7 +819,7 @@ async fn legacy_room_claim_is_atomic_between_applications() {
 }
 
 #[tokio::test]
-async fn auth_disabled_room_creation_ignores_default_app_context() {
+async fn open_policy_room_creation_ignores_default_app_context() {
     let server = create_server(false, Vec::new()).await;
     let (creator, mut creator_rx) = connect_as(&server, "public-label", 43001).await;
     join_room(&server, &creator, "public-game", None, "Creator", 4).await;
@@ -867,9 +869,11 @@ async fn application_player_cap_rejects_oversized_creation_and_lowered_legacy_ca
     // Model a restart with a lower app cap by attaching the newly loaded app
     // policy to a fresh connection. Existing members remain; new seats close.
     let (third, mut third_rx) = connect_as(&server, APP_A, 44003).await;
-    let mut lowered_policy = server.client_app_info(&third).expect("app policy attached");
+    let mut lowered_policy = server
+        .client_app_context(&third)
+        .expect("app policy attached");
     lowered_policy.max_players_per_room = Some(1);
-    server.set_client_app_info(&third, lowered_policy);
+    server.set_client_app_context(&third, lowered_policy);
     join_room(
         &server,
         &third,
@@ -922,10 +926,10 @@ async fn reconnect_respects_current_application_player_cap_without_consuming_tok
 
     let (blocked, mut blocked_rx) = connect_as(&server, APP_A, 44503).await;
     let mut lowered_policy = server
-        .client_app_info(&blocked)
+        .client_app_context(&blocked)
         .expect("app policy attached");
     lowered_policy.max_players_per_room = Some(1);
-    server.set_client_app_info(&blocked, lowered_policy);
+    server.set_client_app_context(&blocked, lowered_policy);
     assert!(
         !server
             .handle_reconnect(&blocked, &original, &room_id, &reconnect_token)
@@ -940,9 +944,11 @@ async fn reconnect_respects_current_application_player_cap_without_consuming_tok
     server.unregister_client(&replacement).await;
 
     let (retry, _retry_rx) = connect_as(&server, APP_A, 44504).await;
-    let mut lowered_policy = server.client_app_info(&retry).expect("app policy attached");
+    let mut lowered_policy = server
+        .client_app_context(&retry)
+        .expect("app policy attached");
     lowered_policy.max_players_per_room = Some(1);
-    server.set_client_app_info(&retry, lowered_policy);
+    server.set_client_app_context(&retry, lowered_policy);
     assert!(
         server
             .handle_reconnect(&retry, &original, &room_id, &reconnect_token)

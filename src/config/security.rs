@@ -1,4 +1,4 @@
-//! Security and authentication configuration types.
+//! Security and application-identification configuration types.
 
 use super::defaults::{
     default_client_auth_mode, default_cors_origins, default_max_connections_per_ip,
@@ -15,9 +15,13 @@ pub struct SecurityConfig {
     /// Allowed CORS origins (comma-separated, or "*" for any)
     #[serde(default = "default_cors_origins")]
     pub cors_origins: String,
-    /// Enable authentication for WebSocket connections
+    /// Require the public client `app_id` to match a configured application.
+    ///
+    /// This is an access/accounting allowlist, not credential authentication:
+    /// shipped clients disclose their app IDs and no client secret is checked.
     #[serde(default = "default_require_auth")]
-    pub require_websocket_auth: bool,
+    #[serde(alias = "require_websocket_auth")]
+    pub enforce_app_id_allowlist: bool,
     /// Enable authentication for metrics endpoint
     #[serde(default = "default_require_auth")]
     pub require_metrics_auth: bool,
@@ -50,26 +54,27 @@ pub struct SecurityConfig {
     /// Transport-level security configuration (TLS, mTLS, token binding scaffolding)
     #[serde(default)]
     pub transport: TransportSecurityConfig,
-    /// Optional list of authorized applications.
-    /// When empty and `require_websocket_auth` is false, all connections are
-    /// accepted. When `require_websocket_auth` is true, only connections with
+    /// Optional list of application IDs allowed to identify themselves.
+    /// When empty and `enforce_app_id_allowlist` is false, all connections are
+    /// accepted. When `enforce_app_id_allowlist` is true, only connections with
     /// an app_id matching one of these entries are accepted.
     #[serde(default)]
-    pub authorized_apps: Vec<AppAuthEntry>,
+    #[serde(alias = "authorized_apps")]
+    pub allowed_apps: Vec<AppRegistrationEntry>,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             cors_origins: default_cors_origins(),
-            require_websocket_auth: default_require_auth(),
+            enforce_app_id_allowlist: default_require_auth(),
             require_metrics_auth: default_require_auth(),
             metrics_auth_token: None,
             max_message_size: default_max_message_size(),
             max_signal_bytes: default_max_signal_bytes(),
             max_connections_per_ip: default_max_connections_per_ip(),
             transport: TransportSecurityConfig::default(),
-            authorized_apps: Vec::new(),
+            allowed_apps: Vec::new(),
         }
     }
 }
@@ -196,19 +201,16 @@ impl fmt::Display for ClientAuthMode {
     }
 }
 
-/// A single authorized application entry loaded from configuration.
+/// A single application registration loaded from configuration.
 ///
-/// Each entry defines the credentials and limits for one application that is
-/// allowed to connect to the signaling server when `require_websocket_auth` is
-/// enabled.
+/// Each entry defines the public identifier and limits for one application
+/// allowed to connect when `enforce_app_id_allowlist` is enabled. It contains
+/// no client credential and does not establish hostile-client identity.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AppAuthEntry {
+pub struct AppRegistrationEntry {
     /// Unique identifier clients send in the `Authenticate` message.
     pub app_id: String,
-    /// Shared secret used for full credential validation (not required for
-    /// app-id-only auth flow).
-    pub app_secret: String,
-    /// Human-readable name returned to the client after authentication.
+    /// Human-readable name returned to the client after app identification.
     pub app_name: String,
     /// Optional maximum number of rooms this application may create.
     #[serde(default)]

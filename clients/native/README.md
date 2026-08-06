@@ -53,7 +53,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--leave-on-game-start` | off | Exit 0 after `GameStarting` and its authoritative `SessionPlan` WITHOUT pairing (the plan is logged, not acted on). Used to vacate a seat in a finalized room — the server only finalizes full rooms, so late joins are seat fills |
 | `--game-name <NAME>` | `reference-native` | Game name for room create/join |
 | `--player-name <NAME>` | `RefNative` | Display name |
-| `--app-id <ID>` | `reference-native-app` | `Authenticate.app_id` (interop servers run with WebSocket auth disabled) |
+| `--app-id <ID>` | `reference-native-app` | Public `Authenticate.app_id` (interop servers use an open app-ID policy) |
 | `--platform <P>` | `reference-native` | `Authenticate.platform` |
 | `--exchange` | off | When a P2P pair fully opens, send exactly one text message per channel and require the symmetric receives (see success criteria) |
 | `--exchange-release-file <PATH>` | — | Test harness only; requires `--exchange`. Establish every planned pair and finish local ICE gathering, emit `exchange_ready`, then hold the exact channel exchange until PATH exists. Normal exchange behavior is unchanged when omitted |
@@ -118,7 +118,7 @@ process continues to its normal bounded exit.
 | Event | Fields | Emitted when |
 |-------|--------|--------------|
 | `connected` | `runtime`, `tick_stall_ms` | WebSocket connection established; echoes the `--runtime` token and `--tick-stall-ms` value so harnesses can assert the intended runtime/fault shape was in effect |
-| `authenticated` | — | Server accepted `Authenticate` |
+| `authenticated` | — | Server accepted the legacy `Authenticate` app-ID handshake |
 | `protocol_info` | `negotiated_version` | Negotiation result (v2 connections report `2`) |
 | `room_created` | `room_code` | This client created the room (harnesses scrape the code) |
 | `room_joined` | `room_id`, `player_id`, `lobby_state` | Seated in the room; `lobby_state` ∈ `waiting`/`lobby`/`finalized` — `finalized` marks a late join into a running session |
@@ -157,7 +157,7 @@ process continues to its normal bounded exit.
 |------|---------|
 | `0` | All flag-driven success criteria met within the run window |
 | `1` | `--run-for-secs` elapsed with unmet criteria (the `error` event lists them) |
-| `2` | Protocol error (auth/join rejection, malformed frame), or a local pre-flight failure such as an `--ip-family` the host cannot serve. Exit 2 is **also** clap's default exit code for CLI-usage errors (unknown/missing flags); on that path the usage message goes to stderr and NO `exiting` event is emitted (the event stream never starts) |
+| `2` | Protocol error (app-ID handshake/join rejection, malformed frame), or a local pre-flight failure such as an `--ip-family` the host cannot serve. Exit 2 is **also** clap's default exit code for CLI-usage errors (unknown/missing flags); on that path the usage message goes to stderr and NO `exiting` event is emitted (the event stream never starts) |
 | `3` | Transport failure (connect failed, socket died mid-session) |
 | `4` | `--max-runtime-secs` watchdog fired (hard abort) |
 

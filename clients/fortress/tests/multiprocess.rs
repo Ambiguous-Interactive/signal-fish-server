@@ -140,7 +140,7 @@ fn spawn_server(server_bin: &str) -> (Server, u16) {
             .env("SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING", "false")
             .env("SIGNAL_FISH__TURN__ENABLED", "false")
             .env("SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH", "false")
-            .env("SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH", "false")
+            .env("SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST", "false")
             .env("SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE", "false");
 
         match command.spawn() {

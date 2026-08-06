@@ -55,15 +55,15 @@ async fn connect_v3(port: u16) -> WsStream {
     )
     .await;
 
-    let authenticated = next_server_message_within(
+    let handshake_response = next_server_message_within(
         &mut ws,
         SERVER_MESSAGE_TIMEOUT,
         "split-brain authentication",
     )
     .await;
     assert!(
-        matches!(authenticated, ServerMessage::Authenticated { .. }),
-        "expected Authenticated, got {authenticated:?}"
+        matches!(handshake_response, ServerMessage::Authenticated { .. }),
+        "expected Authenticated, got {handshake_response:?}"
     );
 
     let protocol_info = next_server_message_within(

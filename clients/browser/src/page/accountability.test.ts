@@ -808,8 +808,8 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
     connectionState = 'new';
     onconnectionstatechange: (() => void) | null = null;
     onicecandidate:
-      | ((event: { candidate: { toJSON(): Record<string, unknown> } | null }) => void)
-      | null = null;
+      ((event: { candidate: { toJSON(): Record<string, unknown> } | null }) => void) | null =
+      null;
     ondatachannel: ((event: { channel: RTCDataChannel }) => void) | null = null;
 
     constructor(configuration: RTCConfiguration) {
