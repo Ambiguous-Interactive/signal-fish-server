@@ -358,7 +358,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bytecheck_derive`, `munge`, `munge_macro`, `ptr_meta`, `ptr_meta_derive`,
   `rancor`, `rend`, `simdutf8` — roughly 44,000 lines carrying ~1,347 `unsafe`
   occurrences, in a project that denies `unsafe_code` in every one of its own
-  manifests.
+  manifests. `smallvec` moves to `[dev-dependencies]` in the same change:
+  `broadcast` held the only production small-vector player list, and the
+  remaining users are the stack-allocation characteristics tests, so it would
+  otherwise keep shipping in the library graph with no production use — the very
+  thing this removal is about. `cargo-machete` could not have caught that
+  either, since a test-only use still reads as usage.
   **Breaking (Rust API):** the `broadcast` and `rkyv_utils` modules and the
   rkyv trait implementations on protocol types are gone, so the next release is
   at least `0.6.0`. No wire behavior changes: the `GameDataEncoding::Rkyv` wire
