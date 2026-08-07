@@ -1,4 +1,3 @@
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -170,19 +169,7 @@ use super::types::{
 // ============================================================================
 
 /// Room lobby state
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Default,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-#[rkyv(compare(PartialEq))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LobbyState {
     #[default]

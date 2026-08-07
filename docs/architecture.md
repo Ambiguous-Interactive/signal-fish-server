@@ -347,11 +347,9 @@ main.rs
        ├── metrics.rs (AtomicU64 + HDR histograms)
        ├── logging.rs (Structured logging init)
        ├── distributed.rs (InMemoryDistributedLock)
-       ├── broadcast.rs (Zero-copy broadcast primitives)
        ├── rate_limit.rs (In-memory RoomRateLimiter)
        ├── reconnection.rs (In-memory ReconnectionManager)
-       ├── retry.rs (Exponential backoff utility)
-       └── rkyv_utils.rs (Zero-copy serialization helpers)
+       └── retry.rs (Exponential backoff utility)
 
 ```
 

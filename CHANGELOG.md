@@ -115,6 +115,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Return the durable-detach retry that a rejected reconnect took over
+  (issue #297). A reconnect removes the queued retry for the membership it is
+  claiming — maintenance must not delete a row the reconnect is about to make
+  live — but only re-queued one when the attempt had restored the membership
+  itself. A reconnect against a row that survived a failed disconnect removal
+  restores nothing, so any later failure (the second room read,
+  `reassign_connection`, or an undeliverable `Reconnected` baseline) erased the
+  marker and left the phantom row holding a seat in every capacity check:
+  genuine joiners were told `ROOM_FULL` and the room never looked empty to
+  cleanup, for the remainder of the reconnection window. The uncommitted durable
+  state is now one value that every rejection path unwinds, and the retry is
+  handed back with the application-claim rollback provenance it started with.
+- Answer a rejected `JoinAsSpectator` with `SpectatorJoinFailed`
+  (issue #298). The message was documented in `docs/protocol.md` and declared in
+  the AsyncAPI document but had no emitter: every failure produced a generic
+  `Error` instead, so a client awaiting the documented
+  `SpectatorJoined | SpectatorJoinFailed` pair — the same contract `JoinRoom`
+  has with `RoomJoined` / `RoomJoinFailed` — waited out its own timeout. The
+  reason and `error_code` are the values the `Error` frame carried; a client
+  that only handles `Error` for this case must now handle
+  `SpectatorJoinFailed`. `docs/concepts/spectator-mode.md`, which described the
+  `Error` shape, now matches.
+- Report the documented cause of an `AuthorityRequest` denial (issue #298).
+  `AUTHORITY_CONFLICT` and `AUTHORITY_NOT_SUPPORTED` are specified in
+  `docs/concepts/authority.md`, `docs/reference/error-codes.md`, and the
+  AsyncAPI document, but the storage layer returned refusals as an untyped
+  string and the single coordinator mapping site flattened every one to
+  `AUTHORITY_DENIED`. A client that lost a race was told it lacked permission —
+  and `authority.md` has clients disable host migration on that code — while a
+  client in a room created with `supports_authority: false` was told the same
+  and could retry forever. Denials that are genuinely neither (not a member,
+  releasing a role you do not hold) keep `AUTHORITY_DENIED`, and a storage fault
+  keeps `STORAGE_ERROR`. No wire schema changed: all four codes already existed.
 - Keep a member that reconnects into a running game marked ready. Removal
   prunes the departing id from a finalized room's ready list, so the restored
   membership carries the only surviving evidence that it started the game — and
@@ -306,6 +339,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty-room timeout begins only after the final spectator leaves. Inactive
   cleanup also reconciles any removed room with the process-local spectator
   role during maintenance so the client can join again.
+
+### Removed
+
+- Removed the unused zero-copy serialization surface and the `rkyv` dependency
+  (issue #296). `broadcast` and `rkyv_utils` were public modules that no
+  production path called, and their advertised optimization could not work:
+  `BroadcastMessage::get_or_serialize_rkyv`, `PreSerializedMessage::from_rkyv`,
+  and `PreSerializedMessage::get_rkyv_bytes` returned
+  `RkyvSerializeError::NotImplemented` unconditionally, and every crate doctest
+  demonstrating them was `ignore`d. The `rkyv` derives on the protocol types
+  were likewise never used to archive anything. Dropping them removes 11 crates
+  from the shipped graph — `rkyv`, `rkyv_derive`, `bytecheck`,
+  `bytecheck_derive`, `munge`, `munge_macro`, `ptr_meta`, `ptr_meta_derive`,
+  `rancor`, `rend`, `simdutf8` — roughly 44,000 lines carrying ~1,347 `unsafe`
+  occurrences, in a project that denies `unsafe_code` in every one of its own
+  manifests.
+  **Breaking (Rust API):** the `broadcast` and `rkyv_utils` modules and the
+  rkyv trait implementations on protocol types are gone, so the next release is
+  at least `0.6.0`. No wire behavior changes: the `GameDataEncoding::Rkyv` wire
+  token is a reserved/internal encoding the server relays opaquely and is pure
+  serde, so it — and the browser client's `BinaryGameDataEncoding` union — are
+  unaffected.
 
 ### Security
 

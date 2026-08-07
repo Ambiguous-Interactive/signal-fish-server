@@ -69,7 +69,6 @@
 | `src/coordination/dedup.rs`           | DedupCache (LRU)                  |
 | `src/distributed.rs`                  | InMemoryDistributedLock           |
 | `src/metrics.rs`                      | AtomicU64 + HDR histograms        |
-| `src/broadcast.rs`                    | Zero-copy broadcast primitives    |
 | `src/rate_limit.rs`                   | In-memory RoomRateLimiter         |
 | `src/reconnection.rs`                 | In-memory ReconnectionManager     |
 | `src/security/mod.rs`                 | Security module root              |
@@ -78,7 +77,6 @@
 | `src/security/token_binding.rs`       | Channel-bound tokens              |
 | `src/logging.rs`                      | Structured logging init           |
 | `src/retry.rs`                        | Exponential backoff utility       |
-| `src/rkyv_utils.rs`                   | Zero-copy serialization helpers   |
 
 ## LLM Documentation Assets
 

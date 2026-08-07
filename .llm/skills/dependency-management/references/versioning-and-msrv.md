@@ -141,7 +141,6 @@ See [MSRV Management](../../msrv-management/SKILL.md) for comprehensive guidance
 | **JWT**              | `jsonwebtoken`         | —                     | manual JWT parsing               |
 | **Regex**            | `regex`                | —                     | manual parsing (unless trivial)  |
 | **Crypto**           | `rustls` + `ring`      | —                     | `openssl` (C dependency)         |
-| **Zero-copy**        | `rkyv`                 | `flatbuffers`         | `bincode` (not zero-copy)        |
 | **Date/time**        | `chrono`               | `time`                | manual timestamp math            |
 | **Property testing** | `proptest`             | `quickcheck`          | —                                |
 | **Benchmarks**       | `criterion`            | `divan`               | manual timing                    |
@@ -157,7 +156,6 @@ See [MSRV Management](../../msrv-management/SKILL.md) for comprehensive guidance
 | `dashmap`            | Concurrent room/player maps              | Replaces `Mutex<HashMap>` in hot paths      |
 | `smallvec`           | Small player lists per room              | Stack-allocated for ≤8 players              |
 | `bytes`              | Zero-copy network message passing        | Shared across broadcast recipients          |
-| `rkyv`               | Zero-copy deserialization for game state | Performance-critical relay path             |
 | `matchbox_signaling` | Base signaling protocol                  | Upstream crate we extend                    |
 | `sqlx`               | PostgreSQL async driver                  | Behind `postgres` feature flag              |
 | `redis`              | Session/pub-sub for distributed mode     | Connection manager for pooling              |
