@@ -375,6 +375,62 @@ async fn successful_reconnect_but_not_spectator_adopts_pending_ownership_claim()
         .is_some_and(|entry| entry.value().is_none()));
 }
 
+/// A rejected reconnect that cannot undo its own restored membership must
+/// re-queue the detach carrying the ownership rollback the retry it displaced
+/// still owed. Re-queueing a bare detach would leave the room's application
+/// claim held forever: the repair would delete the row and never clear it.
+#[tokio::test]
+async fn rejected_reconnect_requeues_the_ownership_rollback_it_inherited() {
+    let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(8))]).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("in-memory test database");
+    let (creator, mut creator_rx) = connect_as(&server, APP_A, 41601).await;
+    let application_id = server
+        .client_app_id(&creator)
+        .expect("app context attached");
+    join_room(&server, &creator, "requeue-rollback", None, "Creator", 8).await;
+    let (room_id, _room_code, reconnect_token) =
+        joined_room(receive(&mut creator_rx).await.as_ref());
+    let reconnect_token = reconnect_token.expect("reconnection token is issued");
+
+    // The disconnect removes the row. A detach queued behind it still owes the
+    // ownership rollback an earlier repair could not perform.
+    server.unregister_client(&creator).await;
+    server.pending_durable_player_detaches.insert(
+        (room_id, creator),
+        Some(PendingApplicationClaimRollback { application_id }),
+    );
+
+    // The reconnect restores the membership and takes that retry over, then
+    // fails on an undeliverable baseline — and its own rollback removal fails
+    // too, so the row it restored survives.
+    let (current, current_rx) = connect_as(&server, APP_A, 41602).await;
+    drop(current_rx);
+    database.fail_remove_player_from_room_for_test(true);
+    assert!(
+        !server
+            .handle_reconnect(&current, &creator, &room_id, &reconnect_token)
+            .await
+    );
+    database.fail_remove_player_from_room_for_test(false);
+
+    let queued = server
+        .pending_durable_player_detaches
+        .get(&(room_id, creator))
+        .expect("a rejection that could not remove the row owes a detach retry");
+    assert_eq!(
+        queued
+            .value()
+            .as_ref()
+            .map(|rollback| rollback.application_id),
+        Some(application_id),
+        "the re-queued retry must keep the ownership rollback it still owes"
+    );
+}
+
 #[tokio::test]
 async fn legacy_room_claims_only_on_app_bound_seated_admission() {
     let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(8))]).await;
