@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-07
+
 ### Added
 
 - Add exhaustive formal verification for classified outbound queue
@@ -1887,7 +1889,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional TLS/mTLS support via `rustls` (`tls` feature).
 - Optional legacy full-mesh mode (`legacy-fullmesh` feature).
 
-[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.4.1...v0.5.0
