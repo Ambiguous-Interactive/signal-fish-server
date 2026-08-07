@@ -51,8 +51,13 @@ impl EnhancedGameServer {
             .handle_authority_request(&room_id, player_id, become_authority)
             .await
         {
-            Ok((granted, reason)) => {
-                tracing::info!(%player_id, %granted, ?reason, "Authority request processed");
+            Ok(outcome) => {
+                tracing::info!(
+                    %player_id,
+                    granted = outcome.granted(),
+                    denial = ?outcome.denial(),
+                    "Authority request processed"
+                );
             }
             Err(e) => {
                 tracing::error!("Authority request failed: {}", e);

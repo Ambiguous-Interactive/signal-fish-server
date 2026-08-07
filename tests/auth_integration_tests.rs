@@ -508,7 +508,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
     assert!(
         matches!(
             spectator_rejection,
-            ServerMessage::Error {
+            ServerMessage::SpectatorJoinFailed {
                 error_code: Some(ErrorCode::RoomNotFound),
                 ..
             }

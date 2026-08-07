@@ -899,7 +899,7 @@ impl EnhancedGameServer {
                 {
                     // A granted release means this member held the role, so the
                     // remaining members still need the cleared-authority event.
-                    Ok((released, _)) => released,
+                    Ok(outcome) => outcome.granted(),
                     Err(authority_error) => {
                         // Two consecutive storage failures: the role may still
                         // be held by a member that is gone. The durable-detach

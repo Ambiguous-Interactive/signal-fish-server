@@ -275,8 +275,9 @@ async fn app_bound_room_owner_gates_seated_spectator_and_reconnect_admission() {
         )
         .await;
     let other_spectator_result = receive(&mut other_spectator_rx).await;
-    let ServerMessage::Error { error_code, .. } = other_spectator_result.as_ref() else {
-        panic!("expected spectator Error, got {other_spectator_result:?}");
+    let ServerMessage::SpectatorJoinFailed { error_code, .. } = other_spectator_result.as_ref()
+    else {
+        panic!("expected SpectatorJoinFailed, got {other_spectator_result:?}");
     };
     assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
 

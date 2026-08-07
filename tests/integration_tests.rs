@@ -2,6 +2,7 @@ mod test_helpers;
 
 use signal_fish_server::protocol::*;
 use signal_fish_server::server::ServerConfig;
+use std::collections::HashMap;
 use std::sync::Arc;
 use test_helpers::{create_test_server, create_test_server_with_config};
 use tokio::sync::mpsc;
@@ -395,6 +396,93 @@ async fn test_authority_transfer() {
     assert_no_pending_message(&mut rx2, "player 2 post-authority-transfer drain");
 
     println!("Authority transfer test completed successfully");
+}
+
+/// A denied `AuthorityRequest` must name its cause. Flattening every refusal to
+/// `AUTHORITY_DENIED` tells a client that merely lost a race to stop retrying
+/// (`docs/concepts/authority.md` gates host migration on this code) and tells a
+/// client in a room that can never grant the role to retry forever.
+#[tokio::test]
+async fn authority_denials_report_their_documented_error_code() {
+    let server = create_test_server().await;
+    let mut receivers: HashMap<PlayerId, mpsc::Receiver<Arc<ServerMessage>>> = HashMap::new();
+    let mut members = Vec::new();
+    for (game, code, name, supports_authority) in [
+        ("authority_unsupported", "AUTHN1", "Unsupported", false),
+        ("authority_contested", "AUTHC1", "Holder", true),
+        ("authority_contested", "AUTHC1", "Challenger", true),
+    ] {
+        let (tx, mut rx) = mpsc::channel(64);
+        let player_id = server
+            .register_client(tx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        server
+            .handle_join_room(
+                &player_id,
+                game.to_string(),
+                Some(code.to_string()),
+                name.to_string(),
+                Some(2),
+                Some(supports_authority),
+                None,
+            )
+            .await;
+        expect_room_joined(&mut rx, name);
+        receivers.insert(player_id, rx);
+        members.push(player_id);
+    }
+    let [unsupported, holder, challenger] = members[..] else {
+        panic!("three members joined");
+    };
+
+    // Drain the lobby traffic the joins produced, so the next frame each actor
+    // receives is its authority response.
+    expect_lobby_state_changed(
+        receivers.get_mut(&unsupported).expect("receiver"),
+        "unsupported own-join lobby entry",
+    );
+    let holder_rx = receivers.get_mut(&holder).expect("receiver");
+    expect_lobby_state_changed(holder_rx, "holder own-join lobby entry");
+    expect_player_joined(holder_rx, challenger, "holder sees the challenger join");
+
+    for (actor, become_authority, expected_code, context) in [
+        (
+            unsupported,
+            true,
+            ErrorCode::AuthorityNotSupported,
+            "a room created without authority support can never grant it",
+        ),
+        (
+            challenger,
+            true,
+            ErrorCode::AuthorityConflict,
+            "losing a live contest is retryable once the holder releases",
+        ),
+        (
+            challenger,
+            false,
+            ErrorCode::AuthorityDenied,
+            "releasing a role you do not hold is neither a conflict nor unsupported",
+        ),
+    ] {
+        server
+            .handle_client_message(&actor, ClientMessage::AuthorityRequest { become_authority })
+            .await;
+        let receiver = receivers.get_mut(&actor).expect("actor receiver");
+        match recv_now(receiver, context).as_ref() {
+            ServerMessage::AuthorityResponse {
+                granted,
+                reason,
+                error_code,
+            } => {
+                assert!(!granted, "{context}: must be denied");
+                assert_eq!(*error_code, Some(expected_code), "{context}");
+                assert!(reason.is_some(), "{context}: denial carries a reason");
+            }
+            other => panic!("{context}: expected AuthorityResponse, got {other:?}"),
+        }
+    }
 }
 
 fn recv_now(

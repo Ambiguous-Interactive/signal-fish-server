@@ -179,18 +179,22 @@ The server confirms with a `SpectatorLeft` response:
 ## When Spectator Join Fails
 
 If the room does not exist or spectating is not allowed, the server
-responds with an `Error` carrying the reason and an `error_code` (for a
-missing room, the literal reason is `Room not found`):
+responds with a `SpectatorJoinFailed` carrying the reason and an
+`error_code` (for a missing room, the literal reason is `Room not found`):
 
 ```json
 {
-  "type": "Error",
+  "type": "SpectatorJoinFailed",
   "data": {
-    "message": "Room not found",
+    "reason": "Room not found",
     "error_code": "ROOM_NOT_FOUND"
   }
 }
 ```
+
+Every `JoinAsSpectator` is answered by exactly one of `SpectatorJoined` or
+`SpectatorJoinFailed`, so a client can await that pair without a timeout —
+the same contract `JoinRoom` has with `RoomJoined` / `RoomJoinFailed`.
 
 ## Use Cases
 

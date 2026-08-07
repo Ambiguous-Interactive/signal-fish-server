@@ -750,14 +750,14 @@ impl EnhancedGameServer {
                 .request_room_authority(room_id, reconnect_player_id, true)
                 .await
             {
-                Ok((true, _)) => {
+                Ok(outcome) if outcome.granted() => {
                     restore.restored_authority = true;
                 }
-                Ok((false, reason)) => {
+                Ok(outcome) => {
                     tracing::debug!(
                         %reconnect_player_id,
                         %room_id,
-                        ?reason,
+                        denial = ?outcome.denial(),
                         "Reconnect authority restore lost an atomic authority race"
                     );
                 }

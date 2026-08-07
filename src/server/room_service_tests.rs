@@ -788,7 +788,7 @@ impl GameDatabase for DrainAfterCreateDatabase {
         room_id: &RoomId,
         player_id: &PlayerId,
         become_authority: bool,
-    ) -> anyhow::Result<(bool, Option<String>)> {
+    ) -> anyhow::Result<crate::database::AuthorityOutcome> {
         self.inner
             .request_room_authority(room_id, player_id, become_authority)
             .await
