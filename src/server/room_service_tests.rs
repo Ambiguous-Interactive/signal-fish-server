@@ -2918,6 +2918,77 @@ async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reach
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn failed_reconnect_returns_the_durable_detach_it_took_over() {
+    let fixture = setup_joined_pair_with_reconnection().await;
+    fixture.database.fail_remove_player_from_room_for_test(true);
+    fixture.server.unregister_client(&fixture.leaver).await;
+    fixture
+        .database
+        .fail_remove_player_from_room_for_test(false);
+    assert!(
+        fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .expect("membership remains readable after the injected failure")
+            .iter()
+            .any(|player| player.id == fixture.leaver),
+        "the forced teardown leaves the row for the durable-detach retry"
+    );
+
+    // The reconnect claims the room-gated membership — taking the queued retry
+    // with it — and then fails: dropping the fresh socket's receiver makes the
+    // `Reconnected` baseline unqueueable, which is the last rejection point
+    // before the claim commits.
+    let (current, current_rx) =
+        register_client(&fixture.server, "127.0.0.1:48140".parse().unwrap()).await;
+    drop(current_rx);
+    assert!(
+        !fixture
+            .server
+            .handle_reconnect(
+                &current,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+            )
+            .await,
+        "an undeliverable baseline must fail the reconnect"
+    );
+
+    assert!(
+        fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .expect("membership remains readable after the failed reconnect")
+            .iter()
+            .any(|player| player.id == fixture.leaver),
+        "the failed reconnect restored no membership of its own, so the phantom row survives"
+    );
+    assert_eq!(
+        fixture
+            .server
+            .cleanup_pending_durable_player_detaches()
+            .await,
+        1,
+        "a rejected reconnect must hand the durable detach back, or the phantom row holds a \
+         seat until the reconnection window expires"
+    );
+    assert!(
+        !fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .expect("membership remains readable after repair")
+            .iter()
+            .any(|player| player.id == fixture.leaver),
+        "the returned retry removes the seat the failed reconnect could not"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn disconnect_storage_error_retries_without_reconnection_support() {
     let server = create_test_server_with_config(ServerConfig {
         enable_reconnection: false,
