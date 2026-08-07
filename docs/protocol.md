@@ -783,14 +783,15 @@ Authority request response.
 {
   "type": "AuthorityResponse",
   "data": {
-    "granted": true,
-    "reason": "Authority granted"
+    "granted": true
   }
 }
 
 ```
 
-Note: The `reason` and `error_code` fields are optional.
+Note: The `reason` and `error_code` fields are optional. A granted response
+carries neither; a denial carries both, and the code names the cause (see
+[Authority](concepts/authority.md#requesting-authority) for the full table).
 
 ### GameStarting
 

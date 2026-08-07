@@ -148,6 +148,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and could retry forever. Denials that are genuinely neither (not a member,
   releasing a role you do not hold) keep `AUTHORITY_DENIED`, and a storage fault
   keeps `STORAGE_ERROR`. No wire schema changed: all four codes already existed.
+  **Breaking (Rust API):** `GameDatabase::request_room_authority` and
+  `RoomOperationCoordinatorTrait::handle_authority_request` return
+  `AuthorityOutcome` instead of `(bool, Option<String>)`; use
+  `AuthorityOutcome::granted()` and `AuthorityOutcome::denial()`.
 - Keep a member that reconnects into a running game marked ready. Removal
   prunes the departing id from a finalized room's ready list, so the restored
   membership carries the only surviving evidence that it started the game — and

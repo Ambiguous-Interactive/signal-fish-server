@@ -104,6 +104,7 @@ The code tells you whether retrying can ever succeed:
 | `AUTHORITY_DENIED` | You are not a member of the room, or you released a role you do not hold. | No — nothing about the room's state will change that. |
 | `NOT_IN_ROOM` | You are not in a room at all. | Join a room first. |
 | `STORAGE_ERROR` | The server could not decide the request. | Yes — this is a transient server-side fault. |
+| `INTERNAL_ERROR` | The request failed before storage was consulted. | Yes — this is a transient server-side fault. |
 
 ### Broadcasting Authority Changes
 
