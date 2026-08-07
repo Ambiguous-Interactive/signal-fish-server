@@ -321,10 +321,10 @@ impl EnhancedGameServer {
                     error = %err,
                     "Failed to roll back restored room membership after reconnect failure"
                 );
-            } else if !matches!(requeue_detach, Some(Some(_))) {
+            } else {
                 // The rollback removed the row, so only an outstanding
                 // application-claim rollback still needs a retry.
-                requeue_detach = None;
+                requeue_detach = requeue_detach.filter(Option::is_some);
             }
         } else if restore.restored_authority {
             if let Err(err) = self
