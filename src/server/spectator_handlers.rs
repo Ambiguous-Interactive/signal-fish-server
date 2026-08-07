@@ -1,5 +1,6 @@
 use super::EnhancedGameServer;
-use crate::protocol::PlayerId;
+use crate::protocol::{PlayerId, ServerMessage};
+use std::sync::Arc;
 
 impl EnhancedGameServer {
     /// Handle joining a room as spectator, surfacing validation errors back to the client.
@@ -15,8 +16,21 @@ impl EnhancedGameServer {
             .join(player_id, game_name, room_code, spectator_name)
             .await
         {
+            // The terminal response to a `JoinAsSpectator`, mirroring
+            // `RoomJoinFailed` for `JoinRoom`: a client that awaits
+            // `SpectatorJoined | SpectatorJoinFailed` — the pair `docs/protocol.md`
+            // and the AsyncAPI document define — must never have to time out
+            // instead. The reason and code are the same values the generic
+            // `Error` frame carried.
             let _ = self
-                .send_error_to_player(player_id, err.message, err.code)
+                .message_coordinator
+                .send_to_player(
+                    player_id,
+                    Arc::new(ServerMessage::SpectatorJoinFailed {
+                        reason: err.message,
+                        error_code: err.code,
+                    }),
+                )
                 .await;
         }
     }

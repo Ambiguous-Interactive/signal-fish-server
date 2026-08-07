@@ -595,14 +595,12 @@ signal-fish-server/
 │   ├── main.rs                  # Binary entry point
 │   ├── lib.rs                   # Library crate root
 │   ├── server.rs                # EnhancedGameServer core
-│   ├── broadcast.rs             # Zero-copy broadcast primitives
 │   ├── distributed.rs           # In-memory coordination extension seams
 │   ├── logging.rs               # tracing-subscriber initialization
 │   ├── metrics.rs               # Atomic counters + HDR histograms
 │   ├── rate_limit.rs            # In-memory rate limiter
 │   ├── reconnection.rs          # Token-based reconnection manager
 │   ├── retry.rs                 # Exponential backoff utility
-│   ├── rkyv_utils.rs            # Zero-copy serialization helpers
 │   ├── auth/                    # In-memory public app-ID allowlist
 │   ├── config/                  # JSON + env var configuration
 │   ├── coordination/            # Room coordination and dedup cache

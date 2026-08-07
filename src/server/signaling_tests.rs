@@ -2266,12 +2266,16 @@ async fn reconnect_does_not_restore_authority_taken_by_a_successor() {
         .expect("unroute disconnected authority");
 
     // The successor claims the vacant authority before the original returns.
-    let (granted, reason) = server
+    let outcome = server
         .database
         .request_room_authority(&room_id, &successor, true)
         .await
         .expect("successor authority request");
-    assert!(granted, "successor must take vacant authority: {reason:?}");
+    assert!(
+        outcome.granted(),
+        "successor must take vacant authority: {:?}",
+        outcome.denial()
+    );
 
     assert!(
         server

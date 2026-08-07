@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::database::{AuthorityDenial, AuthorityOutcome};
 use crate::distributed::{DistributedLock, LockHandle};
 use crate::protocol::{PeerConnectionInfo, PlayerId, PlayerInfo, RoomId};
 
@@ -156,13 +157,16 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
     /// Execute a distributed operation on a room
     async fn execute_distributed_operation(&self, operation: &str, room_id: &RoomId) -> Result<()>;
 
-    /// Handle authority request from a player
+    /// Handle authority request from a player.
+    ///
+    /// The returned outcome is the same decision the requester's
+    /// `AuthorityResponse` carries, including the typed refusal cause.
     async fn handle_authority_request(
         &self,
         room_id: &RoomId,
         player_id: &PlayerId,
         become_authority: bool,
-    ) -> Result<(bool, Option<String>)>;
+    ) -> Result<AuthorityOutcome>;
 
     /// Handle a player ready-state toggle.
     ///
@@ -598,7 +602,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         room_id: &RoomId,
         player_id: &PlayerId,
         become_authority: bool,
-    ) -> Result<(bool, Option<String>)> {
+    ) -> Result<AuthorityOutcome> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
         let lock_key = format!("room_authority:{room_id}");
         let lock_guard = RoomOperationLockGuard::acquire(
@@ -623,37 +627,41 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 .request_room_authority(&room_id, &player_id, become_authority)
                 .await
             {
-                Ok((granted, reason)) => {
+                Ok(outcome) => {
+                    // The single site that turns a storage decision into the
+                    // client's `AuthorityResponse`. Both fields come from the
+                    // same typed denial, so the code can never contradict the
+                    // reason, and a losing claimant is told it lost a contest
+                    // (`AUTHORITY_CONFLICT`) rather than that it lacks
+                    // permission.
+                    let denial = outcome.denial();
                     let response = crate::protocol::ServerMessage::AuthorityResponse {
-                        granted,
-                        reason: reason.clone(),
-                        error_code: if granted {
-                            None
-                        } else {
-                            Some(crate::protocol::ErrorCode::AuthorityDenied)
-                        },
+                        granted: outcome.granted(),
+                        reason: denial.map(|denial| denial.reason().to_string()),
+                        error_code: denial.map(AuthorityDenial::error_code),
                     };
-                    let authority_change = granted.then_some(if become_authority {
+                    let authority_change = outcome.granted().then_some(if become_authority {
                         Some(player_id)
                     } else {
                         None
                     });
-                    if granted {
+                    if outcome.granted() {
                         tracing::info!(%room_id, %player_id, %become_authority, "Authority request granted (in-memory)");
                     } else {
-                        tracing::info!(%room_id, %player_id, %become_authority, ?reason, "Authority request denied (in-memory)");
+                        tracing::info!(%room_id, %player_id, %become_authority, ?denial, "Authority request denied (in-memory)");
                     }
 
-                    ((granted, reason), response, authority_change)
+                    (outcome, response, authority_change)
                 }
                 Err(e) => {
                     tracing::error!(%room_id, %player_id, %become_authority, "Authority request failed: {}", e);
+                    let denial = AuthorityDenial::StorageError;
                     (
-                        (false, Some("Storage error".to_string())),
+                        AuthorityOutcome::Denied(denial),
                         crate::protocol::ServerMessage::AuthorityResponse {
                             granted: false,
-                            reason: Some("Storage error".to_string()),
-                            error_code: Some(crate::protocol::ErrorCode::StorageError),
+                            reason: Some(denial.reason().to_string()),
+                            error_code: Some(denial.error_code()),
                         },
                         None,
                     )

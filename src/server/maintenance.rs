@@ -161,6 +161,17 @@ impl EnhancedGameServer {
         removed
     }
 
+    /// Discard reconnect reservations whose window has closed, removing the
+    /// room row each one was holding.
+    ///
+    /// Unlike [`Self::cleanup_pending_durable_player_detaches`] this does not
+    /// take the room mutation gate, and does not need to: a candidate is
+    /// expired and unclaimed, expiry is monotonic, and `claim_reconnection`
+    /// refuses an expired record — so no reconnect can restore this membership
+    /// after the snapshot, and the removal can only ever delete a row whose
+    /// owner is already gone. The detach backlog takes the gate because its
+    /// candidates have no such proof: a live reconnect legitimately reclaims
+    /// one, and the gate is what orders that claim against this deletion.
     pub(crate) async fn cleanup_expired_reconnections(&self) -> usize {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             return 0;

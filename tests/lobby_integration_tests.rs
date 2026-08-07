@@ -522,6 +522,80 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
     }
 }
 
+/// Every rejected `JoinAsSpectator` answers with the terminal `SpectatorJoinFailed`
+/// that `docs/protocol.md` and the AsyncAPI document pair with `SpectatorJoined`.
+/// A client that awaits that pair — the documented contract — otherwise waits out
+/// its own timeout while a generic `Error` frame goes unmatched.
+#[tokio::test]
+async fn spectator_join_failures_answer_with_spectator_join_failed() {
+    let server = create_test_server().await;
+
+    let host_id = Uuid::new_v4();
+    let (host_tx, mut host_rx) = mpsc::channel(64);
+    server.connect_client(host_id, host_tx).await;
+    server
+        .handle_join_room(
+            &host_id,
+            "spectator_failure".to_string(),
+            Some("SPECF1".to_string()),
+            "Host".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    expect_room_joined(&mut host_rx, "host join before spectator failures");
+
+    // One case per distinct rejection source: the room lookup, and the role
+    // check that precedes it.
+    for (room_code, spectate_first, context, expected_code) in [
+        (
+            "NOSUCH",
+            false,
+            "no such room code",
+            ErrorCode::RoomNotFound,
+        ),
+        (
+            "SPECF1",
+            true,
+            "already spectating this room",
+            ErrorCode::SpectatorJoinFailed,
+        ),
+    ] {
+        let spectator_id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel(64);
+        server.connect_client(spectator_id, tx).await;
+        if spectate_first {
+            server
+                .handle_join_as_spectator(
+                    &spectator_id,
+                    "spectator_failure".to_string(),
+                    room_code.to_string(),
+                    "Viewer".to_string(),
+                )
+                .await;
+            expect_spectator_joined(&mut rx, spectator_id, context);
+        }
+
+        server
+            .handle_join_as_spectator(
+                &spectator_id,
+                "spectator_failure".to_string(),
+                room_code.to_string(),
+                "Viewer".to_string(),
+            )
+            .await;
+
+        match recv_now(&mut rx, context).as_ref() {
+            ServerMessage::SpectatorJoinFailed { error_code, reason } => {
+                assert_eq!(*error_code, Some(expected_code), "{context}");
+                assert!(!reason.is_empty(), "{context}: failure carries a reason");
+            }
+            other => panic!("{context}: expected SpectatorJoinFailed, got {other:?}"),
+        }
+    }
+}
+
 fn recv_now(
     receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
     context: &str,

@@ -899,7 +899,7 @@ impl EnhancedGameServer {
                 {
                     // A granted release means this member held the role, so the
                     // remaining members still need the cleared-authority event.
-                    Ok((released, _)) => released,
+                    Ok(outcome) => outcome.granted(),
                     Err(authority_error) => {
                         // Two consecutive storage failures: the role may still
                         // be held by a member that is gone. The durable-detach
@@ -907,6 +907,15 @@ impl EnhancedGameServer {
                         // it, but that repair is silent, so this room can end up
                         // authority-less without the event. Announcing here
                         // would be a guess — storage never confirmed the state.
+                        //
+                        // Unreachable with the shipped in-memory storage, which
+                        // never returns `Err` from `request_room_authority`: the
+                        // surviving row therefore always reaches the repair with
+                        // its role already released. A backend that CAN fail
+                        // here owes the repair paths an announcement, and
+                        // `remove_player_from_room` already returns the record
+                        // that says whether the removal vacated the role — the
+                        // same evidence the `Ok(Some(..))` branch above uses.
                         tracing::warn!(%player_id, %room_id, error = %authority_error, "Failed to clear disconnected authority after storage removal error");
                         false
                     }

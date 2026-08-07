@@ -122,9 +122,9 @@ client as the authoritative source of game state.
 
 | Error Code | Description |
 |---|---|
-| `AUTHORITY_NOT_SUPPORTED` | Authority features are not enabled on this server. |
-| `AUTHORITY_CONFLICT` | Another client has already claimed authority in this room. |
-| `AUTHORITY_DENIED` | You do not have permission to claim authority in this room. |
+| `AUTHORITY_NOT_SUPPORTED` | This room was created with `supports_authority: false`, so no member can ever hold the role. |
+| `AUTHORITY_CONFLICT` | Another client currently holds authority in this room. Retry after an `AuthorityChanged` clears it. |
+| `AUTHORITY_DENIED` | You are not a member of this room, or you released a role you do not hold. |
 
 ### Rate Limiting Errors (5xxx)
 
@@ -303,6 +303,9 @@ is still public and replayable; see [Application identification](../authenticati
 
 Spectator mode must be enabled for the room. Verify the room exists,
 supports spectators, and has not reached its spectator capacity limit.
+These codes arrive on a `SpectatorJoinFailed` message, not on `Error`:
+every `JoinAsSpectator` is answered by `SpectatorJoined` or
+`SpectatorJoinFailed`.
 
 ---
 

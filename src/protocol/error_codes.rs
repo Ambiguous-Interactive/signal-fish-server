@@ -1,12 +1,8 @@
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Error codes for structured error handling
-#[derive(
-    Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-#[rkyv(compare(PartialEq))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     // Authentication errors (1xxx)
@@ -65,10 +61,10 @@ pub enum ErrorCode {
     StorageError,
     ServiceUnavailable,
 
-    // Signaling errors (8xxx) — appended last to preserve rkyv discriminant
-    // stability of pre-existing variants. rkyv encodes enum discriminants
-    // positionally, so new variants must be added at the END of the enum;
-    // serde tokens are name-based (SCREAMING_SNAKE_CASE) and order-independent.
+    // Signaling errors (8xxx). Variants stay in the order they were added:
+    // the wire encoding is name-based (SCREAMING_SNAKE_CASE serde tokens), so
+    // order is free, but this file's grouping-by-category comments only make
+    // sense read as a history of appends.
     CrossRoomSignal,
     UnsupportedTransport,
     SignalTargetNotFound,
@@ -77,21 +73,20 @@ pub enum ErrorCode {
     /// exceeds `security.max_signal_bytes`.
     SignalTooLarge,
 
-    // Connection lifecycle errors (1xxx category, appended at the END for rkyv
-    // discriminant stability — see the signaling-errors note above).
+    // Connection lifecycle errors (1xxx category, appended at the END — see
+    // the signaling-errors note above).
     ConnectionIdleTimeout,
 
-    // Game-start errors (3xxx category, appended at the END for rkyv
-    // discriminant stability — see the signaling-errors note above). Raised by
-    // the explicit `StartGame` flow.
+    // Game-start errors (3xxx category, appended at the END — see the
+    // signaling-errors note above). Raised by the explicit `StartGame` flow.
     /// `StartGame` was sent before every current player was ready.
     GameStartNotReady,
     /// `StartGame` was sent by a player not permitted to start the game (the
     /// room has a designated authority and the sender is not it).
     GameStartForbidden,
 
-    // Connection lifecycle errors (1xxx category, appended at the END for rkyv
-    // discriminant stability — see the signaling-errors note above).
+    // Connection lifecycle errors (1xxx category, appended at the END — see
+    // the signaling-errors note above).
     /// The connection's outbound queue stayed full past
     /// `websocket.slow_consumer_timeout_ms`, so the server disconnected it
     /// rather than silently dropping relayed messages. Sent best-effort as a
@@ -108,13 +103,13 @@ pub enum ErrorCode {
     /// (`server_shutdown`) at the drain deadline.
     ServerDraining,
 
-    // Delivery-class validation (2xxx category). Appended at the END for rkyv
-    // discriminant stability; see the signaling-errors note above.
+    // Delivery-class validation (2xxx category). Appended at the END; see the
+    // signaling-errors note above.
     /// The requested delivery class/key combination is invalid.
     InvalidDeliveryClass,
 
-    // Authentication errors (1xxx category). Appended at the END for rkyv
-    // discriminant stability; see the signaling-errors note above.
+    // Authentication errors (1xxx category). Appended at the END; see the
+    // signaling-errors note above.
     /// The client cannot speak this deployment's minimum protocol version.
     UnsupportedProtocolVersion,
 }

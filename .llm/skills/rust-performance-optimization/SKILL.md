@@ -157,21 +157,6 @@ fn process(input: &[u8]) -> Cow<'_, [u8]> {
 }
 ```
 
-### rkyv for Zero-Copy Deserialization
-
-This project uses `rkyv` for zero-copy serialization:
-
-```rust
-use rkyv::{Archive, Serialize, Deserialize};
-
-#[derive(Archive, Serialize, Deserialize)]
-struct GameState { players: Vec<PlayerData>, tick: u64 }
-
-// Deserialize without copying — access archived data directly
-let archived = rkyv::access::<ArchivedGameState, rkyv::rancor::Error>(&bytes)?;
-println!("Tick: {}", archived.tick);  // No allocation
-```
-
 ---
 
 ## Cache-Friendly Data Structures

@@ -724,14 +724,39 @@ pub fn events_named<'a>(events: &'a [Value], name: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+/// Every event tag in emission order, or `<none>`.
+///
+/// The first question a missing event raises is how far the session actually
+/// got, and the filtered match list cannot answer it — a run that never
+/// connected and a run that negotiated and then failed both print `[]`. A
+/// hosted Windows runner produced exactly that in 2.3s (`expected exactly one
+/// selected_candidate_pair event, got 0: []`) with nothing else to go on.
+pub fn event_tags(events: &[Value]) -> String {
+    if events.is_empty() {
+        return "<none>".to_string();
+    }
+    events
+        .iter()
+        .map(|event| {
+            event
+                .get("event")
+                .and_then(Value::as_str)
+                .unwrap_or("<untagged>")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Exactly one event with the tag, or panic.
 pub fn single_event<'a>(events: &'a [Value], name: &str, who: &str) -> &'a Value {
     let matches = events_named(events, name);
     assert_eq!(
         matches.len(),
         1,
-        "{who}: expected exactly one `{name}` event, got {}: {matches:?}",
-        matches.len()
+        "{who}: expected exactly one `{name}` event, got {}: {matches:?}\n{who} emitted {} event(s): {}",
+        matches.len(),
+        events.len(),
+        event_tags(events),
     );
     matches[0]
 }

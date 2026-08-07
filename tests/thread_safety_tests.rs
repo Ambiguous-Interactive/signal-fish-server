@@ -313,11 +313,14 @@ async fn test_concurrent_authority_request_exactly_one_wins() {
     }
 
     // Release authority from creator
-    let (released, _) = db
+    let released = db
         .request_room_authority(&room_id, &creator_id, false)
         .await
         .expect("release should not error");
-    assert!(released, "Creator should be able to release authority");
+    assert!(
+        released.granted(),
+        "Creator should be able to release authority"
+    );
 
     // All 10 players concurrently request authority
     let task_count = player_ids.len();
@@ -337,7 +340,7 @@ async fn test_concurrent_authority_request_exactly_one_wins() {
     let mut winners = 0usize;
     for handle in handles {
         let result = handle.await.expect("task should not panic");
-        if let Ok((true, _)) = result {
+        if result.is_ok_and(|outcome| outcome.granted()) {
             winners += 1;
         }
     }

@@ -43,6 +43,87 @@ pub enum FinalizeRoomGameOutcome {
     SnapshotChanged,
 }
 
+/// Why an authority request or release was refused.
+///
+/// Storage distinguishes these cases internally. Carrying the distinction out
+/// is what lets `AuthorityResponse` report the documented error code
+/// (`docs/reference/error-codes.md`) rather than flattening every refusal to
+/// `AUTHORITY_DENIED`: a client that merely lost a race would otherwise read
+/// "you do not have permission" and disable host migration for good, while a
+/// client facing a room that can never grant the role would retry forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityDenial {
+    /// The room was created with `supports_authority: false`.
+    NotSupported,
+    /// Another member currently holds the role.
+    AlreadyHeld,
+    /// The requester is not a member of the room.
+    NotAMember,
+    /// A release from a member that does not hold the role.
+    NotHeld,
+    /// The room no longer exists.
+    RoomNotFound,
+    /// Storage could not decide the request. Not a refusal by policy — the
+    /// coordinator reports it so the one response a client is promised still
+    /// carries an honest cause.
+    StorageError,
+}
+
+impl AuthorityDenial {
+    /// Client-facing `reason` text carried on `AuthorityResponse`.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NotSupported => "Room does not support authority",
+            Self::AlreadyHeld => "Another player already has authority",
+            Self::NotAMember => "Player not found in room",
+            Self::NotHeld => "You do not have authority to release",
+            Self::RoomNotFound => "Room not found",
+            Self::StorageError => "Storage error",
+        }
+    }
+
+    /// Documented `ErrorCode` for this refusal. The three room-state refusals
+    /// share `AUTHORITY_DENIED` because they all mean "not you, and not
+    /// because of a contest you can win"; only a live contest is a conflict,
+    /// and only a room without authority support is unsupported.
+    #[must_use]
+    pub fn error_code(self) -> crate::protocol::ErrorCode {
+        match self {
+            Self::NotSupported => crate::protocol::ErrorCode::AuthorityNotSupported,
+            Self::AlreadyHeld => crate::protocol::ErrorCode::AuthorityConflict,
+            Self::NotAMember | Self::NotHeld | Self::RoomNotFound => {
+                crate::protocol::ErrorCode::AuthorityDenied
+            }
+            Self::StorageError => crate::protocol::ErrorCode::StorageError,
+        }
+    }
+}
+
+/// Result of an atomic authority request or release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityOutcome {
+    Granted,
+    Denied(AuthorityDenial),
+}
+
+impl AuthorityOutcome {
+    /// Whether the requested transition was performed.
+    #[must_use]
+    pub fn granted(self) -> bool {
+        matches!(self, Self::Granted)
+    }
+
+    /// The refusal, if this outcome is one.
+    #[must_use]
+    pub fn denial(self) -> Option<AuthorityDenial> {
+        match self {
+            Self::Granted => None,
+            Self::Denied(denial) => Some(denial),
+        }
+    }
+}
+
 /// Exact room state from which a game-start publication was prepared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeRoomGameExpectation {
@@ -183,13 +264,17 @@ pub trait GameDatabase: Send + Sync {
         authority_player: Option<PlayerId>,
     ) -> Result<bool>;
 
-    /// Atomically request room authority with proper protocol enforcement
+    /// Atomically request room authority with proper protocol enforcement.
+    ///
+    /// A refusal must name its cause: the coordinator maps
+    /// [`AuthorityDenial`] straight onto the wire `reason` and `error_code`,
+    /// so a cause collapsed here is a cause the client cannot act on.
     async fn request_room_authority(
         &self,
         room_id: &RoomId,
         player_id: &PlayerId,
         become_authority: bool,
-    ) -> Result<(bool, Option<String>)>;
+    ) -> Result<AuthorityOutcome>;
 
     /// Update player name in room
     async fn update_player_name(
@@ -924,17 +1009,17 @@ impl GameDatabase for InMemoryDatabase {
         room_id: &RoomId,
         player_id: &PlayerId,
         become_authority: bool,
-    ) -> Result<(bool, Option<String>)> {
+    ) -> Result<AuthorityOutcome> {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             // Check if room supports authority
             if !room.supports_authority {
-                return Ok((false, Some("Room does not support authority".to_string())));
+                return Ok(AuthorityOutcome::Denied(AuthorityDenial::NotSupported));
             }
 
             // Check if player exists in room
             if !room.players.contains_key(player_id) {
-                return Ok((false, Some("Player not found in room".to_string())));
+                return Ok(AuthorityOutcome::Denied(AuthorityDenial::NotAMember));
             }
 
             if become_authority {
@@ -942,10 +1027,7 @@ impl GameDatabase for InMemoryDatabase {
 
                 // Rule: Can only request authority if no one currently has it
                 if room.authority_player.is_some() {
-                    return Ok((
-                        false,
-                        Some("Another player already has authority".to_string()),
-                    ));
+                    return Ok(AuthorityOutcome::Denied(AuthorityDenial::AlreadyHeld));
                 }
 
                 // Grant authority to the requesting player
@@ -957,16 +1039,13 @@ impl GameDatabase for InMemoryDatabase {
                 drop(rooms);
                 #[cfg(test)]
                 self.pause_after_authority_request_commit_for_test().await;
-                Ok((true, None))
+                Ok(AuthorityOutcome::Granted)
             } else {
                 // RELEASE AUTHORITY CASE
 
                 // Rule: Can only release authority if you currently have it
                 if room.authority_player != Some(*player_id) {
-                    return Ok((
-                        false,
-                        Some("You do not have authority to release".to_string()),
-                    ));
+                    return Ok(AuthorityOutcome::Denied(AuthorityDenial::NotHeld));
                 }
 
                 // Release authority
@@ -978,10 +1057,10 @@ impl GameDatabase for InMemoryDatabase {
                 drop(rooms);
                 #[cfg(test)]
                 self.pause_after_authority_request_commit_for_test().await;
-                Ok((true, None))
+                Ok(AuthorityOutcome::Granted)
             }
         } else {
-            Ok((false, Some("Room not found".to_string())))
+            Ok(AuthorityOutcome::Denied(AuthorityDenial::RoomNotFound))
         }
     }
 

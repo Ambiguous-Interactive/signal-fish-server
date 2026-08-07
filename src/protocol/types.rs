@@ -1,4 +1,3 @@
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -27,20 +26,7 @@ pub type RoomId = Uuid;
 pub type SessionGeneration = Uuid;
 
 /// Relay transport protocol selection
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Default,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-#[rkyv(compare(PartialEq))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RelayTransport {
     /// TCP transport (reliable, ordered delivery)
@@ -59,20 +45,7 @@ pub enum RelayTransport {
 }
 
 /// Encoding format for sequenced game data payloads.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Default,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-#[rkyv(compare(PartialEq))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GameDataEncoding {
     /// JSON payloads delivered over text frames.
@@ -143,8 +116,7 @@ pub enum Topology {
 /// Mirrors the browser `RTCIceServer` shape (Appendix A/B): `urls` holds one or
 /// more STUN/TURN endpoints, and `username`/`credential` carry short-lived TURN
 /// credentials when present. Both auth fields are omitted from the wire when
-/// absent (public STUN needs no credentials). These are v3-only control payloads,
-/// so — like [`ProtocolInfoPayload`] — no rkyv derives are added.
+/// absent (public STUN needs no credentials).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IceServer {
     /// STUN/TURN URLs for this server (e.g. `stun:stun.l.google.com:19302`).
@@ -328,19 +300,7 @@ pub struct SpectatorInfo {
 }
 
 /// Describes why a spectator state change occurred.
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Default,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-#[rkyv(compare(PartialEq))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SpectatorStateChangeReason {
     #[default]
@@ -388,7 +348,7 @@ impl PeerConnectionInfo {
 }
 
 /// Rate limit information for an application
-#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitInfo {
     /// Requests allowed per minute; enforced when explicitly configured.
     pub per_minute: u32,

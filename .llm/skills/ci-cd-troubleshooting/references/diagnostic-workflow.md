@@ -133,7 +133,6 @@ Before committing workflow changes, verify:
 | TOML validator fails on "before/after" example | Duplicate `[dependencies]` headers in one block | Split into separate fenced code blocks |
 | `An action could not be found at the URI` | Invalid/disallowed action ref in workflow | Update to explicit version tag allowed by policy |
 | `SecretsUsedInArgOrEnv` Docker build warning | BuildKit flags ENV with security-related names | Add `# check=skip=SecretsUsedInArgOrEnv` as first line |
-| AlignedVec alignment lost after Bytes conversion | rkyv serialize() drops alignment via into_vec() | Use serialize_aligned() for zero-copy access |
 | WSL bash has no installed distributions (Windows CI) | Command::new("bash") resolves to WSL not Git Bash | Use Git Bash path on Windows CI runners |
 | `The module 'CHANNEL=$(grep...' could not be loaded` | Bash syntax in `run:` step without `shell: bash` on Windows | Add `shell: bash` to step |
 | `Detected non-internal changes without CHANGELOG.md update: Cargo.toml` | Squash-merged Dependabot PR: actor is the human merger, not `dependabot[bot]` | Add dep-detect step: check if only Cargo.toml/Cargo.lock changed AND commit message matches dependency bump pattern |

@@ -9,11 +9,31 @@ use std::sync::Arc;
 use crate::coordination::{RoomMessageTransactionOutcome, RoomRecipientMessages};
 
 use super::session_policy::{membership_session_decision, ActiveSessionPlan};
-use super::EnhancedGameServer;
+use super::{EnhancedGameServer, PendingApplicationClaimRollback};
 
 struct ReconnectionClaimGuard {
     manager: Arc<ReconnectionManager>,
     claim: Option<ClaimedReconnection>,
+}
+
+/// Durable state a reconnect attempt has already changed but has not yet
+/// committed. Rejection unwinds exactly this set, so every failure path is
+/// driven from one value instead of a widening argument list that a new
+/// early-return can silently under-populate.
+#[derive(Default)]
+struct ReconnectRestoreState {
+    /// This attempt re-added the membership row that the disconnect removed.
+    restored_membership: bool,
+    /// This attempt was granted the room's vacant authority back.
+    restored_authority: bool,
+    /// This attempt took ownership of a queued durable detach: `Some(value)`
+    /// is the retry it removed, carrying whatever application-claim rollback
+    /// that retry still owed. Taking it over is required — maintenance must
+    /// not delete a membership this reconnect is about to make live again —
+    /// but a rejection has to hand it back, or the phantom row it describes
+    /// keeps a seat in every capacity check with nothing left to repair it
+    /// until the reconnection window expires.
+    cleared_pending_detach: Option<Option<PendingApplicationClaimRollback>>,
 }
 
 impl ReconnectionClaimGuard {
@@ -273,8 +293,7 @@ impl EnhancedGameServer {
         &self,
         current_player_id: &PlayerId,
         claim_guard: ReconnectionClaimGuard,
-        restored_membership: bool,
-        restored_authority: bool,
+        restore: &ReconnectRestoreState,
         reason: &str,
         error_code: ErrorCode,
     ) -> bool {
@@ -282,22 +301,32 @@ impl EnhancedGameServer {
             tracing::warn!(%reason, "Reconnection rejection had no active claim to release");
             return false;
         };
-        if restored_membership {
+        // A detach this attempt took over is owed back to maintenance unless
+        // the rejection itself made the durable state clean. `None` here means
+        // "nothing left to repair"; `Some(rollback)` re-queues the retry with
+        // the provenance it started with.
+        let mut requeue_detach = restore.cleared_pending_detach.clone();
+        if restore.restored_membership {
             if let Err(err) = self
                 .database
                 .remove_player_from_room(&disconnected.room_id, &disconnected.player_id)
                 .await
             {
-                self.pending_durable_player_detaches
-                    .insert((disconnected.room_id, disconnected.player_id), None);
+                // The row survives, so a detach retry is owed whether or not
+                // this attempt inherited one.
+                requeue_detach = Some(requeue_detach.flatten());
                 tracing::warn!(
                     player_id = %disconnected.player_id,
                     room_id = %disconnected.room_id,
                     error = %err,
                     "Failed to roll back restored room membership after reconnect failure"
                 );
+            } else {
+                // The rollback removed the row, so only an outstanding
+                // application-claim rollback still needs a retry.
+                requeue_detach = requeue_detach.filter(Option::is_some);
             }
-        } else if restored_authority {
+        } else if restore.restored_authority {
             if let Err(err) = self
                 .database
                 .update_room_authority(&disconnected.room_id, None)
@@ -310,6 +339,10 @@ impl EnhancedGameServer {
                     "Failed to roll back restored authority after reconnect failure"
                 );
             }
+        }
+        if let Some(rollback) = requeue_detach {
+            self.pending_durable_player_detaches
+                .insert((disconnected.room_id, disconnected.player_id), rollback);
         }
 
         let released = claim_guard.release().await;
@@ -339,8 +372,7 @@ impl EnhancedGameServer {
         current_player_id: &PlayerId,
         reconnect_player_id: &PlayerId,
         claim_guard: ReconnectionClaimGuard,
-        restored_membership: bool,
-        restored_authority: bool,
+        restore: &ReconnectRestoreState,
         rollback_context: &'static str,
     ) -> bool {
         self.discard_pre_issued_reconnection_token(reconnect_player_id)
@@ -364,8 +396,7 @@ impl EnhancedGameServer {
         self.reject_claimed_reconnect(
             current_player_id,
             claim_guard,
-            restored_membership,
-            restored_authority,
+            restore,
             "Reconnected baseline could not be delivered",
             ErrorCode::ReconnectionFailed,
         )
@@ -549,8 +580,7 @@ impl EnhancedGameServer {
             return false;
         };
         let last_sequence = disconnected.last_sequence;
-        let mut restored_membership = false;
-        let mut restored_authority = false;
+        let mut restore = ReconnectRestoreState::default();
 
         // Defense-in-depth for unexpected concurrent ownership paths. The
         // claim above is what resolves duplicate same-token races.
@@ -559,8 +589,7 @@ impl EnhancedGameServer {
                 .reject_claimed_reconnect(
                     current_player_id,
                     claim_guard,
-                    restored_membership,
-                    restored_authority,
+                    &restore,
                     "Player is already connected",
                     ErrorCode::PlayerAlreadyConnected,
                 )
@@ -585,8 +614,7 @@ impl EnhancedGameServer {
                     .reject_claimed_reconnect(
                         current_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "Room no longer exists",
                         ErrorCode::RoomNotFound,
                     )
@@ -598,8 +626,7 @@ impl EnhancedGameServer {
                     .reject_claimed_reconnect(
                         current_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "Storage error",
                         ErrorCode::InternalError,
                     )
@@ -624,8 +651,7 @@ impl EnhancedGameServer {
                     .reject_claimed_reconnect(
                         current_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "Room no longer exists",
                         ErrorCode::RoomNotFound,
                     )
@@ -652,8 +678,7 @@ impl EnhancedGameServer {
                     .reject_claimed_reconnect(
                         current_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "Room is full",
                         ErrorCode::RoomFull,
                     )
@@ -665,8 +690,7 @@ impl EnhancedGameServer {
                     .reject_claimed_reconnect(
                         current_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "Player room membership could not be restored",
                         ErrorCode::ReconnectionFailed,
                     )
@@ -675,15 +699,14 @@ impl EnhancedGameServer {
 
             match self.database.add_player_to_room(room_id, player_info).await {
                 Ok(true) => {
-                    restored_membership = true;
+                    restore.restored_membership = true;
                 }
                 Ok(false) => {
                     return self
                         .reject_claimed_reconnect(
                             current_player_id,
                             claim_guard,
-                            restored_membership,
-                            restored_authority,
+                            &restore,
                             "Room is full",
                             ErrorCode::RoomFull,
                         )
@@ -700,8 +723,7 @@ impl EnhancedGameServer {
                         .reject_claimed_reconnect(
                             current_player_id,
                             claim_guard,
-                            restored_membership,
-                            restored_authority,
+                            &restore,
                             "Storage error",
                             ErrorCode::InternalError,
                         )
@@ -712,9 +734,14 @@ impl EnhancedGameServer {
 
         // A prior disconnect may have forced local teardown while durable
         // removal was unavailable. This room-gated reconnect now owns the
-        // membership again, so maintenance must not delete it as stale.
-        self.pending_durable_player_detaches
-            .remove(&(*room_id, *reconnect_player_id));
+        // membership again, so maintenance must not delete it as stale. Keep
+        // the retry it displaced: everything below can still reject, and a
+        // rejection that owns no membership of its own would otherwise leave
+        // the phantom row holding a seat with nothing queued to remove it.
+        restore.cleared_pending_detach = self
+            .pending_durable_player_detaches
+            .remove(&(*room_id, *reconnect_player_id))
+            .map(|(_, rollback)| rollback);
 
         if disconnected.was_authority && room.supports_authority && room.authority_player.is_none()
         {
@@ -723,14 +750,14 @@ impl EnhancedGameServer {
                 .request_room_authority(room_id, reconnect_player_id, true)
                 .await
             {
-                Ok((true, _)) => {
-                    restored_authority = true;
+                Ok(outcome) if outcome.granted() => {
+                    restore.restored_authority = true;
                 }
-                Ok((false, reason)) => {
+                Ok(outcome) => {
                     tracing::debug!(
                         %reconnect_player_id,
                         %room_id,
-                        ?reason,
+                        denial = ?outcome.denial(),
                         "Reconnect authority restore lost an atomic authority race"
                     );
                 }
@@ -744,6 +771,9 @@ impl EnhancedGameServer {
                 }
             }
         }
+        // Settled for the rest of this attempt: publication below reads it from
+        // an owned copy so the rejection paths keep the whole restore state.
+        let restored_authority = restore.restored_authority;
 
         let room = match self.database.get_room_by_id(room_id).await {
             Ok(Some(room)) => room,
@@ -752,8 +782,7 @@ impl EnhancedGameServer {
                     .reject_claimed_reconnect(
                         current_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "Room no longer exists",
                         ErrorCode::RoomNotFound,
                     )
@@ -765,8 +794,7 @@ impl EnhancedGameServer {
                     .reject_claimed_reconnect(
                         current_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "Storage error",
                         ErrorCode::InternalError,
                     )
@@ -784,8 +812,7 @@ impl EnhancedGameServer {
                 .reject_claimed_reconnect(
                     current_player_id,
                     claim_guard,
-                    restored_membership,
-                    restored_authority,
+                    &restore,
                     "Current connection no longer exists",
                     ErrorCode::ReconnectionFailed,
                 )
@@ -1098,8 +1125,7 @@ impl EnhancedGameServer {
                         current_player_id,
                         reconnect_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "baseline_delivery",
                     )
                     .await;
@@ -1119,8 +1145,7 @@ impl EnhancedGameServer {
                         current_player_id,
                         reconnect_player_id,
                         claim_guard,
-                        restored_membership,
-                        restored_authority,
+                        &restore,
                         "coordinator_registration",
                     )
                     .await;

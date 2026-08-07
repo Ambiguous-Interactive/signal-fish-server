@@ -19,9 +19,6 @@
 /// Public app-ID allowlist and per-label rate limiting.
 pub mod auth;
 
-/// Optimized broadcast message handling
-pub mod broadcast;
-
 /// Server configuration and environment variables
 pub mod config;
 
@@ -51,9 +48,6 @@ pub mod reconnection;
 
 /// Retry logic utilities
 pub mod retry;
-
-/// Zero-copy serialization utilities
-pub mod rkyv_utils;
 
 /// TLS and crypto utilities
 pub mod security;

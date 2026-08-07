@@ -81,18 +81,30 @@ The server responds directly to the requesting player with an
 ```
 
 If the request is denied (for example, because another player already
-holds authority), the response includes a reason:
+holds authority), the response includes a reason and the error code for
+that specific cause:
 
 ```json
 {
   "type": "AuthorityResponse",
   "data": {
     "granted": false,
-    "reason": "Another client has already claimed authority. Only one client can have authority at a time.",
+    "reason": "Another player already has authority",
     "error_code": "AUTHORITY_CONFLICT"
   }
 }
 ```
+
+The code tells you whether retrying can ever succeed:
+
+| `error_code` | Cause | Retry? |
+|---|---|---|
+| `AUTHORITY_CONFLICT` | Another member holds the role right now. | Yes — after an `AuthorityChanged` clears it. |
+| `AUTHORITY_NOT_SUPPORTED` | The room was created with `supports_authority: false`. | No — no member of this room can ever hold the role. |
+| `AUTHORITY_DENIED` | You are not a member of the room, or you released a role you do not hold. | No — nothing about the room's state will change that. |
+| `NOT_IN_ROOM` | You are not in a room at all. | Join a room first. |
+| `STORAGE_ERROR` | The server could not decide the request. | Yes — this is a transient server-side fault. |
+| `INTERNAL_ERROR` | The request failed before storage was consulted. | Yes — this is a transient server-side fault. |
 
 ### Broadcasting Authority Changes
 
