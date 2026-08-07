@@ -545,44 +545,48 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
         )
         .await;
     expect_room_joined(&mut host_rx, "host join before spectator failures");
-    expect_lobby_state_changed(&mut host_rx, "host own-join lobby entry");
 
-    // One case per distinct rejection source: the room lookup, and the
-    // role check that runs once a room is found.
-    let cases: [(Uuid, &str, &str, ErrorCode); 2] = [
+    // One case per distinct rejection source: the room lookup, and the role
+    // check that precedes it.
+    for (room_code, spectate_first, context, expected_code) in [
         (
-            Uuid::new_v4(),
             "NOSUCH",
+            false,
             "no such room code",
             ErrorCode::RoomNotFound,
         ),
         (
-            host_id,
             "SPECF1",
-            "a seated player cannot also spectate",
-            ErrorCode::SpectatorNotAllowed,
+            true,
+            "already spectating this room",
+            ErrorCode::SpectatorJoinFailed,
         ),
-    ];
-
-    for (actor, room_code, context, expected_code) in cases {
+    ] {
+        let spectator_id = Uuid::new_v4();
         let (tx, mut rx) = mpsc::channel(64);
-        if actor != host_id {
-            server.connect_client(actor, tx).await;
+        server.connect_client(spectator_id, tx).await;
+        if spectate_first {
+            server
+                .handle_join_as_spectator(
+                    &spectator_id,
+                    "spectator_failure".to_string(),
+                    room_code.to_string(),
+                    "Viewer".to_string(),
+                )
+                .await;
+            expect_spectator_joined(&mut rx, spectator_id, context);
         }
+
         server
             .handle_join_as_spectator(
-                &actor,
+                &spectator_id,
                 "spectator_failure".to_string(),
                 room_code.to_string(),
                 "Viewer".to_string(),
             )
             .await;
-        let receiver = if actor == host_id {
-            &mut host_rx
-        } else {
-            &mut rx
-        };
-        match recv_now(receiver, context).as_ref() {
+
+        match recv_now(&mut rx, context).as_ref() {
             ServerMessage::SpectatorJoinFailed { error_code, reason } => {
                 assert_eq!(*error_code, Some(expected_code), "{context}");
                 assert!(!reason.is_empty(), "{context}: failure carries a reason");
