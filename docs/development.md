@@ -84,17 +84,17 @@ cargo run
 
 ```
 
-### With Custom Config
+### Validate a Custom Config
 
 ```bash
-# Using -c flag (not implemented - config.json is loaded by default)
-# The server automatically looks for config.json in the working directory
-cargo run
+# The server automatically loads config.json from the working directory.
+# -c is the short form of --validate-config: validate and exit without serving.
+cargo run -- -c
 
 ```
 
-Note: The `-c` flag shown in some examples is not currently implemented. The server automatically loads
-`config.json` from the working directory if it exists.
+To serve after validation succeeds, run `cargo run` without `-c`. Configuration
+file selection is automatic; `-c` does not accept a path argument.
 
 ### Validate Config
 
