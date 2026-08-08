@@ -70,5 +70,27 @@ Unreleased `Fixed`; runtime server and wire behavior are unchanged.
   safety, shell portability, fixture validity, documentation, changelog, PLAN,
   and session scope.
 
-Hosted CI, merge, and the subsequent issue #312 publication remain pending at
-this point in the session.
+## Hosted review and CI
+
+PR #315's first exact code head,
+`0a1cb0745f509f0c9544c33531bb913269b4828d`, completed every applicable hosted
+gate successfully:
+
+- CI run `31275860685` passed all 16 jobs, including the three-platform lint and
+  Nextest matrix, coverage, MSRV, dependency/audit checks, Docker, SBOM, panic
+  policy, documentation consistency, and relay allocation ceilings.
+- Advanced Safety run `31275860643` passed both Miri and AddressSanitizer.
+- Unused Dependencies `31275860648`, Markdownlint `31275860646`, Link Check
+  `31275860645`, Spellcheck `31275860661`, and Documentation Validation
+  `31275860669` all passed. The Dependabot-only auto-merge workflow skipped as
+  expected for a non-dependency pull request.
+- GitHub reported the pull request mergeable with no review threads or change
+  requests. The only review submission was a non-actionable Copilot quota
+  notice.
+
+The exact pre-PR `main` head,
+`5545daf1435374df8a913b5ec533f387076ebd08`, also completed its eight applicable
+push workflows successfully, including CI and Docker Publish. The progress-only
+follow-up commit that records this evidence must retain the same green hosted
+state before merge. The subsequent issue #312 publication remains a separate
+operation after this repair lands.
