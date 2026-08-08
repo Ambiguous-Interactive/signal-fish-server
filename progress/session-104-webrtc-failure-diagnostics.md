@@ -77,7 +77,23 @@ implying a shipped server behavior change.
 - The local Fortress host test is unavailable because this environment has no
   Godot 4.5 executable for the fixture's `api-custom` build. The pinned hosted
   Godot/Emscripten/Chromium workflow is the authoritative remaining evidence.
-- Hosted-CI and PR review evidence will be recorded before handoff.
+- PR #308's code head `b4e1bb4` passed all 12 substantive hosted workflows:
+  CI, Advanced Safety, Verification Nightly, WebRTC Interop, TURN-only WebRTC
+  Interop, Fortress WASM Interop, Browser Interop, Documentation Validation,
+  Unused Dependencies, Spellcheck, Markdownlint, and Link Check. The expected
+  Dependabot auto-merge workflow was skipped.
+- Windows live WebRTC passed on its first attempt. The first macOS attempt
+  reproduced the targeted missing selected-pair snapshot while the client
+  exited 0, exchanged both channel directions, reported WebRTC connected, and
+  advertised three host candidates; the new stderr identified the absent
+  post-connect selected-pair statistic. Its targeted retry passed, making run
+  31264319045 green. The evidence is recorded on issue #301.
+- The real released Fortress WASM graph and expected-busted negative control
+  passed in run 31264319057. This supplies the pinned Godot/Emscripten/Chromium
+  evidence unavailable in the local container.
+- PR #308 has no inline review threads or requested changes. Copilot could not
+  review because the requester's quota was exhausted; both independent local
+  adversarial rounds remain the substantive review evidence.
 
 ## Follow-up boundary
 
