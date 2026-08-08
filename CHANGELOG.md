@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reduce the shared relay-frame cache from 680 to 472 allocated bytes whenever
+  projection work repeats across a relay's recipients (issue #207). JSON,
+  direct MessagePack, and mixed MessagePack projections retain the same
+  allocation-operation counts, codec work, and exact wire output while
+  allocating 208 fewer bytes per shared-cache relay.
+
 ### Fixed
 
 - Preserve the reviewed release-preparation source when documentation or
