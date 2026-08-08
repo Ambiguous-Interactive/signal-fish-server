@@ -78,11 +78,11 @@ use std::net::{IpAddr, UdpSocket};
 use std::time::Duration;
 
 use harness::{
-    advertised_candidate_addresses, events_named, player_id_of, scenario_window, single_event,
-    spawn_client, spawn_server, str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT,
-    EVENT_TIMEOUT,
+    advertised_candidate_addresses, advertised_candidates, event_tags, events_named, player_id_of,
+    scenario_window, single_event, spawn_client, spawn_server, str_field, ClientProcess,
+    ClientSpec, CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use signal_fish_reference_native::engine::{local_udp_addrs, EngineSettings, IpFamily};
 use uuid::Uuid;
 
@@ -133,6 +133,8 @@ struct ScenarioRun {
     logs: Vec<Vec<Value>>,
     /// Recent stdout events plus captured stderr, same indexing.
     diagnostics: Vec<String>,
+    /// Reaped process exit codes, same indexing.
+    exit_codes: Vec<i32>,
 }
 
 impl ScenarioRun {
@@ -154,6 +156,15 @@ impl ScenarioRun {
 
     fn diagnostics(&self, index: usize) -> &str {
         &self.diagnostics[index]
+    }
+
+    fn selected_pair_failure_context(&self, index: usize) -> String {
+        selected_pair_failure_context(
+            TWO_CLIENT_NAMES[index],
+            self.exit_codes[index],
+            &self.logs[index],
+            self.diagnostics(index),
+        )
     }
 }
 
@@ -187,7 +198,7 @@ impl ClientConfig {
 
 /// Drain one client to EOF + reap it; it must exit 0 AND report that via its
 /// final `exiting` event.
-async fn drain_expect_success(client: &mut ClientProcess) {
+async fn drain_expect_success(client: &mut ClientProcess) -> i32 {
     let code = client.drain_to_exit(CLIENT_EXIT_TIMEOUT).await;
     assert_eq!(
         code,
@@ -203,6 +214,7 @@ async fn drain_expect_success(client: &mut ClientProcess) {
         "client {}: exiting event must report code 0",
         client.name
     );
+    code
 }
 
 async fn await_event_count(
@@ -280,8 +292,9 @@ async fn run_three_clients(
 
     // Drain everyone to EOF + reap; every client must succeed on its own
     // (their internal success criteria) AND report it via the exiting event.
+    let mut exit_codes = Vec::with_capacity(clients.len());
     for client in &mut clients {
-        drain_expect_success(client).await;
+        exit_codes.push(drain_expect_success(client).await);
     }
 
     let ids: Vec<String> = clients
@@ -301,6 +314,7 @@ async fn run_three_clients(
             .map(|mut client| std::mem::take(&mut client.events))
             .collect(),
         diagnostics,
+        exit_codes,
     }
 }
 
@@ -357,8 +371,9 @@ async fn run_two_peer_mesh(game_name: &str, extra_args: &'static [&'static str])
     );
 
     let mut clients = vec![creator, joiner];
+    let mut exit_codes = Vec::with_capacity(clients.len());
     for client in &mut clients {
-        drain_expect_success(client).await;
+        exit_codes.push(drain_expect_success(client).await);
     }
     server.shutdown().await;
 
@@ -376,6 +391,7 @@ async fn run_two_peer_mesh(game_name: &str, extra_args: &'static [&'static str])
             .map(|mut client| std::mem::take(&mut client.events))
             .collect(),
         diagnostics,
+        exit_codes,
     }
 }
 
@@ -1593,8 +1609,21 @@ fn selected_ip_address(event: &Value, field: &str, who: &str) -> IpAddr {
 
 /// Assert this client's single selected pair is a direct host/host path toward
 /// the expected peer, and return its concrete local and remote addresses.
-fn assert_direct_host_path(events: &[Value], who: &str, peer_id: &str) -> [IpAddr; 2] {
-    let selected = single_event(events, "selected_candidate_pair", who);
+fn assert_direct_host_path(
+    events: &[Value],
+    who: &str,
+    peer_id: &str,
+    failure_context: &str,
+) -> [IpAddr; 2] {
+    let selected = events_named(events, "selected_candidate_pair");
+    assert_eq!(
+        selected.len(),
+        1,
+        "{who}: expected exactly one `selected_candidate_pair` event, got {}: {selected:?}\n\
+         {failure_context}",
+        selected.len(),
+    );
+    let selected = selected[0];
     assert_eq!(
         str_field(selected, "peer"),
         peer_id,
@@ -1620,6 +1649,82 @@ fn assert_direct_host_path(events: &[Value], who: &str, peer_id: &str) -> [IpAdd
     addresses
 }
 
+fn selected_pair_failure_context(
+    who: &str,
+    exit_code: i32,
+    events: &[Value],
+    diagnostics: &str,
+) -> String {
+    format!(
+        "client {who} exit code: {exit_code}\n\
+         emitted {} event(s): {}\n\
+         advertised local ICE candidates: {:?}\n\
+         {diagnostics}",
+        events.len(),
+        event_tags(events),
+        advertised_candidates(events),
+    )
+}
+
+#[test]
+fn missing_selected_pair_reports_fully_drained_process_and_ice_evidence() {
+    let events = vec![
+        json!({
+            "event": "local_candidate",
+            "candidate_type": "host",
+            "address": "192.0.2.7",
+            "port": 49152
+        }),
+        json!({
+            "event": "player_left"
+        }),
+        json!({
+            "event": "exiting",
+            "code": 0
+        }),
+    ];
+    let run = ScenarioRun {
+        ids: Vec::new(),
+        logs: vec![events],
+        diagnostics: vec!["stderr sentinel".to_owned()],
+        exit_codes: vec![0],
+    };
+    let context = run.selected_pair_failure_context(0);
+
+    assert!(context.contains("client c0 exit code: 0"), "{context}");
+    assert!(
+        context.contains("emitted 3 event(s): local_candidate, player_left, exiting"),
+        "{context}"
+    );
+    assert!(
+        context.contains("advertised local ICE candidates: [\"host 192.0.2.7:49152\"]"),
+        "{context}"
+    );
+    assert!(context.contains("stderr sentinel"), "{context}");
+
+    let failure = std::panic::catch_unwind(|| {
+        assert_direct_host_path(run.window(0), "c0", "peer-id", &context);
+    })
+    .expect_err("the missing selected pair must fail its real assertion path");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("assertion panic must carry a string message");
+    for required in [
+        "expected exactly one `selected_candidate_pair` event, got 0",
+        "client c0 exit code: 0",
+        "local_candidate, player_left, exiting",
+        "advertised local ICE candidates: [\"host 192.0.2.7:49152\"]",
+        "stderr sentinel",
+    ] {
+        assert!(
+            message.contains(required),
+            "missing `{required}` in:\n{message}"
+        );
+    }
+}
+
 /// Assert this client's single selected pair is host/host over concrete IPv6,
 /// toward the expected peer.
 ///
@@ -1629,8 +1734,8 @@ fn assert_direct_host_path(events: &[Value], who: &str, peer_id: &str) -> [IpAdd
 /// STUN or TURN is configured), and carried by an address a peer could actually
 /// dial — never unspecified, multicast, or link-local, whose scope ID the
 /// candidate wire cannot carry.
-fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str) {
-    for address in assert_direct_host_path(events, who, peer_id) {
+fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str, failure_context: &str) {
+    for address in assert_direct_host_path(events, who, peer_id, failure_context) {
         let IpAddr::V6(address) = address else {
             panic!("{who}: the IPv6-only run selected an IPv4 candidate {address}");
         };
@@ -1685,7 +1790,8 @@ async fn two_peer_mesh_exchanges_over_live_webrtc() {
         );
 
         assert_pair_connected_exactly(window, who, &peers);
-        assert_direct_host_path(window, who, peer_id);
+        let failure_context = run.selected_pair_failure_context(index);
+        assert_direct_host_path(window, who, peer_id, &failure_context);
         assert_exchange_sent_to(window, who, &peers);
         assert_exchange_received_from(window, who, &peers);
         assert_transport_status_true(&run.logs[index], who);
@@ -1739,7 +1845,8 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
         );
 
         // ...over IPv6, with the exact exchange on both channel labels.
-        assert_ipv6_host_path(window, who, peer_id);
+        let failure_context = run.selected_pair_failure_context(index);
+        assert_ipv6_host_path(window, who, peer_id, &failure_context);
         assert_no_ipv4_candidate_advertised(window, who);
         assert_exchange_sent_to(window, who, &peers);
         assert_exchange_received_from(window, who, &peers);

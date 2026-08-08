@@ -67,7 +67,7 @@ func _publish_bridge_error(message: String) -> void:
 		return
 	result_published = true
 	var result := {
-		"schema_version": 2,
+		"schema_version": 3,
 		"status": "complete",
 		"runtime_error": message,
 		"origin": "gdscript-bootstrap-error",

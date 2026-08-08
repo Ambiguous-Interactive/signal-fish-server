@@ -15,6 +15,7 @@ const expectedThresholds = {
   max_oldest_queue_age_us: 500000,
   max_confirmation_lag: 8,
   max_rollback_depth: 8,
+  max_stall_count: 1,
 };
 const reportKeys = [
   "schema_version", "status", "origin", "runtime_error", "role", "run_mode",
@@ -40,6 +41,11 @@ const reportKeys = [
 
 const [mode, exportDirectoryArg, serverBinaryArg, artifactDirectoryArg, buildSha] =
   process.argv.slice(2);
+if (mode === "self-test") {
+  runHealthGateSelfTests();
+  process.stdout.write("HEALTHY fortress-wasm health-gate self-test\n");
+  process.exit(0);
+}
 if (!mode || !exportDirectoryArg || !serverBinaryArg || !artifactDirectoryArg || !buildSha) {
   throw new Error(
     "usage: node harness.mjs <released|negative> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
@@ -133,7 +139,7 @@ try {
   });
   const room = await waitForGlobal(creator, "__FORTRESS_ROOM_READY", 15_000);
   assertExactKeys(room, ["schema_version", "role", "instance_nonce", "room_code"], "room-ready");
-  assert(room.schema_version === 2, "room-ready schema mismatch");
+  assert(room.schema_version === 3, "room-ready schema mismatch");
   assert(room.role === "creator", "room-ready role mismatch");
   assert(room.instance_nonce === creatorNonce, "room-ready nonce mismatch");
   assert(typeof room.room_code === "string" && room.room_code.length > 0, "empty room code");
@@ -346,7 +352,7 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
     },
     {
       config: {
-        schema_version: 2,
+        schema_version: 3,
         server_url: `ws://127.0.0.1:${serverPort}/v2/ws`,
         role,
         room_code: roomCode,
@@ -437,7 +443,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     ["joiner", joinerReport, joinerBrowser],
   ]) {
     assertExactKeys(report, reportKeys, `${name} report`);
-    assert(report.schema_version === 2 && report.status === "complete", `${name}: incomplete schema`);
+    assert(report.schema_version === 3 && report.status === "complete", `${name}: incomplete schema`);
     assert(report.origin === "rust-gdextension", `${name}: report did not originate in Rust`);
     assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
     assert(report.role === name, `${name}: role mismatch`);
@@ -524,8 +530,12 @@ function healthViolations(name, report) {
   check(report.final_pipeline_queue_depth === 0, `final pipeline depth=${report.final_pipeline_queue_depth}`);
   check(report.peak_pipeline_queue_depth <= 64, `peak pipeline depth=${report.peak_pipeline_queue_depth}`);
   check(report.peak_oldest_queue_age_us <= 500_000, `oldest queue age=${report.peak_oldest_queue_age_us}us`);
-  const forbidden = ["relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable", "checksums_mismatched", "events_discarded_total", "stall_count", "wait_recommendations"];
+  const forbidden = ["relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable", "checksums_mismatched", "events_discarded_total", "wait_recommendations"];
   for (const field of forbidden) check(report[field] === 0, `${field}=${report[field]}`);
+  check(
+    stallCountWithinThreshold(report),
+    `stall_count=${report.stall_count} exceeds ${report.acceptance_thresholds.max_stall_count}`,
+  );
   check(report.relay_send_retries <= 8, `relay_send_retries=${report.relay_send_retries}`);
   check(report.confirmation_lag_current <= 8 && report.confirmation_lag_max <= 8, "confirmation lag exceeded eight frames");
   check(report.max_rollback_depth <= 8, `rollback depth=${report.max_rollback_depth}`);
@@ -536,6 +546,31 @@ function healthViolations(name, report) {
   check(rate >= 120, `completed rate=${rate.toFixed(1)} messages/s`);
   check(report.client_game_data_sent_during_run > report.active_callback_count * 2, "no more than two sends per callback");
   return failures;
+}
+
+function stallCountWithinThreshold(report) {
+  return Number.isSafeInteger(report.stall_count) &&
+    report.stall_count >= 0 &&
+    report.stall_count <= report.acceptance_thresholds.max_stall_count;
+}
+
+function runHealthGateSelfTests() {
+  for (const [stallCount, expected] of [
+    [0, true],
+    [1, true],
+    [2, false],
+    [-1, false],
+    [1.5, false],
+  ]) {
+    const report = {
+      stall_count: stallCount,
+      acceptance_thresholds: expectedThresholds,
+    };
+    assert(
+      stallCountWithinThreshold(report) === expected,
+      `stall threshold case ${stallCount} expected ${expected}`,
+    );
+  }
 }
 
 async function waitForGlobal(peer, key, timeout) {

@@ -22,7 +22,8 @@ use workload::{
     MIN_COMPLETED_MESSAGES_PER_SECOND, NOMINAL_FPS, TARGET_CONFIRMED_FRAMES,
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 2;
+const REPORT_SCHEMA_VERSION: u32 = 3;
+const MAX_STALL_COUNT: u64 = 1;
 const MIN_ACTIVE_CALLBACKS: u64 = 600;
 const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;
 const RUNTIME_DEADLINE: Duration = Duration::from_secs(90);
@@ -105,6 +106,7 @@ struct AcceptanceThresholds {
     max_oldest_queue_age_us: u64,
     max_confirmation_lag: u64,
     max_rollback_depth: u32,
+    max_stall_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -656,6 +658,7 @@ impl Runtime {
                 max_oldest_queue_age_us: MAX_OLDEST_QUEUE_AGE_US,
                 max_confirmation_lag: MAX_CONFIRMATION_LAG,
                 max_rollback_depth: MAX_ROLLBACK_DEPTH,
+                max_stall_count: MAX_STALL_COUNT,
             },
             max_admissions_per_callback: self.max_admissions_per_callback,
             current_frame,
