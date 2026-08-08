@@ -106,6 +106,84 @@ impl ReleaseFixture {
         self.head()
     }
 
+    fn commit_version(&self, version: &str, message: &str) -> String {
+        write_release_metadata(&self.root, version);
+        git(&self.root, &["add", "Cargo.toml", "CHANGELOG.md"]);
+        git(&self.root, &["commit", "-m", message]);
+        git(&self.root, &["push", "origin", "main"]);
+        self.head()
+    }
+
+    fn commit_version_with_changelog(
+        &self,
+        version: &str,
+        changelog: &str,
+        message: &str,
+    ) -> String {
+        write_file(
+            &self.root.join("Cargo.toml"),
+            &format!("[package]\nname = \"fixture\"\nversion = \"{version}\"\n"),
+        );
+        write_file(&self.root.join("CHANGELOG.md"), changelog);
+        git(&self.root, &["add", "Cargo.toml", "CHANGELOG.md"]);
+        git(&self.root, &["commit", "-m", message]);
+        git(&self.root, &["push", "origin", "main"]);
+        self.head()
+    }
+
+    fn commit_symlinked_version(&self, version: &str, message: &str) -> String {
+        let manifest_target = "actual-Cargo.toml";
+        write_file(
+            &self.root.join(manifest_target),
+            &format!("[package]\nname = \"fixture\"\nversion = \"{version}\"\n"),
+        );
+        fs::remove_file(self.root.join("Cargo.toml")).expect("remove fixture Cargo.toml");
+        std::os::unix::fs::symlink(manifest_target, self.root.join("Cargo.toml"))
+            .expect("symlink fixture Cargo.toml");
+        git(&self.root, &["add", "Cargo.toml", manifest_target]);
+        git(&self.root, &["commit", "-m", message]);
+        git(&self.root, &["push", "origin", "main"]);
+        assert_eq!(
+            git(&self.root, &["status", "--porcelain=v1"]),
+            "",
+            "symlink fixture must represent a clean checkout"
+        );
+        assert_eq!(
+            git(&self.root, &["show", "HEAD:Cargo.toml"]),
+            manifest_target,
+            "historical Cargo.toml lookup must read the symlink blob, not its target"
+        );
+        self.head()
+    }
+
+    fn commit_changelog(&self, changelog: &str, message: &str) -> String {
+        write_file(&self.root.join("CHANGELOG.md"), changelog);
+        git(&self.root, &["add", "CHANGELOG.md"]);
+        git(&self.root, &["commit", "-m", message]);
+        git(&self.root, &["push", "origin", "main"]);
+        self.head()
+    }
+
+    fn commit_same_version_manifest_edit(&self, message: &str) -> String {
+        let manifest =
+            fs::read_to_string(self.root.join("Cargo.toml")).expect("read fixture Cargo.toml");
+        write_file(
+            &self.root.join("Cargo.toml"),
+            &format!("{manifest}description = \"reviewed metadata edit\"\n"),
+        );
+        git(&self.root, &["add", "Cargo.toml"]);
+        git(&self.root, &["commit", "-m", message]);
+        git(&self.root, &["push", "origin", "main"]);
+        self.head()
+    }
+
+    fn make_head_shallow(&self) {
+        write_file(
+            &self.root.join(".git/shallow"),
+            &format!("{}\n", self.head()),
+        );
+    }
+
     fn tag(&self, annotated: bool, target: &str) {
         let mut args = vec!["tag"];
         if annotated {
@@ -160,6 +238,7 @@ impl ReleaseFixture {
 fn release_source_resolver_covers_retry_and_rejection_states() {
     struct Case {
         name: &'static str,
+        initial_version: &'static str,
         arrange: fn(&ReleaseFixture) -> String,
         event: &'static str,
         event_ref: &'static str,
@@ -169,6 +248,58 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
 
     fn no_tag(fixture: &ReleaseFixture) -> String {
         fixture.head()
+    }
+    fn no_tag_after_later_commit(fixture: &ReleaseFixture) -> String {
+        let release = fixture.head();
+        fixture.commit("document prepared release");
+        release
+    }
+    fn no_tag_after_same_version_manifest_edit(fixture: &ReleaseFixture) -> String {
+        let release = fixture.head();
+        fixture.commit_same_version_manifest_edit("edit package metadata without a version bump");
+        release
+    }
+    fn repeated_version_boundary(fixture: &ReleaseFixture) -> String {
+        let original = fixture.head();
+        fixture.commit_version("1.2.4", "advance past candidate version");
+        fixture.commit_version("1.2.3", "illegally reuse candidate version");
+        original
+    }
+    fn incomplete_first_parent_history(fixture: &ReleaseFixture) -> String {
+        let release = fixture.head();
+        fixture.commit("later commit hidden from its parent history");
+        fixture.make_head_shallow();
+        release
+    }
+    fn no_version_introduction_match(fixture: &ReleaseFixture) -> String {
+        fixture.commit_symlinked_version(
+            "1.2.3",
+            "make the working manifest version unavailable to historical reads",
+        )
+    }
+    fn introduction_missing_changelog_section(fixture: &ReleaseFixture) -> String {
+        let introduction = fixture.commit_version_with_changelog(
+            "1.2.3",
+            "# Changelog\n\n## [Unreleased]\n",
+            "introduce version without release notes",
+        );
+        fixture.commit_changelog(
+            "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-07-18\n",
+            "add release notes too late",
+        );
+        introduction
+    }
+    fn introduction_mismatches_changelog_section(fixture: &ReleaseFixture) -> String {
+        let introduction = fixture.commit_version_with_changelog(
+            "1.2.3",
+            "# Changelog\n\n## [Unreleased]\n\n## [1.2.4] - 2026-07-18\n",
+            "introduce version with mismatched release notes",
+        );
+        fixture.commit_changelog(
+            "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-07-18\n",
+            "correct release notes too late",
+        );
+        introduction
     }
     fn matching_ancestor(fixture: &ReleaseFixture) -> String {
         let release = fixture.head();
@@ -215,7 +346,8 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
 
     let cases = [
         Case {
-            name: "manual without tag uses dispatched head",
+            name: "manual without tag uses version-introduction head",
+            initial_version: "1.2.3",
             arrange: no_tag,
             event: "workflow_dispatch",
             event_ref: "refs/heads/main",
@@ -223,7 +355,71 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
             diagnostic: "",
         },
         Case {
+            name: "manual without tag ignores a later documentation commit",
+            initial_version: "1.2.3",
+            arrange: no_tag_after_later_commit,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: true,
+            diagnostic: "",
+        },
+        Case {
+            name: "manual without tag ignores a later same-version manifest edit",
+            initial_version: "1.2.3",
+            arrange: no_tag_after_same_version_manifest_edit,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: true,
+            diagnostic: "",
+        },
+        Case {
+            name: "manual without tag rejects a reused version boundary",
+            initial_version: "1.2.3",
+            arrange: repeated_version_boundary,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: false,
+            diagnostic: "multiple first-parent introduction commits",
+        },
+        Case {
+            name: "manual without tag rejects incomplete first-parent history",
+            initial_version: "1.2.3",
+            arrange: incomplete_first_parent_history,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: false,
+            diagnostic: "complete first-parent history",
+        },
+        Case {
+            name: "manual without tag rejects zero version-introduction matches",
+            initial_version: "1.2.2",
+            arrange: no_version_introduction_match,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: false,
+            diagnostic: "No first-parent commit introduces release version 1.2.3",
+        },
+        Case {
+            name: "manual without tag rejects an introduction missing changelog metadata",
+            initial_version: "1.2.2",
+            arrange: introduction_missing_changelog_section,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: false,
+            diagnostic: "CHANGELOG.md has no ## [1.2.3] release section",
+        },
+        Case {
+            name: "manual without tag rejects mismatched introduction changelog metadata",
+            initial_version: "1.2.2",
+            arrange: introduction_mismatches_changelog_section,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: false,
+            diagnostic: "CHANGELOG.md has no ## [1.2.3] release section",
+        },
+        Case {
             name: "manual retry reuses matching annotated ancestor",
+            initial_version: "1.2.3",
             arrange: matching_ancestor,
             event: "workflow_dispatch",
             event_ref: "refs/heads/main",
@@ -232,6 +428,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
         },
         Case {
             name: "lightweight tag is rejected",
+            initial_version: "1.2.3",
             arrange: lightweight,
             event: "workflow_dispatch",
             event_ref: "refs/heads/main",
@@ -240,6 +437,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
         },
         Case {
             name: "unrelated tag is rejected",
+            initial_version: "1.2.3",
             arrange: non_ancestor,
             event: "workflow_dispatch",
             event_ref: "refs/heads/main",
@@ -248,6 +446,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
         },
         Case {
             name: "tagged metadata mismatch is rejected",
+            initial_version: "1.2.3",
             arrange: metadata_mismatch,
             event: "workflow_dispatch",
             event_ref: "refs/heads/main",
@@ -256,6 +455,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
         },
         Case {
             name: "direct matching annotated tag passes",
+            initial_version: "1.2.3",
             arrange: direct_match,
             event: "push",
             event_ref: "refs/tags/v1.2.3",
@@ -264,6 +464,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
         },
         Case {
             name: "direct tag event commit mismatch is rejected",
+            initial_version: "1.2.3",
             arrange: direct_event_mismatch,
             event: "push",
             event_ref: "refs/tags/v1.2.3",
@@ -273,7 +474,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
     ];
 
     for case in cases {
-        let fixture = ReleaseFixture::new("1.2.3");
+        let fixture = ReleaseFixture::new(case.initial_version);
         let expected_source = (case.arrange)(&fixture);
         let output = fixture.resolve(case.event, case.event_ref);
         assert_eq!(

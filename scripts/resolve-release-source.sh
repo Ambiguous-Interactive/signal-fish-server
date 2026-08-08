@@ -7,20 +7,18 @@ DEFAULT_BRANCH=${RELEASE_DEFAULT_BRANCH:-}
 EVENT_REF=${RELEASE_EVENT_REF:-${GITHUB_REF:-}}
 OUTPUT_FILE=${RELEASE_OUTPUT_FILE:-${GITHUB_OUTPUT:-}}
 
-# Preserve the dispatch revision's parser before a retry detaches the worktree
-# to a historical tag. Tests may inject an already-isolated helper explicitly.
-resolver_scratch=
+# Preserve the dispatch revision's parser and historical manifest snapshots
+# outside the checkout before detaching to the immutable release source. Tests
+# may inject an already-isolated helper explicitly.
+scratch_base=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+resolver_scratch=$(mktemp -d "${scratch_base}/release-resolver.XXXXXX")
 cleanup() {
-    if [ -n "$resolver_scratch" ]; then
-        rm -rf -- "$resolver_scratch"
-    fi
+    rm -rf -- "$resolver_scratch"
 }
 trap cleanup EXIT
 if [ -n "${READ_TOML_SCRIPT:-}" ]; then
     readonly READ_TOML_SCRIPT
 else
-    scratch_base=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
-    resolver_scratch=$(mktemp -d "${scratch_base}/release-resolver.XXXXXX")
     cp scripts/read-toml-string.sh "${resolver_scratch}/read-toml-string.sh"
     readonly READ_TOML_SCRIPT="${resolver_scratch}/read-toml-string.sh"
 fi
@@ -32,6 +30,54 @@ fi
 
 read_cargo_version() {
     bash "$READ_TOML_SCRIPT" Cargo.toml version package 2>/dev/null || true
+}
+
+read_cargo_version_at() {
+    local candidate=$1
+    local manifest="${resolver_scratch}/Cargo.${candidate}.toml"
+    if ! git show "${candidate}:Cargo.toml" > "$manifest" 2>/dev/null; then
+        return 1
+    fi
+    bash "$READ_TOML_SCRIPT" "$manifest" version package 2>/dev/null || true
+}
+
+find_version_introduction() {
+    local dispatch_revision=$1
+    local expected_version=$2
+    local candidate candidate_version parent parent_version
+    local match_count=0
+    local matched_revision=
+
+    if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+        echo "ERROR: Release source selection requires complete first-parent history." >&2
+        return 1
+    fi
+
+    while IFS= read -r candidate; do
+        candidate_version=$(read_cargo_version_at "$candidate" || true)
+        [ "$candidate_version" = "$expected_version" ] || continue
+
+        parent=$(git rev-parse "${candidate}^1" 2>/dev/null || true)
+        parent_version=
+        if [ -n "$parent" ]; then
+            parent_version=$(read_cargo_version_at "$parent" || true)
+        fi
+        [ "$parent_version" != "$expected_version" ] || continue
+
+        matched_revision=$candidate
+        match_count=$((match_count + 1))
+    done < <(git rev-list --first-parent "$dispatch_revision" -- Cargo.toml)
+
+    if [ "$match_count" -eq 0 ]; then
+        echo "ERROR: No first-parent commit introduces release version ${expected_version}." >&2
+        return 1
+    fi
+    if [ "$match_count" -ne 1 ]; then
+        echo "ERROR: Release version ${expected_version} has multiple first-parent introduction commits; refusing ambiguous source selection." >&2
+        return 1
+    fi
+
+    printf '%s\n' "$matched_revision"
 }
 
 validate_annotated_tag() {
@@ -70,7 +116,8 @@ if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
         fi
         echo "Reusing existing annotated tag ${tag} at ${source_revision}."
     elif [ "$tag_status" -eq 2 ]; then
-        source_revision=$dispatch_revision
+        source_revision=$(find_version_introduction "$dispatch_revision" "$version")
+        echo "Resolved prepared ${version} source at ${source_revision}."
     else
         echo "ERROR: Failed to check release tag ${tag}: ${tag_result}" >&2
         exit "$tag_status"

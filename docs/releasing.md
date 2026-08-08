@@ -35,10 +35,15 @@ bash scripts/prepare-release.sh --bump patch
 Do not create or move the version tag by hand for the normal manual path. Run
 the **Release - Publish Crate** workflow from the default branch without a
 version input. It derives the reviewed version from `Cargo.toml`, eliminating a
-second operator-entered identity. If the matching tag already exists after a
-partial run, the workflow requires that it is annotated, reachable from the
-dispatched default-branch commit, and consistent with the tagged Cargo and
-changelog metadata; the retry then publishes that immutable source commit.
+second operator-entered identity. When the tag is absent, it walks the complete
+first-parent history and selects the unique commit that introduced that package
+version. This preserves the reviewed release candidate if documentation or
+workflow fixes reach the default branch before publication, and it fails closed
+if history is shallow or a version was reused. If the matching tag already
+exists after a partial run, the workflow requires that it is annotated,
+reachable from the dispatched default-branch commit, and consistent with the
+tagged Cargo and changelog metadata; the retry then publishes that immutable
+source commit.
 
 The release workflow directly calls the reusable container workflow. It does
 not depend on a tag created with `GITHUB_TOKEN` starting a second workflow.

@@ -5132,6 +5132,10 @@ fn test_release_dispatch_derives_identity_and_reuses_only_safe_tags() {
         "dispatch_revision=$(git rev-parse \"HEAD^{commit}\")",
         "version=$(read_cargo_version)",
         "tag=\"v${version}\"",
+        "find_version_introduction \"$dispatch_revision\" \"$version\"",
+        "git rev-parse --is-shallow-repository",
+        "git rev-list --first-parent \"$dispatch_revision\" -- Cargo.toml",
+        "multiple first-parent introduction commits",
         "git ls-remote --exit-code --tags origin \"refs/tags/${tag}\"",
         "Existing release tag ${candidate_tag} is lightweight",
         "source_revision=$(git rev-parse \"refs/tags/${tag}^{commit}\")",
@@ -5149,6 +5153,11 @@ fn test_release_dispatch_derives_identity_and_reuses_only_safe_tags() {
              Resolver:\n{resolver}"
         );
     }
+    assert!(
+        !resolver.contains("source_revision=$dispatch_revision"),
+        "An absent release tag must resolve the reviewed version-introduction commit, not a \
+         later default-branch tip.\nResolver:\n{resolver}"
+    );
 }
 
 #[test]

@@ -688,12 +688,17 @@ Enable git hooks as a final last-resort guard:
 
 ## Release Process
 
-1. Update version in `Cargo.toml`
-2. Update `CHANGELOG.md`
-3. Run full test suite: `cargo test --all-features`
-4. Build release: `cargo build --release`
-5. Tag release: `git tag v0.x.x`
-6. Push: `git push origin v0.x.x`
+Use the two reviewed workflows in the [release runbook](releasing.md):
+
+1. Dispatch **Prepare Release**, review its generated version/changelog pull
+   request, and merge only after required checks pass.
+2. Dispatch **Release - Publish Crate** from the default branch. It selects the
+   reviewed version-introduction commit and creates the immutable annotated tag,
+   crate, GitHub Release, binaries, SBOM, and versioned container artifacts.
+3. Run the independent public-artifact verification from the release runbook.
+
+Do not edit release metadata or create and push version tags by hand during the
+normal release path.
 
 ## Next Steps
 
