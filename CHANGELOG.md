@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Make live-reference-client interoperability failures actionable (issue
+  #301). A missing native WebRTC candidate pair now reports the client's exit
+  code, stderr, full event progression, and advertised ICE candidates. The
+  hosted Fortress/Godot WASM gate permits one recovered prediction-window
+  denial but fails on any repetition; its zero-wait, progress, throughput,
+  queue, rollback, checksum, conservation, and error oracles remain unchanged.
+  The expanded acceptance-threshold report and browser configuration use schema
+  version 3, so stale v2 exports fail closed instead of silently omitting the
+  new stall boundary.
 - Refresh the browser reference client's runtime and development toolchain:
   Playwright Core 1.62.1, TypeScript 7.0.2, Prettier 3.9.6, and Node.js 26 type
   definitions. The supported Node.js floor remains 20.

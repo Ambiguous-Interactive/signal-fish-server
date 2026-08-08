@@ -18,6 +18,8 @@ readonly LIBRARY_NAME="signal_fish_fortress_wasm_interop"
 readonly TARGET_DIR="${REPO_ROOT}/target/fortress-wasm"
 readonly COMMON_RUSTFLAGS="-Z unstable-options -C panic=immediate-abort -C link-arg=-sSIDE_MODULE=2 -C llvm-args=-enable-emscripten-cxx-exceptions=0 -Z default-visibility=hidden -Z link-native-libraries=no"
 
+node "${FIXTURE_ROOT}/harness.mjs" self-test
+
 if ! command -v emcc >/dev/null 2>&1; then
     if [[ -n "${EMSDK:-}" && -f "${EMSDK}/emsdk_env.sh" ]]; then
         # shellcheck disable=SC1091

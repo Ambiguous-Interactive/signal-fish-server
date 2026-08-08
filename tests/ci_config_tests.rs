@@ -24731,7 +24731,8 @@ SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVE
     for required in [
         "async fn two_peer_mesh_exchanges_over_live_webrtc()",
         r#"let run = run_two_peer_mesh("interop-cross-platform-smoke", &[]).await;"#,
-        "assert_direct_host_path(window, who, peer_id);",
+        "let failure_context = run.selected_pair_failure_context(index);",
+        "assert_direct_host_path(window, who, peer_id, &failure_context);",
         "assert_exchange_sent_to(window, who, &peers);",
         "assert_exchange_received_from(window, who, &peers);",
         "assert_transport_status_true(&run.logs[index], who);",
@@ -24757,7 +24758,7 @@ SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVE
         "The lane must not be skipped silently.",
         // The path is asserted to be direct IPv6 toward the planned peer.
         "fn assert_ipv6_host_path(",
-        "assert_ipv6_host_path(window, who, peer_id);",
+        "assert_ipv6_host_path(window, who, peer_id, &failure_context);",
         "fn selected_ip_address(event: &Value, field: &str, who: &str) -> IpAddr {",
         "let IpAddr::V6(address) = address else {",
         r#"for field in ["local_candidate_type", "remote_candidate_type"] {"#,
@@ -25065,7 +25066,9 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "use signal_fish_client_godot::GodotWebSocketTransport;",
         "const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = \"0.9.0\";",
         "signal_fish_client_godot_version: SIGNAL_FISH_CLIENT_GODOT_VERSION",
-        "const REPORT_SCHEMA_VERSION: u32 = 2;",
+        "const REPORT_SCHEMA_VERSION: u32 = 3;",
+        "const MAX_STALL_COUNT: u64 = 1;",
+        "max_stall_count: MAX_STALL_COUNT,",
     ] {
         assert!(
             source.contains(required),
@@ -25080,6 +25083,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "Engine.get_version_info()",
         "RenderingServer.set_render_loop_enabled(false)",
         "Engine.max_fps = 60",
+        "\"schema_version\": 3,",
         "config[\"schema_version\"] = int(",
         "config[\"browser_process_id\"] = int(",
         "config[\"godot_runtime\"]",
@@ -25100,7 +25104,9 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "sharedArrayBufferType === \"undefined\"",
         "workerConstructions === 0",
         "report.callback_count === report.poll_count",
-        "report.schema_version === 2",
+        "room.schema_version === 3",
+        "schema_version: 3,",
+        "report.schema_version === 3",
         "report.signal_fish_client_godot_version === \"0.9.0\"",
         "report.godot_runtime.string === \"4.5-stable (official)\"",
         "assertExactKeys(report, reportKeys",
@@ -25115,6 +25121,9 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence",
         "joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence",
         "const healthyViolations = peerHealth.flatMap",
+        "max_stall_count: 1,",
+        "stallCountWithinThreshold(report)",
+        "runHealthGateSelfTests();",
         "BUSTED fortress-wasm expected negative control",
         "HEALTHY fortress-wasm released-client interoperability",
     ] {
@@ -25152,6 +25161,17 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
             && !released_classification.contains("completion bottleneck"),
         "P13 released classifier must require health instead of accepting the old bottleneck"
     );
+    let forbidden_start = harness
+        .find("const forbidden = [")
+        .expect("P13 harness must define exact-zero failure counters");
+    let forbidden_end = harness[forbidden_start..]
+        .find("];\n")
+        .map(|offset| forbidden_start + offset)
+        .expect("P13 exact-zero failure counter list must be bounded");
+    assert!(
+        !harness[forbidden_start..forbidden_end].contains("\"stall_count\""),
+        "P13 must apply the evidence-backed one-stall threshold separately from exact-zero counters"
+    );
     for required in [
         "report.active_callback_count >= 600",
         "report.max_admissions_per_callback === 1",
@@ -25181,6 +25201,10 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     assert!(
         !harness.contains("/confirmed_frame|completed rate|sends per callback/"),
         "P13 negative control must not accept shortened confirmed-frame progress as expected BUSTED evidence"
+    );
+    assert!(
+        runner.contains("node \"${FIXTURE_ROOT}/harness.mjs\" self-test"),
+        "P13 runner must execute the data-driven health-threshold regression before the expensive build"
     );
     let persist_before_close = harness
         .find("await persistPeerArtifacts(joiner, joinerReport)")

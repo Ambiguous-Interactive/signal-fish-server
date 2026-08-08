@@ -31,7 +31,11 @@ Rust floor is 1.94.0, intentionally higher than the standalone server crate's
 MSRV. The primary cell requires both peers to satisfy every healthy throughput,
 progress, queue-age, conservation, rollback, checksum, cadence, and runtime
 identity gate. Any missing report or invariant violation fails closed as
-`BUSTED`; only the complete two-peer result prints `HEALTHY`.
+`BUSTED`; only the complete two-peer result prints `HEALTHY`. The hosted WASM
+gate permits at most one recovered prediction-window-denied game callback and
+fails on a second. Wait recommendations remain forbidden, as do every existing
+loss, overflow, throughput, queue-age, lag, rollback, checksum, and conservation
+violation. The native Fortress gate retains its stricter zero-stall boundary.
 
 Exact-head CI with the released 0.9.0 graph passed the complete primary cell:
 both reports satisfied every health and identity invariant and printed
