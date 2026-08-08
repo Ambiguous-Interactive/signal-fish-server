@@ -1576,6 +1576,32 @@ fn tracked_package_manifests(root: &Path) -> Vec<String> {
     manifests
 }
 
+fn tracked_cargo_lockfiles(root: &Path) -> BTreeSet<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--", "Cargo.lock", "*/Cargo.lock"])
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("`git ls-files` failed ({error}); this guard requires a git checkout")
+        });
+    assert!(
+        output.status.success(),
+        "`git ls-files` exited with {}; this guard requires a git checkout",
+        output.status
+    );
+    let lockfiles = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.replace('\\', "/"))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        lockfiles.contains("Cargo.lock"),
+        "the tracked Cargo lockfile inventory must include the server graph"
+    );
+    lockfiles
+}
+
 #[test]
 fn test_msrv_consistency_across_config_files() {
     // This test prevents the MSRV inconsistency issue that was fixed in commit d9eac0f
@@ -16385,12 +16411,6 @@ fn assert_dependabot_cargo_holds(directory: &str, expected: &[(&str, &str)]) {
     }
 }
 
-fn dependabot_cargo_directories() -> BTreeSet<String> {
-    let path = repo_root().join(".github/dependabot.yml");
-    let content = read_live_file(&path);
-    dependabot_cargo_directories_from_yaml(&content)
-}
-
 fn dependabot_cargo_directories_from_yaml(content: &str) -> BTreeSet<String> {
     let documents = Yaml::load_from_str(content).expect("dependabot.yml must parse as YAML");
     let updates = documents
@@ -21857,10 +21877,9 @@ fn test_audit_job_installs_cargo_audit() {
 }
 
 #[test]
-fn test_audit_job_covers_every_dependabot_managed_cargo_graph() {
-    // Every graph that Dependabot advances needs the scheduled cargo-audit
-    // second opinion. Otherwise a standalone lockfile can receive updates
-    // without ever being scanned by this daily job.
+fn test_audit_job_covers_every_tracked_cargo_graph() {
+    // Exact-release compatibility fixtures intentionally opt out of automatic
+    // updates, but they still need the scheduled cargo-audit second opinion.
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
@@ -21872,23 +21891,17 @@ fn test_audit_job_covers_every_dependabot_managed_cargo_graph() {
         .filter_map(|line| line.trim().strip_prefix("run: "))
         .collect::<BTreeSet<_>>();
 
-    for directory in dependabot_cargo_directories() {
-        let lockfile = if directory == "/" {
-            "Cargo.lock".to_owned()
-        } else {
-            format!("{}/Cargo.lock", directory.trim_start_matches('/'))
-        };
-        let expected_command = if directory == "/" {
+    for lockfile in tracked_cargo_lockfiles(&root) {
+        let expected_command = if lockfile == "Cargo.lock" {
             "cargo audit".to_owned()
         } else {
             format!("cargo audit --file {lockfile}")
         };
         assert!(
             audit_commands.contains(expected_command.as_str()),
-            "The scheduled cargo-audit job must scan every Dependabot-managed Cargo graph.\n\
+            "The scheduled cargo-audit job must scan every tracked Cargo graph.\n\
              Missing command: {expected_command}\n\
-             Uncovered lockfile: {lockfile}\n\
-             Dependabot directory: {directory}"
+             Uncovered lockfile: {lockfile}"
         );
     }
 
@@ -21896,6 +21909,44 @@ fn test_audit_job_covers_every_dependabot_managed_cargo_graph() {
         !audit_section.contains("cargo audit --locked"),
         "cargo-audit reads Cargo.lock directly and does not support --locked.\n\
          Fix: use `cargo audit` without --locked in .github/workflows/ci.yml."
+    );
+}
+
+#[test]
+fn test_deny_job_covers_every_tracked_cargo_graph() {
+    let root = repo_root();
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&ci_content).expect("ci.yml must parse as YAML");
+    let steps = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("deny"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("ci.yml must define jobs.deny.steps"));
+    let configured = steps
+        .iter()
+        .filter(|step| {
+            step.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|uses| uses.starts_with("EmbarkStudios/cargo-deny-action@"))
+        })
+        .map(|step| {
+            step.as_mapping_get("with")
+                .and_then(|with| with.as_mapping_get("manifest-path"))
+                .and_then(Yaml::as_str)
+                .unwrap_or("Cargo.toml")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    let expected = tracked_cargo_lockfiles(&root)
+        .into_iter()
+        .map(|lockfile| lockfile.replace("Cargo.lock", "Cargo.toml"))
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        configured, expected,
+        "the push/PR/daily cargo-deny job must enforce every tracked Cargo graph"
     );
 }
 
@@ -23988,16 +24039,29 @@ fn test_run_local_ci_excludes_check_outdated() {
     );
 }
 
+fn cargo_lock_package<'a>(lockfile: &'a str, name: &str, version: &str) -> &'a str {
+    let marker = format!("name = \"{name}\"\nversion = \"{version}\"");
+    let start = lockfile
+        .find(&marker)
+        .unwrap_or_else(|| panic!("Cargo.lock is missing `{marker}`"));
+    &lockfile[start
+        ..lockfile[start..]
+            .find("\n\n")
+            .map_or(lockfile.len(), |offset| start + offset)]
+}
+
 #[test]
 fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
     let root = repo_root();
     let root_manifest = read_file(&root.join("Cargo.toml"));
-    let manifest = read_file(&root.join("clients/fortress/Cargo.toml"));
+    let manifest = read_live_file(&root.join("clients/fortress/Cargo.toml"));
+    let lockfile = read_file(&root.join("clients/fortress/Cargo.lock"));
+    let deny = read_file(&root.join("clients/fortress/deny.toml"));
     let workflow = read_live_file(&root.join(".github/workflows/fortress-interop.yml"));
     let runner = read_file(&root.join("scripts/run-fortress-interop.sh"));
 
     for dependency in [
-        "fortress-rollback = \"=0.10.0\"",
+        "fortress-rollback = \"=0.12.0\"",
         "signal-fish-client = { version = \"=0.8.0\"",
     ] {
         assert!(
@@ -24005,6 +24069,37 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
             "clients/fortress must exact-pin its production interoperability dependency: {dependency}"
         );
     }
+
+    let fortress_package = cargo_lock_package(&lockfile, "fortress-rollback", "0.12.0");
+    let codec_package = cargo_lock_package(&lockfile, "bincode-next", "2.1.0");
+    let fixture_package = cargo_lock_package(&lockfile, "signal-fish-fortress-interop", "0.1.0");
+    for package in [fortress_package, codec_package] {
+        assert!(
+            package.contains("source = \"registry+https://github.com/rust-lang/crates.io-index\""),
+            "the native Fortress graph must resolve exact releases from crates.io: {package}"
+        );
+    }
+    assert!(
+        fixture_package.contains(" \"fortress-rollback\","),
+        "the native fixture must directly lock Fortress Rollback: {fixture_package}"
+    );
+    assert_eq!(
+        lockfile.matches("name = \"fortress-rollback\"\n").count(),
+        1,
+        "the native fixture must resolve exactly one Fortress Rollback release"
+    );
+    assert!(
+        fortress_package.contains(" \"bincode-next\","),
+        "Fortress 0.12.0 must directly use the maintained codec: {fortress_package}"
+    );
+    assert!(
+        !lockfile.contains("name = \"bincode\"\n"),
+        "the native Fortress graph must not restore unmaintained bincode"
+    );
+    assert!(
+        !deny.contains("RUSTSEC-2025-0141"),
+        "the native Fortress policy must not restore the obsolete bincode advisory exception"
+    );
 
     assert_eq!(
         extract_toml_version(&manifest, "rust-version"),
@@ -24995,17 +25090,18 @@ fn test_ice_bind_set_and_advertised_candidate_oracles_are_pinned() {
 #[test]
 fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let root = repo_root();
-    let manifest = read_file(&root.join("clients/fortress-wasm/Cargo.toml"));
+    let manifest = read_live_file(&root.join("clients/fortress-wasm/Cargo.toml"));
     let lockfile = read_file(&root.join("clients/fortress-wasm/Cargo.lock"));
     let source = read_file(&root.join("clients/fortress-wasm/src/lib.rs"));
     let harness = read_file(&root.join("clients/fortress-wasm/harness.mjs"));
     let project = read_file(&root.join("clients/fortress-wasm/project/export_presets.cfg"));
     let bridge = read_file(&root.join("clients/fortress-wasm/project/main.gd"));
     let runner = read_file(&root.join("scripts/run-fortress-wasm-interop.sh"));
+    let deny = read_file(&root.join("clients/fortress-wasm/deny.toml"));
     let workflow = read_live_file(&root.join(".github/workflows/fortress-wasm-interop.yml"));
 
     for dependency in [
-        "fortress-rollback = \"=0.10.0\"",
+        "fortress-rollback = \"=0.12.0\"",
         "signal-fish-client = { version = \"=0.9.0\", default-features = false, features = [\"polling-client\"] }",
         "signal-fish-client-godot = \"=0.9.0\"",
         "godot = { version = \"=0.4.5\", features = [\"api-custom\", \"experimental-wasm\", \"experimental-wasm-nothreads\", \"lazy-function-tables\"] }",
@@ -25019,24 +25115,43 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         extract_toml_version(&manifest, "rust-version"),
         Some("1.94.0".to_owned())
     );
-    for locked in [
-        "name = \"fortress-rollback\"\nversion = \"0.10.0\"",
-        "name = \"signal-fish-client\"\nversion = \"0.9.0\"",
-        "name = \"signal-fish-client-godot\"\nversion = \"0.9.0\"",
-        "name = \"godot\"\nversion = \"0.4.5\"",
+    for (name, version) in [
+        ("fortress-rollback", "0.12.0"),
+        ("bincode-next", "2.1.0"),
+        ("signal-fish-client", "0.9.0"),
+        ("signal-fish-client-godot", "0.9.0"),
+        ("godot", "0.4.5"),
     ] {
-        let start = lockfile
-            .find(locked)
-            .unwrap_or_else(|| panic!("Fortress WASM lockfile is missing `{locked}`"));
-        let package = &lockfile[start
-            ..lockfile[start..]
-                .find("\n\n")
-                .map_or(lockfile.len(), |offset| start + offset)];
+        let package = cargo_lock_package(&lockfile, name, version);
         assert!(
             package.contains("source = \"registry+https://github.com/rust-lang/crates.io-index\""),
             "P13 production dependencies must resolve from crates.io without path/Git overrides: {package}"
         );
     }
+    let fortress_package = cargo_lock_package(&lockfile, "fortress-rollback", "0.12.0");
+    let fixture_package =
+        cargo_lock_package(&lockfile, "signal-fish-fortress-wasm-interop", "0.1.0");
+    assert!(
+        fixture_package.contains(" \"fortress-rollback\","),
+        "the WASM fixture must directly lock Fortress Rollback: {fixture_package}"
+    );
+    assert_eq!(
+        lockfile.matches("name = \"fortress-rollback\"\n").count(),
+        1,
+        "the WASM fixture must resolve exactly one Fortress Rollback release"
+    );
+    assert!(
+        fortress_package.contains(" \"bincode-next\","),
+        "Fortress 0.12.0 must directly use the maintained codec: {fortress_package}"
+    );
+    assert!(
+        !lockfile.contains("name = \"bincode\"\n"),
+        "the Fortress WASM graph must not restore unmaintained bincode"
+    );
+    assert!(
+        !deny.contains("RUSTSEC-2025-0141"),
+        "the Fortress WASM policy must not restore the obsolete bincode advisory exception"
+    );
 
     assert!(project.contains("variant/thread_support=false"));
     assert!(project.contains("variant/extensions_support=true"));
@@ -25065,6 +25180,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "relay_received_sequence_hash",
         "use signal_fish_client_godot::GodotWebSocketTransport;",
         "const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = \"0.9.0\";",
+        "const FORTRESS_ROLLBACK_VERSION: &str = \"0.12.0\";",
         "signal_fish_client_godot_version: SIGNAL_FISH_CLIENT_GODOT_VERSION",
         "const REPORT_SCHEMA_VERSION: u32 = 3;",
         "const MAX_STALL_COUNT: u64 = 1;",
@@ -25108,6 +25224,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "schema_version: 3,",
         "report.schema_version === 3",
         "report.signal_fish_client_godot_version === \"0.9.0\"",
+        "report.fortress_rollback_version === \"0.12.0\"",
         "report.godot_runtime.string === \"4.5-stable (official)\"",
         "assertExactKeys(report, reportKeys",
         "report.relay_send_retries <= 8",
@@ -25251,6 +25368,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "timeout --foreground",
         "signal-fish-client v0.9.0",
         "signal-fish-client-godot v0.9.0",
+        "fortress-rollback v0.12.0",
         "HEALTHY: released Signal Fish client 0.9.0",
     ] {
         assert!(
@@ -25273,23 +25391,23 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         );
     }
 
-    for required_path in [
-        "src/**",
-        "Cargo.toml",
-        "Cargo.lock",
-        "clients/fortress/src/relay.rs",
-        "clients/fortress/src/workload.rs",
-        "clients/fortress-wasm/**",
-        "clients/browser/package-lock.json",
-        "scripts/run-fortress-wasm-interop.sh",
-        ".github/workflows/fortress-wasm-interop.yml",
-    ] {
-        assert_eq!(
-            workflow.matches(&format!("- \"{required_path}\"")).count(),
-            2,
-            "fortress-wasm-interop.yml must trigger on `{required_path}` for push and pull_request"
-        );
-    }
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "fortress-wasm-interop.yml",
+        &[
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "clients/fortress/src/relay.rs",
+            "clients/fortress/src/workload.rs",
+            "clients/fortress-wasm/**",
+            "clients/browser/package.json",
+            "clients/browser/package-lock.json",
+            "scripts/run-fortress-wasm-interop.sh",
+            ".github/workflows/fortress-wasm-interop.yml",
+        ],
+    );
     for required in [
         "GODOT_EDITOR_SHA512:",
         "GODOT_TEMPLATES_SHA512:",

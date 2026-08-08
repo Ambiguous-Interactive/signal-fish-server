@@ -416,12 +416,30 @@ jobs:
           # before executing cargo-deny. This avoids relying on preinstalled
           # aliases like `stable` that may be absent in the container image.
           rust-version: ${{ steps.deny-msrv.outputs.version }}
+      - name: Run cargo-deny (native reference client)
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          manifest-path: clients/native/Cargo.toml
+          arguments: --all-features
+          rust-version: ${{ steps.deny-msrv.outputs.version }}
       - name: Run cargo-deny (fuzz package)
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           manifest-path: fuzz/Cargo.toml
           arguments: --all-features
           rust-version: ${{ steps.deny-msrv.outputs.version }}
+      - name: Run cargo-deny (Fortress fixture)
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          manifest-path: clients/fortress/Cargo.toml
+          arguments: --all-features
+          rust-version: ${{ steps.deny-msrv.outputs.version }}
+      - name: Run cargo-deny (Fortress WASM fixture)
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          manifest-path: clients/fortress-wasm/Cargo.toml
+          arguments: --all-features
+          rust-version: 1.94.0
 
   audit:
     name: Audit (cargo-audit)
@@ -471,6 +489,10 @@ jobs:
         run: cargo audit --file clients/native/Cargo.lock
       - name: Run cargo-audit (fuzz package)
         run: cargo audit --file fuzz/Cargo.lock
+      - name: Run cargo-audit (Fortress fixture)
+        run: cargo audit --file clients/fortress/Cargo.lock
+      - name: Run cargo-audit (Fortress WASM fixture)
+        run: cargo audit --file clients/fortress-wasm/Cargo.lock
 
   msrv:
     name: MSRV Verification
