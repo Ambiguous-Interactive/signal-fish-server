@@ -71,11 +71,24 @@ under Unreleased without implying a Signal Fish Server wire or runtime change.
   WASM runtime-identity coverage, all-lockfile `cargo audit` coverage, exact
   workflow-trigger coverage, and the ignored progress file. All five were
   corrected. The independent follow-up review reported zero findings.
-- Exact-head hosted CI and GitHub review evidence are appended before the
-  session closes.
+- PR #310 code head `fcb9d4d` completed all 13 substantive hosted workflows
+  successfully. This includes the full [CI run][ci-run], [Advanced Safety
+  run][safety-run], exact native Fortress gate, and authoritative [Fortress
+  WASM run][wasm-run]. The latter compiled the 0.12.0 graph with the pinned
+  Godot/Emscripten toolchain and passed both healthy Chromium acceptance and
+  the expected-`BUSTED` negative control. Both Dependabot-only runs skipped as
+  designed.
+- GitHub review inspection on PR #310 found no inline threads, requested
+  changes, or actionable comments. The only hosted review was a Copilot quota
+  notice; the two independent adversarial reviews remain the substantive review
+  evidence.
 
 ## Follow-up boundary
 
 P53 and P56 keep their existing hosted sample requirements. After this PR is
 merged green, issue #307 prepares the fresh 0.6.0 candidate from the updated
 main tree; this session does not stack a release PR.
+
+[ci-run]: https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/31267300438
+[safety-run]: https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/31267300446
+[wasm-run]: https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/31267300461
