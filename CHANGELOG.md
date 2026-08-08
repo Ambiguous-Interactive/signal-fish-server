@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve the reviewed release-preparation source when documentation or
+  workflow changes reach the default branch before publication. Manual releases
+  now select the unique first-parent commit that introduced the package version
+  and reject shallow history or reused version boundaries instead of publishing
+  a later tree under the prepared version.
+
 ## [0.6.0] - 2026-08-08
 
 ### Added
