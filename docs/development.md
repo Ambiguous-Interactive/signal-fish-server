@@ -268,6 +268,22 @@ receiver-drain ledgers do not prove every expected delivery. Its allocator uses
 sequentially consistent counters, so its output is an allocation baseline, not
 a latency benchmark; use the ordinary Criterion benchmarks for timing.
 
+Measure the complete ingress-to-wire projection across frozen-v2 raw binary,
+protocol-v3 JSON and MessagePack, and mixed-format recipient cohorts:
+
+```bash
+
+cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking
+
+```
+
+This required CI benchmark checks five identical samples per 2-, 8-, and
+16-player cell. It proves exact wire digests, codec-operation counts, delivery
+ledgers, queue drainage, and allocation-operation, reallocation, and allocated-
+byte ceilings. When projection work repeats within a relay's recipient set, it
+uses one 472-byte lazy frame cache; single-recipient, non-repeating, and
+frozen-v2 raw-passthrough relays do not allocate it.
+
 The ignored real-WebSocket saturation diagnostic retains the exact 16-player
 rates used for release-profile comparisons without adding them to default CI:
 

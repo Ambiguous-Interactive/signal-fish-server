@@ -85,9 +85,10 @@ impl DeliveryMessage {
     }
 
     pub(crate) fn shared_relay(message: Arc<ServerMessage>) -> Self {
+        let relay_frame_cache = RelayFrameCache::for_message(message.as_ref()).map(Arc::new);
         Self {
             message,
-            relay_frame_cache: Some(Arc::new(RelayFrameCache::default())),
+            relay_frame_cache,
         }
     }
 

@@ -51,7 +51,7 @@ pub(super) fn preflight_binary_fallback(
     if *encoding == recipient_format {
         return BinaryFallbackPreflight::NotNeeded;
     }
-    if let Some(cache) = relay_cache {
+    if let Some(cache) = relay_cache.filter(|cache| cache.kind == RelayFrameKind::Binary) {
         return match cache.decoded_fallback.get_or_init(|| {
             let decoded = decode_binary_to_json(*encoding, payload).map(Arc::new);
             if decoded.is_ok() && *encoding == GameDataEncoding::MessagePack {
@@ -108,30 +108,69 @@ enum RelayFrameCohort {
     BinaryFallbackV3,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayFrameKind {
+    Text,
+    Binary,
+}
+
+impl RelayFrameCohort {
+    const fn kind(self) -> RelayFrameKind {
+        match self {
+            Self::TextV2 | Self::TextV3 => RelayFrameKind::Text,
+            Self::BinaryDirectV2
+            | Self::BinaryDirectV3
+            | Self::BinaryFallbackV2
+            | Self::BinaryFallbackV3 => RelayFrameKind::Binary,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct RelayFrameCache {
-    text_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
-    text_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
-    binary_direct_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
-    binary_direct_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
-    binary_fallback_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
-    binary_fallback_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    kind: RelayFrameKind,
+    // Text and binary relays are mutually exclusive for one logical message,
+    // so their v2/v3 slots can share storage instead of reserving six full
+    // MaterializedFrame results for every shared relay.
+    primary_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    primary_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    fallback_v2: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
+    fallback_v3: OnceLock<Result<MaterializedFrame, GameDataMaterializationError>>,
     decoded_fallback: OnceLock<Result<Arc<serde_json::Value>, String>>,
     message_pack_decode_unreported: AtomicBool,
 }
 
 impl RelayFrameCache {
+    pub(crate) fn for_message(message: &ServerMessage) -> Option<Self> {
+        let kind = match message {
+            ServerMessage::GameData { .. } => RelayFrameKind::Text,
+            ServerMessage::GameDataBinary { .. } => RelayFrameKind::Binary,
+            _ => return None,
+        };
+        Some(Self {
+            kind,
+            primary_v2: OnceLock::new(),
+            primary_v3: OnceLock::new(),
+            fallback_v2: OnceLock::new(),
+            fallback_v3: OnceLock::new(),
+            decoded_fallback: OnceLock::new(),
+            message_pack_decode_unreported: AtomicBool::new(false),
+        })
+    }
+
+    fn supports(&self, cohort: RelayFrameCohort) -> bool {
+        self.kind == cohort.kind()
+    }
+
     fn slot(
         &self,
         cohort: RelayFrameCohort,
     ) -> &OnceLock<Result<MaterializedFrame, GameDataMaterializationError>> {
         match cohort {
-            RelayFrameCohort::TextV2 => &self.text_v2,
-            RelayFrameCohort::TextV3 => &self.text_v3,
-            RelayFrameCohort::BinaryDirectV2 => &self.binary_direct_v2,
-            RelayFrameCohort::BinaryDirectV3 => &self.binary_direct_v3,
-            RelayFrameCohort::BinaryFallbackV2 => &self.binary_fallback_v2,
-            RelayFrameCohort::BinaryFallbackV3 => &self.binary_fallback_v3,
+            RelayFrameCohort::TextV2 | RelayFrameCohort::BinaryDirectV2 => &self.primary_v2,
+            RelayFrameCohort::TextV3 | RelayFrameCohort::BinaryDirectV3 => &self.primary_v3,
+            RelayFrameCohort::BinaryFallbackV2 => &self.fallback_v2,
+            RelayFrameCohort::BinaryFallbackV3 => &self.fallback_v3,
         }
     }
 
@@ -199,7 +238,7 @@ pub(super) fn materialize_game_data_frame(
             ));
         }
     };
-    if let Some(cache) = relay_cache {
+    if let Some(cache) = relay_cache.filter(|cache| cache.supports(cohort)) {
         return cache.materialize(cohort, || {
             materialize_game_data_frame_uncached(
                 message,
@@ -1404,7 +1443,10 @@ mod tests {
             class: Some(crate::protocol::DeliveryClass::Reliable),
             key: None,
         };
-        let text_cache = RelayFrameCache::default();
+        let text_cache = RelayFrameCache::for_message(&text).expect("text relay cache");
+        assert!(text_cache.supports(RelayFrameCohort::TextV2));
+        assert!(text_cache.supports(RelayFrameCohort::TextV3));
+        assert!(!text_cache.supports(RelayFrameCohort::BinaryDirectV3));
         for supports_v3 in [false, true] {
             let first = materialize_game_data_frame(
                 &text,
@@ -1435,7 +1477,11 @@ mod tests {
             seq: Some(42),
             epoch: Some(3),
         };
-        let binary_cache = RelayFrameCache::default();
+        let binary_cache = RelayFrameCache::for_message(&binary).expect("binary relay cache");
+        assert!(binary_cache.supports(RelayFrameCohort::BinaryDirectV2));
+        assert!(binary_cache.supports(RelayFrameCohort::BinaryFallbackV3));
+        assert!(!binary_cache.supports(RelayFrameCohort::TextV3));
+        assert!(RelayFrameCache::for_message(&ServerMessage::RoomLeft).is_none());
         for (index, supports_v3) in [false, true].into_iter().enumerate() {
             let preflight =
                 preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&binary_cache));
@@ -1488,7 +1534,61 @@ mod tests {
     }
 
     #[test]
-    fn relay_cache_attributes_shared_decode_to_the_winning_concurrent_cohort() {
+    fn wrong_kind_cache_bypasses_binary_preflight_and_materialization() {
+        let text = ServerMessage::GameData {
+            from_player: player_a(),
+            data: serde_json::json!({"kind": "text"}),
+            seq: Some(1),
+            epoch: Some(1),
+            class: None,
+            key: None,
+        };
+        let text_cache = RelayFrameCache::for_message(&text).expect("text relay cache");
+
+        for (index, data) in [
+            serde_json::json!({"move": "up", "n": 3}),
+            serde_json::json!({"move": "down", "n": 9}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+            let binary = ServerMessage::GameDataBinary {
+                from_player: player_a(),
+                encoding: GameDataEncoding::MessagePack,
+                payload: payload.into(),
+                seq: Some(index as u64 + 1),
+                epoch: Some(1),
+            };
+            let expected_preflight =
+                preflight_binary_fallback(&binary, GameDataEncoding::Json, None);
+            let expected = materialize_game_data_frame(
+                &binary,
+                true,
+                GameDataEncoding::Json,
+                expected_preflight,
+                None,
+            )
+            .expect("uncached fallback projection");
+
+            let mismatched_preflight =
+                preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&text_cache));
+            let actual = materialize_game_data_frame(
+                &binary,
+                true,
+                GameDataEncoding::Json,
+                mismatched_preflight,
+                Some(&text_cache),
+            )
+            .expect("wrong-kind cache must use the uncached projection");
+
+            assert_eq!(actual.frame, expected.frame, "message {index} wire frame");
+            assert_eq!(actual.work, expected.work, "message {index} codec work");
+        }
+    }
+
+    #[test]
+    fn relay_cache_attributes_one_decode_across_concurrent_fallback_cohorts() {
         let data = serde_json::json!({"move": "up", "n": 3});
         let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
         let binary = Arc::new(ServerMessage::GameDataBinary {
@@ -1498,7 +1598,7 @@ mod tests {
             seq: Some(42),
             epoch: Some(3),
         });
-        let cache = Arc::new(RelayFrameCache::default());
+        let cache = Arc::new(RelayFrameCache::for_message(&binary).expect("binary relay cache"));
         let (preflight_ready_tx, preflight_ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
 
@@ -1533,7 +1633,7 @@ mod tests {
             preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&cache));
         let winning = materialize_game_data_frame(
             &binary,
-            false,
+            true,
             GameDataEncoding::Json,
             winning_preflight,
             Some(&cache),
@@ -1544,17 +1644,84 @@ mod tests {
             .expect("delayed thread must still be waiting");
         let delayed = delayed.join().expect("delayed projection must not panic");
 
-        assert_eq!(winning.frame, delayed.frame);
+        assert_ne!(
+            winning.frame, delayed.frame,
+            "v3 and frozen-v2 fallbacks must initialize distinct wire cohorts"
+        );
         assert_eq!(
             winning.work.message_pack_decodes + delayed.work.message_pack_decodes,
             1,
-            "the shared MessagePack decode must be attributed exactly once even when \
-             a different thread wins cohort initialization"
+            "the shared MessagePack decode must be attributed exactly once across \
+             concurrent v2/v3 fallback initialization"
         );
         assert_eq!(
             winning.work.json_encodes + delayed.work.json_encodes,
+            2,
+            "both exact fallback cohorts must serialize once"
+        );
+    }
+
+    #[test]
+    fn relay_cache_initializes_one_frame_across_same_fallback_cohort_race() {
+        let data = serde_json::json!({"move": "up", "n": 3});
+        let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+        let binary = Arc::new(ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: payload.into(),
+            seq: Some(42),
+            epoch: Some(3),
+        });
+        let cache = Arc::new(RelayFrameCache::for_message(&binary).expect("binary relay cache"));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+
+        for _ in 0..2 {
+            let binary = Arc::clone(&binary);
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                let preflight = preflight_binary_fallback(
+                    binary.as_ref(),
+                    GameDataEncoding::Json,
+                    Some(&cache),
+                );
+                barrier.wait();
+                materialize_game_data_frame(
+                    binary.as_ref(),
+                    false,
+                    GameDataEncoding::Json,
+                    preflight,
+                    Some(&cache),
+                )
+                .expect("racing fallback projection")
+            }));
+        }
+
+        barrier.wait();
+        let frames: [MaterializedFrame; 2] = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("fallback projection must not panic"))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("exactly two fallback projections");
+        let [left, right] = frames;
+        assert_eq!(left.frame, right.frame);
+        assert_eq!(
+            [&left, &right]
+                .into_iter()
+                .map(|frame| frame.work.json_encodes)
+                .sum::<u64>(),
             1,
-            "one exact fallback cohort must serialize exactly once"
+            "one same-cohort racer must initialize the JSON frame"
+        );
+        assert_eq!(
+            [&left, &right]
+                .into_iter()
+                .map(|frame| frame.work.message_pack_decodes)
+                .sum::<u64>(),
+            1,
+            "the shared MessagePack decode must be attributed exactly once"
         );
     }
 

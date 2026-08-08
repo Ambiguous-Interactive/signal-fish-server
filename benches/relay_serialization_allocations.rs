@@ -82,18 +82,15 @@ fn print_sample(scenario: Scenario, room_size: usize, sample: &Sample) {
 fn assert_allocation_ceiling(scenario: Scenario, room_size: usize, sample: &Sample) {
     let (maximum_operations_per_relay, maximum_reallocations_per_relay, maximum_bytes_per_relay) =
         match (scenario, room_size) {
-            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 2) => (3, 0, 425),
-            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 8) => (3, 0, 665),
-            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 16) => (3, 0, 985),
-            (Scenario::V3JsonText, 2) => (8, 3, 2_587),
-            (Scenario::V3JsonText, 8) => (9, 3, 3_507),
-            (Scenario::V3JsonText, 16) => (9, 3, 3_827),
-            (Scenario::V3MessagePackBinary, 2) => (5, 0, 1_581),
-            (Scenario::V3MessagePackBinary, 8) => (6, 0, 2_501),
-            (Scenario::V3MessagePackBinary, 16) => (6, 0, 2_821),
-            (Scenario::MixedMessagePackSource, 2) => (15, 0, 3_572),
-            (Scenario::MixedMessagePackSource, 8) => (22, 0, 8_090),
-            (Scenario::MixedMessagePackSource, 16) => (22, 0, 8_410),
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 2) => (2, 0, 425),
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 8) => (2, 0, 665),
+            (Scenario::V2JsonBinary | Scenario::V2RkyvBinary, 16) => (2, 0, 985),
+            (Scenario::V3JsonText, 2) => (7, 3, 2_587),
+            (Scenario::V3JsonText, 8 | 16) => (8, 3, 3_059),
+            (Scenario::V3MessagePackBinary, 2) => (4, 0, 1_581),
+            (Scenario::V3MessagePackBinary, 8 | 16) => (5, 0, 2_053),
+            (Scenario::MixedMessagePackSource, 2) => (14, 0, 3_572),
+            (Scenario::MixedMessagePackSource, 8 | 16) => (21, 0, 7_642),
             _ => panic!("room-{room_size} has no checked-in allocation baseline"),
         };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
