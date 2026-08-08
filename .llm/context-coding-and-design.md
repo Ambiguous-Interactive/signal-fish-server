@@ -28,7 +28,8 @@ Key rules:
   production `.expect()`
 - Validate all input at system boundaries
 - Use `checked_`/`saturating_` arithmetic -- never raw `as` casts that truncate
-- Use `Bytes` for network data, `SmallVec` for small collections, `DashMap` for concurrent access
+- Use `Bytes` for shared network data and `DashMap` for concurrent access;
+  choose specialized collections only when a production measurement justifies them
 - Never hold a sync `Mutex` across `.await`; use bounded channels with backpressure
 - Use structured logging with `tracing` -- no string interpolation in log macros
 - Classify our OWN errors with types, never by matching error strings. When a

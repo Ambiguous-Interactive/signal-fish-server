@@ -5,6 +5,6 @@
 {"type": "PlayerLeft", "data": {"player_id": "..."}}
 {"type": "GameData", "data": {"from_player": "...", "data": {}}}
 {"type": "LobbyStateChanged", "data": {"lobby_state": "lobby", "all_ready": false}}
-{"type": "AuthorityResponse", "data": {"granted": true, "reason": "Authority granted"}}
+{"type": "AuthorityResponse", "data": {"granted": true, "reason": null}}
 {"type": "Error", "data": {"message": "Room is full", "error_code": "ROOM_FULL"}}
 {"type": "Pong"}

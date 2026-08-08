@@ -54,10 +54,12 @@ impl Fixture {
         );
         write(
             &root.join("fuzz/Cargo.toml"),
-            "[package]\nname = \"signal-fish-server-fuzz\"\nversion = \"0.0.0\"\n\n\
+            &format!(
+                "[package]\nname = \"signal-fish-server-fuzz\"\nversion = \"0.0.0\"\n\n\
                [dependencies.signal-fish-server] # synchronized local dependency\n\
-             path = \"..\"\n  version = '1.2.3' # preserve this formatting\n\n\
+             path = \"..\"\n  version = '{version}' # preserve this formatting\n\n\
              [[package.metadata.fixture]]\nversion = \"1.2.3\"\n",
+            ),
         );
         for source in ["src/lib.rs", "clients/native/src/lib.rs", "fuzz/src/lib.rs"] {
             write(&root.join(source), "");
@@ -594,6 +596,107 @@ fn prepare_release_rejects_cargo_version_without_matching_latest_release_before_
 }
 
 #[test]
+fn prepare_release_rejects_bumps_below_the_breaking_change_floor_before_mutation() {
+    for (version, bump, expected_floor) in [
+        ("0.5.2", "patch", "minor or major"),
+        ("1.2.3", "patch", "major"),
+        ("1.2.3", "minor", "major"),
+        ("9223372036854775808.0.0", "patch", "major"),
+    ] {
+        let fixture = Fixture::new(version);
+        let changelog = read(fixture.root.join("CHANGELOG.md")).replace(
+            "- Preserve categorized notes.",
+            "- **Breaking (Rust API):** Replace the public contract.",
+        );
+        write(&fixture.root.join("CHANGELOG.md"), &changelog);
+        let before = release_file_snapshot(&fixture);
+
+        let output = fixture.run(&["--bump", bump, "--date", RELEASE_DATE]);
+
+        assert!(
+            !output.status.success(),
+            "{version} {bump} unexpectedly accepted breaking notes"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("contains a breaking change") && stderr.contains(expected_floor),
+            "{version} {bump} emitted an unexpected diagnostic:\n{stderr}"
+        );
+        assert_release_files_unchanged(&fixture, &before);
+    }
+}
+
+#[test]
+fn prepare_release_does_not_treat_breaking_label_examples_as_declarations() {
+    for note in [
+        "- Document the `**Breaking:**` compatibility label.",
+        "- **Breaking News:** Publish a project update.",
+    ] {
+        let fixture = Fixture::new("1.2.3");
+        let changelog =
+            read(fixture.root.join("CHANGELOG.md")).replace("- Preserve categorized notes.", note);
+        write(&fixture.root.join("CHANGELOG.md"), &changelog);
+
+        let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+
+        assert!(
+            output.status.success(),
+            "non-declaration {note:?} blocked a patch release:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(read(fixture.root.join("Cargo.toml")).contains("version = \"1.2.4\""));
+    }
+}
+
+#[test]
+fn prepare_release_recognizes_a_bold_breaking_label_with_an_external_colon() {
+    let fixture = Fixture::new("0.5.2");
+    let changelog = read(fixture.root.join("CHANGELOG.md")).replace(
+        "- Preserve categorized notes.",
+        "- **Breaking**: Replace the public contract.",
+    );
+    write(&fixture.root.join("CHANGELOG.md"), &changelog);
+    let before = release_file_snapshot(&fixture);
+
+    let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+
+    assert!(
+        !output.status.success(),
+        "breaking patch unexpectedly passed"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("minor or major bump"));
+    assert_release_files_unchanged(&fixture, &before);
+}
+
+#[test]
+fn prepare_release_accepts_bumps_at_or_above_the_breaking_change_floor() {
+    for (version, bump, expected) in [
+        ("0.5.2", "minor", "0.6.0"),
+        ("0.5.2", "major", "1.0.0"),
+        ("1.2.3", "major", "2.0.0"),
+    ] {
+        let fixture = Fixture::new(version);
+        let changelog = read(fixture.root.join("CHANGELOG.md")).replace(
+            "- Preserve categorized notes.",
+            "- **Breaking:** Replace the public contract.",
+        );
+        write(&fixture.root.join("CHANGELOG.md"), &changelog);
+
+        let output = fixture.run(&["--bump", bump, "--date", RELEASE_DATE]);
+
+        assert!(
+            output.status.success(),
+            "{version} {bump} rejected a sufficient breaking bump:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            read(fixture.root.join("Cargo.toml")).contains(&format!("version = \"{expected}\"")),
+            "{version} {bump} did not produce {expected}"
+        );
+    }
+}
+
+#[test]
 fn prepare_release_rejects_invalid_tag_baselines_before_mutation() {
     for tag_kind in ["missing", "lightweight", "non-ancestor", "target-exists"] {
         let fixture = Fixture::new("1.2.3");
@@ -685,6 +788,14 @@ fn release_lockfile_awk_is_portable_and_gawk_lint_clean_in_every_mode() {
             || String::from_utf8_lossy(&output.stderr).contains("GNU Awk")
     });
 
+    let current_version = env!("CARGO_PKG_VERSION");
+    let mut parsed_version = semver::Version::parse(current_version).expect("package semver");
+    parsed_version.patch = parsed_version
+        .patch
+        .checked_add(1)
+        .expect("patch increment");
+    let next_version = parsed_version.to_string();
+
     for mode in ["list", "state", "rewrite"] {
         let mut command = Command::new("awk");
         if is_gawk {
@@ -692,11 +803,11 @@ fn release_lockfile_awk_is_portable_and_gawk_lint_clean_in_every_mode() {
         }
         command.args(["-v", &format!("mode={mode}")]);
         if mode == "state" {
-            command.args(["-v", "expected_version=0.5.2"]);
+            command.args(["-v", &format!("expected_version={current_version}")]);
         } else if mode == "rewrite" {
             command.args([
                 "-v",
-                "next_version=0.5.3",
+                &format!("next_version={next_version}"),
                 "-v",
                 &format!("count_file={}", temp.path().join("count").display()),
             ]);
@@ -726,7 +837,7 @@ fn release_lockfile_awk_is_portable_and_gawk_lint_clean_in_every_mode() {
         ] {
             let output = Command::new("awk")
                 .args(["-v", &format!("mode={mode}")])
-                .args(["-v", "expected_version=0.5.2"])
+                .args(["-v", &format!("expected_version={current_version}")])
                 .args([
                     "-v",
                     &format!("count_file={}", temp.path().join("count").display()),
@@ -847,10 +958,10 @@ case "${1:-}" in
         [ "$authenticated" = true ]
         if [[ "$*" == *"--tags"* ]]; then
             status=${TAG_STATUS:-2}
-            [ "$status" -ne 0 ] || printf '%s\t%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/tags/v0.5.2
+            [ "$status" -ne 0 ] || printf '%s\t%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "refs/tags/v${EXPECTED_VERSION}"
         else
             status=${BRANCH_STATUS:-2}
-            [ "$status" -ne 0 ] || printf '%s\t%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/release/v0.5.2
+            [ "$status" -ne 0 ] || printf '%s\t%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "refs/heads/release/v${EXPECTED_VERSION}"
         fi
         [ "$status" -eq 0 ] || echo "remote probe failed" >&2
         exit "$status"
@@ -883,6 +994,7 @@ esac
         std::env::var("PATH").expect("PATH must be set")
     );
     let resolver = root.join("scripts/resolve-prepared-release.sh");
+    let current_version = env!("CARGO_PKG_VERSION");
 
     for (description, tag_status, branch_status, tree_status, fetched_sha, success, expected) in [
         (
@@ -962,6 +1074,7 @@ esac
             .env("TREE_STATUS", tree_status)
             .env("FETCHED_SHA", fetched_sha)
             .env("GIT_LOG", &git_log)
+            .env("EXPECTED_VERSION", current_version)
             .output()
             .unwrap_or_else(|error| panic!("run {description} resolver case: {error}"));
         assert_eq!(output.status.success(), success, "{description}");
@@ -977,7 +1090,9 @@ esac
         if description == "matching branch" {
             assert!(evidence.contains("branch_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
             let log = read(&git_log);
-            assert!(log.contains("fetch --no-tags origin refs/heads/release/v0.5.2"));
+            assert!(log.contains(&format!(
+                "fetch --no-tags origin refs/heads/release/v{current_version}"
+            )));
             assert!(log.contains("rev-parse FETCH_HEAD"));
             assert!(log.contains("diff --quiet FETCH_HEAD --"));
         }

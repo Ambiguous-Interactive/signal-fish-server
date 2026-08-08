@@ -7,11 +7,23 @@ use std::fmt;
 pub enum ErrorCode {
     // Authentication errors (1xxx)
     Unauthorized,
+    /// Reserved for source and decode compatibility. Signal Fish Server does
+    /// not emit this legacy token; invalid reconnect credentials use
+    /// [`Self::ReconnectionTokenInvalid`].
     InvalidToken,
+    /// Reserved for source and decode compatibility. Signal Fish Server does
+    /// not emit this legacy token; a required app-ID handshake that was not
+    /// supplied uses [`Self::MissingAppId`].
     AuthenticationRequired,
     InvalidAppId,
+    /// Reserved for source and decode compatibility with potential external
+    /// authentication backends. The shipped in-memory allowlist cannot emit it.
     AppIdExpired,
+    /// Reserved for source and decode compatibility with potential external
+    /// authentication backends. The shipped in-memory allowlist cannot emit it.
     AppIdRevoked,
+    /// Reserved for source and decode compatibility with potential external
+    /// authentication backends. The shipped in-memory allowlist cannot emit it.
     AppIdSuspended,
     MissingAppId,
     AuthenticationTimeout,
@@ -59,6 +71,9 @@ pub enum ErrorCode {
     // Server errors (9xxx)
     InternalError,
     StorageError,
+    /// Reserved for source and decode compatibility. Signal Fish Server does
+    /// not emit this token on WebSockets; HTTP admission can return status 503,
+    /// while socket shutdown uses [`Self::ServerDraining`].
     ServiceUnavailable,
 
     // Signaling errors (8xxx). Variants stay in the order they were added:
@@ -115,6 +130,19 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Variants retained for Rust source and wire-decoding compatibility that
+    /// the shipped server does not emit.
+    ///
+    /// Code generators should exclude these from the server-emitted contract.
+    pub const NON_EMITTED: &'static [Self] = &[
+        Self::InvalidToken,
+        Self::AuthenticationRequired,
+        Self::AppIdExpired,
+        Self::AppIdRevoked,
+        Self::AppIdSuspended,
+        Self::ServiceUnavailable,
+    ];
+
     /// Returns a human-readable description of this error code.
     ///
     /// This method provides actionable error messages that SDK developers
@@ -144,7 +172,7 @@ impl ErrorCode {
                 "The application ID has been suspended. Contact the administrator for assistance."
             }
             Self::MissingAppId => {
-                "Application ID is required but was not provided. Include your app ID in the request."
+                "The required app-ID handshake was not completed. Send Authenticate before application messages."
             }
             Self::AuthenticationTimeout => {
                 "The app-ID and protocol handshake took too long to complete. Please try again."
@@ -386,6 +414,15 @@ mod tests {
                 description.len() > 10,
                 "ErrorCode::{error_code:?} has suspiciously short description: '{description}'"
             );
+        }
+    }
+
+    #[test]
+    fn non_emitted_error_codes_remain_serializable_and_decodable() {
+        assert_eq!(ErrorCode::NON_EMITTED.len(), 6);
+        for code in ErrorCode::NON_EMITTED {
+            let wire = serde_json::to_string(code).unwrap();
+            assert_eq!(serde_json::from_str::<ErrorCode>(&wire).unwrap(), *code);
         }
     }
 

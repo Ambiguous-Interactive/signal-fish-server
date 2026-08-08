@@ -126,6 +126,9 @@ jobs:
             exit 1
           fi
 
+      - name: Validate prepared release state
+        run: cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency
+
       - name: Resolve prepared release identity
         id: release
         env:

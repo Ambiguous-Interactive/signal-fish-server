@@ -154,7 +154,6 @@ See [MSRV Management](../../msrv-management/SKILL.md) for comprehensive guidance
 | `axum`               | HTTP/WebSocket server framework          | Core framework — version-locked with tower  |
 | `tokio`              | Async runtime                            | Multi-threaded, full features for server    |
 | `dashmap`            | Concurrent room/player maps              | Replaces `Mutex<HashMap>` in hot paths      |
-| `smallvec`           | Test-only: stack-allocation characteristics tests | Dev-dependency since issue #296 removed the last production user |
 | `bytes`              | Zero-copy network message passing        | Shared across broadcast recipients          |
 | `matchbox_signaling` | Base signaling protocol                  | Upstream crate we extend                    |
 | `sqlx`               | PostgreSQL async driver                  | Behind `postgres` feature flag              |
