@@ -783,14 +783,16 @@ Authority request response.
 {
   "type": "AuthorityResponse",
   "data": {
-    "granted": true
+    "granted": true,
+    "reason": null
   }
 }
 
 ```
 
-Note: The `reason` and `error_code` fields are optional. A granted response
-carries neither; a denial carries both, and the code names the cause (see
+Note: The frozen v2 wire shape always carries `reason`; it is `null` on a
+granted response and a human-readable string on a denial. The optional
+`error_code` is omitted when granted and names the cause when denied (see
 [Authority](concepts/authority.md#requesting-authority) for the full table).
 
 ### GameStarting
@@ -845,7 +847,7 @@ Common error codes:
 - `ROOM_NOT_FOUND` - Room code does not exist
 - `INVALID_GAME_NAME` - Game name validation failed
 - `RATE_LIMIT_EXCEEDED` - Too many requests
-- `AUTHENTICATION_REQUIRED` - Authentication required
+- `MISSING_APP_ID` - Required app-ID handshake was not completed
 - `INVALID_APP_ID` - Invalid app ID
 - `INVALID_DELIVERY_CLASS` - Well-typed but illegal v3 class/key pairing
 - `INVALID_INPUT` - Malformed message or delivery metadata

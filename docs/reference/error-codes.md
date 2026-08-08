@@ -69,13 +69,8 @@ names do not imply client credentials.
 | Error Code | Description |
 |---|---|
 | `UNAUTHORIZED` | Access denied by a policy that uses this legacy wire code. |
-| `INVALID_TOKEN` | The authentication token is invalid, malformed, or expired. |
-| `AUTHENTICATION_REQUIRED` | The operation requires the legacy `Authenticate` handshake first. |
 | `INVALID_APP_ID` | The provided application ID is not recognized. |
-| `APP_ID_EXPIRED` | The application ID has expired. Renew your application registration. |
-| `APP_ID_REVOKED` | The application ID has been revoked by an administrator. |
-| `APP_ID_SUSPENDED` | The application ID has been suspended by an administrator. |
-| `MISSING_APP_ID` | Application ID is required but was not provided in the request. |
+| `MISSING_APP_ID` | The required app-ID handshake was not completed before an application message. |
 | `AUTHENTICATION_TIMEOUT` | Authentication input was not observed strictly before the exclusive authentication deadline. |
 | `CONNECTION_IDLE_TIMEOUT` | The connection was closed because no inbound WebSocket frame was observed strictly before the exclusive idle deadline (`websocket.idle_timeout_secs`). Send periodic `Ping` messages to keep the connection alive. |
 | `SLOW_CONSUMER` | The delivery contract failed closed: reliable queue/sojourn timed out, a selected socket write did not complete strictly before its class-aware maximum-sojourn deadline, or the server could not preserve exact report/control ordering. The best-effort error is followed by authoritative close code `4002 slow_consumer`. |
@@ -181,8 +176,17 @@ that may resolve on retry.
 |---|---|
 | `INTERNAL_ERROR` | An internal server error occurred. Try again or contact support. |
 | `STORAGE_ERROR` | A storage error occurred while processing the request. |
-| `SERVICE_UNAVAILABLE` | The service is temporarily unavailable. Try again in a few moments. |
 | `SERVER_DRAINING` | The server is draining for shutdown. New room creation is rejected; existing sockets will close with `4000 server_shutdown` at the drain deadline. |
+
+The public Rust `ErrorCode` enum retains `INVALID_TOKEN`,
+`AUTHENTICATION_REQUIRED`, `APP_ID_EXPIRED`, `APP_ID_REVOKED`,
+`APP_ID_SUSPENDED`, and `SERVICE_UNAVAILABLE` as non-emitted compatibility
+tokens. Signal Fish Server does not emit any of them; specifically, the shipped
+in-memory allowlist cannot produce the three app-status outcomes. Invalid
+reconnect credentials use `RECONNECTION_TOKEN_INVALID`, a missing app-ID
+handshake uses `MISSING_APP_ID`, HTTP admission can return status 503, and
+WebSocket shutdown uses `SERVER_DRAINING`. Rust consumers and code generators
+can read the same set from `ErrorCode::NON_EMITTED`.
 
 ---
 
@@ -221,10 +225,10 @@ fn handle_server_error(error: &ServerError) {
         "ROOM_NOT_FOUND" => {
             println!("Room not found. It may have been closed.");
         }
-        "AUTHENTICATION_REQUIRED" | "UNAUTHORIZED" | "INVALID_TOKEN" => {
-            println!("Handshake or token rejected. Re-establishing the session.");
+        "MISSING_APP_ID" | "UNAUTHORIZED" => {
+            println!("App-ID handshake rejected. Check the connection setup.");
         }
-        code if code.starts_with("INTERNAL") || code.starts_with("SERVICE") => {
+        "INTERNAL_ERROR" | "STORAGE_ERROR" => {
             println!("Server issue. Retrying after a delay.");
         }
         unknown_code if !unknown_code.is_empty() => {
@@ -294,10 +298,10 @@ not relayed.
 
 ### App-ID admission failures (`UNAUTHORIZED`, `INVALID_APP_ID`)
 
-Verify that your `app_id` is correct and has not expired, been revoked,
-or been suspended. Send an `Authenticate` message before attempting
-room operations when app-ID allowlist enforcement is enabled. A recognized ID
-is still public and replayable; see [Application identification](../authentication.md).
+Verify that your `app_id` is present in the configured allowlist. Send an
+`Authenticate` message before attempting room operations when app-ID allowlist
+enforcement is enabled. A recognized ID is still public and replayable; see
+[Application identification](../authentication.md).
 
 ### Spectator join failed (`SPECTATOR_JOIN_FAILED`, `SPECTATOR_NOT_ALLOWED`)
 

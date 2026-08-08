@@ -1133,7 +1133,7 @@ common error codes to provide a good player experience.
 | `ROOM_FULL` | Room reached max players | Show "room full" to the player |
 | `ROOM_NOT_FOUND` | Room code does not exist | Prompt the player to check the code |
 | `RATE_LIMIT_EXCEEDED` | Too many requests | Back off and retry after a delay |
-| `AUTHENTICATION_REQUIRED` | Server requires authentication | Send `Authenticate` first |
+| `MISSING_APP_ID` | Required app-ID handshake was not completed | Send `Authenticate` first |
 | `INVALID_APP_ID` | Bad app ID | Check your app configuration |
 | `ALREADY_IN_ROOM` | Player is already in a room | Leave the current room first |
 | `NOT_IN_ROOM` | Action requires being in a room | Join a room before this action |
@@ -1166,11 +1166,11 @@ fn handle_server_message(msg: &ServerMessage) {
                     );
                     // Wait and retry
                 }
-                Some("AUTHENTICATION_REQUIRED") => {
+                Some("MISSING_APP_ID") => {
                     eprintln!(
-                        "Auth required: {message}"
+                        "App-ID handshake missing: {message}"
                     );
-                    // Send Authenticate message
+                    // Send Authenticate first
                 }
                 Some(code) => {
                     eprintln!(

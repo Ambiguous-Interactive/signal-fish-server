@@ -295,6 +295,23 @@ if ! grep -Eq '^### (Added|Changed|Deprecated|Removed|Fixed|Security)$' <<< "$UN
     exit 1
 fi
 
+# A maintainer still chooses the release increment, but the categorized notes
+# are the authoritative compatibility declaration. Fail before mutation when a
+# breaking release would otherwise be assigned a version that permits existing
+# dependents to accept it as compatible. During initial 0.x development SemVer
+# permits breaking changes in a minor release; once 1.0 ships they require a
+# major release.
+if grep -Eq '^[[:space:]]*([-*][[:space:]]+)?\*\*Breaking([[:space:]]+\([^*]+\))?(:\*\*|\*\*:)' \
+    <<< "$UNRELEASED_BODY"; then
+    if [ "$CURRENT_MAJOR" = "0" ] && [ "$BUMP" = "patch" ]; then
+        echo "ERROR: CHANGELOG.md [Unreleased] contains a breaking change; version $CURRENT_VERSION requires a minor or major bump, not patch." >&2
+        exit 1
+    elif [ "$CURRENT_MAJOR" != "0" ] && [ "$BUMP" != "major" ]; then
+        echo "ERROR: CHANGELOG.md [Unreleased] contains a breaking change; version $CURRENT_VERSION requires a major bump, not $BUMP." >&2
+        exit 1
+    fi
+fi
+
 replace_root_package_version() {
     local file="$1"
     local next_version="$2"

@@ -4877,6 +4877,8 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "toolchain: ${{ steps.toolchain.outputs.channel }}",
         "bash scripts/prepare-release.sh --bump \"$BUMP\"",
         "git diff --check",
+        "Validate prepared release state",
+        "cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency",
         "bash scripts/list-release-lockfiles.sh",
         "release_files=(",
         "git add \"${release_files[@]}\"",
@@ -4907,6 +4909,41 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         2,
         "The synchronized fuzz dependency manifest must appear once in the exact prepared-diff \
          allowlist and once in the staged release_files array.\nJob block:\n{prepare}"
+    );
+
+    let prepare_files_position = prepare
+        .find("- name: Prepare release files")
+        .expect("release files must be prepared");
+    let diff_scope_position = prepare
+        .find("- name: Validate prepared diff scope")
+        .expect("prepared diff scope must be validated");
+    let prepared_state_position = prepare
+        .find("- name: Validate prepared release state")
+        .expect("prepared release state must be tested");
+    let prepared_state_command =
+        "cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency";
+    assert_eq!(
+        prepare.matches(prepared_state_command).count(),
+        1,
+        "the prepared-state command must occur exactly once"
+    );
+    let prepared_state_command_position = prepare
+        .find(prepared_state_command)
+        .expect("prepared-state command must be present");
+    let resolve_position = prepare
+        .find("- name: Resolve prepared release identity")
+        .expect("prepared release identity must be resolved");
+    let push_position = prepare
+        .find("- name: Push release branch and open pull request")
+        .expect("release branch must be pushed");
+    assert!(
+        prepare_files_position < diff_scope_position
+            && diff_scope_position < prepared_state_position
+            && prepared_state_position < prepared_state_command_position
+            && prepared_state_command_position < resolve_position
+            && resolve_position < push_position,
+        "release delivery must prepare files, validate their exact scope and state, resolve the \
+         immutable identity, then push/open the PR, in that order.\nJob block:\n{prepare}"
     );
 
     let reuse_guard = prepare

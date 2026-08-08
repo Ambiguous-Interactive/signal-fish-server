@@ -115,6 +115,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent release preparation from opening a test-red or semver-incompatible
+  pull request (issue #305). The workflow now runs the release and standalone
+  lockfile identity tests against the prepared tree before pushing it, and
+  `**Breaking:**` Unreleased notes reject a patch bump during `0.x` or any
+  non-major bump after `1.0`.
+- Keep the generated and documented error-code contract limited to codes the
+  server can emit (issue #300). `INVALID_TOKEN`, `AUTHENTICATION_REQUIRED`,
+  `APP_ID_EXPIRED`, `APP_ID_REVOKED`, `APP_ID_SUSPENDED`, and
+  `SERVICE_UNAVAILABLE` remain decode-compatible Rust variants but are reserved;
+  `ErrorCode::NON_EMITTED` exposes that compatibility set to Rust consumers and
+  code generators. Clients should handle `RECONNECTION_TOKEN_INVALID`,
+  `MISSING_APP_ID`, HTTP 503, or `SERVER_DRAINING` for the corresponding shipped
+  behavior.
+- Update `lru` to 0.18.2 for its upstream `pop` panic-safety fix. Signal Fish
+  uses that operation while expiring coordination deduplication entries.
 - Return the durable-detach retry that a rejected reconnect took over
   (issue #297). A reconnect removes the queued retry for the membership it is
   claiming — maintenance must not delete a row the reconnect is about to make
@@ -146,8 +161,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `authority.md` has clients disable host migration on that code — while a
   client in a room created with `supports_authority: false` was told the same
   and could retry forever. Denials that are genuinely neither (not a member,
-  releasing a role you do not hold) keep `AUTHORITY_DENIED`, and a storage fault
-  keeps `STORAGE_ERROR`. No wire schema changed: all four codes already existed.
+  releasing a role you do not hold) keep `AUTHORITY_DENIED`, a room that
+  disappeared during the transition reports `ROOM_NOT_FOUND`, and a storage
+  fault keeps `STORAGE_ERROR`. Granted responses retain the frozen v2
+  `reason: null` field; the protocol guide and canonical sample now show that
+  exact shape. No wire schema changed: all five codes already existed.
   **Breaking (Rust API):** `GameDatabase::request_room_authority` and
   `RoomOperationCoordinatorTrait::handle_authority_request` return
   `AuthorityOutcome` instead of `(bool, Option<String>)`; use
@@ -358,12 +376,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bytecheck_derive`, `munge`, `munge_macro`, `ptr_meta`, `ptr_meta_derive`,
   `rancor`, `rend`, `simdutf8` — roughly 44,000 lines carrying ~1,347 `unsafe`
   occurrences, in a project that denies `unsafe_code` in every one of its own
-  manifests. `smallvec` moves to `[dev-dependencies]` in the same change:
-  `broadcast` held the only production small-vector player list, and the
-  remaining users are the stack-allocation characteristics tests, so it would
-  otherwise keep shipping in the library graph with no production use — the very
-  thing this removal is about. `cargo-machete` could not have caught that
-  either, since a test-only use still reads as usage.
+  manifests. The direct `smallvec` dependency and its mock-only performance
+  suite are removed too: `broadcast` held the only production small-vector
+  player list, while that suite only characterized locally invented wrappers
+  and third-party primitives, not a remaining Signal Fish path.
   **Breaking (Rust API):** the `broadcast` and `rkyv_utils` modules and the
   rkyv trait implementations on protocol types are gone, so the next release is
   at least `0.6.0`. No wire behavior changes: the `GameDataEncoding::Rkyv` wire

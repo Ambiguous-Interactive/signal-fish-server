@@ -83,18 +83,16 @@ impl AuthorityDenial {
         }
     }
 
-    /// Documented `ErrorCode` for this refusal. The three room-state refusals
-    /// share `AUTHORITY_DENIED` because they all mean "not you, and not
-    /// because of a contest you can win"; only a live contest is a conflict,
-    /// and only a room without authority support is unsupported.
+    /// Documented `ErrorCode` for this refusal. Membership and ownership
+    /// refusals share `AUTHORITY_DENIED`; a missing room retains the distinct
+    /// `ROOM_NOT_FOUND` lifecycle outcome.
     #[must_use]
     pub fn error_code(self) -> crate::protocol::ErrorCode {
         match self {
             Self::NotSupported => crate::protocol::ErrorCode::AuthorityNotSupported,
             Self::AlreadyHeld => crate::protocol::ErrorCode::AuthorityConflict,
-            Self::NotAMember | Self::NotHeld | Self::RoomNotFound => {
-                crate::protocol::ErrorCode::AuthorityDenied
-            }
+            Self::NotAMember | Self::NotHeld => crate::protocol::ErrorCode::AuthorityDenied,
+            Self::RoomNotFound => crate::protocol::ErrorCode::RoomNotFound,
             Self::StorageError => crate::protocol::ErrorCode::StorageError,
         }
     }
@@ -1569,6 +1567,7 @@ fn percentile(sorted_values: &[usize], p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ErrorCode;
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -1596,6 +1595,45 @@ mod tests {
             None,
         )
         .await
+    }
+
+    #[test]
+    fn authority_denials_map_to_their_exact_wire_contract() {
+        for (denial, reason, error_code) in [
+            (
+                AuthorityDenial::NotSupported,
+                "Room does not support authority",
+                ErrorCode::AuthorityNotSupported,
+            ),
+            (
+                AuthorityDenial::AlreadyHeld,
+                "Another player already has authority",
+                ErrorCode::AuthorityConflict,
+            ),
+            (
+                AuthorityDenial::NotAMember,
+                "Player not found in room",
+                ErrorCode::AuthorityDenied,
+            ),
+            (
+                AuthorityDenial::NotHeld,
+                "You do not have authority to release",
+                ErrorCode::AuthorityDenied,
+            ),
+            (
+                AuthorityDenial::RoomNotFound,
+                "Room not found",
+                ErrorCode::RoomNotFound,
+            ),
+            (
+                AuthorityDenial::StorageError,
+                "Storage error",
+                ErrorCode::StorageError,
+            ),
+        ] {
+            assert_eq!(denial.reason(), reason, "{denial:?} reason");
+            assert_eq!(denial.error_code(), error_code, "{denial:?} code");
+        }
     }
 
     #[tokio::test]

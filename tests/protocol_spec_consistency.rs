@@ -7,7 +7,10 @@
 //! parsing technique in `tests/docs_site_consistency.rs`: it extracts every
 //! variant of `ClientMessage` / `ServerMessage` (from `src/protocol/messages.rs`)
 //! and every `ErrorCode` variant (from `src/protocol/error_codes.rs`) directly
-//! from source — no hand-kept lists — and asserts each appears in the spec.
+//! from source — no hand-kept emitted-code list — and asserts the spec contains
+//! exactly the emitted variants after subtracting an explicit compatibility-only
+//! reserve. A companion source sweep prevents those reserved variants from
+//! being referenced by production emitter paths.
 //!
 //! The spec is parsed as YAML 1.2 with `saphyr` (already a dev-dependency, used
 //! by `tests/ci_config_tests.rs`). Rather than scan the raw text, we collect the
@@ -26,8 +29,10 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use common::{read_file, repo_root};
+use common::{read_file, repo_root, strip_comment_lines};
 use saphyr::{LoadableYamlNode, Yaml};
 
 /// Extract the top-level variant identifiers of `enum <enum_name>` from Rust
@@ -1472,10 +1477,10 @@ fn spec_documents_every_client_and_server_message_variant() {
 }
 
 #[test]
-fn spec_documents_every_error_code_variant() {
-    let source = read_file(&repo_root().join("src/protocol/error_codes.rs"));
-    let declared = spec_declared_tokens();
+fn spec_documents_exactly_the_emitted_error_codes() {
+    use signal_fish_server::protocol::ErrorCode;
 
+    let source = read_file(&repo_root().join("src/protocol/error_codes.rs"));
     let variants = enum_variants(&source, "ErrorCode");
     assert!(
         variants.len() >= 40,
@@ -1483,26 +1488,117 @@ fn spec_documents_every_error_code_variant() {
         variants.len()
     );
 
-    let missing: Vec<String> = variants
+    let rust_codes: BTreeSet<String> = variants.iter().map(|v| to_screaming_snake(v)).collect();
+    let reserved: BTreeSet<String> = ErrorCode::NON_EMITTED
         .iter()
-        .map(|v| to_screaming_snake(v))
-        .filter(|token| !declared.contains(token.as_str()))
+        .map(|code| {
+            serde_json::to_value(code)
+                .expect("non-emitted ErrorCode must serialize")
+                .as_str()
+                .expect("ErrorCode wire value must be a string")
+                .to_string()
+        })
         .collect();
-
     assert!(
-        missing.is_empty(),
-        "spec/signal-fish-protocol.asyncapi.yaml's ErrorCode enum is missing {} code(s) \
-         that exist in src/protocol/error_codes.rs: {missing:?}",
-        missing.len()
+        reserved.is_subset(&rust_codes),
+        "reserved compatibility codes must remain decodable Rust variants"
     );
 
-    // The new game-start codes must be present.
+    let expected: BTreeSet<_> = rust_codes.difference(&reserved).cloned().collect();
+    let docs = Yaml::load_from_str(&spec_text()).expect("protocol spec must be valid YAML");
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one YAML document");
+    let declared: BTreeSet<String> =
+        mapping_path(root, &["components", "schemas", "ErrorCode", "enum"])
+            .and_then(Yaml::as_sequence)
+            .expect("components.schemas.ErrorCode.enum must be a sequence")
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .expect("ErrorCode enum members must be strings")
+                    .to_string()
+            })
+            .collect();
+
+    let missing: Vec<_> = expected.difference(&declared).cloned().collect();
+    let unexpected: Vec<_> = declared.difference(&expected).cloned().collect();
+
+    assert!(
+        missing.is_empty() && unexpected.is_empty(),
+        "spec ErrorCode must equal the server-emitted Rust set; missing={missing:?}, \
+         unexpected={unexpected:?} (reserved non-emitted={reserved:?})"
+    );
+
+    // The game-start codes must remain part of the emitted contract.
     for token in ["GAME_START_NOT_READY", "GAME_START_FORBIDDEN"] {
         assert!(
             declared.contains(token),
             "spec must list error code {token}"
         );
     }
+}
+
+#[test]
+fn non_emitted_error_codes_have_only_pinned_production_references() {
+    use signal_fish_server::protocol::ErrorCode;
+
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        variants: &[String],
+        references: &mut Vec<(PathBuf, String)>,
+    ) {
+        for entry in fs::read_dir(dir).expect("production source directory must be readable") {
+            let path = entry.expect("source entry must be readable").path();
+            if path.is_dir() {
+                visit(root, &path, variants, references);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+                && !path.ends_with("protocol/error_codes.rs")
+            {
+                let source = strip_comment_lines(&read_file(&path));
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("visited production source must be below repository root")
+                    .to_path_buf();
+                for variant in variants {
+                    for _ in source.match_indices(variant) {
+                        references.push((relative.clone(), variant.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut variants: Vec<String> = ErrorCode::NON_EMITTED
+        .iter()
+        .map(|code| format!("{code:?}"))
+        .collect();
+    variants.push("NON_EMITTED".to_string());
+    let mut references = Vec::new();
+    let root = repo_root();
+    visit(&root, &root.join("src"), &variants, &mut references);
+
+    let connection_path = PathBuf::from("src").join("websocket").join("connection.rs");
+    let auth_error_path = PathBuf::from("src").join("auth").join("error.rs");
+    let mut allowed = Vec::new();
+    for code in ErrorCode::NON_EMITTED {
+        let variant = format!("{code:?}");
+        if variant.starts_with("AppId") {
+            allowed.extend(
+                std::iter::repeat_n((auth_error_path.clone(), variant.clone()), 1).chain(
+                    std::iter::repeat_n((connection_path.clone(), variant.clone()), 2),
+                ),
+            );
+        }
+    }
+    references.sort();
+    allowed.sort();
+    assert_eq!(
+        references, allowed,
+        "non-emitted variants may appear only in the pinned future app-status definitions/mapping; \
+         any other production reference requires reclassifying and documenting the emitted contract"
+    );
 }
 
 /// Every wire-token enum's serde representation is documented in the spec.

@@ -11,9 +11,10 @@
 #
 # It models EVERY `ClientMessage` (send / client -> server) and `ServerMessage`
 # (receive / server -> client) variant from `src/protocol/messages.rs`, plus the
-# full `ErrorCode` enum from `src/protocol/error_codes.rs`. A Rust consistency
-# test — `tests/protocol_spec_consistency.rs` — fails the build if this file
-# drifts from those Rust types, so codegen consumers can trust it.
+# server-emitted subset of `ErrorCode` from `src/protocol/error_codes.rs`. A
+# Rust consistency test — `tests/protocol_spec_consistency.rs` — subtracts the
+# explicit non-emitted compatibility reserve and fails the build if this file
+# drifts from the emitted set, so codegen consumers can trust it.
 #
 # ---------------------------------------------------------------------------
 # HOW TO USE FOR CODEGEN
@@ -467,16 +468,11 @@ components:
     ErrorCode:
       type: string
       description: >-
-        Structured error code (SCREAMING_SNAKE_CASE). Mirrors the ErrorCode enum
-        in src/protocol/error_codes.rs; guarded by tests/protocol_spec_consistency.rs.
+        Structured error code (SCREAMING_SNAKE_CASE) emitted by Signal Fish
+        Server; guarded by tests/protocol_spec_consistency.rs.
       enum:
         - UNAUTHORIZED
-        - INVALID_TOKEN
-        - AUTHENTICATION_REQUIRED
         - INVALID_APP_ID
-        - APP_ID_EXPIRED
-        - APP_ID_REVOKED
-        - APP_ID_SUSPENDED
         - MISSING_APP_ID
         - AUTHENTICATION_TIMEOUT
         - SDK_VERSION_UNSUPPORTED
@@ -509,7 +505,6 @@ components:
         - SPECTATOR_JOIN_FAILED
         - INTERNAL_ERROR
         - STORAGE_ERROR
-        - SERVICE_UNAVAILABLE
         - CROSS_ROOM_SIGNAL
         - UNSUPPORTED_TRANSPORT
         - SIGNAL_TARGET_NOT_FOUND
