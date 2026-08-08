@@ -70,7 +70,13 @@ carrying them forward:
   contract tests pass.
 - A real-worktree `--bump patch` preparation fails before mutation with the
   expected breaking-change diagnostic.
-- Full mandatory and session-end validation follows before publication.
+- Full locked all-feature tests, all-target/all-feature Clippy with warnings
+  denied, formatting, documentation/Markdown policy, shell/workflow policy,
+  and all four `cargo deny` policy areas pass locally.
+- The first hosted Windows Nextest run exposed that the production-reference
+  guard compared native discovered paths with slash-delimited expected paths.
+  The guard now compares repository-relative `PathBuf` values, and its focused
+  regression plus the full locked all-feature suite pass after the repair.
 
 ## Changelog classification
 

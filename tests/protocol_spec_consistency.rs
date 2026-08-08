@@ -30,7 +30,7 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use common::{read_file, repo_root, strip_comment_lines};
 use saphyr::{LoadableYamlNode, Yaml};
@@ -1543,18 +1543,27 @@ fn spec_documents_exactly_the_emitted_error_codes() {
 fn non_emitted_error_codes_have_only_pinned_production_references() {
     use signal_fish_server::protocol::ErrorCode;
 
-    fn visit(dir: &Path, variants: &[String], references: &mut Vec<String>) {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        variants: &[String],
+        references: &mut Vec<(PathBuf, String)>,
+    ) {
         for entry in fs::read_dir(dir).expect("production source directory must be readable") {
             let path = entry.expect("source entry must be readable").path();
             if path.is_dir() {
-                visit(&path, variants, references);
+                visit(root, &path, variants, references);
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
                 && !path.ends_with("protocol/error_codes.rs")
             {
                 let source = strip_comment_lines(&read_file(&path));
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("visited production source must be below repository root")
+                    .to_path_buf();
                 for variant in variants {
                     for _ in source.match_indices(variant) {
-                        references.push(format!("{} references {variant}", path.display()));
+                        references.push((relative.clone(), variant.clone()));
                     }
                 }
             }
@@ -1567,23 +1576,19 @@ fn non_emitted_error_codes_have_only_pinned_production_references() {
         .collect();
     variants.push("NON_EMITTED".to_string());
     let mut references = Vec::new();
-    visit(&repo_root().join("src"), &variants, &mut references);
+    let root = repo_root();
+    visit(&root, &root.join("src"), &variants, &mut references);
 
-    let connection_path = repo_root().join("src/websocket/connection.rs");
-    let auth_error_path = repo_root().join("src/auth/error.rs");
+    let connection_path = PathBuf::from("src").join("websocket").join("connection.rs");
+    let auth_error_path = PathBuf::from("src").join("auth").join("error.rs");
     let mut allowed = Vec::new();
     for code in ErrorCode::NON_EMITTED {
         let variant = format!("{code:?}");
         if variant.starts_with("AppId") {
             allowed.extend(
-                std::iter::repeat_n(
-                    format!("{} references {variant}", auth_error_path.display()),
-                    1,
-                )
-                .chain(std::iter::repeat_n(
-                    format!("{} references {variant}", connection_path.display()),
-                    2,
-                )),
+                std::iter::repeat_n((auth_error_path.clone(), variant.clone()), 1).chain(
+                    std::iter::repeat_n((connection_path.clone(), variant.clone()), 2),
+                ),
             );
         }
     }
