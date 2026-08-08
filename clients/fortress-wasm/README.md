@@ -1,7 +1,7 @@
 # Fortress + Signal Fish Godot/WASM interoperability fixture
 
 This standalone fixture is the browser half of the issue-242 regression. It
-compiles the registry releases `fortress-rollback` 0.10.0,
+compiles the registry releases `fortress-rollback` 0.12.0,
 `signal-fish-client` 0.9.0, and `signal-fish-client-godot` 0.9.0 into a Godot
 4.5 GDExtension for
 `wasm32-unknown-emscripten`, exports with the official no-thread web template,

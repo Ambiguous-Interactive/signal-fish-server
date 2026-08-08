@@ -7,7 +7,7 @@ the current checkout:
 
 - one separately spawned signaling-server process;
 - two separately spawned `fortress-relay-peer` game processes;
-- `fortress-rollback` exactly `0.10.0` in each game;
+- `fortress-rollback` exactly `0.12.0` in each game;
 - `signal-fish-client` exactly `0.8.0` using
   `SignalFishPollingClient<WebSocketTransport>`;
 - protocol-v3 MessagePack game-data relay over real loopback WebSockets.
@@ -38,8 +38,5 @@ bash scripts/run-fortress-interop.sh
 The runner builds the server from this checkout, verifies this crate's lockfile,
 formats and lints it, and supplies an absolute server binary path to the test.
 
-The fixture's supply-chain policy narrowly ignores `RUSTSEC-2025-0141` because
-Fortress 0.10.0 directly depends on unmaintained `bincode` 2.0.1 and the
-advisory offers no safe upgrade. This is not a production server dependency;
-the exception must be removed when the issue reproduction can move to a
-maintained Fortress release.
+Fortress 0.12.0 uses the maintained `bincode-next` codec line, so the fixture's
+supply-chain policy no longer needs the former `RUSTSEC-2025-0141` exception.

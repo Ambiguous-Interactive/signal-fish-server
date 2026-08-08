@@ -12,13 +12,7 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    # fortress-rollback 0.10.0 directly uses bincode 2.0.1. The advisory is an
-    # unmaintained notice, not a memory/correctness vulnerability, and states
-    # that no safe upgrade is available. Remove this exception when the pinned
-    # issue-242 reproduction can move to a maintained Fortress release.
-    "RUSTSEC-2025-0141",
-]
+ignore = []
 
 [licenses]
 version = 2

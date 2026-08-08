@@ -6,12 +6,7 @@ targets = ["wasm32-unknown-emscripten"]
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    # fortress-rollback 0.10.0 directly uses bincode 2.0.1. This is an
-    # unmaintained notice with no safe compatible upgrade for the exact issue
-    # reproduction. Remove it when the acceptance pin can advance.
-    "RUSTSEC-2025-0141",
-]
+ignore = []
 
 [licenses]
 version = 2

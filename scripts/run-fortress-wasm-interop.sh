@@ -56,7 +56,7 @@ feature_tree="${ARTIFACT_DIR}/cargo-feature-tree.txt"
 cargo +"${NIGHTLY}" tree --manifest-path "${MANIFEST_PATH}" --locked -e features >"${feature_tree}"
 grep -F 'signal-fish-client v0.9.0' "${feature_tree}" >/dev/null
 grep -F 'signal-fish-client-godot v0.9.0' "${feature_tree}" >/dev/null
-grep -F 'fortress-rollback v0.10.0' "${feature_tree}" >/dev/null
+grep -F 'fortress-rollback v0.12.0' "${feature_tree}" >/dev/null
 grep -F 'godot v0.4.5' "${feature_tree}" >/dev/null
 if grep -Eq 'transport-websocket-emscripten|sync-send' "${feature_tree}"; then
     printf 'BUSTED: forbidden raw-WebSocket or Send+Sync feature in released graph\n' >&2

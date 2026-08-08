@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Advance both pinned Fortress Rollback compatibility fixtures to 0.12.0
+  (issue #309), preserving the native multiprocess and Godot no-thread WASM
+  gameplay oracles while replacing the unmaintained `bincode` graph with
+  `bincode-next` and removing the obsolete advisory exceptions. The daily and
+  pull-request security jobs now apply both Cargo policy and RustSec scans to
+  every tracked Cargo lockfile, including exact-release fixtures.
 - Make live-reference-client interoperability failures actionable (issue
   #301). A missing native WebRTC candidate pair now reports the client's exit
   code, stderr, full event progression, and advertised ICE candidates. The

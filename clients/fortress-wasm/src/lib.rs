@@ -29,7 +29,7 @@ const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;
 const RUNTIME_DEADLINE: Duration = Duration::from_secs(90);
 const SIGNAL_FISH_CLIENT_VERSION: &str = "0.9.0";
 const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = "0.9.0";
-const FORTRESS_ROLLBACK_VERSION: &str = "0.10.0";
+const FORTRESS_ROLLBACK_VERSION: &str = "0.12.0";
 const GODOT_RUST_VERSION: &str = "0.4.5";
 const WASM_TARGET: &str = "wasm32-unknown-emscripten";
 
