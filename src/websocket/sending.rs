@@ -274,9 +274,9 @@ fn materialize_game_data_frame_uncached(
             let frame = if !recipient_supports_v3
                 && (seq.is_some() || epoch.is_some() || class.is_some() || key.is_some())
             {
-                serialize_json_frame(&LegacyGameDataEnvelope::new(*from_player, data))
+                serialize_json_relay_frame(&LegacyGameDataEnvelope::new(*from_player, data), data)
             } else {
-                serialize_json_frame(message)
+                serialize_json_relay_frame(message, data)
             }
             .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
             Ok(MaterializedFrame {
@@ -831,8 +831,129 @@ fn serialize_json_text<T: Serialize>(message: &T) -> Result<String, serde_json::
     serde_json::to_string(message)
 }
 
+#[cfg(test)]
 fn serialize_json_frame<T: Serialize>(message: &T) -> Result<Message, serde_json::Error> {
     serialize_json_text(message).map(|json| Message::Text(json.into()))
+}
+
+/// Serialize a JSON game-data relay into one pre-sized output allocation.
+///
+/// The value estimate counts its unescaped wire structure and the relay
+/// headroom covers the tagged envelope, UUID, delivery stamps, and ordinary
+/// string escaping. Inputs with unusually escape-heavy strings may still grow
+/// through `Vec`'s normal allocator-abort path. Excess capacity from that
+/// growth is compacted only when it exceeds the same fixed headroom,
+/// preserving exact wire bytes without making a fixed-size assumption part of
+/// the protocol contract.
+const JSON_RELAY_HEADROOM: usize = 256;
+const JSON_ESTIMATE_WORK_BUDGET: usize = 256;
+// A float's one-byte lower bound can miss at most 23 bytes of its ordinary
+// serde_json representation. Charge that uncertainty as sizing work so a
+// float-dense value falls back before a second traversal plus buffer
+// grow/compact cycle costs more than the allocation it was meant to avoid.
+const JSON_FLOAT_ESTIMATE_UNCERTAINTY: usize = 23;
+
+fn serialize_json_relay_frame<T: Serialize>(
+    message: &T,
+    data: &serde_json::Value,
+) -> Result<Message, String> {
+    let Some(estimated_value_len) = estimated_json_value_len(data) else {
+        return serialize_json_text(message)
+            .map(|json| Message::Text(json.into()))
+            .map_err(|error| error.to_string());
+    };
+    let capacity = estimated_value_len
+        .checked_add(JSON_RELAY_HEADROOM)
+        .filter(|capacity| *capacity <= isize::MAX as usize)
+        .ok_or_else(|| "JSON relay frame capacity overflow".to_string())?;
+    // The old `serde_json::to_string` path was already infallible on allocator
+    // exhaustion. Keep Vec's direct `Write` implementation here: wrapping
+    // every serializer write in a fallibility check costs more than the three
+    // growth reallocations this path removes. Any underestimated growth keeps
+    // those same allocator-abort semantics; the fallback converter below has
+    // a separate explicit fallible allocation contract.
+    let mut bytes = Vec::with_capacity(capacity);
+    serde_json::to_writer(&mut bytes, message).map_err(|error| error.to_string())?;
+    let maximum_retained_capacity = bytes.len().saturating_add(JSON_RELAY_HEADROOM);
+    if bytes.capacity() > capacity && bytes.capacity() > maximum_retained_capacity {
+        bytes.shrink_to(maximum_retained_capacity);
+    }
+    String::from_utf8(bytes)
+        .map(|json| Message::Text(json.into()))
+        .map_err(|error| format!("JSON serializer emitted invalid UTF-8: {error}"))
+}
+
+/// Lower-bound serialized length that is cheap to derive from an existing
+/// `serde_json::Value`. String escaping may expand beyond this estimate; the
+/// caller deliberately permits ordinary `Vec` growth for that case. Returning
+/// `None` caps sizing work for structurally dense inputs, which then use the
+/// reference serializer without paying for a second complete traversal.
+fn estimated_json_value_len(value: &serde_json::Value) -> Option<usize> {
+    let mut remaining_work = JSON_ESTIMATE_WORK_BUDGET;
+    estimated_json_value_len_bounded(value, &mut remaining_work)
+}
+
+fn estimated_json_value_len_bounded(
+    value: &serde_json::Value,
+    remaining_work: &mut usize,
+) -> Option<usize> {
+    *remaining_work = remaining_work.checked_sub(1)?;
+    match value {
+        serde_json::Value::Null => Some(4),
+        serde_json::Value::Bool(value) => {
+            if *value {
+                Some(4)
+            } else {
+                Some(5)
+            }
+        }
+        serde_json::Value::Number(value) => {
+            let (estimated_len, uncertainty) = estimated_json_number_len(value);
+            *remaining_work = remaining_work.checked_sub(uncertainty)?;
+            Some(estimated_len)
+        }
+        serde_json::Value::String(value) => Some(value.len().saturating_add(2)),
+        serde_json::Value::Array(values) => values.iter().try_fold(
+            2usize.saturating_add(values.len().saturating_sub(1)),
+            |size, value| {
+                Some(size.saturating_add(estimated_json_value_len_bounded(value, remaining_work)?))
+            },
+        ),
+        serde_json::Value::Object(values) => values.iter().try_fold(
+            2usize.saturating_add(values.len().saturating_sub(1)),
+            |size, (key, value)| {
+                Some(
+                    size.saturating_add(key.len().saturating_add(3))
+                        .saturating_add(estimated_json_value_len_bounded(value, remaining_work)?),
+                )
+            },
+        ),
+    }
+}
+
+fn estimated_json_number_len(value: &serde_json::Number) -> (usize, usize) {
+    if let Some(value) = value.as_i64() {
+        (
+            decimal_digit_count(value.unsigned_abs())
+                .saturating_add(usize::from(value.is_negative())),
+            0,
+        )
+    } else if let Some(value) = value.as_u64() {
+        (decimal_digit_count(value), 0)
+    } else {
+        // Formatting a float here duplicates serde_json's comparatively
+        // expensive conversion. One byte is a safe lower bound; ordinary Vec
+        // growth handles the remainder and the caller trims excess capacity.
+        (1, JSON_FLOAT_ESTIMATE_UNCERTAINTY)
+    }
+}
+
+fn decimal_digit_count(value: u64) -> usize {
+    if value == 0 {
+        1
+    } else {
+        (value.ilog10() as usize).saturating_add(1)
+    }
 }
 
 /// Serialize a decoded binary fallback without repeatedly growing the JSON
@@ -850,15 +971,20 @@ fn serialize_json_fallback_frame<T: Serialize>(
         .checked_add(JSON_FALLBACK_HEADROOM)
         .filter(|capacity| *capacity <= isize::MAX as usize)
         .ok_or_else(|| "JSON fallback frame capacity overflow".to_string())?;
+    serialize_json_frame_with_capacity(message, capacity, "JSON fallback")
+}
+
+fn serialize_json_frame_with_capacity<T: Serialize>(
+    message: &T,
+    capacity: usize,
+    frame_kind: &'static str,
+) -> Result<Message, String> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(capacity)
-        .map_err(|error| format!("failed to reserve JSON fallback frame capacity: {error}"))?;
-    serde_json::to_writer(
-        &mut FallibleVecWriter::new(&mut bytes, "JSON fallback"),
-        message,
-    )
-    .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("failed to reserve {frame_kind} frame capacity: {error}"))?;
+    serde_json::to_writer(&mut FallibleVecWriter::new(&mut bytes, frame_kind), message)
+        .map_err(|error| error.to_string())?;
     String::from_utf8(bytes)
         .map(|json| Message::Text(json.into()))
         .map_err(|error| format!("JSON serializer emitted invalid UTF-8: {error}"))
@@ -1973,6 +2099,141 @@ mod tests {
                 "estimated payload length {estimated_payload_len} changed JSON fallback bytes"
             );
         }
+    }
+
+    #[test]
+    fn json_relay_preallocation_preserves_wire_bytes_across_value_shapes() {
+        let cases = [
+            ("null", serde_json::Value::Null),
+            ("empty object", serde_json::json!({})),
+            ("empty array", serde_json::json!([])),
+            (
+                "nested gameplay state",
+                serde_json::json!({
+                    "entity": 42,
+                    "position": [123.25, -87.5, 9.75],
+                    "active": true,
+                    "children": [{"id": 1}, {"id": 2}],
+                }),
+            ),
+            (
+                "escape-heavy unicode",
+                serde_json::json!({"text": "\"\\\n\u{0000}🦀".repeat(300)}),
+            ),
+        ];
+
+        for (description, data) in cases {
+            let message = ServerMessage::GameData {
+                from_player: player_a(),
+                data: data.clone(),
+                seq: Some(u64::MAX),
+                epoch: Some(u32::MAX),
+                class: Some(crate::protocol::DeliveryClass::Reliable),
+                key: None,
+            };
+            assert_eq!(
+                serialize_json_relay_frame(&message, &data)
+                    .expect("preallocated JSON relay encode"),
+                serialize_json_frame(&message).expect("reference JSON relay encode"),
+                "{description} changed JSON relay wire bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn json_relay_estimate_budget_charges_float_uncertainty() {
+        let representative_float_count =
+            serde_json::Value::Array(vec![serde_json::json!(123.25); 7]);
+        assert!(
+            estimated_json_value_len(&representative_float_count).is_some(),
+            "the representative relay's seven floats must retain pre-sizing"
+        );
+
+        let last_pre_sized_float_array =
+            serde_json::Value::Array(vec![serde_json::json!(123.25); 10]);
+        assert!(
+            estimated_json_value_len(&last_pre_sized_float_array).is_some(),
+            "ten floats fit the uncertainty-weighted work budget"
+        );
+
+        let first_fallback_float_array =
+            serde_json::Value::Array(vec![serde_json::json!(123.25); 11]);
+        assert!(
+            estimated_json_value_len(&first_fallback_float_array).is_none(),
+            "eleven floats must use the one-pass reference serializer"
+        );
+    }
+
+    #[test]
+    fn numeric_dense_near_limit_json_relay_does_not_retain_amplified_capacity() {
+        const DEFAULT_MESSAGE_LIMIT: usize = 64 * 1_024;
+
+        let data = serde_json::Value::Array(vec![serde_json::json!(0); 30_000]);
+        let message = ServerMessage::GameData {
+            from_player: player_a(),
+            data: data.clone(),
+            seq: Some(u64::MAX),
+            epoch: Some(u32::MAX),
+            class: Some(crate::protocol::DeliveryClass::Reliable),
+            key: None,
+        };
+        let expected = serialize_json_frame(&message).expect("reference JSON relay encode");
+        let actual =
+            serialize_json_relay_frame(&message, &data).expect("preallocated JSON relay encode");
+        assert_eq!(actual, expected, "numeric-dense relay changed wire bytes");
+
+        let Message::Text(text) = actual else {
+            panic!("JSON relay must produce a text frame");
+        };
+        let wire_len = text.len();
+        assert!(
+            (60_000..=DEFAULT_MESSAGE_LIMIT).contains(&wire_len),
+            "fixture must remain near the default message limit, got {wire_len} bytes"
+        );
+        let retained_capacity = Bytes::from(text)
+            .try_into_mut()
+            .expect("sole-owner text frame must expose its retained allocation")
+            .capacity();
+        assert!(
+            retained_capacity <= DEFAULT_MESSAGE_LIMIT,
+            "numeric-dense {wire_len}-byte relay retained {retained_capacity} bytes"
+        );
+    }
+
+    #[test]
+    fn escape_dense_near_limit_json_relay_does_not_retain_growth_slack() {
+        const DEFAULT_MESSAGE_LIMIT: usize = 64 * 1_024;
+
+        let data = serde_json::json!({"text": "\u{0000}".repeat(10_000)});
+        let message = ServerMessage::GameData {
+            from_player: player_a(),
+            data: data.clone(),
+            seq: Some(u64::MAX),
+            epoch: Some(u32::MAX),
+            class: Some(crate::protocol::DeliveryClass::Reliable),
+            key: None,
+        };
+        let expected = serialize_json_frame(&message).expect("reference JSON relay encode");
+        let actual =
+            serialize_json_relay_frame(&message, &data).expect("preallocated JSON relay encode");
+        assert_eq!(actual, expected, "escape-dense relay changed wire bytes");
+
+        let Message::Text(text) = actual else {
+            panic!("JSON relay must produce a text frame");
+        };
+        let wire_len = text.len();
+        assert!(
+            (60_000..=DEFAULT_MESSAGE_LIMIT).contains(&wire_len),
+            "fixture must remain near the default message limit, got {wire_len} bytes"
+        );
+        let retained_capacity = Bytes::from(text)
+            .try_into_mut()
+            .expect("sole-owner text frame must expose its retained allocation")
+            .capacity();
+        assert!(
+            retained_capacity <= wire_len.saturating_add(JSON_RELAY_HEADROOM),
+            "escape-dense {wire_len}-byte relay retained {retained_capacity} bytes"
+        );
     }
 
     #[test]

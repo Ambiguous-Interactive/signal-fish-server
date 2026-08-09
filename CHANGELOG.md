@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that cache with the message envelope. Eight- and 16-player JSON and binary
   ingress fall from three to two allocation operations and from 1,120 to 1,104
   allocated bytes per relay; two-player ingress and the public compatibility
-  handoff remain unchanged. Codec work and exact wire output are preserved.
+  handoff remain unchanged. On the checked-in representative workload, JSON
+  text projection now pre-sizes its relay frame, eliminating three growth
+  reallocations and reducing allocation operations from 7/8 to 4/5 in
+  2-/8-/16-player rooms, with 30–36% fewer allocated bytes. Codec work and
+  exact wire output are preserved.
 
 ### Fixed
 
