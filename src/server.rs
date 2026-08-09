@@ -1111,18 +1111,28 @@ fn relay_projection_cohort(
     })
 }
 
-fn relay_projection_work_repeats(cohorts: impl IntoIterator<Item = RelayProjectionCohort>) -> bool {
+fn relay_projection_summary(
+    recipients: impl IntoIterator<Item = (bool, Option<RelayProjectionCohort>)>,
+) -> (bool, bool) {
     let mut seen = 0u8;
     let mut saw_binary_fallback = false;
-    for cohort in cohorts {
+    let mut repeats = false;
+    let mut all_recipients_are_classified = true;
+    for (classified, cohort) in recipients {
+        all_recipients_are_classified &= classified;
+        let Some(cohort) = cohort else {
+            continue;
+        };
         let bit = cohort.cache_bit();
-        if seen & bit != 0 || (cohort.is_binary_fallback() && saw_binary_fallback) {
-            return true;
-        }
+        repeats |= seen & bit != 0 || (cohort.is_binary_fallback() && saw_binary_fallback);
         seen |= bit;
         saw_binary_fallback |= cohort.is_binary_fallback();
     }
-    false
+    (repeats, all_recipients_are_classified)
+}
+
+fn relay_projection_work_repeats(cohorts: impl IntoIterator<Item = RelayProjectionCohort>) -> bool {
+    relay_projection_summary(cohorts.into_iter().map(|cohort| (true, Some(cohort)))).0
 }
 
 impl InMemoryMessageCoordinator {
@@ -1185,16 +1195,24 @@ impl InMemoryMessageCoordinator {
         .then(|| {
             crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(&message))
         });
-        let started = self.start_deliveries(recipients, &message, room_id, shared_relay);
+        let started = self.start_deliveries(recipients, room_id, |player_id| {
+            shared_relay.clone().unwrap_or_else(|| {
+                crate::coordination::outbound_queue::DeliveryMessage::new(
+                    room_message_for_recipient(&message, player_id),
+                )
+            })
+        });
         self.finish_deliveries(started).await;
     }
 
     fn start_deliveries(
         &self,
         recipients: impl IntoIterator<Item = (PlayerId, ClientDeliveryHandle)>,
-        message: &Arc<ServerMessage>,
         room_id: Option<RoomId>,
-        shared_relay: Option<crate::coordination::outbound_queue::DeliveryMessage>,
+        mut delivery_for_player: impl FnMut(
+            &PlayerId,
+        )
+            -> crate::coordination::outbound_queue::DeliveryMessage,
     ) -> StartedDeliveries {
         // The negotiated queue policy normally resolves through `try_send`.
         // Start every recipient synchronously and build async machinery only
@@ -1203,11 +1221,7 @@ impl InMemoryMessageCoordinator {
         // deadline begins when that queue first reports `Full`.
         let mut started = StartedDeliveries::default();
         for (player_id, handle) in recipients {
-            let delivery = shared_relay.clone().unwrap_or_else(|| {
-                crate::coordination::outbound_queue::DeliveryMessage::new(
-                    room_message_for_recipient(message, &player_id),
-                )
-            });
+            let delivery = delivery_for_player(&player_id);
             match crate::coordination::start_message_delivery_in_room(
                 &self.metrics,
                 self.slow_consumer_timeout,
@@ -1293,6 +1307,80 @@ impl InMemoryMessageCoordinator {
         .then(|| {
             crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(message))
         });
+        self.start_routed_deliveries_with_shared(
+            room_players,
+            clients,
+            room_id,
+            except_player,
+            message,
+            shared_relay,
+        )
+    }
+
+    fn start_routed_owned_deliveries(
+        &self,
+        room_players: &HashMap<RoomId, HashSet<PlayerId>>,
+        clients: &HashMap<PlayerId, ClientDeliveryHandle>,
+        room_id: &RoomId,
+        except_player: Option<&PlayerId>,
+        message: ServerMessage,
+    ) -> StartedDeliveries {
+        let Some(players) = room_players.get(room_id) else {
+            return StartedDeliveries::default();
+        };
+        let (projection_work_repeats, all_recipients_are_classified) = relay_projection_summary(
+            players
+                .iter()
+                .filter(|player_id| Some(*player_id) != except_player)
+                .filter_map(|player_id| clients.get(player_id))
+                .map(|handle| match handle.sender.relay_projection() {
+                    Some((supports_v3, format)) => {
+                        (true, relay_projection_cohort(&message, supports_v3, format))
+                    }
+                    None => (false, None),
+                }),
+        );
+
+        if projection_work_repeats && all_recipients_are_classified {
+            let shared_relay =
+                crate::coordination::outbound_queue::DeliveryMessage::coowned_shared_relay(message);
+            let recipients = players
+                .iter()
+                .filter(|player_id| Some(*player_id) != except_player)
+                .filter_map(|player_id| {
+                    clients
+                        .get(player_id)
+                        .map(|handle| (*player_id, handle.clone()))
+                });
+            return self.start_deliveries(recipients, Some(*room_id), |_| shared_relay.clone());
+        }
+
+        let message = Arc::new(message);
+        let shared_relay = projection_work_repeats.then(|| {
+            crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(&message))
+        });
+        self.start_routed_deliveries_with_shared(
+            room_players,
+            clients,
+            room_id,
+            except_player,
+            &message,
+            shared_relay,
+        )
+    }
+
+    fn start_routed_deliveries_with_shared(
+        &self,
+        room_players: &HashMap<RoomId, HashSet<PlayerId>>,
+        clients: &HashMap<PlayerId, ClientDeliveryHandle>,
+        room_id: &RoomId,
+        except_player: Option<&PlayerId>,
+        message: &Arc<ServerMessage>,
+        shared_relay: Option<crate::coordination::outbound_queue::DeliveryMessage>,
+    ) -> StartedDeliveries {
+        let Some(players) = room_players.get(room_id) else {
+            return StartedDeliveries::default();
+        };
         let recipients = players
             .iter()
             .filter(|player_id| Some(*player_id) != except_player)
@@ -1301,7 +1389,13 @@ impl InMemoryMessageCoordinator {
                     .get(player_id)
                     .map(|handle| (*player_id, handle.clone()))
             });
-        self.start_deliveries(recipients, message, Some(*room_id), shared_relay)
+        self.start_deliveries(recipients, Some(*room_id), |player_id| {
+            shared_relay.clone().unwrap_or_else(|| {
+                crate::coordination::outbound_queue::DeliveryMessage::new(
+                    room_message_for_recipient(message, player_id),
+                )
+            })
+        })
     }
 
     fn collect_routed_recipients(
@@ -2819,6 +2913,31 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(())
     }
 
+    async fn broadcast_to_room_except_with_borrowed_owned_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> anyhow::Result<()> {
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let started = build_message().map(|message| {
+            self.start_routed_owned_deliveries(
+                &room_players,
+                &clients,
+                room_id,
+                Some(except_player),
+                message,
+            )
+        });
+        drop(clients);
+        drop(room_players);
+        if let Some(started) = started {
+            self.finish_deliveries(started).await;
+        }
+        Ok(())
+    }
+
     async fn register_local_client(
         &self,
         player_id: PlayerId,
@@ -3027,8 +3146,8 @@ impl Default for InMemoryMessageCoordinator {
 #[cfg(test)]
 mod relay_projection_cache_tests {
     use super::{
-        relay_projection_cohort, relay_projection_work_repeats, GameDataEncoding,
-        InMemoryMessageCoordinator, RelayProjectionCohort::*,
+        relay_projection_cohort, relay_projection_summary, relay_projection_work_repeats,
+        GameDataEncoding, InMemoryMessageCoordinator, RelayProjectionCohort::*,
     };
     use crate::coordination::outbound_queue::DeliveryMessage;
     use crate::coordination::{
@@ -3094,6 +3213,14 @@ mod relay_projection_cache_tests {
                 "v3 {encoding:?} still needs its stamped MessagePack envelope cached"
             );
         }
+    }
+
+    #[test]
+    fn repeated_projection_scan_still_observes_a_later_legacy_recipient() {
+        let summary =
+            relay_projection_summary([(true, Some(TextV3)), (true, Some(TextV3)), (false, None)]);
+
+        assert_eq!(summary, (true, false));
     }
 
     fn legacy_delivery_handle(

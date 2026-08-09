@@ -154,8 +154,8 @@ impl EnhancedGameServer {
     /// per-(sender, room) `seq` — text and binary share the single counter on
     /// the sender's `ClientConnection`) to the rest of the room.
     ///
-    /// The stamp is carried INSIDE the shared `Arc<ServerMessage>`, so this
-    /// layer — and the [`MessageCoordinator`](crate::coordination::MessageCoordinator)
+    /// The stamp is carried inside the shared message envelope, so this layer
+    /// — and the [`MessageCoordinator`](crate::coordination::MessageCoordinator)
     /// below it — stays protocol-version-agnostic: per-recipient gating
     /// (stripping `seq` for pre-v3 recipients) happens at serialization time
     /// in `websocket::sending`, where every other per-recipient wire decision
@@ -203,18 +203,20 @@ where
     F: FnOnce() -> Option<ServerMessage> + Send + 'a,
 {
     metrics.increment_game_data_messages();
-    let mut build_message = one_shot_arc_builder(build_message);
+    let mut build_message = one_shot_message_builder(build_message);
     message_coordinator
-        .broadcast_to_room_except_with_borrowed_message(room_id, player_id, &mut build_message)
+        .broadcast_to_room_except_with_borrowed_owned_message(
+            room_id,
+            player_id,
+            &mut build_message,
+        )
         .await
 }
 
-pub(super) fn one_shot_arc_builder<F>(
-    build_message: F,
-) -> impl FnMut() -> Option<Arc<ServerMessage>>
+pub(super) fn one_shot_message_builder<F>(build_message: F) -> impl FnMut() -> Option<ServerMessage>
 where
     F: FnOnce() -> Option<ServerMessage>,
 {
     let mut build_message = Some(build_message);
-    move || build_message.take().and_then(|build| build()).map(Arc::new)
+    move || build_message.take().and_then(|build| build())
 }

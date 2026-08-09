@@ -16,8 +16,8 @@ use crate::server::EnhancedGameServer;
 use super::complete_before_deadline;
 use super::connection::{record_outbound_probe_activity, PingProbeState};
 use super::sending::{
-    preflight_binary_fallback, send_single_message, write_pending_unsupported_report,
-    BinaryFallbackPreflight, SendAccounting, SendDisposition,
+    preflight_binary_fallback, send_single_message, send_single_message_ref,
+    write_pending_unsupported_report, BinaryFallbackPreflight, SendAccounting, SendDisposition,
 };
 
 /// Message batcher for WebSocket connections
@@ -336,10 +336,8 @@ pub(super) async fn send_queued(
         OutboundPayload::Message(message) => {
             close_signal.start_trace_write(message, write_phase == WritePhase::CloseFlush)
         }
-        OutboundPayload::Data(delivery) => close_signal.start_trace_write(
-            delivery.message_arc(),
-            write_phase == WritePhase::CloseFlush,
-        ),
+        OutboundPayload::Data(delivery) => close_signal
+            .start_trace_write(delivery.message(), write_phase == WritePhase::CloseFlush),
         OutboundPayload::DeliveryReport(_) => None,
     };
     let class = queued.class();
@@ -402,11 +400,10 @@ pub(super) async fn send_queued(
                 .await?
             }
             OutboundPayload::Data(delivery) => {
-                let (message, relay_cache) = delivery.into_parts();
-                send_single_message(
+                send_single_message_ref(
                     sender,
-                    message,
-                    relay_cache.as_deref(),
+                    delivery.message(),
+                    delivery.relay_frame_cache(),
                     player_id,
                     recipient_supports_v3,
                     recipient_format,

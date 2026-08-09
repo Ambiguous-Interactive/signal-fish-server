@@ -70,25 +70,63 @@ struct LatestKey {
 /// Keeping these in one carrier guarantees a reliable queue's full/retry path
 /// cannot accidentally detach a message from frames materialized for a
 /// different relay.
+#[derive(Debug)]
+struct CoownedRelay {
+    message: ServerMessage,
+    relay_frame_cache: RelayFrameCache,
+}
+
+#[derive(Debug, Clone)]
+enum DeliveryMessageStorage {
+    Separate {
+        message: Arc<ServerMessage>,
+        relay_frame_cache: Option<Arc<RelayFrameCache>>,
+    },
+    Coowned(Arc<CoownedRelay>),
+}
+
 #[derive(Debug, Clone)]
 pub struct DeliveryMessage {
-    message: Arc<ServerMessage>,
-    relay_frame_cache: Option<Arc<RelayFrameCache>>,
+    storage: DeliveryMessageStorage,
 }
 
 impl DeliveryMessage {
     pub fn new(message: Arc<ServerMessage>) -> Self {
         Self {
-            message,
-            relay_frame_cache: None,
+            storage: DeliveryMessageStorage::Separate {
+                message,
+                relay_frame_cache: None,
+            },
         }
     }
 
     pub(crate) fn shared_relay(message: Arc<ServerMessage>) -> Self {
-        let relay_frame_cache = RelayFrameCache::for_message(message.as_ref()).map(Arc::new);
-        Self {
-            message,
-            relay_frame_cache,
+        match RelayFrameCache::for_message(message.as_ref()) {
+            Some(relay_frame_cache) => Self {
+                storage: DeliveryMessageStorage::Separate {
+                    message,
+                    relay_frame_cache: Some(Arc::new(relay_frame_cache)),
+                },
+            },
+            None => Self::new(message),
+        }
+    }
+
+    /// Co-own a newly built relay envelope and cache in one allocation.
+    ///
+    /// The production ingress seam still owns the newly built message when the
+    /// routing snapshot is taken. Keeping both values in the same `Arc` removes
+    /// the otherwise separate cache allocation while preserving one shared
+    /// cache identity across every recipient and retry.
+    pub(crate) fn coowned_shared_relay(message: ServerMessage) -> Self {
+        match RelayFrameCache::for_message(&message) {
+            Some(relay_frame_cache) => Self {
+                storage: DeliveryMessageStorage::Coowned(Arc::new(CoownedRelay {
+                    message,
+                    relay_frame_cache,
+                })),
+            },
+            None => Self::new(Arc::new(message)),
         }
     }
 
@@ -96,27 +134,81 @@ impl DeliveryMessage {
         message: Arc<ServerMessage>,
         relay_frame_cache: Option<Arc<RelayFrameCache>>,
     ) -> Self {
-        Self {
-            message,
-            relay_frame_cache,
+        match relay_frame_cache {
+            Some(relay_frame_cache) => Self {
+                storage: DeliveryMessageStorage::Separate {
+                    message,
+                    relay_frame_cache: Some(relay_frame_cache),
+                },
+            },
+            None => Self::new(message),
         }
     }
 
     pub fn message(&self) -> &ServerMessage {
-        self.message.as_ref()
+        match &self.storage {
+            DeliveryMessageStorage::Separate { message, .. } => message.as_ref(),
+            DeliveryMessageStorage::Coowned(relay) => &relay.message,
+        }
     }
 
-    #[cfg(any(test, feature = "trace-validation"))]
-    pub(crate) fn message_arc(&self) -> &Arc<ServerMessage> {
-        &self.message
+    #[cfg(test)]
+    pub(crate) fn shares_message_arc_with(&self, expected: &Arc<ServerMessage>) -> bool {
+        match &self.storage {
+            DeliveryMessageStorage::Separate { message, .. } => Arc::ptr_eq(message, expected),
+            DeliveryMessageStorage::Coowned(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_relay_carrier_with(&self, expected: &Self) -> bool {
+        match (&self.storage, &expected.storage) {
+            (DeliveryMessageStorage::Coowned(left), DeliveryMessageStorage::Coowned(right)) => {
+                Arc::ptr_eq(left, right)
+            }
+            (
+                DeliveryMessageStorage::Separate {
+                    message: left_message,
+                    relay_frame_cache: left_cache,
+                },
+                DeliveryMessageStorage::Separate {
+                    message: right_message,
+                    relay_frame_cache: right_cache,
+                },
+            ) => {
+                Arc::ptr_eq(left_message, right_message)
+                    && matches!(
+                        (left_cache, right_cache),
+                        (Some(left), Some(right)) if Arc::ptr_eq(left, right)
+                    )
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn relay_frame_cache(&self) -> Option<&RelayFrameCache> {
-        self.relay_frame_cache.as_deref()
+        match &self.storage {
+            DeliveryMessageStorage::Separate {
+                relay_frame_cache, ..
+            } => relay_frame_cache.as_deref(),
+            DeliveryMessageStorage::Coowned(relay) => Some(&relay.relay_frame_cache),
+        }
     }
 
     pub(crate) fn into_parts(self) -> (Arc<ServerMessage>, Option<Arc<RelayFrameCache>>) {
-        (self.message, self.relay_frame_cache)
+        match self.storage {
+            DeliveryMessageStorage::Separate {
+                message,
+                relay_frame_cache,
+            } => (message, relay_frame_cache),
+            DeliveryMessageStorage::Coowned(relay) => {
+                // Co-owned carriers are created only for classified game-data
+                // queues, whose retry and writer paths preserve this carrier.
+                // Keep the compatibility conversion semantically safe if a
+                // future caller routes one through a legacy/control path.
+                (Arc::new(relay.message.clone()), None)
+            }
+        }
     }
 }
 
@@ -2362,11 +2454,11 @@ fn push_data_arrived_at(
     effective_class: DeliveryClass,
     arrival: Instant,
 ) {
-    let payload = match data.delivery.into_parts() {
-        (message, None) => OutboundPayload::Message(message),
-        (message, relay_frame_cache @ Some(_)) => {
-            OutboundPayload::Data(DeliveryMessage::from_parts(message, relay_frame_cache))
-        }
+    let payload = if data.delivery.relay_frame_cache().is_some() {
+        OutboundPayload::Data(data.delivery)
+    } else {
+        let (message, _) = data.delivery.into_parts();
+        OutboundPayload::Message(message)
     };
     let queued = QueuedOutbound {
         payload,
@@ -3646,16 +3738,16 @@ mod tests {
         tx.set_protocol_version(3);
         let game_data = data(1, DeliveryClass::Reliable, None, 1);
         assert!(matches!(
-            tx.try_enqueue_control(Arc::clone(game_data.delivery.message_arc())),
+            tx.try_enqueue_control(Arc::new(game_data.delivery.message().clone())),
             Err(TryEnqueueError::InvalidMetadata(_))
         ));
         let permit = tx.try_reserve_control().unwrap();
         assert!(permit
-            .send_control(Arc::clone(game_data.delivery.message_arc()))
+            .send_control(Arc::new(game_data.delivery.message().clone()))
             .is_err());
 
         let stamped_without_metadata =
-            OutboundData::reliable_unstamped(Arc::clone(game_data.delivery.message_arc()));
+            OutboundData::reliable_unstamped(Arc::new(game_data.delivery.message().clone()));
         assert!(matches!(
             tx.try_enqueue_data(stamped_without_metadata),
             Err(TryEnqueueError::InvalidMetadata(_))

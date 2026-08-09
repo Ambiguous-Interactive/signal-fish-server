@@ -140,11 +140,8 @@ impl DeliveryTraceRecorder {
         format!("{prefix}-{}-{sequence}", std::process::id())
     }
 
-    pub(crate) fn begin_delivery(
-        &self,
-        message: &std::sync::Arc<crate::protocol::ServerMessage>,
-    ) -> u64 {
-        let key = std::sync::Arc::as_ptr(message) as usize;
+    pub(crate) fn begin_delivery(&self, message: &crate::protocol::ServerMessage) -> u64 {
+        let key = std::ptr::from_ref(message) as usize;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.next_delivery_id = state.next_delivery_id.saturating_add(1);
         let delivery_id = state.next_delivery_id;
@@ -277,10 +274,10 @@ impl DeliveryTraceRecorder {
     /// id. Untraced socket-internal/control traffic is intentionally ignored.
     pub(crate) fn start_write(
         &self,
-        message: &std::sync::Arc<crate::protocol::ServerMessage>,
+        message: &crate::protocol::ServerMessage,
         close_flush: bool,
     ) -> Option<u64> {
-        let key = std::sync::Arc::as_ptr(message) as usize;
+        let key = std::ptr::from_ref(message) as usize;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.projection_stopped {
             return None;

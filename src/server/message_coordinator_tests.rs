@@ -630,7 +630,7 @@ async fn missing_sender_stamp_cancels_broadcast_before_any_delivery_attempt() {
 
 #[tokio::test(start_paused = true)]
 async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapshot() {
-    for borrowed_builder in [false, true] {
+    for builder_kind in ["boxed", "borrowed", "borrowed-owned"] {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
             Duration::from_secs(5),
@@ -705,7 +705,7 @@ async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapsho
         let mut broadcast = {
             let coordinator = Arc::clone(&coordinator);
             tokio::spawn(async move {
-                if borrowed_builder {
+                if builder_kind == "borrowed" {
                     let mut build_message = || {
                         Some(Arc::new(ServerMessage::GameData {
                             from_player: sender_id,
@@ -718,6 +718,24 @@ async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapsho
                     };
                     coordinator
                         .broadcast_to_room_except_with_borrowed_message(
+                            &room_id,
+                            &sender_id,
+                            &mut build_message,
+                        )
+                        .await
+                } else if builder_kind == "borrowed-owned" {
+                    let mut build_message = || {
+                        Some(ServerMessage::GameData {
+                            from_player: sender_id,
+                            data: serde_json::json!({"seq": 2}),
+                            seq: Some(2),
+                            epoch: Some(1),
+                            class: Some(DeliveryClass::Reliable),
+                            key: None,
+                        })
+                    };
+                    coordinator
+                        .broadcast_to_room_except_with_borrowed_owned_message(
                             &room_id,
                             &sender_id,
                             &mut build_message,
@@ -762,14 +780,7 @@ async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapsho
         )
         .await
         .unwrap_or_else(|_| {
-            panic!(
-                "{} builder held routing locks across its capacity wait",
-                if borrowed_builder {
-                    "borrowed"
-                } else {
-                    "boxed"
-                }
-            )
+            panic!("{builder_kind} builder held routing locks across its capacity wait")
         })
         .expect("late joiner registration must succeed during capacity wait");
         assert!(
@@ -799,18 +810,28 @@ async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapsho
             .await
             .expect("builder broadcast task must not panic")
             .expect("builder broadcast must complete after capacity returns");
+        let mut observed_delivery = None;
         for (player_id, receiver) in &mut classified_receivers {
             let relayed = receiver
                 .try_recv()
                 .unwrap_or_else(|error| panic!("recipient {player_id} lost relay: {error:?}"));
+            let crate::coordination::outbound_queue::OutboundPayload::Data(delivery) =
+                relayed.payload
+            else {
+                panic!("{builder_kind} relay lost its shared carrier");
+            };
             assert!(matches!(
-                relayed.payload,
-                crate::coordination::outbound_queue::OutboundPayload::Data(data)
-                    if matches!(
-                        data.message(),
-                        ServerMessage::GameData { seq: Some(2), .. }
-                    )
+                delivery.message(),
+                ServerMessage::GameData { seq: Some(2), .. }
             ));
+            if let Some(expected) = &observed_delivery {
+                assert!(
+                    delivery.shares_relay_carrier_with(expected),
+                    "{builder_kind} relay recipients must share one carrier through retry"
+                );
+            } else {
+                observed_delivery = Some(delivery);
+            }
         }
         let unexpected = late_joiner_rx.try_recv();
         assert!(

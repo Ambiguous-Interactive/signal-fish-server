@@ -392,8 +392,33 @@ pub(super) async fn send_single_message(
     metadata: Option<DataDeliveryMetadata>,
     accounting: &mut SendAccounting<'_>,
 ) -> Result<SendDisposition, ()> {
+    send_single_message_ref(
+        sender,
+        message.as_ref(),
+        relay_cache,
+        player_id,
+        recipient_supports_v3,
+        recipient_format,
+        fallback_preflight,
+        metadata,
+        accounting,
+    )
+    .await
+}
+
+pub(super) async fn send_single_message_ref(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: &ServerMessage,
+    relay_cache: Option<&RelayFrameCache>,
+    player_id: &PlayerId,
+    recipient_supports_v3: bool,
+    recipient_format: GameDataEncoding,
+    fallback_preflight: BinaryFallbackPreflight,
+    metadata: Option<DataDeliveryMetadata>,
+    accounting: &mut SendAccounting<'_>,
+) -> Result<SendDisposition, ()> {
     let mut disposition = SendDisposition::Written;
-    match message.as_ref() {
+    match message {
         ServerMessage::GameDataBinary {
             from_player,
             encoding,
@@ -402,7 +427,7 @@ pub(super) async fn send_single_message(
             ..
         } => {
             match materialize_game_data_frame(
-                message.as_ref(),
+                message,
                 recipient_supports_v3,
                 recipient_format,
                 fallback_preflight,
@@ -463,7 +488,7 @@ pub(super) async fn send_single_message(
         }
         ServerMessage::GameData { .. } => {
             let materialized = materialize_game_data_frame(
-                message.as_ref(),
+                message,
                 recipient_supports_v3,
                 recipient_format,
                 fallback_preflight,
