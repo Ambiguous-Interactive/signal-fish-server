@@ -95,5 +95,20 @@ WebRTC workflow with all 94 unit tests and all eight multi-process scenarios.
 The pre-commit worktree preflight also passed; its existing 1000 ms advisory
 remains tracked separately by issue #318 and is unrelated to this change.
 
-Hosted pull-request validation and final review state will be appended after
-publication.
+PR #320 reached ready-for-review at implementation head
+`a24ddaab6d844bbab203bdea19cf0a054524b404`. All 15 applicable hosted
+workflows succeeded: the core CI matrix, WebRTC and browser interop, TURN-only,
+Fortress native and WASM interop, verification-nightly fault profiles, formal
+verification, fuzzing, AddressSanitizer/Miri, unused-dependency, documentation,
+link, spelling, and Markdown gates. The Dependabot-only workflow skipped as
+designed. The first WASM attempt exposed one legitimate fixture integration
+gap—the Chromium page's concrete loopback origin was not configured—and the
+harness now derives that exact allowlist entry from its allocated HTTP port;
+the pinned Godot/Emscripten/Chromium rerun passed.
+
+The final GitHub audit found no review threads or PR comments. Cursor Bugbot
+reviewed exact head `a24ddaa` without an actionable finding; Copilot's review
+requests reported only the repository owner's exhausted quota. The repeated
+independent adversarial loop ended with zero findings. The PR is mergeable and
+non-draft; P68 remains open in PLAN.md only for merge, while P53 and P56 retain
+their unchanged 3/20 hosted evidence cohorts.
