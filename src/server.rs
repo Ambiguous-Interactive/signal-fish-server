@@ -1195,19 +1195,30 @@ impl InMemoryMessageCoordinator {
         .then(|| {
             crate::coordination::outbound_queue::DeliveryMessage::shared_relay(Arc::clone(&message))
         });
-        let started = self.start_deliveries(recipients, room_id, |player_id| {
-            shared_relay.clone().unwrap_or_else(|| {
-                crate::coordination::outbound_queue::DeliveryMessage::new(
-                    room_message_for_recipient(&message, player_id),
-                )
-            })
-        });
+        let started = self.start_deliveries(
+            recipients
+                .iter()
+                .map(|(player_id, handle)| (*player_id, handle)),
+            room_id,
+            |player_id| {
+                shared_relay.clone().unwrap_or_else(|| {
+                    crate::coordination::outbound_queue::DeliveryMessage::new(
+                        room_message_for_recipient(&message, player_id),
+                    )
+                })
+            },
+        );
+        // `start_deliveries` clones only the handles whose full queues must
+        // survive into the async wait. Release the owned routing snapshot now
+        // so one backpressured recipient cannot prolong every unrelated
+        // healthy recipient's connection lifetime.
+        drop(recipients);
         self.finish_deliveries(started).await;
     }
 
-    fn start_deliveries(
+    fn start_deliveries<'a>(
         &self,
-        recipients: impl IntoIterator<Item = (PlayerId, ClientDeliveryHandle)>,
+        recipients: impl IntoIterator<Item = (PlayerId, &'a ClientDeliveryHandle)>,
         room_id: Option<RoomId>,
         mut delivery_for_player: impl FnMut(
             &PlayerId,
@@ -1226,13 +1237,15 @@ impl InMemoryMessageCoordinator {
                 &self.metrics,
                 self.slow_consumer_timeout,
                 &player_id,
-                &handle,
+                handle,
                 delivery,
                 room_id,
             ) {
                 crate::coordination::DeliveryStart::Complete(outcome) => {
                     if outcome == DeliveryOutcome::SlowConsumer {
-                        started.slow_consumers.push((player_id, handle.sender));
+                        started
+                            .slow_consumers
+                            .push((player_id, handle.sender.clone()));
                     }
                 }
                 crate::coordination::DeliveryStart::Backpressured(delivery) => {
@@ -1347,11 +1360,7 @@ impl InMemoryMessageCoordinator {
             let recipients = players
                 .iter()
                 .filter(|player_id| Some(*player_id) != except_player)
-                .filter_map(|player_id| {
-                    clients
-                        .get(player_id)
-                        .map(|handle| (*player_id, handle.clone()))
-                });
+                .filter_map(|player_id| clients.get(player_id).map(|handle| (*player_id, handle)));
             return self.start_deliveries(recipients, Some(*room_id), |_| shared_relay.clone());
         }
 
@@ -1384,11 +1393,7 @@ impl InMemoryMessageCoordinator {
         let recipients = players
             .iter()
             .filter(|player_id| Some(*player_id) != except_player)
-            .filter_map(|player_id| {
-                clients
-                    .get(player_id)
-                    .map(|handle| (*player_id, handle.clone()))
-            });
+            .filter_map(|player_id| clients.get(player_id).map(|handle| (*player_id, handle)));
         self.start_deliveries(recipients, Some(*room_id), |player_id| {
             shared_relay.clone().unwrap_or_else(|| {
                 crate::coordination::outbound_queue::DeliveryMessage::new(
@@ -3378,6 +3383,90 @@ mod relay_projection_cache_tests {
             .try_recv()
             .expect("the timed-out recipient's prefill remains queued");
         assert!(matches!(first_prefill.as_ref(), ServerMessage::Pong));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backpressured_bulk_delivery_releases_unrouted_healthy_recipient() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        ));
+        let healthy_player = PlayerId::from_u128(1);
+        let blocked_player = PlayerId::from_u128(2);
+        let (healthy, mut healthy_receiver) = legacy_delivery_handle(1);
+        let (blocked, _blocked_receiver) = legacy_delivery_handle(1);
+        blocked
+            .sender
+            .try_send(Arc::new(ServerMessage::Pong), None)
+            .expect("blocked-recipient prefill must fit");
+        {
+            let mut clients = coordinator.local_clients.write().await;
+            clients.insert(healthy_player, healthy);
+            clients.insert(blocked_player, blocked);
+        }
+        let recipients = coordinator
+            .local_clients
+            .read()
+            .await
+            .iter()
+            .map(|(player_id, handle)| (*player_id, handle.clone()))
+            .collect();
+
+        let task = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move {
+                coordinator
+                    .deliver_to_all(recipients, Arc::new(ServerMessage::Pong), None)
+                    .await;
+            })
+        };
+
+        for _ in 0..100 {
+            if metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed),
+            1,
+            "blocked recipient must enter its capacity wait"
+        );
+        assert!(
+            !task.is_finished(),
+            "bulk delivery must still be waiting on the blocked recipient"
+        );
+
+        let removed = coordinator
+            .local_clients
+            .write()
+            .await
+            .remove(&healthy_player)
+            .expect("healthy recipient must still be routed");
+        drop(removed);
+        let delivered = healthy_receiver
+            .try_recv()
+            .expect("healthy recipient must receive the broadcast");
+        assert!(matches!(delivered.as_ref(), ServerMessage::Pong));
+        let terminal = healthy_receiver.try_recv();
+        assert!(
+            matches!(terminal, Err(mpsc::error::TryRecvError::Disconnected)),
+            "unrouting the healthy recipient must terminate its queue while an unrelated peer is \
+             still backpressured"
+        );
+
+        task.abort();
+        let task_error = task
+            .await
+            .expect_err("aborted blocked delivery must not complete normally");
+        assert!(task_error.is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]

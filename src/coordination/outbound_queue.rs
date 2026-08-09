@@ -433,6 +433,10 @@ struct QueueState {
     receiver_open: bool,
     accountability_failed: bool,
     sender_count: usize,
+    /// Deterministic evidence for the allocation benchmark's per-recipient
+    /// handle-ownership boundary; excluded from normal builds.
+    #[cfg(feature = "allocation-tracking")]
+    sender_clone_operations: usize,
     permit_count: usize,
     counters: DeliveryCountersByClass,
     /// The counter frontier successfully written and flushed to the socket.
@@ -591,6 +595,8 @@ impl QueueState {
             receiver_open: true,
             accountability_failed: false,
             sender_count: 1,
+            #[cfg(feature = "allocation-tracking")]
+            sender_clone_operations: 0,
             permit_count: 0,
             counters: DeliveryCountersByClass::default(),
             wire_counters: DeliveryCountersByClass::default(),
@@ -854,10 +860,24 @@ impl Clone for OutboundSender {
     fn clone(&self) -> Self {
         let mut state = self.shared.state();
         state.sender_count = state.sender_count.saturating_add(1);
+        #[cfg(feature = "allocation-tracking")]
+        {
+            state.sender_clone_operations = state.sender_clone_operations.saturating_add(1);
+        }
         drop(state);
         Self {
             shared: Arc::clone(&self.shared),
         }
+    }
+}
+
+impl OutboundSender {
+    /// Return the number of sender clones for deterministic hot-path
+    /// benchmarking.
+    #[cfg(feature = "allocation-tracking")]
+    #[doc(hidden)]
+    pub fn clone_operations_for_allocation_benchmark(&self) -> usize {
+        self.shared.state().sender_clone_operations
     }
 }
 

@@ -21,7 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2-/8-/16-player rooms, with 30–36% fewer allocated bytes. The healthy
   production handoff now also avoids allocating its async completion state,
   reducing both JSON and binary ingress from two allocations to one and saving
-  another 352 allocated bytes per relay at every room size. Routing contention
+  another 352 allocated bytes per relay at every room size. Healthy fan-out now
+  also borrows registered delivery handles, removing one queue-handle clone and
+  its synchronization per recipient per relay; ownership is retained only for
+  exceptional backpressure and slow-consumer cleanup. Routing contention
   retains the existing async fallback, while backpressured delivery retains its
   existing ordering, deadline, and cleanup semantics. Codec work and exact wire
   output are preserved.
