@@ -63,7 +63,7 @@ browser-interop = []
 [dev-dependencies]
 # The interop harness spawns the server binary + N client binaries as real
 # child processes; `process` mirrors the root crate's test-only tokio features.
-tokio = { version = "1.52", features = ["process"] }
+tokio = { version = "1.52", features = ["process", "test-util"] }
 tempfile = "3.27"
 rmp = "0.8"
 rmp-serde = "1.3"

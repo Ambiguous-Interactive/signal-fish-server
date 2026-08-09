@@ -25,6 +25,7 @@
 //! they forward through an unbounded [`EngineEvent`] channel back to the orchestrator.
 
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,10 +40,13 @@ use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
     RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCIceTransportPolicy,
-    RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, RTCStatsReportEntry,
-    SettingEngine, StatsSelector,
+    RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, RTCStatsReport,
+    RTCStatsReportEntry, SettingEngine, StatsSelector,
 };
 use webrtc::runtime::{default_runtime, Runtime};
+
+const SELECTED_PAIR_STATS_BUDGET: Duration = Duration::from_secs(1);
+const SELECTED_PAIR_STATS_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Label of the ordered, reliable data channel (commands / critical events).
 pub const RELIABLE_LABEL: &str = "reliable";
@@ -543,36 +547,86 @@ impl Engine {
     /// carried the data channels.
     pub async fn selected_candidate_pair(&self, peer: PlayerId) -> Option<SelectedCandidatePair> {
         let pc = self.peers.get(&peer)?.pc.clone();
-        let report = pc
-            .get_stats(std::time::Instant::now(), StatsSelector::None)
-            .await;
-        let selected_pair_id = &report.transport()?.selected_candidate_pair_id;
-        let RTCStatsReportEntry::IceCandidatePair(pair) = report.get(selected_pair_id)? else {
-            return None;
-        };
-        // rtc 0.20 records raw ICE-agent IDs on the candidate-pair entry but
-        // prefixes the standalone candidate report IDs. Accept the direct ID
-        // first so this remains compatible if that internal mismatch is fixed.
-        let local_id = format!("RTCLocalIceCandidate_{}", pair.local_candidate_id);
-        let remote_id = format!("RTCRemoteIceCandidate_{}", pair.remote_candidate_id);
-        let RTCStatsReportEntry::LocalCandidate(local) = report
-            .get(&pair.local_candidate_id)
-            .or_else(|| report.get(&local_id))?
-        else {
-            return None;
-        };
-        let RTCStatsReportEntry::RemoteCandidate(remote) = report
-            .get(&pair.remote_candidate_id)
-            .or_else(|| report.get(&remote_id))?
-        else {
-            return None;
-        };
-        Some(SelectedCandidatePair {
-            local_candidate_type: local.candidate_type.to_string(),
-            remote_candidate_type: remote.candidate_type.to_string(),
-            local_candidate_address: local.address.clone(),
-            remote_candidate_address: remote.address.clone(),
+        observe_eventually(SELECTED_PAIR_STATS_BUDGET, || {
+            let pc = Arc::clone(&pc);
+            async move {
+                let report = pc
+                    .get_stats(std::time::Instant::now(), StatsSelector::None)
+                    .await;
+                selected_candidate_pair_from_report(&report)
+            }
         })
+        .await
+    }
+}
+
+fn selected_candidate_pair_from_report(report: &RTCStatsReport) -> Option<SelectedCandidatePair> {
+    let selected_pair_id = &report.transport()?.selected_candidate_pair_id;
+    let RTCStatsReportEntry::IceCandidatePair(pair) = report.get(selected_pair_id)? else {
+        return None;
+    };
+    // rtc 0.20 records raw ICE-agent IDs on the candidate-pair entry but
+    // prefixes the standalone candidate report IDs. Accept the direct ID
+    // first so this remains compatible if that internal mismatch is fixed.
+    let local_id = format!("RTCLocalIceCandidate_{}", pair.local_candidate_id);
+    let remote_id = format!("RTCRemoteIceCandidate_{}", pair.remote_candidate_id);
+    let RTCStatsReportEntry::LocalCandidate(local) = report
+        .get(&pair.local_candidate_id)
+        .or_else(|| report.get(&local_id))?
+    else {
+        return None;
+    };
+    let RTCStatsReportEntry::RemoteCandidate(remote) = report
+        .get(&pair.remote_candidate_id)
+        .or_else(|| report.get(&remote_id))?
+    else {
+        return None;
+    };
+    Some(SelectedCandidatePair {
+        local_candidate_type: local.candidate_type.to_string(),
+        remote_candidate_type: remote.candidate_type.to_string(),
+        local_candidate_address: local.address.clone(),
+        remote_candidate_address: remote.address.clone(),
+    })
+}
+
+/// Observe an eventually consistent WebRTC statistic until it exists or the
+/// fixed evidence deadline expires.
+///
+/// webrtc-rs can report open data channels before its driver has drained the
+/// earlier ICE selected-pair event into the statistics accumulator. The pair
+/// is already carrying gameplay traffic at that point; only the stats snapshot
+/// lags. Polling the observable postcondition closes that scheduler boundary
+/// without weakening the harness's exact selected-path assertion.
+async fn observe_eventually<T, Observe, Observation>(
+    budget: Duration,
+    mut observe: Observe,
+) -> Option<T>
+where
+    Observe: FnMut() -> Observation,
+    Observation: Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        // `timeout_at` polls its inner future before checking the deadline. Do
+        // both checks ourselves so an immediately-ready snapshot cannot start
+        // or become accepted at the exact evidence boundary.
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        let observation = tokio::time::timeout_at(deadline, observe()).await.ok()?;
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        if let Some(value) = observation {
+            return Some(value);
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        tokio::time::sleep_until((now + SELECTED_PAIR_STATS_INTERVAL).min(deadline)).await;
     }
 }
 
@@ -1057,7 +1111,90 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_observation_waits_for_delayed_stats() {
+        let attempts = AtomicUsize::new(0);
+
+        let observed = observe_eventually(Duration::from_millis(100), || {
+            let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+            async move { (attempt == 2).then_some("selected-pair") }
+        })
+        .await;
+
+        assert_eq!(observed, Some("selected-pair"));
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            3,
+            "issue #301's connected-before-stats schedule must be observed again, not lost"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_observation_stops_at_evidence_deadline() {
+        let attempts = AtomicUsize::new(0);
+        let observation = observe_eventually(Duration::from_millis(20), || {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            async { None::<()> }
+        })
+        .await;
+
+        assert_eq!(observation, None);
+        assert!(
+            attempts.load(Ordering::Relaxed) >= 1,
+            "the deadline path must take at least one real stats snapshot"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_observation_cancels_a_snapshot_at_the_absolute_deadline() {
+        let started_at = tokio::time::Instant::now();
+        let observation = observe_eventually(Duration::from_secs(1), || async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Some("too-late")
+        })
+        .await;
+
+        assert_eq!(observation, None);
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started_at),
+            Duration::from_secs(1),
+            "a slow stats snapshot must not extend the evidence budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_observation_rejects_a_snapshot_ready_at_the_exact_deadline() {
+        let observation = observe_eventually(Duration::from_secs(1), || async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Some("boundary-evidence")
+        })
+        .await;
+
+        assert_eq!(
+            observation, None,
+            "evidence that becomes ready at the deadline is outside the strict budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_observation_does_not_retry_at_the_evidence_deadline() {
+        let attempts = AtomicUsize::new(0);
+        let observation = observe_eventually(SELECTED_PAIR_STATS_INTERVAL, || {
+            let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+            async move { (attempt == 1).then_some("too-late") }
+        })
+        .await;
+
+        assert_eq!(observation, None);
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            1,
+            "a would-be retry at the exact deadline must never start"
+        );
+    }
 
     /// Payload of the routing probes below. Its exact bytes are compared on
     /// arrival, so a datagram from anything else cannot be mistaken for it.
