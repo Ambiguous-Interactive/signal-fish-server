@@ -1,7 +1,9 @@
+use super::game_data::broadcast_game_data_with;
 use super::{ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator};
 use crate::coordination::{
-    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, MessageCoordinator,
-    RoomMessageTransactionOutcome, RoomRecipientMessages,
+    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome,
+    ImmediateGameDataBroadcast, MessageCoordinator, RoomMessageTransactionOutcome,
+    RoomRecipientMessages,
 };
 use crate::metrics::ServerMetrics;
 use crate::protocol::{
@@ -628,9 +630,164 @@ async fn missing_sender_stamp_cancels_broadcast_before_any_delivery_attempt() {
     );
 }
 
+fn contended_game_data(sender_id: PlayerId) -> ServerMessage {
+    ServerMessage::GameData {
+        from_player: sender_id,
+        data: serde_json::Value::Null,
+        seq: Some(1),
+        epoch: Some(1),
+        class: Some(DeliveryClass::Reliable),
+        key: None,
+    }
+}
+
+fn spawn_contended_game_data_broadcast(
+    coordinator: Arc<InMemoryMessageCoordinator>,
+    metrics: Arc<ServerMetrics>,
+    room_id: RoomId,
+    sender_id: PlayerId,
+    calls: Arc<AtomicUsize>,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        let trait_object: &dyn MessageCoordinator = coordinator.as_ref();
+        broadcast_game_data_with(
+            trait_object,
+            metrics.as_ref(),
+            &sender_id,
+            &room_id,
+            move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Some(contended_game_data(sender_id))
+            },
+        )
+        .await
+    })
+}
+
+#[tokio::test]
+async fn immediate_owned_broadcast_preserves_builder_across_room_routing_contention() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::new_v4();
+    let sender_id = PlayerId::new_v4();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut build_message = || {
+        calls.fetch_add(1, Ordering::Relaxed);
+        Some(contended_game_data(sender_id))
+    };
+
+    let room_players = coordinator.room_players.write().await;
+    let outcome = coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+        &room_id,
+        &sender_id,
+        &mut build_message,
+    );
+    assert!(matches!(outcome, ImmediateGameDataBroadcast::Unavailable));
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "a contended try-start must preserve the one-shot builder for fallback"
+    );
+    let broadcast = spawn_contended_game_data_broadcast(
+        Arc::clone(&coordinator),
+        Arc::clone(&metrics),
+        room_id,
+        sender_id,
+        Arc::clone(&calls),
+    );
+    wait_for_counter(
+        "trait-object broadcast entered contention fallback",
+        10_000,
+        || metrics.game_data_messages.load(Ordering::Relaxed) == 1,
+    )
+    .await;
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(!broadcast.is_finished());
+    drop(room_players);
+
+    broadcast
+        .await
+        .expect("contended broadcast task must not panic")
+        .expect("async fallback must consume the preserved builder");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        0,
+        "an empty room must not create a delivery attempt"
+    );
+}
+
+#[tokio::test]
+async fn immediate_owned_broadcast_releases_room_guard_across_client_routing_contention() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::new_v4();
+    let sender_id = PlayerId::new_v4();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut build_message = || {
+        calls.fetch_add(1, Ordering::Relaxed);
+        Some(contended_game_data(sender_id))
+    };
+
+    let clients = coordinator.local_clients.write().await;
+    assert!(matches!(
+        coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+            &room_id,
+            &sender_id,
+            &mut build_message,
+        ),
+        ImmediateGameDataBroadcast::Unavailable
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let room_players = coordinator
+        .room_players
+        .try_write()
+        .expect("failed second-lock try-start must release its room-routing read guard");
+    drop(room_players);
+
+    let broadcast = spawn_contended_game_data_broadcast(
+        Arc::clone(&coordinator),
+        Arc::clone(&metrics),
+        room_id,
+        sender_id,
+        Arc::clone(&calls),
+    );
+    wait_for_counter(
+        "trait-object broadcast reached client contention",
+        10_000,
+        || metrics.game_data_messages.load(Ordering::Relaxed) == 1,
+    )
+    .await;
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(!broadcast.is_finished());
+    drop(clients);
+
+    broadcast
+        .await
+        .expect("client-contended broadcast task must not panic")
+        .expect("async fallback must consume the builder once");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        0,
+        "an empty room must not create a delivery attempt"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapshot() {
-    for builder_kind in ["boxed", "borrowed", "borrowed-owned"] {
+    for builder_kind in [
+        "boxed",
+        "borrowed",
+        "borrowed-owned",
+        "immediate-borrowed-owned",
+    ] {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
             Duration::from_secs(5),
@@ -723,7 +880,7 @@ async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapsho
                             &mut build_message,
                         )
                         .await
-                } else if builder_kind == "borrowed-owned" {
+                } else if matches!(builder_kind, "borrowed-owned" | "immediate-borrowed-owned") {
                     let mut build_message = || {
                         Some(ServerMessage::GameData {
                             from_player: sender_id,
@@ -734,13 +891,30 @@ async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapsho
                             key: None,
                         })
                     };
-                    coordinator
-                        .broadcast_to_room_except_with_borrowed_owned_message(
+                    if builder_kind == "immediate-borrowed-owned" {
+                        match coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
                             &room_id,
                             &sender_id,
                             &mut build_message,
-                        )
-                        .await
+                        ) {
+                            ImmediateGameDataBroadcast::Pending(completion) => {
+                                completion.await;
+                                Ok(())
+                            }
+                            ImmediateGameDataBroadcast::Complete => Ok(()),
+                            ImmediateGameDataBroadcast::Unavailable => {
+                                panic!("uncontended immediate broadcast must acquire routing")
+                            }
+                        }
+                    } else {
+                        coordinator
+                            .broadcast_to_room_except_with_borrowed_owned_message(
+                                &room_id,
+                                &sender_id,
+                                &mut build_message,
+                            )
+                            .await
+                    }
                 } else {
                     coordinator
                         .broadcast_to_room_except_with_message(

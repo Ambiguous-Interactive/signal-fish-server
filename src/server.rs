@@ -2,10 +2,10 @@ use crate::auth::AppContext;
 use crate::config::AppRegistrationEntry;
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliveryPermit,
-    DeliveryReserveError, DeliverySender, DeliveryTrySendError, InMemoryRoomOperationCoordinator,
-    MessageCoordinator, RoomEventCompletion, RoomEventJob, RoomEventMutationGuard,
-    RoomEventSequencer, RoomMessageTransactionOutcome, RoomOperationCoordinatorTrait,
-    RoomRecipientMessages,
+    DeliveryReserveError, DeliverySender, DeliveryTrySendError, ImmediateGameDataBroadcast,
+    InMemoryRoomOperationCoordinator, MessageCoordinator, RoomEventCompletion, RoomEventJob,
+    RoomEventMutationGuard, RoomEventSequencer, RoomMessageTransactionOutcome,
+    RoomOperationCoordinatorTrait, RoomRecipientMessages,
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
@@ -2936,6 +2936,38 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             self.finish_deliveries(started).await;
         }
         Ok(())
+    }
+
+    fn try_broadcast_to_room_except_with_borrowed_owned_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> ImmediateGameDataBroadcast<'a> {
+        let Ok(room_players) = self.room_players.try_read() else {
+            return ImmediateGameDataBroadcast::Unavailable;
+        };
+        let Ok(clients) = self.local_clients.try_read() else {
+            return ImmediateGameDataBroadcast::Unavailable;
+        };
+        let Some(message) = build_message() else {
+            return ImmediateGameDataBroadcast::Complete;
+        };
+        let started = self.start_routed_owned_deliveries(
+            &room_players,
+            &clients,
+            room_id,
+            Some(except_player),
+            message,
+        );
+        drop(clients);
+        drop(room_players);
+
+        if started.pending.is_empty() && started.slow_consumers.is_empty() {
+            ImmediateGameDataBroadcast::Complete
+        } else {
+            ImmediateGameDataBroadcast::Pending(Box::pin(self.finish_deliveries(started)))
+        }
     }
 
     async fn register_local_client(

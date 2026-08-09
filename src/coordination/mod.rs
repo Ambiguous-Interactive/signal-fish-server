@@ -60,6 +60,21 @@ pub type RoomEventJob = Box<
 /// Completion of one FIFO room event.
 pub type RoomEventCompletion = Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'static>>;
 
+/// Result of attempting the allocation-free game-data broadcast handoff.
+///
+/// The process-local coordinator can acquire its routing snapshot without
+/// awaiting in the uncontended case. Other implementations, or a contended
+/// local coordinator, return [`Self::Unavailable`] and retain the ordinary
+/// async trait path. Queue backpressure is exceptional and owns a boxed future
+/// only after the synchronous delivery attempt has already started.
+#[doc(hidden)]
+#[must_use = "await Pending completion or retry Unavailable through the async coordinator path"]
+pub enum ImmediateGameDataBroadcast<'a> {
+    Complete,
+    Pending(Pin<Box<dyn Future<Output = ()> + Send + 'a>>),
+    Unavailable,
+}
+
 /// Ordered control frames destined for one member of a room transaction.
 ///
 /// All batches in a transaction are fully reserved before its commit hook is
@@ -1906,6 +1921,24 @@ pub trait MessageCoordinator: Send + Sync {
         Ok(())
     }
 
+    /// Try the healthy game-data handoff without allocating an async-trait
+    /// future.
+    ///
+    /// Implementations must not invoke `build_message` when returning
+    /// [`ImmediateGameDataBroadcast::Unavailable`], because the caller will
+    /// retry through [`Self::broadcast_to_room_except_with_borrowed_owned_message`].
+    /// The default preserves compatibility for coordinators without a
+    /// synchronous routing snapshot.
+    #[doc(hidden)]
+    fn try_broadcast_to_room_except_with_borrowed_owned_message<'a>(
+        &'a self,
+        _room_id: &RoomId,
+        _except_player: &PlayerId,
+        _build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> ImmediateGameDataBroadcast<'a> {
+        ImmediateGameDataBroadcast::Unavailable
+    }
+
     async fn register_local_client(
         &self,
         player_id: PlayerId,
@@ -2747,6 +2780,19 @@ mod tests {
                 calls_for_builder.fetch_add(1, Ordering::Relaxed);
                 built.take().flatten()
             };
+            assert!(matches!(
+                coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+                    &room_id,
+                    &sender,
+                    &mut build_message,
+                ),
+                ImmediateGameDataBroadcast::Unavailable
+            ));
+            assert_eq!(
+                build_calls.load(Ordering::Relaxed),
+                0,
+                "{context}: the default try-start must preserve the builder for async fallback"
+            );
             coordinator
                 .broadcast_to_room_except_with_borrowed_owned_message(
                     &room_id,

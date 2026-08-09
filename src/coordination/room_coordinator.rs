@@ -3372,7 +3372,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn independent_membership_change_while_capacity_waits_rejects_start_cas() {
         let database = Arc::new(InMemoryDatabase::new());
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
@@ -3496,16 +3496,23 @@ mod tests {
             .expect("room lookup succeeds")
             .expect("room remains present");
         assert_ne!(persisted.lobby_state, LobbyState::Finalized);
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0,
+            "the deterministic capacity wait must not race its delivery deadline"
+        );
         let unexpected_alice = alice_rx.try_recv();
-        assert!(matches!(
-            unexpected_alice,
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        assert!(
+            matches!(unexpected_alice, Err(mpsc::error::TryRecvError::Empty)),
+            "Alice received unexpected post-CAS output: {unexpected_alice:?}"
+        );
         let unexpected_bob = bob_rx.try_recv();
-        assert!(matches!(
-            unexpected_bob,
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        assert!(
+            matches!(unexpected_bob, Err(mpsc::error::TryRecvError::Empty)),
+            "Bob received unexpected post-CAS output: {unexpected_bob:?}"
+        );
     }
 
     #[tokio::test]
