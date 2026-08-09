@@ -606,7 +606,7 @@ where
     Observe: FnMut() -> Observation,
     Observation: Future<Output = Option<T>>,
 {
-    let deadline = tokio::time::Instant::now() + budget;
+    let deadline = tokio::time::Instant::now().checked_add(budget)?;
     loop {
         // `timeout_at` polls its inner future before checking the deadline. Do
         // both checks ourselves so an immediately-ready snapshot cannot start
@@ -626,7 +626,10 @@ where
         if now >= deadline {
             return None;
         }
-        tokio::time::sleep_until((now + SELECTED_PAIR_STATS_INTERVAL).min(deadline)).await;
+        let next_attempt = now
+            .checked_add(SELECTED_PAIR_STATS_INTERVAL)
+            .map_or(deadline, |next| next.min(deadline));
+        tokio::time::sleep_until(next_attempt).await;
     }
 }
 
