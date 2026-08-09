@@ -27,8 +27,8 @@ cargo run -- --print-config
 - [ ] App-ID allowlist enabled — `security.enforce_app_id_allowlist=true`.
 - [ ] At least one real app registered in `security.allowed_apps` with a
   meaningful `app_id` / `app_name`.
-- [ ] CORS locked down — `security.cors_origins` set to your origin(s), **not**
-  `*`.
+- [ ] Browser origins locked down — `security.cors_origins` set to your HTTP and
+  WebSocket origin(s), **not** `*`.
 - [ ] `security.max_connections_per_ip` set to a sane ceiling (default `24`).
 
 ## Secrets protected

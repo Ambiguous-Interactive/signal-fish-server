@@ -150,7 +150,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__LOGGING__LEVEL` | `logging.level` | `null` | Log level override (`trace`, `debug`, `info`, `warn`, `error`) |
 | `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING` | `logging.enable_file_logging` | `true` | Enable rolling file logs |
 | `SIGNAL_FISH__LOGGING__FORMAT` | `logging.format` | `json` | Log output format (`json` or `text`) |
-| `SIGNAL_FISH__SECURITY__CORS_ORIGINS` | `security.cors_origins` | `http://localhost:3000,http://localhost:5173` | Allowed CORS origins (comma-separated or `*`) |
+| `SIGNAL_FISH__SECURITY__CORS_ORIGINS` | `security.cors_origins` | `http://localhost:3000,http://localhost:5173` | Allowed HTTP and browser WebSocket origins (comma-separated or `*`) |
 | `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST` | `security.enforce_app_id_allowlist` | `true` | Require the public client app ID to appear in `allowed_apps` |
 | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH` | `security.require_metrics_auth` | `true` | Require auth token for metrics endpoints |
 | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN` | `security.metrics_auth_token` | `null` | Bearer token for metrics endpoints |

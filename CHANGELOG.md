@@ -17,11 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wait for the native WebRTC statistics accumulator at the bounded
+  connected-data-channel boundary before declaring selected candidate-pair
+  evidence missing. Live interop still requires exactly one concrete pair and
+  fails after the one-second evidence deadline (issue #301).
 - Preserve the reviewed release-preparation source when documentation or
   workflow changes reach the default branch before publication. Manual releases
   now select the unique first-parent commit that introduced the package version
   and reject shallow history or reused version boundaries instead of publishing
   a later tree under the prepared version.
+
+### Security
+
+- Enforce `security.cors_origins` on browser WebSocket upgrades at both
+  `/v2/ws` and `/v3/ws`, using the same parsed policy as HTTP CORS responses.
+  Disallowed origins now receive HTTP 403 and malformed allowlists fail
+  configuration validation; origin-less native clients remain compatible
+  (issue #319).
 
 ## [0.6.0] - 2026-08-08
 
