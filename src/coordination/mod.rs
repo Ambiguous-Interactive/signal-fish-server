@@ -3504,6 +3504,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn classified_delivery_permits_commit_transition_and_cancel_old_scope() {
+        let (sender, mut receiver) = outbound_queue::channel(1, 2);
+        let current = DeliverySender::classified(sender);
+        current.set_protocol_version(3);
+        let stale = current
+            .try_reserve_control(None)
+            .expect("reserve an ordinary generation-zero control permit");
+        let transition = current
+            .next_generation()
+            .try_reserve_control(None)
+            .expect("reserve the next-generation transition permit");
+
+        assert!(
+            transition
+                .send(Arc::new(ServerMessage::RoomLeft))
+                .expect("the DeliveryPermit wrapper must commit the transition")
+                .enqueued
+        );
+        assert_eq!(
+            stale
+                .send(test_message())
+                .expect("the old DeliveryPermit resolves as cancellation"),
+            QueueEnqueueOutcome {
+                enqueued: false,
+                losses: 0,
+            }
+        );
+        assert!(matches!(
+            receiver
+                .recv()
+                .await
+                .expect("classified receiver remains healthy")
+                .expect("the transition must be queued")
+                .payload,
+            OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::RoomLeft)
+        ));
+        match receiver.try_recv() {
+            Err(outbound_queue::TryReceiveError::Empty) => {}
+            Ok(message) => panic!("unexpected post-transition control: {message:?}"),
+            Err(other) => panic!("classified receiver ended unexpectedly: {other:?}"),
+        }
+    }
+
     /// (a) Fast path: an attempt against a queue with room is enqueued
     /// immediately — no backpressure, no drops, conservation exact.
     #[tokio::test(start_paused = true)]

@@ -9,7 +9,9 @@
 #     #131 delivery contract (formal/tla/DeliveryContract.tla — bounded queue,
 #     unfair consumer, slow-consumer eviction; message conservation and
 #     no-silent-loss), plus classified queue capacity-deadline arbitration
-#     (continuous availability, refill invalidation, and atomic admission) —
+#     (continuous availability, refill invalidation, and atomic admission) and
+#     the reserved control-permit lifecycle (exact release, producer liveness,
+#     parked-receiver notification, and commit-time scope validation) —
 #     exploring reachable states.
 #   * Z3 discharges universally quantified SMT proofs of the pure decision
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the

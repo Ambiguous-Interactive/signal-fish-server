@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wake a classified WebSocket receiver when its final reserved control is
+  canceled by a concurrent room-generation transition. The receiver now
+  observes terminal disconnect instead of remaining parked after every sender
+  and permit has gone (issue #220).
 - Wait for the native WebRTC statistics accumulator at the bounded
   connected-data-channel boundary before declaring selected candidate-pair
   evidence missing. Live interop still requires exactly one concrete pair and

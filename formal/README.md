@@ -33,6 +33,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late-join, reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor`) |
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
 | `tla/CapacityDeadlineArbitration.tla` | P56's classified queue deadline: continuous pre-deadline capacity, refill invalidation, and lock-atomic late admission |
+| `tla/CapacityPermitLifecycle.tla` | P73's classified control-permit lifecycle: exact reservation accounting, producer liveness, terminal release, and commit-time scope validation |
 | `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
@@ -649,6 +650,51 @@ at graph depth 9 with TLC 2.19. `_ExpectedFailure` sets
 followed by a deadline-or-later poll. The oracle intentionally pins the
 invariant diagnostic rather than one scheduler-equivalent trace's exact ticks.
 A clean run, parse failure, or unrelated violation fails CI.
+
+## Reserved control-permit lifecycle
+
+`CapacityPermitLifecycle.tla` continues at the exact boundary deliberately left
+open by `CapacityDeadlineArbitration.tla`. It follows classified control
+permits after atomic admission through commit, explicit cancellation / `Drop`,
+receiver close, accountability failure, last-sender drop, and a competing
+generation transition. Two independently identified permits and capacity two
+match the production transaction bound: both permits may be held together, or
+one ordinary permit may remain held while the other commits a transition that
+makes its scope stale.
+
+| Model action / predicate | Production correspondence |
+| ------------------------ | ------------------------- |
+| `ReserveCurrent` / `ReserveNext` | `DeliverySender` constructing current- or next-generation scoped `DeliveryPermit`s over reserved control capacity |
+| `SenderDrop` / `ProducersOpen` | `OutboundSender::drop` and `QueueState::producers_open` |
+| `ReceiverClose` / `FailAccountability` | the two terminal `QueueState::accepting` conditions |
+| `PermitCommitControl` / `PermitCommitTransition` | `DeliveryPermit::send` and `OutboundPermit::send_control_inner` releasing first, then validating ordinary or next-generation scope |
+| `PermitCommitFailed` / `PermitCommitStaleControl` / `PermitCommitStaleTransition` | terminal and cross-kind / stale-scope send arms after reservation consumption |
+| `PermitDrop` | `OutboundPermit::drop` releasing the lane reservation and producer capability |
+| `ReceiverPoll` / `ReceiverResume` | `OutboundReceiver::recv` empty / item / terminal decisions around `item_available` notification |
+
+`PermitAccountingExact` proves the reservation and producer-capability counts
+agree with the exact held-permit set on every path.
+`PermitLifecycleConservation` proves each logical control is held, queued,
+canceled, failed, or delivered rather than lost or duplicated.
+`NoPrematureEof` prevents the last sender from overtaking a still-committable
+permit, `NoStaleScopeCommit` prevents an old control from entering a new
+generation, and `WaitingReceiverNotified` proves every modeled progress edge
+issues the notification required to resume an already-parked receiver. The
+last is an action-level notification invariant, not a scheduler-fairness or
+wall-clock liveness claim.
+
+Reservation records only generation and optional room scope, just as
+`DeliveryPermit` does; it does not predict the later message kind. Ordinary
+control and transition commit are separate nondeterministic actions for every
+held permit, so the model also explores current scope misused for a transition
+and next-generation wildcard scope misused for ordinary control.
+
+`_Small` exhaustively checks 6,902 distinct states at graph depth 11 with TLC
+2.19. Six named `_ExpectedFailure` configurations independently omit the
+permit producer capability, Drop release, failed-send release, stale-cancel
+release, commit-time scope validation, or the permit-notification class. The runner
+accepts each only when TLC reports its exact named invariant, so a clean run,
+parser error, or unrelated failure cannot make the non-vacuity gates pass.
 
 ## Additional disconnect/outage exposure bound
 
