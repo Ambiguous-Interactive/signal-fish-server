@@ -135,9 +135,9 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Enforce deterministic relay allocation ceilings
-        run: >-
-          cargo bench --locked --bench relay_serialization_allocations
-          --features allocation-tracking
+        run: |
+          cargo bench --locked --bench relay_allocations --features allocation-tracking
+          cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking
 
   lint:
     name: Lint (${{ matrix.os }})

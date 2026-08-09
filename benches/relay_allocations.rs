@@ -134,9 +134,9 @@ impl FanoutFixture {
         });
 
         // Construct caller-owned payloads before the measured region. The
-        // production ingress cell still builds the ServerMessage and Arc in
-        // the measured region, while the isolated handoff cell uses the
-        // prebuilt minimal envelope retained by the historical baseline.
+        // production ingress cell still builds the ServerMessage and shared
+        // carrier in the measured region, while the isolated handoff cell uses
+        // the prebuilt minimal envelope retained by the historical baseline.
         let payload = ingress_payload(ingress_kind);
         let handoff_message = game_data_message(ingress_kind, SENDER_ID, 1);
         let mut fixture = Self {
@@ -535,14 +535,13 @@ fn assert_healthy_fanout_uses_synchronous_fast_path(room_size: usize, sample: Sa
 
 fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
     let maximum_operations_per_relay = match room_size {
-        2 => 2,
-        8 | 16 => 3,
+        2 | 8 | 16 => 2,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     let maximum_bytes_per_relay = match room_size {
         2 => 648,
-        8 | 16 => 1_328,
+        8 | 16 => 1_104,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     assert!(

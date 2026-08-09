@@ -1,4 +1,4 @@
-use super::game_data::one_shot_arc_builder;
+use super::game_data::one_shot_message_builder;
 use crate::protocol::ServerMessage;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -12,15 +12,15 @@ impl Drop for DropProbe {
 }
 
 #[test]
-fn one_shot_arc_builder_consumes_builder_once_and_defends_against_repeat_calls() {
+fn one_shot_message_builder_consumes_builder_once_and_defends_against_repeat_calls() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_builder = Arc::clone(&calls);
-    let mut builder = one_shot_arc_builder(move || {
+    let mut builder = one_shot_message_builder(move || {
         calls_for_builder.fetch_add(1, Ordering::Relaxed);
         Some(ServerMessage::Pong)
     });
 
-    assert!(matches!(builder().as_deref(), Some(ServerMessage::Pong)));
+    assert!(matches!(builder(), Some(ServerMessage::Pong)));
     assert!(
         builder().is_none(),
         "a repeated call must cancel defensively"
@@ -29,10 +29,10 @@ fn one_shot_arc_builder_consumes_builder_once_and_defends_against_repeat_calls()
 }
 
 #[test]
-fn one_shot_arc_builder_preserves_cancellation_and_drops_called_capture() {
+fn one_shot_message_builder_preserves_cancellation_and_drops_called_capture() {
     let drops = Arc::new(AtomicUsize::new(0));
     let probe = DropProbe(Arc::clone(&drops));
-    let mut builder = one_shot_arc_builder(move || {
+    let mut builder = one_shot_message_builder(move || {
         drop(probe);
         None
     });
@@ -43,10 +43,10 @@ fn one_shot_arc_builder_preserves_cancellation_and_drops_called_capture() {
 }
 
 #[test]
-fn one_shot_arc_builder_drops_uncalled_builder_capture() {
+fn one_shot_message_builder_drops_uncalled_builder_capture() {
     let drops = Arc::new(AtomicUsize::new(0));
     let probe = DropProbe(Arc::clone(&drops));
-    let builder = one_shot_arc_builder(move || {
+    let builder = one_shot_message_builder(move || {
         let _probe = probe;
         Some(ServerMessage::Pong)
     });

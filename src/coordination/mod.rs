@@ -464,7 +464,7 @@ impl ConnectionCloseSignal {
     }
 
     #[cfg(feature = "trace-validation")]
-    pub(crate) fn begin_trace_delivery(&self, message: &Arc<ServerMessage>) -> Option<u64> {
+    pub(crate) fn begin_trace_delivery(&self, message: &ServerMessage) -> Option<u64> {
         self.trace
             .as_ref()
             .map(|trace| trace.begin_delivery(message))
@@ -485,7 +485,7 @@ impl ConnectionCloseSignal {
     #[cfg(feature = "trace-validation")]
     pub(crate) fn start_trace_write(
         &self,
-        message: &Arc<ServerMessage>,
+        message: &ServerMessage,
         close_flush: bool,
     ) -> Option<u64> {
         self.trace
@@ -1267,7 +1267,7 @@ pub(crate) fn start_message_delivery_in_room(
     room_id: Option<RoomId>,
 ) -> DeliveryStart {
     #[cfg(feature = "trace-validation")]
-    let trace_delivery_id = handle.close.begin_trace_delivery(delivery.message_arc());
+    let trace_delivery_id = handle.close.begin_trace_delivery(delivery.message());
     #[cfg(feature = "trace-validation")]
     if !handle.sender.trace_projection_supported() {
         handle.close.record_trace(
@@ -1881,6 +1881,26 @@ pub trait MessageCoordinator: Send + Sync {
     ) -> anyhow::Result<()> {
         if let Some(message) = build_message() {
             self.broadcast_to_room_except(room_id, except_player, message)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Build an owned room message while the implementation holds its routing
+    /// snapshot, without first allocating an `Arc<ServerMessage>`.
+    ///
+    /// The in-memory implementation uses this additive production hot-path
+    /// seam to co-own a repeated-projection relay and its wire cache in one
+    /// allocation. Other implementations retain the exact compatibility
+    /// behavior by wrapping the built message before ordinary broadcast.
+    async fn broadcast_to_room_except_with_borrowed_owned_message<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> anyhow::Result<()> {
+        if let Some(message) = build_message() {
+            self.broadcast_to_room_except(room_id, except_player, Arc::new(message))
                 .await?;
         }
         Ok(())
@@ -2711,6 +2731,46 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn default_borrowed_owned_builder_cancels_none_and_delegates_some_once() {
+        let room_id = RoomId::from_u128(0x55555555555555555555555555555555);
+        let sender = PlayerId::from_u128(0x66666666666666666666666666666666);
+        for (context, built, expected_broadcasts) in [
+            ("live sender", Some(ServerMessage::Pong), 1),
+            ("unregistered sender", None, 0),
+        ] {
+            let coordinator = FallbackCoordinator::default();
+            let build_calls = Arc::new(AtomicUsize::new(0));
+            let calls_for_builder = Arc::clone(&build_calls);
+            let mut built = Some(built);
+            let mut build_message = move || {
+                calls_for_builder.fetch_add(1, Ordering::Relaxed);
+                built.take().flatten()
+            };
+            coordinator
+                .broadcast_to_room_except_with_borrowed_owned_message(
+                    &room_id,
+                    &sender,
+                    &mut build_message,
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{context}: fallback broadcast failed: {err}"));
+
+            assert_eq!(
+                build_calls.load(Ordering::Relaxed),
+                1,
+                "{context}: fallback must build exactly once"
+            );
+            let broadcasts = coordinator.broadcasts_except.lock().await;
+            assert_eq!(broadcasts.len(), expected_broadcasts, "{context}");
+            if let Some((broadcast_room, except_player, message)) = broadcasts.first() {
+                assert_eq!(*broadcast_room, room_id);
+                assert_eq!(*except_player, sender);
+                assert!(matches!(message, ServerMessage::Pong));
+            }
+        }
+    }
+
     #[test]
     fn sender_identity_includes_channel_kind_and_delivery_generation() {
         let (legacy_sender, _legacy_receiver) = tokio::sync::mpsc::channel(1);
@@ -2872,20 +2932,20 @@ mod tests {
             ) {
                 (Ok(data), ExpectedClassification::Stamped(metadata)) => {
                     assert!(
-                        Arc::ptr_eq(data.delivery.message_arc(), &original),
+                        data.delivery.shares_message_arc_with(&original),
                         "{context}"
                     );
                     assert_eq!(data.metadata, Some(metadata), "{context}");
                 }
                 (Ok(data), ExpectedClassification::Unstamped) => {
                     assert!(
-                        Arc::ptr_eq(data.delivery.message_arc(), &original),
+                        data.delivery.shares_message_arc_with(&original),
                         "{context}"
                     );
                     assert_eq!(data.metadata, None, "{context}");
                 }
                 (Err(returned), ExpectedClassification::Rejected) => {
-                    assert!(Arc::ptr_eq(returned.message_arc(), &original), "{context}");
+                    assert!(returned.shares_message_arc_with(&original), "{context}");
                 }
                 (actual, expected) => {
                     panic!("{context}: got {actual:?}, expected {expected:?}")

@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce the shared relay-frame cache from 680 to 472 allocated bytes whenever
-  projection work repeats across a relay's recipients (issue #207). JSON,
-  direct MessagePack, and mixed MessagePack projections retain the same
-  allocation-operation counts, codec work, and exact wire output while
-  allocating 208 fewer bytes per shared-cache relay.
+- Reduce relay allocation overhead whenever projection work repeats across a
+  relay's recipients (issue #207). In addition to the shared frame cache's
+  reduction from 680 to 472 bytes, newly built production relays now co-own
+  that cache with the message envelope. Eight- and 16-player JSON and binary
+  ingress fall from three to two allocation operations and from 1,120 to 1,104
+  allocated bytes per relay; two-player ingress and the public compatibility
+  handoff remain unchanged. Codec work and exact wire output are preserved.
 
 ### Fixed
 
