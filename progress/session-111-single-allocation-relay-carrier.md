@@ -90,4 +90,13 @@ former failure. The second adversarial pass reported zero remaining issues and
 also verified that `DeliveryMessage`, `OutboundData`, and `OutboundPayload`
 retain their prior 16-, 72-, and 120-byte footprints.
 
-Exact-head hosted CI and PR review evidence will be recorded after publication.
+PR #321 was opened from `ea488e3` and marked ready for review. Its exact source
+head completed 20 hosted workflow runs successfully, including CI #1114,
+Advanced Safety #884, the 40-shard mutation matrix, every interop lane, and the
+new combined Relay Allocation Ceilings job. The only two skipped runs were the
+expected duplicate Dependabot auto-merge triggers; no hosted run failed.
+
+GitHub exposed no actionable review thread or human review. Copilot reported
+that it could not review because the requesting account had exhausted its
+quota; the independent two-round adversarial review therefore remains the
+available code-review evidence and ended with zero findings.
