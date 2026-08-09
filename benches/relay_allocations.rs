@@ -535,13 +535,13 @@ fn assert_healthy_fanout_uses_synchronous_fast_path(room_size: usize, sample: Sa
 
 fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
     let maximum_operations_per_relay = match room_size {
-        2 | 8 | 16 => 2,
+        2 | 8 | 16 => 1,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     let maximum_bytes_per_relay = match room_size {
-        2 => 648,
-        8 | 16 => 1_104,
+        2 => 296,
+        8 | 16 => 752,
         _ => panic!("room-{room_size} has no checked-in allocation baseline"),
     };
     assert!(

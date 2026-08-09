@@ -204,13 +204,26 @@ where
 {
     metrics.increment_game_data_messages();
     let mut build_message = one_shot_message_builder(build_message);
-    message_coordinator
-        .broadcast_to_room_except_with_borrowed_owned_message(
-            room_id,
-            player_id,
-            &mut build_message,
-        )
-        .await
+    match message_coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+        room_id,
+        player_id,
+        &mut build_message,
+    ) {
+        crate::coordination::ImmediateGameDataBroadcast::Complete => Ok(()),
+        crate::coordination::ImmediateGameDataBroadcast::Pending(completion) => {
+            completion.await;
+            Ok(())
+        }
+        crate::coordination::ImmediateGameDataBroadcast::Unavailable => {
+            message_coordinator
+                .broadcast_to_room_except_with_borrowed_owned_message(
+                    room_id,
+                    player_id,
+                    &mut build_message,
+                )
+                .await
+        }
+    }
 }
 
 pub(super) fn one_shot_message_builder<F>(build_message: F) -> impl FnMut() -> Option<ServerMessage>
