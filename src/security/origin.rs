@@ -208,6 +208,12 @@ mod tests {
 
     #[test]
     fn invalid_origin_configuration_fails_closed() {
+        let out_of_range_port = format!("https://game.example:{}", u32::from(u16::MAX) + 1);
+        assert!(
+            OriginPolicy::parse(&out_of_range_port).is_err(),
+            "out-of-range port: {out_of_range_port:?} must be rejected"
+        );
+
         for (configured, reason) in [
             ("", "blank value"),
             ("https://game.example,", "blank list entry"),
@@ -233,7 +239,6 @@ mod tests {
                 "default port is omitted by browsers",
             ),
             ("https://game.example:", "empty trailing port"),
-            ("https://game.example:65536", "out-of-range port"),
             ("http://127.1", "IPv4 shorthand"),
             ("http://0x7f000001", "hexadecimal IPv4"),
             ("http://[0:0:0:0:0:0:0:1]:3000", "uncompressed IPv6"),
