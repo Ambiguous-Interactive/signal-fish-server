@@ -934,7 +934,8 @@ fn estimated_json_value_len_bounded(
 fn estimated_json_number_len(value: &serde_json::Number) -> (usize, usize) {
     if let Some(value) = value.as_i64() {
         (
-            decimal_digit_count(value.unsigned_abs()) + usize::from(value.is_negative()),
+            decimal_digit_count(value.unsigned_abs())
+                .saturating_add(usize::from(value.is_negative())),
             0,
         )
     } else if let Some(value) = value.as_u64() {
@@ -951,7 +952,7 @@ fn decimal_digit_count(value: u64) -> usize {
     if value == 0 {
         1
     } else {
-        value.ilog10() as usize + 1
+        (value.ilog10() as usize).saturating_add(1)
     }
 }
 
