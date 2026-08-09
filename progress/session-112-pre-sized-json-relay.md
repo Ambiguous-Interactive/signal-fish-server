@@ -101,4 +101,12 @@ for numeric retained-capacity amplification, escape-growth slack, double number
 formatting, and the float-cutoff runtime cliff; the final independent reread
 reported zero findings.
 
-Publication and exact-head hosted CI remain pending.
+PR #322 is ready for review and merge. Its first published implementation head
+(`11555a1`) exposed two bounded digit-count additions to the repository's
+arithmetic-side-effect panic-policy lint. Both additions now use explicit
+saturating arithmetic; the corrected production head (`60beb88`) passed the
+exact local panic-policy command and every repository-owned hosted workflow.
+The hosted result comprised 53 successful check runs and two expected skips;
+the separate Copilot reviewer integration exhausted its external review quota
+twice and produced no review comment or thread. The final independent
+adversarial reread likewise reported zero findings.
