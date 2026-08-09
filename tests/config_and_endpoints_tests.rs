@@ -8,20 +8,20 @@
 
 mod test_helpers;
 
-use axum::routing::get;
 use regex::Regex;
 use signal_fish_server::config::{
     AppRegistrationEntry, ClientAuthMode, Config, DashboardHistoryField, LogFormat,
 };
 use signal_fish_server::security::token_binding::TokenBindingScheme;
 use signal_fish_server::websocket::{
-    create_router, create_standalone_router, websocket_handler_v3,
+    create_router, create_router_with_origin_policy, create_standalone_router, websocket_handler,
+    websocket_handler_v3, websocket_route_v3, websocket_route_v3_with_origin_policy,
 };
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use test_helpers::{create_test_server, test_server_config};
+use test_helpers::{create_test_server, test_server_config, RunningTestServer};
 
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
@@ -1685,7 +1685,7 @@ async fn test_production_style_router_has_top_level_v3_only() {
     let enhanced_router = create_router("*").with_state(server.clone());
     let app = axum::Router::new()
         .nest("/v2", enhanced_router)
-        .route("/v3/ws", get(websocket_handler_v3))
+        .route("/v3/ws", websocket_route_v3("*"))
         .with_state(server);
 
     let test_server = axum_test::TestServer::new(app);
@@ -1752,8 +1752,225 @@ async fn test_specific_cors_origins() {
     let app = create_router("http://localhost:3000,http://example.com").with_state(server);
 
     let test_server = axum_test::TestServer::new(app);
-    let response = test_server.get("/health").await;
-    response.assert_status_ok();
+    let allowed = test_server
+        .get("/health")
+        .add_header(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://example.com"),
+        )
+        .await;
+    allowed.assert_status_ok().assert_header(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        "http://example.com",
+    );
+
+    let disallowed = test_server
+        .get("/health")
+        .add_header(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("https://evil.example"),
+        )
+        .await;
+    disallowed.assert_status_ok();
+    assert!(
+        !disallowed.contains_header(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        "the HTTP CORS response must use the same explicit allowlist"
+    );
+}
+
+async fn start_origin_policy_test_server(configured_origins: &str) -> RunningTestServer {
+    use axum::Router;
+    use signal_fish_server::security::OriginPolicy;
+
+    let server = create_test_server().await;
+    let policy = OriginPolicy::parse(configured_origins).expect("parse test Origin policy");
+    let app = Router::new()
+        .nest("/v2", create_router_with_origin_policy(policy.clone()))
+        .route(
+            "/v3/ws",
+            websocket_route_v3_with_origin_policy(policy.clone()),
+        )
+        .with_state(server.clone());
+    start_router_test_server(server, app).await
+}
+
+async fn start_router_test_server(
+    server: std::sync::Arc<signal_fish_server::server::EnhancedGameServer>,
+    app: axum::Router,
+) -> RunningTestServer {
+    RunningTestServer::spawn(server, app).await
+}
+
+async fn connect_with_origin(
+    addr: std::net::SocketAddr,
+    path: &str,
+    origin: Option<&'static str>,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::Error,
+> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut request = format!("ws://{addr}{path}")
+        .into_client_request()
+        .expect("build WebSocket request");
+    if let Some(origin) = origin {
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static(origin),
+        );
+    }
+    tokio_tungstenite::connect_async(request)
+        .await
+        .map(|(socket, _response)| socket)
+}
+
+#[tokio::test]
+async fn regression_319_websocket_upgrades_enforce_explicit_origin_policy() {
+    use tokio_tungstenite::tungstenite::Error;
+
+    let running = start_origin_policy_test_server("https://allowed.example").await;
+    let addr = running.addr();
+    for path in ["/v2/ws", "/v3/ws"] {
+        let error = connect_with_origin(addr, path, Some("https://evil.example"))
+            .await
+            .expect_err("disallowed browser Origin must not receive a WebSocket upgrade");
+        let Error::Http(response) = error else {
+            panic!("{path}: expected an HTTP rejection, got {error}");
+        };
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "{path}"
+        );
+
+        for origin in [Some("https://allowed.example"), None] {
+            let mut socket = connect_with_origin(addr, path, origin)
+                .await
+                .unwrap_or_else(|error| panic!("{path}, origin={origin:?}: {error}"));
+            socket
+                .close(None)
+                .await
+                .unwrap_or_else(|error| panic!("{path}: close test WebSocket: {error}"));
+        }
+    }
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn wildcard_origin_policy_preserves_development_websocket_access() {
+    let running = start_origin_policy_test_server("*").await;
+    let addr = running.addr();
+    for path in ["/v2/ws", "/v3/ws"] {
+        let mut socket = connect_with_origin(addr, path, Some("https://any.example"))
+            .await
+            .unwrap_or_else(|error| panic!("{path}: wildcard policy rejected Origin: {error}"));
+        socket
+            .close(None)
+            .await
+            .unwrap_or_else(|error| panic!("{path}: close test WebSocket: {error}"));
+    }
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn standalone_router_enforces_origin_policy_on_both_websocket_aliases() {
+    use tokio_tungstenite::tungstenite::Error;
+
+    let server = create_test_server().await;
+    let app = create_standalone_router("https://allowed.example").with_state(server.clone());
+    let running = start_router_test_server(server, app).await;
+    let addr = running.addr();
+
+    for path in ["/ws", "/v3/ws"] {
+        let error = connect_with_origin(addr, path, Some("https://evil.example"))
+            .await
+            .expect_err("standalone router must reject a disallowed browser Origin");
+        let Error::Http(response) = error else {
+            panic!("{path}: expected an HTTP rejection, got {error}");
+        };
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+
+        for origin in [Some("https://allowed.example"), None] {
+            let mut socket = connect_with_origin(addr, path, origin)
+                .await
+                .unwrap_or_else(|error| panic!("{path}, origin={origin:?}: {error}"));
+            socket
+                .close(None)
+                .await
+                .unwrap_or_else(|error| panic!("{path}: close test WebSocket: {error}"));
+        }
+    }
+
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_legacy_router_configuration_denies_every_upgrade_shape() {
+    use axum::Router;
+    use tokio_tungstenite::tungstenite::Error;
+
+    let nested_server = create_test_server().await;
+    let nested = Router::new()
+        .nest("/v2", create_router("https://allowed.example/path"))
+        .route("/v3/ws", websocket_route_v3("https://allowed.example/path"))
+        .with_state(nested_server.clone());
+    let standalone_server = create_test_server().await;
+    let standalone = create_standalone_router("https://allowed.example/path")
+        .with_state(standalone_server.clone());
+
+    for (server, app, paths) in [
+        (nested_server, nested, &["/v2/ws", "/v3/ws"][..]),
+        (standalone_server, standalone, &["/ws", "/v3/ws"][..]),
+    ] {
+        let running = start_router_test_server(server, app).await;
+        let addr = running.addr();
+        for path in paths {
+            for origin in [Some("https://allowed.example"), None] {
+                let error = connect_with_origin(addr, path, origin)
+                    .await
+                    .expect_err("invalid legacy configuration must deny every upgrade");
+                let Error::Http(response) = error else {
+                    panic!("{path}, origin={origin:?}: expected HTTP rejection, got {error}");
+                };
+                assert_eq!(
+                    response.status(),
+                    axum::http::StatusCode::FORBIDDEN,
+                    "{path}, origin={origin:?}"
+                );
+            }
+        }
+        running.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn raw_websocket_handlers_without_origin_policy_cannot_upgrade() {
+    use axum::routing::get;
+    use tokio_tungstenite::tungstenite::Error;
+
+    let server = create_test_server().await;
+    let app = axum::Router::new()
+        .route("/ws", get(websocket_handler))
+        .route("/v3/ws", get(websocket_handler_v3))
+        .with_state(server.clone());
+    let running = start_router_test_server(server, app).await;
+    let addr = running.addr();
+    for path in ["/ws", "/v3/ws"] {
+        let error = connect_with_origin(addr, path, None)
+            .await
+            .expect_err("a raw handler without required policy state must not upgrade");
+        let Error::Http(response) = error else {
+            panic!("{path}: expected an HTTP rejection, got {error}");
+        };
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+    }
+
+    running.shutdown().await;
 }
 
 // ===========================================================================
@@ -1853,6 +2070,22 @@ fn test_config_validation_scenarios() {
                 c.security.enforce_app_id_allowlist = false;
             }),
             true,
+        ),
+        (
+            "blank CORS/WebSocket Origin policy → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.cors_origins = " ".to_string();
+            }),
+            false,
+        ),
+        (
+            "origin URI with a path → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.cors_origins = "https://game.example/path".to_string();
+            }),
+            false,
         ),
         (
             "metrics auth enabled, app-ID policy open → fails without token",

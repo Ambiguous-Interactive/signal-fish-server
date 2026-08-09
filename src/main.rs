@@ -10,7 +10,7 @@ use signal_fish_server::config;
 use signal_fish_server::database::DatabaseConfig;
 use signal_fish_server::logging;
 use signal_fish_server::security::{
-    ClientCertificateFingerprint, CLIENT_FINGERPRINT_HEADER_CANDIDATES,
+    ClientCertificateFingerprint, OriginPolicy, CLIENT_FINGERPRINT_HEADER_CANDIDATES,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket;
@@ -179,33 +179,12 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_server = game_server.clone();
     let shutdown_task = tokio::spawn(run_shutdown_drain(shutdown_server, shutdown_tx.clone()));
 
-    // Create enhanced protocol router with CORS configuration
-    let enhanced_router =
-        websocket::create_router(&cfg.security.cors_origins).with_state(game_server.clone());
-
-    // Parse CORS origins for top-level router
-    use tower_http::cors::{Any, CorsLayer};
-
-    let cors = if cfg.security.cors_origins == "*" {
-        CorsLayer::permissive()
-    } else {
-        let origins: Vec<_> = cfg
-            .security
-            .cors_origins
-            .split(',')
-            .filter_map(|s| s.trim().parse::<axum::http::HeaderValue>().ok())
-            .collect();
-
-        if origins.is_empty() {
-            tracing::warn!("No valid CORS origins configured, using permissive CORS");
-            CorsLayer::permissive()
-        } else {
-            CorsLayer::new()
-                .allow_origin(origins)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        }
-    };
+    // One parsed policy governs HTTP CORS responses and both WebSocket
+    // upgrades, so the browser-facing allowlist cannot drift between layers.
+    let origin_policy = OriginPolicy::parse(&cfg.security.cors_origins)?;
+    let cors = origin_policy.cors_layer();
+    let enhanced_router = websocket::create_router_with_origin_policy(origin_policy.clone())
+        .with_state(game_server.clone());
 
     use axum::routing::get;
 
@@ -251,7 +230,10 @@ async fn main() -> anyhow::Result<()> {
     // byte-for-byte unchanged.
     let combined_router = combined_router
         .nest("/v2", enhanced_router) // Enhanced protocol under /v2
-        .route("/v3/ws", get(websocket::websocket_handler_v3)) // v3 alias, shared handler
+        .route(
+            "/v3/ws",
+            websocket::websocket_route_v3_with_origin_policy(origin_policy.clone()),
+        ) // v3 alias, shared handler
         .fallback(|| async {
             "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v1/metrics for metrics, /metrics/prom for Prometheus."
         })

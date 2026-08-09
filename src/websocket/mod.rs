@@ -108,7 +108,10 @@ pub use metrics::{metrics_handler, prometheus_metrics_handler, MetricsQuery};
 #[cfg(feature = "tls")]
 pub use routes::ConfiguredAcceptor;
 pub use routes::{
-    bind_serve_listener, bind_tcp_listener, create_router, create_standalone_router, run_server,
+    bind_serve_listener, bind_tcp_listener, create_router, create_router_with_origin_policy,
+    create_standalone_router, create_standalone_router_with_origin_policy, run_server,
+    try_create_router, try_create_standalone_router, try_websocket_route_v3, websocket_route_v3,
+    websocket_route_v3_with_origin_policy,
 };
 
 /// Upper bound on each best-effort WebSocket close-path write.

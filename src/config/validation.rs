@@ -8,6 +8,8 @@ use std::path::Path;
 pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     let is_prod = is_production_mode();
 
+    crate::security::OriginPolicy::parse(&config.security.cors_origins)?;
+
     if config.server.event_buffer_size > super::server::MAX_EVENT_BUFFER_SIZE {
         anyhow::bail!(
             "server.event_buffer_size must not exceed {} (configured: {})",

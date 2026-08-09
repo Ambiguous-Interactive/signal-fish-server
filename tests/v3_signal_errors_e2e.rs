@@ -39,7 +39,7 @@ use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, PlayerId, RoomId, ServerMessage, Topology, Transport,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
-use signal_fish_server::websocket::{create_router, websocket_handler_v3};
+use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{send, SERVER_MESSAGE_TIMEOUT};
@@ -71,8 +71,6 @@ fn app_entry() -> AppRegistrationEntry {
 async fn start_server_with_config(
     mut server_config: ServerConfig,
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
-    use axum::routing::get;
-
     server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
@@ -96,7 +94,7 @@ async fn start_server_with_config(
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
-        .route("/v3/ws", get(websocket_handler_v3))
+        .route("/v3/ws", websocket_route_v3("http://localhost:3000"))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 

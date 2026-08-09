@@ -1,4 +1,4 @@
-use crate::security::ClientCertificateFingerprint;
+use crate::security::{ClientCertificateFingerprint, OriginPolicy};
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Extension, State};
@@ -20,8 +20,18 @@ pub async fn websocket_handler(
     state: State<Arc<EnhancedGameServer>>,
     headers: HeaderMap,
     fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+    origin_policy: Extension<OriginPolicy>,
 ) -> Response {
-    websocket_handler_with_default(ws, connect_info, state, headers, fingerprint, 2).await
+    websocket_handler_with_default(
+        ws,
+        connect_info,
+        state,
+        headers,
+        fingerprint,
+        origin_policy,
+        2,
+    )
+    .await
 }
 
 /// WebSocket handler for the `/v3/ws` alias.
@@ -36,8 +46,18 @@ pub async fn websocket_handler_v3(
     state: State<Arc<EnhancedGameServer>>,
     headers: HeaderMap,
     fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+    origin_policy: Extension<OriginPolicy>,
 ) -> Response {
-    websocket_handler_with_default(ws, connect_info, state, headers, fingerprint, 3).await
+    websocket_handler_with_default(
+        ws,
+        connect_info,
+        state,
+        headers,
+        fingerprint,
+        origin_policy,
+        3,
+    )
+    .await
 }
 
 async fn websocket_handler_with_default(
@@ -46,8 +66,14 @@ async fn websocket_handler_with_default(
     State(server): State<Arc<EnhancedGameServer>>,
     headers: HeaderMap,
     fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+    Extension(origin_policy): Extension<OriginPolicy>,
     default_protocol_version: u16,
 ) -> Response {
+    if !origin_policy.allows_upgrade(&headers) {
+        tracing::warn!(client_ip = %addr.ip(), "WebSocket upgrade rejected: Origin not allowed");
+        return (StatusCode::FORBIDDEN, "WebSocket Origin is not allowed").into_response();
+    }
+
     if server.is_draining() {
         return (StatusCode::SERVICE_UNAVAILABLE, "server is draining").into_response();
     }
