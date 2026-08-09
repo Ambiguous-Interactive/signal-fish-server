@@ -5,11 +5,13 @@
 /// - Envelope encryption (AES-GCM)
 /// - Token binding and channel security
 pub mod crypto;
+pub mod origin;
 pub mod tls;
 pub mod token_binding; // Always include tls module (ClientCertificateFingerprint is always needed)
 pub mod turn_credentials;
 
 pub use crypto::EnvelopeEncryptor;
+pub use origin::{OriginPolicy, OriginPolicyError};
 pub use token_binding::{
     derive_session_secret, ActiveTokenBinding, TokenBindingError, TokenBindingProof,
 };

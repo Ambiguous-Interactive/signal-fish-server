@@ -50,7 +50,7 @@ use signal_fish_server::protocol::{
     Topology, Transport,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
-use signal_fish_server::websocket::{create_router, websocket_handler_v3};
+use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{
@@ -95,8 +95,6 @@ fn mesh_session_config() -> SessionConfig {
 async fn start_server_with_session(
     session: SessionConfig,
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
-    use axum::routing::get;
-
     let mut server_config: ServerConfig = test_server_config();
     server_config.app_id_allowlist_enabled = true;
 
@@ -121,7 +119,7 @@ async fn start_server_with_session(
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
-        .route("/v3/ws", get(websocket_handler_v3))
+        .route("/v3/ws", websocket_route_v3("http://localhost:3000"))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 

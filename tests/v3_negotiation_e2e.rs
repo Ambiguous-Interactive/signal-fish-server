@@ -13,7 +13,7 @@ use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, ServerMessage, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
-use signal_fish_server::websocket::{create_router, websocket_handler_v3};
+use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use std::sync::Arc;
 use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -103,14 +103,12 @@ async fn start_v3_only_server(app_id_allowlist_enabled: bool) -> RunningTestServ
 }
 
 async fn start_server(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
-    use axum::routing::get;
-
     // Mirror main.rs wiring: enhanced router nested under /v2, plus a top-level
     // /v3/ws alias sharing the same connection handler.
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
-        .route("/v3/ws", get(websocket_handler_v3))
+        .route("/v3/ws", websocket_route_v3("http://localhost:3000"))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 

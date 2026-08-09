@@ -12,7 +12,8 @@ use std::fmt;
 /// Security configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SecurityConfig {
-    /// Allowed CORS origins (comma-separated, or "*" for any)
+    /// Allowed HTTP CORS and browser WebSocket origins (comma-separated, or
+    /// "*" for any). Origin-less native WebSocket clients remain compatible.
     #[serde(default = "default_cors_origins")]
     pub cors_origins: String,
     /// Require the public client `app_id` to match a configured application.

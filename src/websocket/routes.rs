@@ -1,6 +1,7 @@
 use crate::database::DatabaseConfig;
+use crate::security::{OriginPolicy, OriginPolicyError};
 use crate::server::{EnhancedGameServer, ServerConfig};
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use std::net::SocketAddr;
@@ -110,41 +111,72 @@ impl<S> axum_server::accept::Accept<TcpStream, S> for ConfiguredAcceptor {
 /// [`create_standalone_router`] or by the top-level production router so nesting
 /// never creates an undocumented `/v2/v3/ws` endpoint.
 pub fn create_router(cors_origins: &str) -> axum::Router<Arc<EnhancedGameServer>> {
-    create_router_inner(cors_origins, false)
+    create_router_with_origin_policy(parse_origin_policy_or_deny(cors_origins))
+}
+
+/// Create the nestable router, returning invalid Origin configuration to the
+/// library caller instead of installing the compatibility deny-all policy.
+pub fn try_create_router(
+    cors_origins: &str,
+) -> Result<axum::Router<Arc<EnhancedGameServer>>, OriginPolicyError> {
+    OriginPolicy::parse(cors_origins).map(create_router_with_origin_policy)
+}
+
+/// Create the nestable router from a policy already validated by the caller.
+pub fn create_router_with_origin_policy(
+    origin_policy: OriginPolicy,
+) -> axum::Router<Arc<EnhancedGameServer>> {
+    create_router_inner(origin_policy, false)
 }
 
 /// Create a standalone router for library users that serve Signal Fish at the
 /// HTTP root rather than nesting [`create_router`] under `/v2`.
 pub fn create_standalone_router(cors_origins: &str) -> axum::Router<Arc<EnhancedGameServer>> {
-    create_router_inner(cors_origins, true)
+    create_standalone_router_with_origin_policy(parse_origin_policy_or_deny(cors_origins))
+}
+
+/// Create the standalone router or return invalid Origin configuration.
+pub fn try_create_standalone_router(
+    cors_origins: &str,
+) -> Result<axum::Router<Arc<EnhancedGameServer>>, OriginPolicyError> {
+    OriginPolicy::parse(cors_origins).map(create_standalone_router_with_origin_policy)
+}
+
+/// Create the standalone router from a policy already validated by the caller.
+pub fn create_standalone_router_with_origin_policy(
+    origin_policy: OriginPolicy,
+) -> axum::Router<Arc<EnhancedGameServer>> {
+    create_router_inner(origin_policy, true)
+}
+
+/// Build the top-level `/v3/ws` route with its required Origin policy.
+pub fn websocket_route_v3(
+    cors_origins: &str,
+) -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
+    websocket_route_v3_with_origin_policy(parse_origin_policy_or_deny(cors_origins))
+}
+
+/// Build the `/v3/ws` route or return invalid Origin configuration.
+pub fn try_websocket_route_v3(
+    cors_origins: &str,
+) -> Result<axum::routing::MethodRouter<Arc<EnhancedGameServer>>, OriginPolicyError> {
+    OriginPolicy::parse(cors_origins).map(websocket_route_v3_with_origin_policy)
+}
+
+/// Build the top-level `/v3/ws` route from a pre-validated Origin policy.
+pub fn websocket_route_v3_with_origin_policy(
+    origin_policy: OriginPolicy,
+) -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
+    get(websocket_handler_v3).layer(Extension(origin_policy))
 }
 
 fn create_router_inner(
-    cors_origins: &str,
+    origin_policy: OriginPolicy,
     include_v3_alias: bool,
 ) -> axum::Router<Arc<EnhancedGameServer>> {
-    use tower_http::cors::{Any, CorsLayer};
     use tower_http::trace::TraceLayer;
 
-    // Parse CORS origins
-    let cors = if cors_origins == "*" {
-        CorsLayer::permissive()
-    } else {
-        let origins: Vec<_> = cors_origins
-            .split(',')
-            .filter_map(|s| s.trim().parse::<axum::http::HeaderValue>().ok())
-            .collect();
-
-        if origins.is_empty() {
-            tracing::warn!("No valid CORS origins configured, using permissive CORS");
-            CorsLayer::permissive()
-        } else {
-            CorsLayer::new()
-                .allow_origin(origins)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        }
-    };
+    let cors = origin_policy.cors_layer();
 
     let router = axum::Router::new()
         .route("/ws", get(websocket_handler))
@@ -158,7 +190,17 @@ fn create_router_inner(
         router
     };
 
-    router.layer(cors).layer(TraceLayer::new_for_http())
+    router
+        .layer(Extension(origin_policy))
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+}
+
+fn parse_origin_policy_or_deny(cors_origins: &str) -> OriginPolicy {
+    OriginPolicy::parse(cors_origins).unwrap_or_else(|error| {
+        tracing::error!(%error, "invalid Origin policy; rejecting all WebSocket upgrades");
+        OriginPolicy::deny_all_upgrades()
+    })
 }
 
 /// Health check endpoint
@@ -179,6 +221,7 @@ pub async fn run_server(
     server_config: ServerConfig,
     cors_origins: String,
 ) -> anyhow::Result<()> {
+    let origin_policy = OriginPolicy::parse(&cors_origins)?;
     let socket_send_buffer_bytes = server_config.websocket_config.socket_send_buffer_bytes;
     // Create storage configuration
     let database_config = DatabaseConfig::from_env()?;
@@ -204,7 +247,7 @@ pub async fn run_server(
     });
 
     // Create router with CORS configuration
-    let app = create_standalone_router(&cors_origins).with_state(game_server);
+    let app = create_standalone_router_with_origin_policy(origin_policy).with_state(game_server);
 
     // Accepted sockets are configured for low-latency relay (issue #197).
     let listener = bind_serve_listener(addr, socket_send_buffer_bytes)?;
@@ -229,6 +272,39 @@ pub async fn run_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallible_router_constructors_return_invalid_origin_configuration() {
+        for result in [
+            try_create_router("https://game.example/path").map(|_| ()),
+            try_create_standalone_router("https://game.example/path").map(|_| ()),
+            try_websocket_route_v3("https://game.example/path").map(|_| ()),
+        ] {
+            let error = result.expect_err("invalid Origin configuration must be returned");
+            assert!(
+                error
+                    .to_string()
+                    .contains("not a canonical serialized browser origin"),
+                "unexpected validation error: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_server_rejects_invalid_origin_configuration_before_side_effects() {
+        let error = run_server(
+            "127.0.0.1:0".parse().expect("parse loopback address"),
+            ServerConfig::default(),
+            "https://game.example/path".to_string(),
+        )
+        .await
+        .expect_err("invalid Origin configuration must stop server startup");
+
+        assert!(
+            error.to_string().contains("invalid security.cors_origins"),
+            "unexpected startup error: {error}"
+        );
+    }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]

@@ -618,9 +618,17 @@ sequence. Supplemental `UNSUPPORTED_GAME_DATA_FORMAT` prose errors are limited
 to one per sender per second so a malformed stream cannot amplify advisory
 traffic; clients use the reports, not those advisory errors, for gap accounting.
 
-## CORS Support
+## Browser Origin Policy
 
-Configure allowed origins:
+`security.cors_origins` controls both HTTP CORS responses and the `Origin`
+header accepted on `/v2/ws` and `/v3/ws` WebSocket upgrades. Use serialized
+HTTP(S) origins without paths or queries; invalid configuration is rejected at
+startup. The browser-standard opaque origin `null` is also accepted when it is
+listed explicitly. Enable `null` only for trusted sandboxed or local-file
+clients: unrelated opaque origins share that value, so it is broader than a
+named HTTP(S) origin.
+
+Configure an allowed origin:
 
 ```json
 
@@ -655,6 +663,10 @@ Allow all (development only):
 }
 
 ```
+
+Browser WebSocket clients send `Origin` and receive HTTP 403 when it is not in
+an explicit allowlist. Native clients that omit `Origin` remain supported;
+this setting is a browser cross-site control, not client authentication.
 
 ## Connection Limits
 

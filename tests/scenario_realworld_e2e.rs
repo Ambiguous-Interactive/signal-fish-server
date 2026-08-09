@@ -45,7 +45,7 @@ use signal_fish_server::protocol::{
     ClientMessage, ErrorCode, PlayerId, ReplayStatus, RoomId, ServerMessage,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
-use signal_fish_server::websocket::{create_router, websocket_handler_v3};
+use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use test_helpers::{
     create_test_server, create_test_server_with_config, test_server_config, RunningTestServer,
 };
@@ -721,8 +721,6 @@ const RECONNECT_APP_ID: &str = "scenario-reconnect-app";
 /// `tests/reconnection_replay_e2e.rs`, the proven reconnect harness), and
 /// the in-process handle kept for `register_reconnect_token`.
 async fn start_reconnect_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
-    use axum::routing::get;
-
     let mut server_config = test_server_config();
     server_config.app_id_allowlist_enabled = true;
 
@@ -753,7 +751,7 @@ async fn start_reconnect_server() -> (RunningTestServer, Arc<EnhancedGameServer>
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
-        .route("/v3/ws", get(websocket_handler_v3))
+        .route("/v3/ws", websocket_route_v3("http://localhost:3000"))
         .with_state(game_server.clone());
     let running_server = RunningTestServer::spawn(game_server.clone(), combined_router).await;
     (running_server, game_server)

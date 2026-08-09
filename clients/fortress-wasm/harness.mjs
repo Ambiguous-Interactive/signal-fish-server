@@ -85,7 +85,7 @@ const serverPort = await freePort();
 const httpPort = await freePort();
 const serverLog = join(artifactDirectory, "server.log");
 const server = spawn(serverBinaryArg, [], {
-  env: cleanServerEnvironment(serverPort),
+  env: cleanServerEnvironment(serverPort, httpPort),
   stdio: ["ignore", "pipe", "pipe"],
 });
 const serverChunks = [];
@@ -646,7 +646,7 @@ async function closePeer(peer) {
   await peer.server?.close().catch(() => {});
 }
 
-function cleanServerEnvironment(port) {
+function cleanServerEnvironment(port, browserOriginPort) {
   const environment = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!key.startsWith("SIGNAL_FISH")) environment[key] = value;
@@ -659,6 +659,7 @@ function cleanServerEnvironment(port) {
     SIGNAL_FISH__TURN__ENABLED: "false",
     SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH: "false",
     SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST: "false",
+    SIGNAL_FISH__SECURITY__CORS_ORIGINS: `http://127.0.0.1:${browserOriginPort}`,
     SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE: "false",
   };
 }

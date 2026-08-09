@@ -28,7 +28,7 @@ use signal_fish_server::protocol::{
     ClientMessage, IceServer, PlayerId, RoomId, ServerMessage, Topology, Transport,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
-use signal_fish_server::websocket::{create_router, websocket_handler_v3};
+use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
@@ -133,12 +133,10 @@ async fn start_server_with(
 }
 
 async fn start_server(game_server: Arc<EnhancedGameServer>) -> RunningTestServer {
-    use axum::routing::get;
-
     let enhanced_router = create_router("http://localhost:3000").with_state(game_server.clone());
     let combined_router = axum::Router::new()
         .nest("/v2", enhanced_router)
-        .route("/v3/ws", get(websocket_handler_v3))
+        .route("/v3/ws", websocket_route_v3("http://localhost:3000"))
         .fallback(|| async { "Use /v2/ws or /v3/ws" })
         .with_state(game_server.clone());
 
