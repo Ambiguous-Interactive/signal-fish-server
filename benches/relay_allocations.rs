@@ -53,6 +53,7 @@ const QUEUE_RECIPIENT_ID: PlayerId = PlayerId::from_u128(0x6601);
 struct Sample {
     stats: Stats,
     deliveries: usize,
+    delivery_handle_clones: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +84,7 @@ struct FanoutFixture {
     coordinator: Arc<InMemoryMessageCoordinator>,
     metrics: Arc<ServerMetrics>,
     receivers: Vec<(PlayerId, OutboundReceiver)>,
+    clone_probes: Vec<OutboundSender>,
     payload: IngressPayload,
     handoff_message: Arc<ServerMessage>,
     ingress_kind: IngressKind,
@@ -105,6 +107,7 @@ impl FanoutFixture {
             Arc::clone(&metrics),
         ));
         let mut receivers = Vec::with_capacity(room_size);
+        let mut clone_probes = Vec::with_capacity(room_size);
 
         runtime.block_on(async {
             for index in 0..room_size {
@@ -121,7 +124,7 @@ impl FanoutFixture {
                     CONTROL_CAPACITY,
                 );
                 let handle = ClientDeliveryHandle::classified_for_allocation_benchmark(
-                    sender,
+                    sender.clone(),
                     1,
                     ConnectionCloseSignal::detached(),
                 );
@@ -130,6 +133,7 @@ impl FanoutFixture {
                     .await
                     .expect("allocation fixture route must register");
                 receivers.push((player_id, receiver));
+                clone_probes.push(sender);
             }
         });
 
@@ -144,6 +148,7 @@ impl FanoutFixture {
             coordinator,
             metrics,
             receivers,
+            clone_probes,
             payload,
             handoff_message,
             ingress_kind,
@@ -212,6 +217,7 @@ impl FanoutFixture {
 
     fn measure_ingress(&mut self) -> Sample {
         let payloads = vec![self.payload.clone(); RELAYS_PER_SAMPLE];
+        let delivery_handle_clones_before = self.delivery_handle_clone_operations();
         let attempts_before = self
             .metrics
             .websocket_delivery_attempts
@@ -224,6 +230,9 @@ impl FanoutFixture {
         let region = Region::new(GLOBAL);
         let deliveries = self.relay_ingress_batch(payloads);
         let stats = region.change();
+        let delivery_handle_clones = self
+            .delivery_handle_clone_operations()
+            .saturating_sub(delivery_handle_clones_before);
         let attempts = self
             .metrics
             .websocket_delivery_attempts
@@ -254,19 +263,38 @@ impl FanoutFixture {
             "allocation baseline is vacuous: production ingress ledger disagrees"
         );
 
-        Sample { stats, deliveries }
+        Sample {
+            stats,
+            deliveries,
+            delivery_handle_clones,
+        }
     }
 
     fn measure_handoff(&mut self) -> Sample {
+        let delivery_handle_clones_before = self.delivery_handle_clone_operations();
         let region = Region::new(GLOBAL);
         let deliveries = self.relay_handoff_batch(RELAYS_PER_SAMPLE);
         let stats = region.change();
+        let delivery_handle_clones = self
+            .delivery_handle_clone_operations()
+            .saturating_sub(delivery_handle_clones_before);
         assert_eq!(
             deliveries,
             RELAYS_PER_SAMPLE * (self.receivers.len() - 1),
             "borrowed handoff baseline is vacuous"
         );
-        Sample { stats, deliveries }
+        Sample {
+            stats,
+            deliveries,
+            delivery_handle_clones,
+        }
+    }
+
+    fn delivery_handle_clone_operations(&self) -> usize {
+        self.clone_probes
+            .iter()
+            .map(OutboundSender::clone_operations_for_allocation_benchmark)
+            .sum()
     }
 }
 
@@ -346,7 +374,11 @@ impl QueueFixture {
             deliveries, RELAYS_PER_SAMPLE,
             "classified queue baseline is vacuous"
         );
-        Sample { stats, deliveries }
+        Sample {
+            stats,
+            deliveries,
+            delivery_handle_clones: 0,
+        }
     }
 }
 
@@ -531,6 +563,11 @@ fn assert_healthy_fanout_uses_synchronous_fast_path(room_size: usize, sample: Sa
          snapshot",
         sample.stats.bytes_allocated
     );
+    assert_eq!(
+        sample.delivery_handle_clones, 0,
+        "healthy {room_size}-player fan-out cloned delivery handles; borrow routing-map handles \
+         and reserve ownership for exceptional backpressure or slow-consumer cleanup"
+    );
 }
 
 fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
@@ -557,13 +594,19 @@ fn assert_production_ingress_ceiling(room_size: usize, sample: Sample) {
         "production {room_size}-player ingress exceeded {maximum_bytes_per_relay} allocated \
          bytes per relay"
     );
+    assert_eq!(
+        sample.delivery_handle_clones, 0,
+        "production {room_size}-player ingress cloned delivery handles; healthy fan-out must \
+         borrow them from the guarded routing map"
+    );
 }
 
 fn print_sample(scope: &str, room_size: usize, recipients: usize, relays: usize, sample: Sample) {
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     println!(
-        "{scope},{room_size},{recipients},{relays},{},{},{},{},{},{:.4},{:.2},{:.4},{:.2}",
+        "{scope},{room_size},{recipients},{relays},{},{},{},{},{},{},{:.4},{:.2},{:.4},{:.2}",
         sample.deliveries,
+        sample.delivery_handle_clones,
         sample.stats.allocations,
         sample.stats.reallocations,
         sample.stats.deallocations,
@@ -577,7 +620,7 @@ fn print_sample(scope: &str, room_size: usize, recipients: usize, relays: usize,
 
 fn main() {
     println!(
-        "scope,room_size,recipients,relays,deliveries,allocations,reallocations,\
+        "scope,room_size,recipients,relays,deliveries,delivery_handle_clones,allocations,reallocations,\
          deallocations,bytes_allocated,allocation_ops_per_relay,bytes_per_relay,\
          allocation_ops_per_delivery,bytes_per_delivery"
     );
