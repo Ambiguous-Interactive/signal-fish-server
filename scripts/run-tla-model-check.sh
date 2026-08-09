@@ -44,18 +44,31 @@ TLA_TOOLS_URL="https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TLA_DIR="${REPO_ROOT}/formal/tla"
-# Every checked configuration is <Module>_<Scenario>.cfg; the module name is
-# everything before the LAST underscore (module names here contain none), so
-# new specs (e.g. DeliveryContract_Small.cfg) are picked up automatically.
+# Every checked configuration starts with its module name. Resolve the longest
+# underscore-delimited prefix that names a checked-in module so one module can
+# carry several independently seeded expected-failure scenarios, for example
+# `<Module>_PrematureEof_ExpectedFailure.cfg`.
 module_of() {
     local base="$1"
-    printf '%s' "${base%_*}"
+    local candidate="${base%_ExpectedFailure}"
+    while true; do
+        if [ -f "${TLA_DIR}/${candidate}.tla" ]; then
+            printf '%s' "$candidate"
+            return
+        fi
+        if [ "$candidate" = "${candidate%_*}" ]; then
+            break
+        fi
+        candidate="${candidate%_*}"
+    done
+    return 1
 }
 
 CACHE_DIR="${SIGNAL_FISH_TLA_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/signal-fish/tla}"
 JAR_PATH="${CACHE_DIR}/tla2tools-${TLA_TOOLS_VERSION}.jar"
 
 SELECTED_CONFIG=""
+RESOLVE_MODULE=""
 VERBOSE=false
 
 usage() {
@@ -70,6 +83,9 @@ Options:
                    one configuration across all specs.
   --tla-dir <dir>  Read modules/configurations from <dir> instead of formal/tla.
                    Used by generated trace-validation bundles.
+  --resolve-module <cfg-base>
+                   Resolve one configuration basename to its checked-in module
+                   and exit. Intended for the hermetic runner regression test.
   --verbose        Stream full TLC output instead of a quiet summary.
   --help           Show this help.
 USAGE
@@ -96,6 +112,14 @@ while [ "$#" -gt 0 ]; do
             }
             shift 2
             ;;
+        --resolve-module)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --resolve-module requires an argument" >&2
+                exit 2
+            fi
+            RESOLVE_MODULE="${2%.cfg}"
+            shift 2
+            ;;
         --verbose|-v)
             VERBOSE=true
             shift
@@ -111,6 +135,15 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ -n "$RESOLVE_MODULE" ]; then
+    if ! module_of "$RESOLVE_MODULE"; then
+        echo "ERROR: no checked-in TLA+ module prefixes '${RESOLVE_MODULE}' in ${TLA_DIR}" >&2
+        exit 2
+    fi
+    printf '\n'
+    exit 0
+fi
 
 # --- Locate java -----------------------------------------------------------
 
@@ -234,7 +267,12 @@ for cfg in "${CONFIGS[@]}"; do
 
     # -metadir keeps TLC's state files out of the repository; deadlock
     # checking is deliberately left ON (see the header comment).
-    module="$(module_of "$(basename "$cfg" .cfg)")"
+    if ! module="$(module_of "$(basename "$cfg" .cfg)")"; then
+        echo "FAIL ${cfg}: no checked-in TLA+ module matches its basename." >&2
+        overall_status=1
+        rm -rf "$metadir"
+        continue
+    fi
     expected_failure=""
     case "$(basename "$cfg" .cfg)" in
         *_ExpectedFailure)

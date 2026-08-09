@@ -48,6 +48,54 @@ fn install_fake_cargo_tools(temp_root: &Path) -> PathBuf {
     fake_bin
 }
 
+#[test]
+fn tla_runner_resolves_longest_module_prefix_fail_closed() {
+    let temp_root = unique_temp_dir("tla-module-resolution");
+    let tla_dir = temp_root.path().join("tla");
+    write_file(
+        &tla_dir.join("Simple.tla"),
+        "---- MODULE Simple ----\n====\n",
+    );
+    write_file(
+        &tla_dir.join("Module_With_Underscore.tla"),
+        "---- MODULE Module_With_Underscore ----\n====\n",
+    );
+
+    for (config, expected) in [
+        ("Simple_Multi_Word_ExpectedFailure", "Simple"),
+        (
+            "Module_With_Underscore_Stale_Release_ExpectedFailure.cfg",
+            "Module_With_Underscore",
+        ),
+    ] {
+        let output = bash_command()
+            .arg(repo_root().join("scripts/run-tla-model-check.sh"))
+            .args(["--tla-dir", tla_dir.to_str().unwrap()])
+            .args(["--resolve-module", config])
+            .output()
+            .expect("TLA runner module resolution should execute");
+        assert!(
+            output.status.success(),
+            "{config} should resolve: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+    }
+
+    let output = bash_command()
+        .arg(repo_root().join("scripts/run-tla-model-check.sh"))
+        .args(["--tla-dir", tla_dir.to_str().unwrap()])
+        .args(["--resolve-module", "Missing_Scenario_ExpectedFailure"])
+        .output()
+        .expect("TLA runner missing-module resolution should execute");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no checked-in TLA+ module prefixes 'Missing_Scenario_ExpectedFailure'"),
+        "missing modules must fail with an actionable diagnostic"
+    );
+}
+
 fn run_validator_with_dockerfile(dockerfile_tail: &str) -> (i32, String) {
     let temp_root = unique_temp_dir("ci-config");
     copy_validator_script(temp_root.path());

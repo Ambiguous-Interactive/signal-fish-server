@@ -1757,8 +1757,8 @@ impl OutboundPermit {
         state.release_reservation(self.lane);
         decrement_counter(&mut state.permit_count, "permit_count");
         self.active = false;
+        let no_producers = !state.producers_open();
         if !state.accepting() {
-            let no_producers = !state.producers_open();
             drop(state);
             self.shared.capacity_available.notify_waiters();
             if no_producers {
@@ -1770,11 +1770,17 @@ impl OutboundPermit {
             let Some((target_generation, _)) = expected_scope else {
                 drop(state);
                 self.shared.capacity_available.notify_waiters();
+                if no_producers {
+                    self.shared.item_available.notify_waiters();
+                }
                 return Err(message);
             };
             if target_generation != state.enqueue_generation.saturating_add(1) {
                 drop(state);
                 self.shared.capacity_available.notify_waiters();
+                if no_producers {
+                    self.shared.item_available.notify_waiters();
+                }
                 return Ok(EnqueueOutcome::CANCELED);
             }
             let barrier = QueuedOutbound {
@@ -1799,6 +1805,9 @@ impl OutboundPermit {
             {
                 drop(state);
                 self.shared.capacity_available.notify_waiters();
+                if no_producers {
+                    self.shared.item_available.notify_waiters();
+                }
                 return Ok(EnqueueOutcome::CANCELED);
             }
             push_message(&mut state, self.lane, message, None, None);
@@ -3754,7 +3763,7 @@ mod tests {
 
     #[test]
     fn queue_rejects_control_data_and_mismatched_delivery_metadata() {
-        let (tx, _rx) = channel(2, 2);
+        let (tx, rx) = channel(2, 2);
         tx.set_protocol_version(3);
         let game_data = data(1, DeliveryClass::Reliable, None, 1);
         assert!(matches!(
@@ -3765,6 +3774,13 @@ mod tests {
         assert!(permit
             .send_control(Arc::new(game_data.delivery.message().clone()))
             .is_err());
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 0);
+            assert_eq!(state.permit_count, 0);
+        }
+        tx.try_enqueue_control(message(8))
+            .expect("invalid permit payload must release its reserved slot");
 
         let stamped_without_metadata =
             OutboundData::reliable_unstamped(Arc::new(game_data.delivery.message().clone()));
@@ -3854,6 +3870,289 @@ mod tests {
         }
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 4);
         assert!(rx.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn last_permit_drop_wakes_receiver_after_last_sender() {
+        let (tx, mut rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        let permit = tx.try_reserve_control().unwrap();
+        drop(tx);
+
+        let waiter = rx.recv();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(waiter.as_mut()).is_pending(),
+            "the reserved permit must keep an empty receiver live"
+        );
+
+        drop(permit);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("permit Drop must wake the already-waiting receiver")
+                .expect("queue state remains valid")
+                .is_none(),
+            "dropping the final producer capability must wake terminal EOF"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_permit_commit_wakes_receiver_after_last_sender() {
+        let (tx, mut rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        let permit = tx.try_reserve_control().unwrap();
+        drop(tx);
+
+        let waiter = rx.recv();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(waiter.as_mut()).is_pending(),
+            "the reserved permit must keep an empty receiver live"
+        );
+
+        permit.send_control(message(6)).unwrap();
+        assert_eq!(
+            message_id(
+                &tokio::time::timeout(Duration::from_secs(1), waiter)
+                    .await
+                    .expect("permit commit must wake the already-waiting receiver")
+                    .expect("queue state remains valid")
+                    .expect("the committed control must be delivered")
+            ),
+            6
+        );
+    }
+
+    #[tokio::test]
+    async fn two_permits_conserve_counts_across_mixed_drop_and_commit() {
+        let (tx, mut rx) = channel(1, 2);
+        tx.set_protocol_version(3);
+        let dropped = tx.try_reserve_control().unwrap();
+        let committed = tx.try_reserve_control().unwrap();
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 2);
+            assert_eq!(state.permit_count, 2);
+        }
+        drop(tx);
+        drop(dropped);
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 1);
+            assert_eq!(state.permit_count, 1);
+            assert!(state.producers_open());
+        }
+
+        let delivered = {
+            let waiter = rx.recv();
+            tokio::pin!(waiter);
+            assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+            committed.send_control(message(9)).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("the surviving permit commit must wake the receiver")
+                .expect("queue state remains valid")
+                .expect("the committed control must be delivered")
+        };
+        assert_eq!(message_id(&delivered), 9);
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 0);
+            assert_eq!(state.permit_count, 0);
+            assert!(!state.producers_open());
+        }
+        assert!(rx.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_final_permit_wakes_receiver_to_eof_after_transition_drains() {
+        let (tx, mut rx) = channel(1, 2);
+        tx.set_protocol_version(3);
+        let transition_sender = tx.clone();
+        let permit = tx
+            .try_reserve_control_scoped(0, None)
+            .expect("reserve generation-zero control capacity");
+        transition_sender
+            .try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .expect("the second producer advances the generation");
+        drop(tx);
+        drop(transition_sender);
+
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().payload,
+            OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::RoomLeft)
+        ));
+        let waiter = rx.recv();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(waiter.as_mut()).is_pending(),
+            "the stale permit remains the final producer capability"
+        );
+
+        assert_eq!(
+            permit
+                .send_control_scoped(message(7), 0, None)
+                .expect("stale scoped send resolves as cancellation"),
+            EnqueueOutcome::CANCELED
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("stale cancellation must wake the already-waiting receiver")
+                .expect("queue state remains valid")
+                .is_none(),
+            "the receiver must observe EOF after its last stale permit resolves"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_transition_permit_wakes_receiver_to_eof_after_peer_transition() {
+        let (tx, mut rx) = channel(1, 2);
+        tx.set_protocol_version(3);
+        let committed = tx
+            .try_reserve_control_scoped(1, None)
+            .expect("reserve the first next-generation transition permit");
+        let stale = tx
+            .try_reserve_control_scoped(1, None)
+            .expect("reserve the second next-generation transition permit");
+        committed
+            .send_control_scoped(Arc::new(ServerMessage::RoomLeft), 1, None)
+            .expect("the first permit commits generation one");
+        drop(tx);
+
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().payload,
+            OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::RoomLeft)
+        ));
+        let waiter = rx.recv();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(waiter.as_mut()).is_pending(),
+            "the second transition permit remains the final producer"
+        );
+
+        assert_eq!(
+            stale
+                .send_control_scoped(Arc::new(ServerMessage::RoomLeft), 1, None)
+                .expect("the duplicate transition resolves as stale"),
+            EnqueueOutcome::CANCELED
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("stale transition cancellation must wake the receiver")
+            .expect("queue state remains valid")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn unscoped_transition_permit_error_wakes_final_receiver() {
+        let (tx, mut rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        let permit = tx
+            .try_reserve_control()
+            .expect("reserve through the raw unscoped test seam");
+        drop(tx);
+
+        let waiter = rx.recv();
+        tokio::pin!(waiter);
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+        assert!(
+            permit
+                .send_control(Arc::new(ServerMessage::RoomLeft))
+                .is_err(),
+            "a transition requires the DeliveryPermit scope wrapper"
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("unscoped transition rejection must wake the receiver")
+            .expect("queue state remains valid")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn closed_receiver_rejects_held_permit_and_releases_last_producer() {
+        let (tx, mut rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        let permit = tx.try_reserve_control().unwrap();
+        drop(tx);
+        rx.close();
+
+        assert!(
+            permit.send_control(message(4)).is_err(),
+            "a closed receiver must reject an already-reserved control"
+        );
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 0);
+            assert_eq!(state.permit_count, 0);
+            assert_eq!(state.control.len(), 0);
+            assert!(!state.producers_open());
+        }
+        assert!(rx.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn accountability_failure_rejects_held_permit_and_releases_capacity() {
+        let (tx, mut rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        let permit = tx.try_reserve_control().unwrap();
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(7), 1))
+            .expect("fill the data lane while control capacity is reserved");
+        assert!(matches!(
+            tx.try_enqueue_data(data(2, DeliveryClass::Latest, Some(7), 2)),
+            Err(TryEnqueueError::AccountabilityUnavailable(_))
+        ));
+
+        assert!(
+            permit.send_control(message(4)).is_err(),
+            "an accountability-terminal queue must reject a held control permit"
+        );
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 0);
+            assert_eq!(state.permit_count, 0);
+            assert_eq!(state.control.len(), 0);
+            assert!(!state.accepting());
+        }
+        assert_eq!(
+            rx.recv().await.unwrap_err(),
+            TryReceiveError::AccountabilityFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_permit_revalidates_generation_at_commit_and_releases_capacity() {
+        let (tx, mut rx) = channel(1, 2);
+        tx.set_protocol_version(3);
+        let permit = tx
+            .try_reserve_control_scoped(0, None)
+            .expect("reserve generation-zero control capacity");
+        tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .expect("the second slot admits a competing generation transition");
+
+        assert_eq!(
+            permit
+                .send_control_scoped(message(4), 0, None)
+                .expect("stale scoped send resolves as cancellation"),
+            EnqueueOutcome::CANCELED
+        );
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.reserved_control, 0);
+            assert_eq!(state.permit_count, 0);
+            assert_eq!(state.enqueue_generation, 1);
+            assert_eq!(state.barriers.len(), 1);
+            assert_eq!(state.control.len(), 0);
+        }
+
+        tx.try_enqueue_control_scoped(message(5), None, 1)
+            .expect("canceled permit must return its slot to the new generation");
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().payload,
+            OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::RoomLeft)
+        ));
+        assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 5);
     }
 
     #[tokio::test]
