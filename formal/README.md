@@ -296,7 +296,10 @@ state under that final routing guard, and only then commits the reserved frames 
 phase order. Departure replanning holds the same mutation gate across its refreshed
 storage snapshot, host election, sticky-plan update, and exact-membership publication.
 Cross-room interleavings do not interact because each lane and all modeled state are
-room-scoped.
+room-scoped. Production recipient routing now follows the same boundary: exact
+publication and replay hooks retain a keyed room read gate, while join/reconnect route
+publication retains that room's write gate. The process-global routing maps are held
+only for brief snapshots or updates, never across those asynchronous hooks/builders.
 
 `RoomEventSequencer.tla` checks the implementation boundary that makes this
 atomicity argument valid. It does not idealize the lane as a general queue of
@@ -311,8 +314,9 @@ The abstraction still does not claim that every machine instruction is atomic. A
 physical receiver may close while the transaction's asynchronous durable hook runs.
 The transaction then reports the exact failed-frame count, calls the phase-zero decision
 callback once, and either continues independent healthy phase-one deliveries or cancels
-every dependent permit. The transaction's routing read guards block normal sender
-replacement during that hook. `RoomMessageTransaction.tla` nevertheless injects a
+every dependent permit. The transaction's room-scoped routing read gate blocks normal
+same-room sender replacement during that hook without excluding unrelated rooms.
+`RoomMessageTransaction.tla` nevertheless injects a
 synthetic permit-scope invalidation at the composition seam to verify that transaction
 accounting remains correct under P73's already-proved stale-permit cancellation lemma;
 it does not claim that invalidation is a normal routed lifecycle interleaving.
