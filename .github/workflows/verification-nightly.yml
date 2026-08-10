@@ -115,11 +115,11 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
       - name: Run relay delivery soak
@@ -163,11 +163,11 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
       - name: Run delivery concurrency stress
@@ -211,11 +211,11 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
       # All three room-based smoke cells are activated by name. The two
@@ -280,14 +280,14 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           workspaces: |
             .
             clients/native
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
       - name: Build the native reference client
@@ -398,7 +398,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           workspaces: |
@@ -456,12 +456,12 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
         id: install-nextest
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
       # --run-ignored all: the PR-lane profiles (already covered by the ci.yml
@@ -642,11 +642,11 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
       - name: Run split-brain failure catalog
@@ -679,7 +679,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install Java runtime

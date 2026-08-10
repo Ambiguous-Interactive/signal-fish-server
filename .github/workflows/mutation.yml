@@ -99,7 +99,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (warm + save the shared mutants cache)
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           # Shared with the mutants shards below so they restore THIS warm target/.
           shared-key: "mutants"
@@ -108,12 +108,12 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-mutants
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
 
@@ -228,7 +228,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (restore the warm shared cache)
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           shared-key: "mutants"
           # The baseline job owns the save; shards restore only (avoids 40 shards
@@ -236,14 +236,14 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-mutants
 
       - name: Install cargo-nextest
         # The mutation oracle uses nextest process isolation plus the dedicated
         # profile's per-test termination for progress-removing mutants.
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
 

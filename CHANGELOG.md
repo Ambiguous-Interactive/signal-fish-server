@@ -53,10 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canceled by a concurrent room-generation transition. The receiver now
   observes terminal disconnect instead of remaining parked after every sender
   and permit has gone (issue #220).
-- Wait for the native WebRTC statistics accumulator at the bounded
-  connected-data-channel boundary before declaring selected candidate-pair
-  evidence missing. Live interop still requires exactly one concrete pair and
-  fails after the one-second evidence deadline (issue #301).
+- Keep selected ICE candidate-pair evidence as a native reference-client clean
+  exit requirement after both data channels open. Gameplay exchange now starts
+  immediately while an eventually consistent statistics snapshot is pending;
+  the client retries that evidence under its existing run deadline and cannot
+  exit successfully without the concrete selected path. A selected remote
+  candidate that rtc 0.20 omits from its registry is reported as the
+  peer-reflexive path the ICE agent dynamically learned, with its unavailable
+  address left redacted instead of polling forever (issue #301).
 - Preserve the reviewed release-preparation source when documentation or
   workflow changes reach the default branch before publication. Manual releases
   now select the unique first-parent commit that introduced the package version

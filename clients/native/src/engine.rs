@@ -25,7 +25,6 @@
 //! they forward through an unbounded [`EngineEvent`] channel back to the orchestrator.
 
 use std::collections::{BTreeSet, HashMap};
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,9 +43,6 @@ use webrtc::peer_connection::{
     RTCStatsReportEntry, SettingEngine, StatsSelector,
 };
 use webrtc::runtime::{default_runtime, Runtime};
-
-const SELECTED_PAIR_STATS_BUDGET: Duration = Duration::from_secs(1);
-const SELECTED_PAIR_STATS_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Label of the ordered, reliable data channel (commands / critical events).
 pub const RELIABLE_LABEL: &str = "reliable";
@@ -541,23 +537,52 @@ impl Engine {
             .cloned()
     }
 
-    /// The selected ICE candidate pair for a connected peer: candidate types
-    /// (`host`/`srflx`/`prflx`/`relay`) plus each side's reported address, so a
-    /// harness can prove which family and which concrete address actually
-    /// carried the data channels.
-    pub async fn selected_candidate_pair(&self, peer: PlayerId) -> Option<SelectedCandidatePair> {
-        let pc = self.peers.get(&peer)?.pc.clone();
-        observe_eventually(SELECTED_PAIR_STATS_BUDGET, || {
-            let pc = Arc::clone(&pc);
+    /// Start a detached selected-pair stats probe for the current physical
+    /// link. Results use a dedicated channel so the orchestrator can arbitrate
+    /// already-completed evidence at its soft deadline without consuming or
+    /// reordering ordinary engine callbacks.
+    pub fn start_selected_candidate_pair_probe(
+        &self,
+        peer: PlayerId,
+        results: mpsc::UnboundedSender<SelectedPairProbeResult>,
+    ) -> bool {
+        let Some(link) = self.peers.get(&peer) else {
+            return false;
+        };
+        let pc = link.pc.clone();
+        let generation = link.generation;
+        spawn_selected_pair_probe(
+            self.runtime.clone(),
+            results,
+            peer,
+            generation,
             async move {
                 let report = pc
                     .get_stats(std::time::Instant::now(), StatsSelector::None)
                     .await;
                 selected_candidate_pair_from_report(&report)
-            }
-        })
-        .await
+            },
+        );
+        true
     }
+}
+
+fn spawn_selected_pair_probe(
+    runtime: Arc<dyn Runtime>,
+    results: mpsc::UnboundedSender<SelectedPairProbeResult>,
+    peer: PlayerId,
+    generation: u64,
+    probe: impl std::future::Future<Output = Option<SelectedCandidatePair>> + Send + 'static,
+) {
+    runtime.spawn(Box::pin(async move {
+        let selected = probe.await;
+        let _ = results.send(SelectedPairProbeResult {
+            peer,
+            generation,
+            completed_at: tokio::time::Instant::now(),
+            selected,
+        });
+    }));
 }
 
 fn selected_candidate_pair_from_report(report: &RTCStatsReport) -> Option<SelectedCandidatePair> {
@@ -576,60 +601,41 @@ fn selected_candidate_pair_from_report(report: &RTCStatsReport) -> Option<Select
     else {
         return None;
     };
-    let RTCStatsReportEntry::RemoteCandidate(remote) = report
+    let remote_entry = report
         .get(&pair.remote_candidate_id)
-        .or_else(|| report.get(&remote_id))?
-    else {
-        return None;
-    };
+        .or_else(|| report.get(&remote_id));
+    if remote_entry.is_none() {
+        tracing::debug!(
+            candidate_id = %pair.remote_candidate_id,
+            "selected remote candidate is peer-reflexive and absent from rtc stats"
+        );
+    }
+    let (remote_candidate_type, remote_candidate_address) =
+        selected_remote_candidate_details(remote_entry)?;
     Some(SelectedCandidatePair {
         local_candidate_type: local.candidate_type.to_string(),
-        remote_candidate_type: remote.candidate_type.to_string(),
+        remote_candidate_type,
         local_candidate_address: local.address.clone(),
-        remote_candidate_address: remote.address.clone(),
+        remote_candidate_address,
     })
 }
 
-/// Observe an eventually consistent WebRTC statistic until it exists or the
-/// fixed evidence deadline expires.
-///
-/// webrtc-rs can report open data channels before its driver has drained the
-/// earlier ICE selected-pair event into the statistics accumulator. The pair
-/// is already carrying gameplay traffic at that point; only the stats snapshot
-/// lags. Polling the observable postcondition closes that scheduler boundary
-/// without weakening the harness's exact selected-path assertion.
-async fn observe_eventually<T, Observe, Observation>(
-    budget: Duration,
-    mut observe: Observe,
-) -> Option<T>
-where
-    Observe: FnMut() -> Observation,
-    Observation: Future<Output = Option<T>>,
-{
-    let deadline = tokio::time::Instant::now().checked_add(budget)?;
-    loop {
-        // `timeout_at` polls its inner future before checking the deadline. Do
-        // both checks ourselves so an immediately-ready snapshot cannot start
-        // or become accepted at the exact evidence boundary.
-        if tokio::time::Instant::now() >= deadline {
-            return None;
+fn selected_remote_candidate_details(
+    entry: Option<&RTCStatsReportEntry>,
+) -> Option<(String, Option<String>)> {
+    match entry {
+        Some(RTCStatsReportEntry::RemoteCandidate(remote)) => {
+            Some((remote.candidate_type.to_string(), remote.address.clone()))
         }
-        let observation = tokio::time::timeout_at(deadline, observe()).await.ok()?;
-        if tokio::time::Instant::now() >= deadline {
-            return None;
-        }
-        if let Some(value) = observation {
-            return Some(value);
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return None;
-        }
-        let next_attempt = now
-            .checked_add(SELECTED_PAIR_STATS_INTERVAL)
-            .map_or(deadline, |next| next.min(deadline));
-        tokio::time::sleep_until(next_attempt).await;
+        Some(_) => None,
+        // rtc 0.20 registers every signaled remote candidate synchronously,
+        // but not a peer-reflexive candidate learned from an inbound ICE
+        // check. A selected pair that exists alongside its local candidate yet
+        // permanently lacks only the remote entry is therefore the library's
+        // prflx shape. Its public stats API exposes no address for that shape,
+        // so preserve the uncertainty rather than inventing a host address;
+        // strict family assertions still fail on `None`.
+        None => Some(("prflx".to_string(), None)),
     }
 }
 
@@ -663,6 +669,14 @@ pub struct SelectedCandidatePair {
     pub local_candidate_address: Option<String>,
     /// Address reported for the remote side of the pair.
     pub remote_candidate_address: Option<String>,
+}
+
+/// Completion from one detached selected-pair statistics snapshot.
+pub struct SelectedPairProbeResult {
+    pub peer: PlayerId,
+    pub generation: u64,
+    pub completed_at: tokio::time::Instant,
+    pub selected: Option<SelectedCandidatePair>,
 }
 
 struct PeerHandler {
@@ -1114,94 +1128,63 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    #[tokio::test(start_paused = true)]
-    async fn selected_pair_observation_waits_for_delayed_stats() {
-        let attempts = AtomicUsize::new(0);
-
-        let observed = observe_eventually(Duration::from_millis(100), || {
-            let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-            async move { (attempt == 2).then_some("selected-pair") }
-        })
-        .await;
-
-        assert_eq!(observed, Some("selected-pair"));
-        assert_eq!(
-            attempts.load(Ordering::Relaxed),
-            3,
-            "issue #301's connected-before-stats schedule must be observed again, not lost"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn selected_pair_observation_stops_at_evidence_deadline() {
-        let attempts = AtomicUsize::new(0);
-        let observation = observe_eventually(Duration::from_millis(20), || {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            async { None::<()> }
-        })
-        .await;
-
-        assert_eq!(observation, None);
-        assert!(
-            attempts.load(Ordering::Relaxed) >= 1,
-            "the deadline path must take at least one real stats snapshot"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn selected_pair_observation_cancels_a_snapshot_at_the_absolute_deadline() {
-        let started_at = tokio::time::Instant::now();
-        let observation = observe_eventually(Duration::from_secs(1), || async {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            Some("too-late")
-        })
-        .await;
-
-        assert_eq!(observation, None);
-        assert_eq!(
-            tokio::time::Instant::now().duration_since(started_at),
-            Duration::from_secs(1),
-            "a slow stats snapshot must not extend the evidence budget"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn selected_pair_observation_rejects_a_snapshot_ready_at_the_exact_deadline() {
-        let observation = observe_eventually(Duration::from_secs(1), || async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            Some("boundary-evidence")
-        })
-        .await;
-
-        assert_eq!(
-            observation, None,
-            "evidence that becomes ready at the deadline is outside the strict budget"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn selected_pair_observation_does_not_retry_at_the_evidence_deadline() {
-        let attempts = AtomicUsize::new(0);
-        let observation = observe_eventually(SELECTED_PAIR_STATS_INTERVAL, || {
-            let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-            async move { (attempt == 1).then_some("too-late") }
-        })
-        .await;
-
-        assert_eq!(observation, None);
-        assert_eq!(
-            attempts.load(Ordering::Relaxed),
-            1,
-            "a would-be retry at the exact deadline must never start"
-        );
-    }
 
     /// Payload of the routing probes below. Its exact bytes are compared on
     /// arrival, so a datagram from anything else cannot be mistaken for it.
     const ROUTE_PROBE: &[u8] = b"signal-fish-route-probe";
+
+    #[tokio::test]
+    async fn detached_selected_pair_probe_cannot_block_unrelated_work() {
+        let runtime = default_runtime().expect("test runtime is available");
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let peer = PlayerId::from_u128(0x05E1_EC7E_D006);
+
+        spawn_selected_pair_probe(runtime, result_tx, peer, 9, async move {
+            started_tx
+                .send(())
+                .expect("test observes the probe reaching its pending point");
+            release_rx.await.expect("test releases the hanging probe");
+            Some(SelectedCandidatePair {
+                local_candidate_type: "host".to_string(),
+                remote_candidate_type: "host".to_string(),
+                local_candidate_address: Some(Ipv4Addr::LOCALHOST.to_string()),
+                remote_candidate_address: Some(Ipv4Addr::LOCALHOST.to_string()),
+            })
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+            .await
+            .expect("detached probe is polled promptly")
+            .expect("detached probe reaches its deliberate hang");
+        let unrelated_gameplay_work = async { "gameplay-ready" }.await;
+        assert_eq!(unrelated_gameplay_work, "gameplay-ready");
+        match result_rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("the deliberately hanging diagnostic task stays alive")
+            }
+            Ok(_) => panic!("the deliberately hanging diagnostic stays detached"),
+        }
+
+        release_tx.send(()).expect("probe task remains alive");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), result_rx.recv())
+            .await
+            .expect("released probe publishes promptly")
+            .expect("probe channel remains open");
+        assert_eq!(result.peer, peer);
+        assert_eq!(result.generation, 9);
+        assert!(result.selected.is_some());
+    }
+
+    #[test]
+    fn absent_selected_remote_stats_are_peer_reflexive() {
+        assert_eq!(
+            selected_remote_candidate_details(None),
+            Some(("prflx".to_string(), None))
+        );
+    }
 
     /// Bind each candidate address and try to send [`ROUTE_PROBE`] to `server`,
     /// reporting what the kernel did for every one of them.
@@ -2028,9 +2011,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_a_live_required_channel_emits_current_channel_closed() {
+    async fn detached_selected_pair_probe_observes_before_live_channel_closes() {
         let (a_tx, mut a_rx) = mpsc::unbounded_channel();
         let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        let (selected_tx, mut selected_rx) = mpsc::unbounded_channel();
         let mut a = Engine::new(mdns_disabled_settings(), a_tx).expect("engine A builds");
         let mut b = Engine::new(mdns_disabled_settings(), b_tx).expect("engine B builds");
         let a_id = PlayerId::from_u128(0xa);
@@ -2092,6 +2076,27 @@ mod tests {
         })
         .await
         .expect("local peer pair connects");
+
+        let selected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(
+                    a.start_selected_candidate_pair_probe(b_id, selected_tx.clone()),
+                    "connected physical link remains available for evidence"
+                );
+                let result = selected_rx.recv().await.expect("probe channel stays open");
+                assert_eq!(result.peer, b_id);
+                assert!(a.is_current_generation(result.peer, result.generation));
+                let outcome = result.selected;
+                if let Some(selected) = outcome {
+                    break selected;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("connected pair eventually publishes detached stats evidence");
+        assert!(!selected.local_candidate_type.is_empty());
+        assert!(!selected.remote_candidate_type.is_empty());
 
         a.channel(b_id, RELIABLE_LABEL)
             .expect("required channel exists")
