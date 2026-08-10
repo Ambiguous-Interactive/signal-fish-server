@@ -88,7 +88,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           # Cover BOTH compilation graphs: the root package (the server
           # binary the harness spawns) and the standalone reference-client

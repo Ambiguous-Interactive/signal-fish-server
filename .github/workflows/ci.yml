@@ -83,7 +83,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       # Formatting first: an unclosed delimiter or otherwise unparseable file
@@ -131,7 +131,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Enforce deterministic relay allocation ceilings
@@ -170,7 +170,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Show Rust tool versions
@@ -245,7 +245,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       # cargo-nextest install is retried because windows-latest runner images
@@ -261,14 +261,14 @@ jobs:
       - name: Install cargo-nextest (attempt 1)
         id: install_nextest
         continue-on-error: true
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-nextest
 
@@ -476,11 +476,11 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-audit
       - name: Run cargo-audit
@@ -528,7 +528,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           # Separate cache key for MSRV job to avoid conflicts with main CI
           prefix-key: "msrv"
@@ -634,11 +634,11 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-llvm-cov
 
@@ -697,7 +697,7 @@ jobs:
           components: clippy
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Run panic-policy check
@@ -726,11 +726,11 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-sbom
 

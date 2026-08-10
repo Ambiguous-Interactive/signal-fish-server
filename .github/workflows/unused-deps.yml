@@ -86,7 +86,7 @@ jobs:
           components: rustc
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Cache cargo-machete binary
@@ -116,7 +116,7 @@ jobs:
           toolchain: nightly-2026-08-01
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Cache cargo-udeps binary

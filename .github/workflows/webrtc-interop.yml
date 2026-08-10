@@ -89,7 +89,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           # Cover BOTH compilation graphs: the root package (the server
           # binary the harness spawns) and the standalone reference-client
@@ -147,7 +147,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           # Cover both compilation graphs: the live smoke spawns the root
           # server binary from the standalone native-client test crate.
