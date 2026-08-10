@@ -11,7 +11,9 @@
 #     no-silent-loss), plus classified queue capacity-deadline arbitration
 #     (continuous availability, refill invalidation, and atomic admission) and
 #     the reserved control-permit lifecycle (exact release, producer liveness,
-#     parked-receiver notification, and commit-time scope validation) —
+#     parked-receiver notification, and commit-time scope validation), plus the
+#     room-event mutation-gate handoff (caller-cancellation immunity, isolated
+#     panic recovery, and weak-registry generation safety) —
 #     exploring reachable states.
 #   * Z3 discharges universally quantified SMT proofs of the pure decision
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the

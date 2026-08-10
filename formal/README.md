@@ -34,6 +34,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/CapacityDeadlineArbitration.tla` | P56's classified queue deadline: continuous pre-deadline capacity, refill invalidation, and lock-atomic late admission |
 | `tla/CapacityPermitLifecycle.tla` | P73's classified control-permit lifecycle: exact reservation accounting, producer liveness, terminal release, and commit-time scope validation |
 | `tla/RoomMessageTransaction.tla` | P74/P75's exact room-publication transaction: sparse production batches, pre-hook retry, final routing validation, durable hook, ordered phases, and degraded accounting |
+| `tla/RoomEventSequencer.tla` | P76's mutation-gate handoff: owned-job ordering, caller-cancellation immunity, panic recovery, and weak-registry generation safety |
 | `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
@@ -296,6 +297,15 @@ phase order. Departure replanning holds the same mutation gate across its refres
 storage snapshot, host election, sticky-plan update, and exact-membership publication.
 Cross-room interleavings do not interact because each lane and all modeled state are
 room-scoped.
+
+`RoomEventSequencer.tla` checks the implementation boundary that makes this
+atomicity argument valid. It does not idealize the lane as a general queue of
+already-mutated jobs: the transferred mutation guard remains owned by the
+queued/running job, so an ordinary second same-room producer cannot mutate or
+enqueue until the first job reaches success, error, or isolated panic. The
+model separately explores both sides of the drain-empty/new-enqueue race and
+the weak-registry replacement race described in
+[Room-event mutation handoff](#room-event-mutation-handoff).
 
 The abstraction still does not claim that every machine instruction is atomic. A
 physical receiver may close while the transaction's asynchronous durable hook runs.
@@ -750,6 +760,46 @@ misaccounting, retry-time permit loss, independent callback loss, and stale
 snapshot reuse. The general safety model permits one stale-waiter retry and at
 most two closed/slow replacement generations per recipient; outside the
 explicit witness it makes no scheduler-fairness or eventual-capacity claim.
+
+## Room-event mutation handoff
+
+`RoomEventSequencer.tla` models two same-room mutations across the exact
+guard-to-owned-job seam in `src/coordination/mod.rs`. It includes the transient
+state after a child job releases its guard but before the drain observes an
+empty queue: the next producer may enqueue while the existing worker still has
+`running = true`, or the worker may clear that flag first and let the next
+enqueue start a replacement drain. Both orders preserve the same mutation and
+owned-job execution sequence.
+
+| Model action / predicate | Production correspondence |
+| ------------------------ | ------------------------- |
+| `AcquireGuard` / `Mutate` | `RoomEventSequencer::lock` and the room-scoped state mutation under its `OwnedMutexGuard` |
+| `Enqueue` | synchronous transfer of that guard into the `RoomEventJob`; no cancellation point exists between the modeled mutation and handoff |
+| `StartJob` / `StopIdleWorker` | the queue-mutex-protected `running` transition and `RoomEventLane::drain` loop |
+| `CompleteSuccess` / `CompleteError` / `CompletePanic` | owned child-task completion, including `JoinError` conversion and guard release |
+| `DropCompletion` | caller drops the oneshot receiver; the queued closure and guard remain lane-owned |
+| `BeginLaneDrop` / `FinishLaneDrop` | a weak entry becomes non-upgradeable, a concurrent lock installs a replacement generation, and the old destructor removes only a pointer-identical entry |
+
+`GuardHeldThroughOwnedJob`, `NoMutatedEventLost`, and
+`SameRoomMutationBarrier` prove that mutation order cannot overtake job
+termination and that dropping a completion receiver cannot cancel committed
+work. `QueueAndActiveExact` and `WorkerStateSound` cover the drain handoff,
+while `RegistryProtectsActiveGuard` prevents stale lane cleanup from deleting a
+new guard's registry identity. The proof is process-local and assumes an active
+Tokio runtime; it makes no multi-node ordering claim and no liveness claim for
+a job whose own future blocks forever.
+
+The healthy two-event/two-generation configuration exhausts 1,704 distinct
+states at graph depth 19. Four independent expected failures release the guard
+at enqueue, cancel work with its caller, strand the drain on panic, or remove a
+replacement registry entry; each is accepted only for its exact named
+diagnostic in its targeted configuration. Later healthy invariants can also
+cascade once a seeded bug has broken the guard contract. A fifth exact-failure
+configuration is a non-vacuity witness that forces a live first caller to
+detach before isolated panic, completes stale-lane cleanup after replacement,
+and runs a successful second event. Deterministic Rust regressions pin the same
+seams, including explicit job error, cross-room independence, and
+pointer-identity cleanup.
 
 ## Additional disconnect/outage exposure bound
 

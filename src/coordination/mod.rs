@@ -162,6 +162,8 @@ struct RoomEventLane {
     owner: Weak<RoomEventSequencer>,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
     queue: Mutex<RoomEventQueue>,
+    #[cfg(test)]
+    post_job_pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl RoomEventLane {
@@ -218,8 +220,22 @@ impl RoomEventLane {
             // cancel the already-enqueued job.
             let result = tokio::spawn(async move { (next.job)().await })
                 .await
-                .map_err(|error| anyhow::anyhow!("room event job failed: {error}"))
+                .map_err(|error| {
+                    let context = format!("room event job failed: {error}");
+                    anyhow::Error::new(error).context(context)
+                })
                 .and_then(std::convert::identity);
+            #[cfg(test)]
+            let post_job_pause = self
+                .post_job_pause
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            #[cfg(test)]
+            if let Some((reached, release)) = post_job_pause {
+                reached.notify_one();
+                release.notified().await;
+            }
             let _ = next.completion.send(result);
         }
     }
@@ -253,18 +269,24 @@ pub(crate) struct RoomEventSequencer {
 }
 
 impl RoomEventSequencer {
+    fn new_lane(self: &Arc<Self>, room_id: RoomId) -> Arc<RoomEventLane> {
+        Arc::new(RoomEventLane {
+            room_id,
+            owner: Arc::downgrade(self),
+            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            queue: Mutex::new(RoomEventQueue::default()),
+            #[cfg(test)]
+            post_job_pause: Mutex::new(None),
+        })
+    }
+
     fn lane(self: &Arc<Self>, room_id: RoomId) -> Arc<RoomEventLane> {
         let mut lanes = self.lanes.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(lane) = lanes.get(&room_id).and_then(Weak::upgrade) {
             return lane;
         }
 
-        let lane = Arc::new(RoomEventLane {
-            room_id,
-            owner: Arc::downgrade(self),
-            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
-            queue: Mutex::new(RoomEventQueue::default()),
-        });
+        let lane = self.new_lane(room_id);
         lanes.insert(room_id, Arc::downgrade(&lane));
         lane
     }
@@ -2071,6 +2093,7 @@ mod tests {
     use crate::metrics::{ConnectionDeliveryStats, ServerMetrics};
     use crate::protocol::{DeliveryClass, GameDataEncoding, LobbyState, SpectatorJoinedPayload};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::sync::Mutex;
 
@@ -2080,6 +2103,15 @@ mod tests {
     /// moment a delivery is parked on a full queue with no reader — and can
     /// never elapse while a test is actively draining.
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+    const ROOM_EVENT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn assert_future_pending_once<F: Future>(future: Pin<&mut F>, label: &str) {
+        let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+        assert!(
+            matches!(future.poll(&mut context), Poll::Pending),
+            "{label} must be polled pending"
+        );
+    }
 
     /// Generous spin bound for "the spawned delivery has demonstrably reached
     /// the backpressure path" waits. Cooperative yields (not sleeps) keep the
@@ -2165,47 +2197,342 @@ mod tests {
                 }),
             )
         };
-        first_started.notified().await;
+        tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, first_started.notified())
+            .await
+            .expect("the first room event must start");
 
-        let second_attempted = Arc::new(AtomicBool::new(false));
-        let second_acquired = Arc::new(AtomicBool::new(false));
-        let second = {
-            let sequencer = Arc::clone(&sequencer);
-            let attempted = Arc::clone(&second_attempted);
-            let acquired = Arc::clone(&second_acquired);
-            let order = Arc::clone(&order);
-            tokio::spawn(async move {
-                attempted.store(true, Ordering::Release);
-                let guard = sequencer.lock(room_id).await;
-                acquired.store(true, Ordering::Release);
-                sequencer
-                    .enqueue(
-                        guard,
-                        Box::new(move || {
-                            Box::pin(async move {
-                                order.lock().await.push(2);
-                                Ok(true)
-                            })
-                        }),
-                    )
-                    .await
-            })
-        };
-        while !second_attempted.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
+        let mut second_lock = Box::pin(sequencer.lock(room_id));
+        assert_future_pending_once(second_lock.as_mut(), "the second same-room mutation lock");
+
+        release_first.notify_one();
         assert!(
-            !second_acquired.load(Ordering::Acquire),
-            "a second producer cannot enqueue while the first job owns the room guard"
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, first_completion)
+                .await
+                .expect("the first room event must finish")
+                .expect("first job completes")
+        );
+        let second_guard = tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, second_lock)
+            .await
+            .expect("the second mutation lock must acquire after the first job");
+        let second_completion = {
+            let order = Arc::clone(&order);
+            sequencer.enqueue(
+                second_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        order.lock().await.push(2);
+                        Ok(true)
+                    })
+                }),
+            )
+        };
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, second_completion)
+                .await
+                .expect("the second room event must finish")
+                .expect("second job completes")
+        );
+        assert_eq!(*order.lock().await, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn dropped_completion_cannot_cancel_owned_job_or_release_gate_early() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5703);
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let first_finished = Arc::new(AtomicBool::new(false));
+
+        let first_guard = sequencer.lock(room_id).await;
+        let first_completion = {
+            let first_started = Arc::clone(&first_started);
+            let release_first = Arc::clone(&release_first);
+            let first_finished = Arc::clone(&first_finished);
+            sequencer.enqueue(
+                first_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        first_started.notify_one();
+                        release_first.notified().await;
+                        first_finished.store(true, Ordering::Release);
+                        Ok(true)
+                    })
+                }),
+            )
+        };
+        // This current-thread Tokio test has not yielded since `enqueue`, so
+        // the spawned drain cannot have started the queued closure yet.
+        drop(first_completion);
+        tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, first_started.notified())
+            .await
+            .expect("the detached queued room event must still start");
+
+        let mut second_lock = Box::pin(sequencer.lock(room_id));
+        assert_future_pending_once(
+            second_lock.as_mut(),
+            "the lock behind a detached room event",
         );
 
         release_first.notify_one();
-        assert!(first_completion.await.expect("first job completes"));
-        assert!(second
+        let second_guard = tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, second_lock)
             .await
-            .expect("second task should not panic")
-            .expect("second job completes"));
-        assert_eq!(*order.lock().await, vec![1, 2]);
+            .expect("the detached room event must release its guard after finishing");
+        assert!(
+            first_finished.load(Ordering::Acquire),
+            "the detached first job must finish before its guard is released"
+        );
+        let second_completion =
+            sequencer.enqueue(second_guard, Box::new(|| Box::pin(async { Ok(true) })));
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, second_completion)
+                .await
+                .expect("the job behind a detached room event must make progress")
+                .expect("second job completes after detached first job")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_room_event_releases_gate_for_the_next_job() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5704);
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let first_guard = sequencer.lock(room_id).await;
+        let first_completion = {
+            let order = Arc::clone(&order);
+            sequencer.enqueue(
+                first_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        order.lock().await.push("failed");
+                        Err(anyhow::anyhow!("sentinel room event failure"))
+                    })
+                }),
+            )
+        };
+        let error = tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, first_completion)
+            .await
+            .expect("the failing room event must finish")
+            .expect_err("the first job must preserve its error result");
+        assert!(error.to_string().contains("sentinel room event failure"));
+
+        let second_guard = sequencer.lock(room_id).await;
+        let second_completion = {
+            let order = Arc::clone(&order);
+            sequencer.enqueue(
+                second_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        order.lock().await.push("succeeded");
+                        Ok(true)
+                    })
+                }),
+            )
+        };
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, second_completion)
+                .await
+                .expect("the room event after an error must finish")
+                .expect("second job succeeds")
+        );
+        assert_eq!(*order.lock().await, vec!["failed", "succeeded"]);
+    }
+
+    #[tokio::test]
+    async fn panicking_room_event_isolated_from_the_next_job() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5705);
+
+        let first_guard = sequencer.lock(room_id).await;
+        let first_completion = sequencer.enqueue(
+            first_guard,
+            Box::new(|| {
+                Box::pin(async move {
+                    panic!("sentinel isolated room event panic");
+                })
+            }),
+        );
+        let error = tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, first_completion)
+            .await
+            .expect("the panicking room event must be isolated")
+            .expect_err("the lane must translate a child panic into an error");
+        let join_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<tokio::task::JoinError>())
+            .expect("the room-event context must preserve the child JoinError");
+        assert!(
+            join_error.is_panic(),
+            "the isolated child failure must retain panic semantics"
+        );
+        let displayed = error.to_string();
+        assert!(
+            displayed.starts_with("room event job failed: task ") && displayed.contains("panicked"),
+            "the top-level error must retain the child-task panic diagnostic: {displayed}"
+        );
+
+        let second_guard = sequencer.lock(room_id).await;
+        let second_completion =
+            sequencer.enqueue(second_guard, Box::new(|| Box::pin(async move { Ok(true) })));
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, second_completion)
+                .await
+                .expect("the lane must not strand work after an isolated panic")
+                .expect("the lane must continue after the isolated panic")
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_room_lanes_progress_independently() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let blocked_room = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5706);
+        let independent_room = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5707);
+        let blocked_started = Arc::new(tokio::sync::Notify::new());
+        let release_blocked = Arc::new(tokio::sync::Notify::new());
+
+        let blocked_guard = sequencer.lock(blocked_room).await;
+        let blocked_completion = {
+            let blocked_started = Arc::clone(&blocked_started);
+            let release_blocked = Arc::clone(&release_blocked);
+            sequencer.enqueue(
+                blocked_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        blocked_started.notify_one();
+                        release_blocked.notified().await;
+                        Ok(true)
+                    })
+                }),
+            )
+        };
+        tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, blocked_started.notified())
+            .await
+            .expect("the blocked-room event must start");
+
+        let independent_guard = tokio::time::timeout(
+            ROOM_EVENT_PROGRESS_TIMEOUT,
+            sequencer.lock(independent_room),
+        )
+        .await
+        .expect("an independent room lock must not share the blocked gate");
+        let independent_completion = sequencer.enqueue(
+            independent_guard,
+            Box::new(|| Box::pin(async move { Ok(true) })),
+        );
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, independent_completion)
+                .await
+                .expect("an independent room event must not be stranded")
+                .expect("an independent room job must complete")
+        );
+
+        release_blocked.notify_one();
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, blocked_completion)
+                .await
+                .expect("the released blocked-room event must finish")
+                .expect("the released blocked-room job must complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_empty_handoff_reuses_or_restarts_the_room_worker() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5708);
+        let after_first_job = Arc::new(tokio::sync::Notify::new());
+        let resume_existing_worker = Arc::new(tokio::sync::Notify::new());
+
+        let first_guard = sequencer.lock(room_id).await;
+        let lane = Arc::clone(&first_guard._lane);
+        *lane
+            .post_job_pause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((
+            Arc::clone(&after_first_job),
+            Arc::clone(&resume_existing_worker),
+        ));
+        let first_completion =
+            sequencer.enqueue(first_guard, Box::new(|| Box::pin(async { Ok(true) })));
+        tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, after_first_job.notified())
+            .await
+            .expect("the first child must release its guard before the drain continues");
+
+        let second_guard =
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, sequencer.lock(room_id))
+                .await
+                .expect("the next mutation must acquire while the old drain is paused");
+        let second_completion =
+            sequencer.enqueue(second_guard, Box::new(|| Box::pin(async { Ok(true) })));
+        {
+            let queue = lane.queue.lock().unwrap_or_else(|error| error.into_inner());
+            assert!(
+                queue.running,
+                "enqueue must observe and reuse the existing drain"
+            );
+            assert_eq!(
+                queue.jobs.len(),
+                1,
+                "the paused existing drain must own the newly queued job"
+            );
+        }
+
+        resume_existing_worker.notify_one();
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, first_completion)
+                .await
+                .expect("the paused first completion must resume")
+                .expect("the first room event succeeds")
+        );
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, second_completion)
+                .await
+                .expect("the reused worker must execute the second room event")
+                .expect("the second room event succeeds")
+        );
+
+        tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, async {
+            loop {
+                if !lane
+                    .queue
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .running
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reused worker must eventually observe its empty queue");
+
+        let release_restarted_worker = Arc::new(tokio::sync::Notify::new());
+        let third_guard = sequencer.lock(room_id).await;
+        let third_completion = {
+            let release_restarted_worker = Arc::clone(&release_restarted_worker);
+            sequencer.enqueue(
+                third_guard,
+                Box::new(move || {
+                    Box::pin(async move {
+                        release_restarted_worker.notified().await;
+                        Ok(true)
+                    })
+                }),
+            )
+        };
+        assert!(
+            lane.queue
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .running,
+            "enqueue after an idle observation must synchronously start a replacement drain"
+        );
+        release_restarted_worker.notify_one();
+        assert!(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, third_completion)
+                .await
+                .expect("the replacement drain must execute its room event")
+                .expect("the third room event succeeds")
+        );
     }
 
     #[test]
@@ -2263,6 +2590,71 @@ mod tests {
                 "dropping the last room owner must remove its idle registry entry"
             );
         }
+    }
+
+    #[test]
+    fn stale_lane_drop_cannot_remove_replacement_registry_entry() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5804);
+        let stale = sequencer.lane(room_id);
+        let stale_weak = Arc::downgrade(&stale);
+        let mut lanes = sequencer
+            .lanes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (drop_finished, drop_observed) = std::sync::mpsc::sync_channel(1);
+        let drop_thread = std::thread::spawn(move || {
+            drop(stale);
+            drop_finished
+                .send(())
+                .expect("the stale-drop observer remains connected");
+        });
+
+        let strong_count_deadline = std::time::Instant::now() + ROOM_EVENT_PROGRESS_TIMEOUT;
+        while stale_weak.strong_count() != 0 {
+            assert!(
+                std::time::Instant::now() < strong_count_deadline,
+                "the last stale lane owner must enter Drop"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            stale_weak.upgrade().is_none(),
+            "a production replacement is possible only after the stale weak entry stops upgrading"
+        );
+
+        // This is the locked replacement half of `RoomEventSequencer::lane`.
+        // The old destructor is blocked on the same registry mutex, so the
+        // replacement deterministically wins before stale cleanup resumes.
+        let replacement = sequencer.new_lane(room_id);
+        lanes.insert(room_id, Arc::downgrade(&replacement));
+        drop(lanes);
+        drop_observed
+            .recv_timeout(ROOM_EVENT_PROGRESS_TIMEOUT)
+            .expect("the stale destructor must finish after the registry unlocks");
+        drop_thread
+            .join()
+            .expect("the stale lane destructor thread must not panic");
+
+        let registered = sequencer
+            .lanes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&room_id)
+            .and_then(Weak::upgrade)
+            .expect("stale cleanup must retain the replacement lane");
+        assert!(Arc::ptr_eq(&registered, &replacement));
+
+        drop(registered);
+        drop(replacement);
+        assert!(
+            sequencer
+                .lanes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "the replacement lane must still clean up its own registry entry"
+        );
     }
 
     /// Build one connection's delivery plumbing: a bounded queue plus the
