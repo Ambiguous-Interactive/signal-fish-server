@@ -2,8 +2,8 @@
 
 ## Correctness-first scope
 
-GitHub triage found nine open issues and no open or draft pull requests. Issue
-#290 remains the highest direct gameplay risk, but its deterministic fix is
+GitHub triage found nine open issues and no open or draft pull requests. Issue #290
+remains the highest direct gameplay risk, but its deterministic fix is
 merged and the remaining P56 acceptance is the unchanged scheduled hosted
 cohort at 4/20; manual runs cannot advance it. P53 likewise remains at 3/20
 eligible scheduled allocations per operating system. No dependency pull
