@@ -102,3 +102,12 @@ hook readiness. The first all-feature run usefully exposed three new
 barrier-test assertions whose nested `try_recv` expressions violated the
 repository's explicit-result policy; binding and asserting the messages fixed
 that policy failure, and the complete rerun passed.
+
+The first hosted head also exposed two publication-only gaps. Markdownlint
+rejected a historical `#290` line that the earlier focused documentation gates
+did not run; the text now keeps `Issue #290` inline and the exact markdown
+workflow passes. The next head proved the routing allocation benchmark green
+but caught the same enlarged async-trait future in the adjacent boxed-`FnOnce`
+serialization handoff. That compatibility path now shares the immediate
+uncontended boundary, retains its builder through routing contention exactly
+once, and restores the existing serialization ceilings without raising them.

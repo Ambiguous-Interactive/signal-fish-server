@@ -644,6 +644,54 @@ fn contended_game_data(sender_id: PlayerId) -> ServerMessage {
     }
 }
 
+#[tokio::test]
+async fn boxed_builder_survives_room_routing_contention_exactly_once() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0016);
+    let sender_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0017);
+    let recipient_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0018);
+    let (sender, mut receiver) = mpsc::channel(2);
+    coordinator
+        .register_local_client(
+            recipient_id,
+            Some(room_id),
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register boxed-builder recipient");
+
+    let held_room = coordinator.room_routing_gates.write(room_id).await;
+    let build_calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_builder = Arc::clone(&build_calls);
+    let mut broadcast = Box::pin(coordinator.broadcast_to_room_except_with_message(
+        &room_id,
+        &sender_id,
+        Box::new(move || {
+            calls_for_builder.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::new(ServerMessage::Pong))
+        }),
+    ));
+    assert!(
+        futures_util::poll!(broadcast.as_mut()).is_pending(),
+        "boxed builder must wait for its room's routing fence"
+    );
+    assert_eq!(
+        build_calls.load(Ordering::Relaxed),
+        0,
+        "contention must not consume the one-shot builder"
+    );
+
+    drop(held_room);
+    broadcast
+        .await
+        .expect("boxed builder resumes after routing contention");
+    assert_eq!(build_calls.load(Ordering::Relaxed), 1);
+    assert!(matches!(
+        receiver.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+}
+
 fn spawn_contended_game_data_broadcast(
     coordinator: Arc<InMemoryMessageCoordinator>,
     metrics: Arc<ServerMetrics>,

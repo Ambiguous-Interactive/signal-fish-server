@@ -3119,23 +3119,22 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: Box<dyn FnOnce() -> Option<Arc<ServerMessage>> + Send + 'a>,
     ) -> anyhow::Result<()> {
-        let _routing = self.room_routing_gates.read(*room_id).await;
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
-        let started = build_message().map(|message| {
-            self.start_routed_deliveries(
-                &room_players,
-                &clients,
-                room_id,
-                Some(except_player),
-                &message,
-            )
-        });
-        drop(clients);
-        drop(room_players);
-        drop(_routing);
-        if let Some(started) = started {
-            self.finish_deliveries(started).await;
+        // Keep this allocation-measured compatibility handoff on the same
+        // compact uncontended path as the borrowed builder. The FnOnce remains
+        // available to the boxed contention path until one branch consumes it.
+        let mut build_message = Some(build_message);
+        let mut build_once = || build_message.take().and_then(|build| build());
+        match self.try_borrowed_room_broadcast(room_id, except_player, &mut build_once) {
+            ImmediateGameDataBroadcast::Complete => {}
+            ImmediateGameDataBroadcast::Pending(finish) => finish.await,
+            ImmediateGameDataBroadcast::Unavailable => {
+                Box::pin(self.borrowed_room_broadcast_after_contention(
+                    room_id,
+                    except_player,
+                    &mut build_once,
+                ))
+                .await;
+            }
         }
         Ok(())
     }
