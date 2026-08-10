@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add exhaustive formal verification and deterministic classified-queue
+  integration coverage for exact two-phase room publication transactions. The
+  checks pin complete pre-hook reservation, final route-generation validation,
+  zero publication on hook rejection or error, phase ordering, exactly-once
+  degraded-delivery callbacks, and complete permit and failure accounting
+  (issue #220).
+
 ### Changed
 
 - Reduce relay allocation overhead whenever projection work repeats across a
