@@ -4007,6 +4007,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_final_permit_wakes_batched_receiver_to_eof_after_transition_drains() {
+        let (tx, mut rx) = channel(1, 2);
+        tx.set_protocol_version(3);
+        let transition_sender = tx.clone();
+        let permit = tx
+            .try_reserve_control_scoped(0, None)
+            .expect("reserve generation-zero control capacity");
+        transition_sender
+            .try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .expect("the second producer advances the generation");
+        drop(tx);
+        drop(transition_sender);
+
+        assert!(matches!(
+            rx.recv_batched(16, Duration::from_secs(10))
+                .await
+                .unwrap()
+                .unwrap()
+                .payload,
+            OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::RoomLeft)
+        ));
+        let waiter = rx.recv_batched(16, Duration::from_secs(10));
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(waiter.as_mut()).is_pending(),
+            "the stale permit remains the final producer capability"
+        );
+
+        assert_eq!(
+            permit
+                .send_control_scoped(message(7), 0, None)
+                .expect("stale scoped send resolves as cancellation"),
+            EnqueueOutcome::CANCELED
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("stale cancellation must wake the batched production receiver")
+                .expect("queue state remains valid")
+                .is_none(),
+            "the batched receiver must observe EOF after its last stale permit resolves"
+        );
+    }
+
+    #[tokio::test]
     async fn stale_transition_permit_wakes_receiver_to_eof_after_peer_transition() {
         let (tx, mut rx) = channel(1, 2);
         tx.set_protocol_version(3);

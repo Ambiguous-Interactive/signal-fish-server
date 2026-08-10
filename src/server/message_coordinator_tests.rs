@@ -1,7 +1,7 @@
 use super::game_data::broadcast_game_data_with;
 use super::{ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator};
 use crate::coordination::{
-    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome,
+    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliverySender,
     ImmediateGameDataBroadcast, MessageCoordinator, RoomMessageTransactionOutcome,
     RoomRecipientMessages,
 };
@@ -1837,6 +1837,49 @@ fn two_frame_batch(player_id: PlayerId) -> RoomRecipientMessages {
     }
 }
 
+async fn classified_room_member(
+    room_id: RoomId,
+    player_id: PlayerId,
+) -> (
+    ClientDeliveryHandle,
+    DeliverySender,
+    DeliverySender,
+    crate::coordination::outbound_queue::OutboundReceiver,
+) {
+    let (sender, mut receiver) = crate::coordination::outbound_queue::channel(1, 2);
+    let outside_room = DeliverySender::classified(sender);
+    outside_room.set_protocol_version(3);
+    let in_room = outside_room.next_generation();
+    in_room
+        .try_send(
+            Arc::new(ServerMessage::SpectatorJoined(Box::new(
+                SpectatorJoinedPayload {
+                    room_id,
+                    room_code: "transaction-room".to_string(),
+                    spectator_id: player_id,
+                    game_name: "transaction-room".to_string(),
+                    current_players: Vec::new(),
+                    current_spectators: Vec::new(),
+                    lobby_state: LobbyState::Lobby,
+                    reason: None,
+                },
+            ))),
+            Some(room_id),
+        )
+        .expect("establish the classified transaction room generation");
+    receiver
+        .recv()
+        .await
+        .expect("classified transaction receiver remains accountable")
+        .expect("room-generation transition must be queued");
+    let next_generation = in_room.next_generation();
+    let handle = ClientDeliveryHandle {
+        sender: in_room.clone(),
+        close: ConnectionCloseSignal::detached(),
+    };
+    (handle, in_room, next_generation, receiver)
+}
+
 #[tokio::test]
 async fn two_frame_transaction_progresses_at_minimum_control_capacity() {
     let metrics = Arc::new(ServerMetrics::new());
@@ -1898,6 +1941,410 @@ async fn two_frame_transaction_progresses_at_minimum_control_capacity() {
         receiver.recv().await.as_deref(),
         Some(ServerMessage::Error { message, .. }) if message == "tailored plan marker"
     ));
+}
+
+#[tokio::test]
+async fn classified_two_frame_transaction_progresses_at_minimum_control_capacity() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_042A);
+    let player = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_042B);
+    let (handle, room_sender, _, mut receiver) = classified_room_member(room_id, player).await;
+    room_sender
+        .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+        .expect("occupy one of the minimum two classified control slots");
+    coordinator
+        .register_local_client(player, Some(room_id), handle)
+        .await
+        .expect("register classified minimum-capacity recipient");
+
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[player],
+                    vec![two_frame_batch(player)],
+                    Box::new(|| Box::pin(async { Ok(true) })),
+                    Box::new(|failed_phase_zero| {
+                        assert_eq!(failed_phase_zero, 0);
+                        true
+                    }),
+                )
+                .await
+        })
+    };
+    wait_for_counter(
+        "second classified reservation reached backpressure",
+        10_000,
+        || {
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        },
+    )
+    .await;
+    assert!(matches!(
+        receiver
+            .recv()
+            .await
+            .expect("classified queue remains accountable")
+            .expect("occupied control must be queued")
+            .payload,
+        crate::coordination::outbound_queue::OutboundPayload::Message(message)
+            if matches!(message.as_ref(), ServerMessage::Pong)
+    ));
+
+    assert_eq!(
+        transaction
+            .await
+            .expect("classified transaction task must not panic")
+            .expect("minimum-capacity classified transaction succeeds"),
+        RoomMessageTransactionOutcome::Committed
+    );
+    for expected_phase in ["phase zero", "phase one"] {
+        let queued = receiver
+            .recv()
+            .await
+            .expect("classified queue remains accountable")
+            .unwrap_or_else(|| panic!("{expected_phase} must be queued"));
+        match (expected_phase, queued.payload) {
+            (
+                "phase zero",
+                crate::coordination::outbound_queue::OutboundPayload::Message(message),
+            ) => assert!(matches!(message.as_ref(), ServerMessage::Pong)),
+            (
+                "phase one",
+                crate::coordination::outbound_queue::OutboundPayload::Message(message),
+            ) => assert!(matches!(
+                message.as_ref(),
+                ServerMessage::Error { message, .. } if message == "tailored plan marker"
+            )),
+            (_, payload) => panic!("unexpected {expected_phase} payload: {payload:?}"),
+        }
+    }
+
+    room_sender
+        .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+        .expect("committed permits must leave classified capacity reusable");
+    assert!(receiver
+        .recv()
+        .await
+        .expect("classified queue remains accountable")
+        .is_some());
+    coordinator
+        .unregister_local_client(&player)
+        .await
+        .expect("remove the classified transaction route");
+    drop(room_sender);
+    assert!(receiver
+        .recv()
+        .await
+        .expect("classified queue remains accountable")
+        .is_none());
+}
+
+#[tokio::test]
+async fn synthetic_classified_scope_change_during_hook_reports_exact_phase_failure() {
+    for continue_publication in [true, false] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        );
+        let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0460);
+        let actor = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0461);
+        let incumbent = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0462);
+        let (actor_handle, _actor_room_sender, actor_transition, mut actor_receiver) =
+            classified_room_member(room_id, actor).await;
+        let (
+            incumbent_handle,
+            incumbent_room_sender,
+            _incumbent_transition,
+            mut incumbent_receiver,
+        ) = classified_room_member(room_id, incumbent).await;
+        coordinator
+            .register_local_client(actor, Some(room_id), actor_handle)
+            .await
+            .expect("register classified phase-zero actor");
+        coordinator
+            .register_local_client(incumbent, Some(room_id), incumbent_handle)
+            .await
+            .expect("register classified phase-one incumbent");
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let callback_failures = Arc::new(AtomicUsize::new(usize::MAX));
+        let observed_calls = Arc::clone(&callback_calls);
+        let observed_failures = Arc::clone(&callback_failures);
+
+        let outcome = coordinator
+            .commit_room_messages_if_members_with_hook(
+                &room_id,
+                &[actor, incumbent],
+                vec![
+                    RoomRecipientMessages::in_order(actor, vec![Arc::new(ServerMessage::Pong)]),
+                    RoomRecipientMessages::from_first_phase(
+                        incumbent,
+                        1,
+                        vec![Arc::new(ServerMessage::Pong)],
+                    ),
+                ],
+                Box::new(move || {
+                    Box::pin(async move {
+                        actor_transition
+                            .try_send(Arc::new(ServerMessage::RoomLeft), None)
+                            .expect("synthetically invalidate held actor permit scope");
+                        Ok(true)
+                    })
+                }),
+                Box::new(move |failed_phase_zero| {
+                    observed_calls.fetch_add(1, Ordering::AcqRel);
+                    observed_failures.store(failed_phase_zero, Ordering::Release);
+                    continue_publication
+                }),
+            )
+            .await
+            .expect("synthetic post-hook scope change is a degraded delivery outcome");
+
+        let expected_failed_frames = if continue_publication { 1 } else { 2 };
+        assert_eq!(
+            outcome,
+            RoomMessageTransactionOutcome::CommittedDegraded {
+                failed_frames: expected_failed_frames,
+            },
+            "continue_publication={continue_publication}"
+        );
+        assert_eq!(callback_calls.load(Ordering::Acquire), 1);
+        assert_eq!(callback_failures.load(Ordering::Acquire), 1);
+        assert_eq!(
+            metrics
+                .websocket_deliveries_canceled
+                .load(Ordering::Relaxed),
+            expected_failed_frames as u64,
+            "every stale or dependency-canceled permit must be counted exactly"
+        );
+        assert!(matches!(
+            actor_receiver
+                .recv()
+                .await
+                .expect("actor queue remains accountable")
+                .expect("actor transition must be queued")
+                .payload,
+            crate::coordination::outbound_queue::OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::RoomLeft)
+        ));
+        let unexpected_actor_frame = actor_receiver.try_recv();
+        assert!(matches!(
+            unexpected_actor_frame,
+            Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+        ));
+        if continue_publication {
+            assert!(matches!(
+                incumbent_receiver
+                    .recv()
+                    .await
+                    .expect("incumbent queue remains accountable")
+                    .expect("independent phase one must be queued")
+                    .payload,
+                crate::coordination::outbound_queue::OutboundPayload::Message(message)
+                    if matches!(message.as_ref(), ServerMessage::Pong)
+            ));
+        } else {
+            let unexpected_incumbent_frame = incumbent_receiver.try_recv();
+            assert!(matches!(
+                unexpected_incumbent_frame,
+                Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+            ));
+        }
+        incumbent_room_sender
+            .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+            .expect("committed or canceled phase-one permit must release its slot");
+        assert!(incumbent_receiver
+            .recv()
+            .await
+            .expect("incumbent queue remains accountable")
+            .is_some());
+    }
+}
+
+#[tokio::test]
+async fn classified_generation_replacement_before_hook_aborts_without_partial_frames() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0470);
+    let player = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0471);
+    let (handle, room_sender, replacement_sender, mut receiver) =
+        classified_room_member(room_id, player).await;
+    room_sender
+        .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+        .expect("occupy one slot so the second reservation waits");
+    coordinator
+        .register_local_client(player, Some(room_id), handle)
+        .await
+        .expect("register the original classified generation");
+    let hook_called = Arc::new(AtomicBool::new(false));
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        let hook_called = Arc::clone(&hook_called);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[player],
+                    vec![two_frame_batch(player)],
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_called.store(true, Ordering::Release);
+                            Ok(true)
+                        })
+                    }),
+                    Box::new(|_| true),
+                )
+                .await
+        })
+    };
+    wait_for_counter("second classified reservation is waiting", 10_000, || {
+        metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 1
+    })
+    .await;
+
+    let mut clients = coordinator.local_clients.write().await;
+    assert!(receiver
+        .recv()
+        .await
+        .expect("classified queue remains accountable")
+        .is_some());
+    clients.insert(
+        player,
+        ClientDeliveryHandle {
+            sender: replacement_sender.clone(),
+            close: ConnectionCloseSignal::detached(),
+        },
+    );
+    drop(clients);
+
+    assert_eq!(
+        transaction
+            .await
+            .expect("generation-replacement task must not panic")
+            .expect("routing change is not an infrastructure failure"),
+        RoomMessageTransactionOutcome::RoutingChanged
+    );
+    assert!(!hook_called.load(Ordering::Acquire));
+    let unexpected_frame = receiver.try_recv();
+    assert!(matches!(
+        unexpected_frame,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+    replacement_sender
+        .try_send(Arc::new(ServerMessage::RoomLeft), None)
+        .expect("aborted reservations must leave capacity for the replacement generation");
+    assert!(receiver
+        .recv()
+        .await
+        .expect("classified queue remains accountable")
+        .is_some());
+}
+
+#[tokio::test]
+async fn classified_hook_rejection_and_error_release_every_reservation() {
+    for hook_errors in [false, true] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        );
+        let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0480);
+        let alice = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0481);
+        let bob = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0482);
+        let (alice_handle, alice_sender, _alice_next, mut alice_receiver) =
+            classified_room_member(room_id, alice).await;
+        let (bob_handle, bob_sender, _bob_next, mut bob_receiver) =
+            classified_room_member(room_id, bob).await;
+        coordinator
+            .register_local_client(alice, Some(room_id), alice_handle)
+            .await
+            .expect("register classified Alice");
+        coordinator
+            .register_local_client(bob, Some(room_id), bob_handle)
+            .await
+            .expect("register classified Bob");
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let observed_callback_calls = Arc::clone(&callback_calls);
+
+        let result = coordinator
+            .commit_room_messages_if_members_with_hook(
+                &room_id,
+                &[alice, bob],
+                vec![two_frame_batch(alice), two_frame_batch(bob)],
+                Box::new(move || {
+                    Box::pin(async move {
+                        if hook_errors {
+                            anyhow::bail!("injected classified hook failure");
+                        }
+                        Ok(false)
+                    })
+                }),
+                Box::new(move |_| {
+                    observed_callback_calls.fetch_add(1, Ordering::AcqRel);
+                    true
+                }),
+            )
+            .await;
+
+        if hook_errors {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(
+                result.expect("hook rejection is a transaction outcome"),
+                RoomMessageTransactionOutcome::HookRejected
+            );
+        }
+        assert_eq!(callback_calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            metrics
+                .websocket_deliveries_canceled
+                .load(Ordering::Relaxed),
+            4,
+            "every pre-commit reservation must be canceled exactly once"
+        );
+        for (sender, receiver, player) in [
+            (&alice_sender, &mut alice_receiver, alice),
+            (&bob_sender, &mut bob_receiver, bob),
+        ] {
+            let unexpected_frame = receiver.try_recv();
+            assert!(matches!(
+                unexpected_frame,
+                Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+            ));
+            for _ in 0..2 {
+                sender
+                    .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "hook_errors={hook_errors}: reservations for {player} leaked: {error:?}"
+                        )
+                    });
+            }
+            for _ in 0..2 {
+                assert!(receiver
+                    .recv()
+                    .await
+                    .expect("classified queue remains accountable")
+                    .is_some());
+            }
+        }
+    }
 }
 
 #[tokio::test]
