@@ -107,5 +107,12 @@ allowed duplicate/license warnings. The profiled pre-commit preflight passed in
 1,737 ms; its 813 ms panic scan and 586 ms changed-file discovery remain within
 already-open issue #318 rather than expanding this correctness phase.
 
-The proof and regression commit is `563afc4`. Pull-request check identities and
-reviewer status are recorded after the branch is published.
+The proof and regression commit is `563afc4`; the documentation commit is
+`d314275`. PR #326 is ready for review and mergeable. At that head, all 15
+applicable pull-request workflows succeeded, Dependabot auto-merge was the sole
+expected skip, and no actionable or unresolved review thread remained. The
+default-branch commit `dad800d` independently completed all 17 push workflows
+successfully. The external client-safety issue referenced by server issue #205
+remains open without a dependency PR; it defines coordinated client work, not
+an incorporable server dependency for this correctness phase. P53 and P56 keep
+their unchanged hosted evidence cohorts.
