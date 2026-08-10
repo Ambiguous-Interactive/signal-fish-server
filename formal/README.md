@@ -33,7 +33,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
 | `tla/CapacityDeadlineArbitration.tla` | P56's classified queue deadline: continuous pre-deadline capacity, refill invalidation, and lock-atomic late admission |
 | `tla/CapacityPermitLifecycle.tla` | P73's classified control-permit lifecycle: exact reservation accounting, producer liveness, terminal release, and commit-time scope validation |
-| `tla/RoomMessageTransaction.tla` | P74's exact room-publication transaction: complete reservation, final routing validation, durable hook, ordered phases, and degraded accounting |
+| `tla/RoomMessageTransaction.tla` | P74/P75's exact room-publication transaction: sparse production batches, pre-hook retry, final routing validation, durable hook, ordered phases, and degraded accounting |
 | `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
@@ -695,6 +695,61 @@ permit producer capability, Drop release, failed-send release, stale-cancel
 release, commit-time scope validation, or the permit-notification class. The runner
 accepts each only when TLC reports its exact named invariant, so a clean run,
 parser error, or unrelated failure cannot make the non-vacuity gates pass.
+
+## Exact room-message transaction
+
+`RoomMessageTransaction.tla` composes those permits inside
+`commit_room_messages_if_members_with_hook`. P74 first checked the symmetric
+two-recipient/two-frame transaction. P75 retains that maximum bound but chooses
+each recipient's frame plan independently from every subset of the two phases,
+excluding only an all-empty transaction. The two-recipient run therefore
+checks all 15 labeled nonempty plans (nine up to recipient symmetry): solo and
+mixed one-phase plans, phase-one-only plans, full plans, and identity-only
+members beside any nonempty plan. An empty member consumes no queue capacity
+but remains in the final exact route and sender-generation validation.
+
+| Model action / predicate | Production correspondence |
+| ------------------------ | ------------------------- |
+| `ReserveFrame` / `AllReserved` | `reserve_room_batch` and the requirement that every planned physical frame own a permit before the hook |
+| `ChangeGeneration` / `CancelStaleReservation` | replacement of a scoped classified queue generation followed by `RoomBatchReservation::Canceled` from its outstanding waiter |
+| `RetryCanceledReservation` | release every canceled recipient batch and held sibling permit, then recollect current handles without consuming either `FnOnce` callback |
+| `ReservationUnavailable` | pre-hook `ChannelClosed` / `SlowConsumer` conditional sender removal followed by outer-loop recollection: either retry an installed replacement or return `RoutingChanged` for the now-missing route |
+| `ExactRouting` / `RoutingAccepted` | exact room-member and same-channel validation, including zero-frame members |
+| `CallHook` | the one-shot durable hook's accept / reject / error boundary |
+| `SendFrame` / `CallPhaseZeroCallback` | ordered permit commit and the exactly-once phase-zero failure decision |
+
+`HookAfterExactReservation` and `HookAfterExactRoutingValidation` keep the
+durable hook behind a complete, current attempt. `HookConsumptionExact` and
+`CallbackRetentionExact` independently prove a canceled reservation attempt
+retains both one-shot closures. `RetrySnapshotFresh` requires explicit
+generation changes and canceled waiters to end in a refreshed attempt snapshot;
+`RetryCancellationExact` records every canceled recipient batch plus the
+complete held sibling set, while `PermitAccountingExact` proves physical
+capacity is released.
+`NoStalePhysicalWaiter` preserves production's joined-result precedence: a
+`Canceled` result is released and retried before any sibling
+`ChannelClosed` / `SlowConsumer` cleanup may refresh the attempt. Mixed result
+vectors retain those unavailable sibling results, immediately release any
+permits their batches had acquired, and include those releases in exact retry
+telemetry before recollection.
+Sparse plans preserve phase ordering and callback input even when a phase has
+no frames; stopping with no phase-one permit correctly returns `Committed`,
+not a vacuous degraded outcome. Model `HookError` corresponds to the outer
+`anyhow::Result::Err`, not a public transaction-outcome variant.
+
+The exhaustive two-recipient configuration reaches 228,040 distinct states at
+depth 25 across all 15 frame plans; a 972-state, depth-15 singleton
+configuration separately checks all three nonempty one-recipient plans. A
+35-state, depth-18 weakly fair witness
+forces `generation change -> canceled waiter -> refreshed retry -> hook ->
+commit`, preventing retry safety from being proved by an unrelated reset.
+Twelve independent expected-failure configurations pin premature hook
+invocation, routing-validation omissions (including an empty member), phase
+inversion, duplicate or incorrect callback behavior, failed-frame or permit
+misaccounting, retry-time permit loss, independent callback loss, and stale
+snapshot reuse. The general safety model permits one stale-waiter retry and at
+most two closed/slow replacement generations per recipient; outside the
+explicit witness it makes no scheduler-fairness or eventual-capacity claim.
 
 ## Additional disconnect/outage exposure bound
 
