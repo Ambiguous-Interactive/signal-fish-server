@@ -195,17 +195,15 @@ impl SelectedPairEvidence {
 fn take_ready_selected_pair_probes(
     receiver: &mut mpsc::UnboundedReceiver<SelectedPairProbeResult>,
 ) -> Vec<SelectedPairProbeResult> {
-    let mut ready = Vec::new();
-    loop {
-        match receiver.try_recv() {
-            Ok(result) => ready.push(result),
-            Err(
-                tokio::sync::mpsc::error::TryRecvError::Empty
-                | tokio::sync::mpsc::error::TryRecvError::Disconnected,
-            ) => break,
+    std::iter::from_fn(|| match receiver.try_recv() {
+        Ok(result) => Some(result),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+            tracing::debug!("selected-pair probe result channel disconnected");
+            None
         }
-    }
-    ready
+    })
+    .collect()
 }
 
 fn apply_selected_pair_probes_before_run_deadline(
