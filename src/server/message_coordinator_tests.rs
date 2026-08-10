@@ -2257,6 +2257,203 @@ async fn classified_generation_replacement_before_hook_aborts_without_partial_fr
 }
 
 #[tokio::test]
+async fn classified_stale_reservation_retries_whole_transaction_before_hook() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0472);
+    let actor = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0473);
+    let incumbent = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0474);
+    let (actor_handle, _actor_room_sender, actor_transition_sender, mut actor_receiver) =
+        classified_room_member(room_id, actor).await;
+    let (
+        incumbent_handle,
+        incumbent_room_sender,
+        _incumbent_transition_sender,
+        mut incumbent_receiver,
+    ) = classified_room_member(room_id, incumbent).await;
+    coordinator
+        .register_local_client(actor, Some(room_id), actor_handle)
+        .await
+        .expect("register the original actor generation");
+    coordinator
+        .register_local_client(incumbent, Some(room_id), incumbent_handle)
+        .await
+        .expect("register the stable incumbent generation");
+
+    let transition_permit = actor_transition_sender
+        .try_reserve_control(None)
+        .expect("pre-reserve the actor's next-generation transition slot");
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::new(AtomicUsize::new(0));
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        let hook_calls = Arc::clone(&hook_calls);
+        let callback_calls = Arc::clone(&callback_calls);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[actor, incumbent],
+                    vec![
+                        two_frame_batch(actor),
+                        RoomRecipientMessages::from_first_phase(
+                            incumbent,
+                            1,
+                            vec![Arc::new(ServerMessage::Pong)],
+                        ),
+                    ],
+                    Box::new(move || {
+                        Box::pin(async move {
+                            hook_calls.fetch_add(1, Ordering::AcqRel);
+                            Ok(true)
+                        })
+                    }),
+                    Box::new(move |failed_phase_zero| {
+                        assert_eq!(failed_phase_zero, 0);
+                        callback_calls.fetch_add(1, Ordering::AcqRel);
+                        true
+                    }),
+                )
+                .await
+        })
+    };
+    wait_for_counter(
+        "the actor's second old-generation reservation is waiting",
+        10_000,
+        || {
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+                && metrics.websocket_delivery_attempts.load(Ordering::Relaxed) >= 3
+        },
+    )
+    .await;
+
+    // Hold the route write lock across the queue transition so the retry can
+    // only refresh after the matching delivery handle publishes generation 2.
+    let mut clients = coordinator.local_clients.write().await;
+    assert!(
+        transition_permit
+            .send(Arc::new(ServerMessage::SpectatorJoined(Box::new(
+                SpectatorJoinedPayload {
+                    room_id,
+                    room_code: "transaction-retry".to_string(),
+                    spectator_id: actor,
+                    game_name: "transaction-retry".to_string(),
+                    current_players: Vec::new(),
+                    current_spectators: Vec::new(),
+                    lobby_state: LobbyState::Lobby,
+                    reason: None,
+                },
+            ))))
+            .expect("commit the next-generation transition")
+            .enqueued,
+        "the transition must be queued"
+    );
+    clients.insert(
+        actor,
+        ClientDeliveryHandle {
+            sender: actor_transition_sender.clone(),
+            close: ConnectionCloseSignal::detached(),
+        },
+    );
+    drop(clients);
+
+    assert!(matches!(
+        actor_receiver
+            .recv()
+            .await
+            .expect("actor queue remains accountable")
+            .expect("generation transition must be queued")
+            .payload,
+        crate::coordination::outbound_queue::OutboundPayload::Message(message)
+            if matches!(message.as_ref(), ServerMessage::SpectatorJoined(_))
+    ));
+    let unexpected_incumbent_frame = incumbent_receiver.try_recv();
+    assert!(matches!(
+        unexpected_incumbent_frame,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+
+    assert_eq!(
+        transaction
+            .await
+            .expect("stale-reservation transaction task must not panic")
+            .expect("stale reservation retry is not an infrastructure failure"),
+        RoomMessageTransactionOutcome::Committed
+    );
+    assert_eq!(hook_calls.load(Ordering::Acquire), 1);
+    assert_eq!(callback_calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        6,
+        "the complete stale attempt and complete refreshed attempt must each reserve all three frames"
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        3,
+        "the stale actor attempt, its held permit, and the incumbent sibling permit must each be canceled exactly once"
+    );
+    for expected in ["phase zero", "phase one"] {
+        let queued = actor_receiver
+            .try_recv()
+            .unwrap_or_else(|error| panic!("actor {expected} must be queued: {error:?}"));
+        match (expected, queued.payload) {
+            (
+                "phase zero",
+                crate::coordination::outbound_queue::OutboundPayload::Message(message),
+            ) => assert!(matches!(message.as_ref(), ServerMessage::Pong)),
+            (
+                "phase one",
+                crate::coordination::outbound_queue::OutboundPayload::Message(message),
+            ) => assert!(matches!(
+                message.as_ref(),
+                ServerMessage::Error { message, .. } if message == "tailored plan marker"
+            )),
+            (_, payload) => panic!("unexpected actor {expected} payload: {payload:?}"),
+        }
+    }
+    assert!(matches!(
+        incumbent_receiver
+            .try_recv()
+            .expect("incumbent phase one must be queued")
+            .payload,
+        crate::coordination::outbound_queue::OutboundPayload::Message(message)
+            if matches!(message.as_ref(), ServerMessage::Pong)
+    ));
+
+    for _ in 0..2 {
+        actor_transition_sender
+            .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+            .expect("retried actor permits must leave both capacity slots reusable");
+        incumbent_room_sender
+            .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+            .expect("retried incumbent permit must leave both capacity slots reusable");
+    }
+    for _ in 0..2 {
+        for (receiver, member) in [
+            (&mut actor_receiver, "actor"),
+            (&mut incumbent_receiver, "incumbent"),
+        ] {
+            assert!(matches!(
+                receiver
+                    .try_recv()
+                    .unwrap_or_else(|error| panic!("{member} capacity probe: {error:?}"))
+                    .payload,
+                crate::coordination::outbound_queue::OutboundPayload::Message(message)
+                    if matches!(message.as_ref(), ServerMessage::Pong)
+            ));
+        }
+    }
+}
+
+#[tokio::test]
 async fn classified_hook_rejection_and_error_release_every_reservation() {
     for hook_errors in [false, true] {
         let metrics = Arc::new(ServerMetrics::new());
@@ -2402,6 +2599,172 @@ async fn room_transaction_commits_every_phase_zero_frame_before_phase_one() {
         incumbent_rx.recv().await.as_deref(),
         Some(ServerMessage::Error { message, .. }) if message == "phase one"
     ));
+}
+
+#[tokio::test]
+async fn empty_member_batch_retains_identity_validation_before_phase_one() {
+    for replacement_kind in [
+        None,
+        Some(ControlQueueKind::Legacy),
+        Some(ControlQueueKind::Classified),
+    ] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            Arc::clone(&metrics),
+        ));
+        let room_id = RoomId::new_v4();
+        let empty_member = PlayerId::new_v4();
+        let phase_one_member = PlayerId::new_v4();
+        let (empty_handle, empty_next_generation, mut empty_receiver, _empty_legacy_sender) =
+            match replacement_kind {
+                Some(ControlQueueKind::Classified) => {
+                    let (handle, _current, next, receiver) =
+                        classified_room_member(room_id, empty_member).await;
+                    (
+                        handle,
+                        Some(next),
+                        ControlReceiver::Classified(receiver),
+                        None,
+                    )
+                }
+                None | Some(ControlQueueKind::Legacy) => {
+                    let (sender, receiver) = mpsc::channel(1);
+                    (
+                        ClientDeliveryHandle::new(
+                            sender.clone(),
+                            ConnectionCloseSignal::detached(),
+                        ),
+                        None,
+                        ControlReceiver::Legacy(receiver),
+                        Some(sender),
+                    )
+                }
+            };
+        let (phase_one_tx, mut phase_one_rx) = mpsc::channel(1);
+        phase_one_tx
+            .try_send(Arc::new(ServerMessage::Pong))
+            .expect("prefill the phase-one recipient");
+        coordinator
+            .register_local_client(empty_member, Some(room_id), empty_handle)
+            .await
+            .expect("register the identity-only member");
+        coordinator
+            .register_local_client(
+                phase_one_member,
+                Some(room_id),
+                ClientDeliveryHandle::new(phase_one_tx.clone(), ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register the phase-one member");
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let transaction = {
+            let coordinator = Arc::clone(&coordinator);
+            let hook_calls = Arc::clone(&hook_calls);
+            let callback_calls = Arc::clone(&callback_calls);
+            tokio::spawn(async move {
+                coordinator
+                    .commit_room_messages_if_members_with_hook(
+                        &room_id,
+                        &[empty_member, phase_one_member],
+                        vec![
+                            RoomRecipientMessages::in_order(empty_member, Vec::new()),
+                            RoomRecipientMessages::from_first_phase(
+                                phase_one_member,
+                                1,
+                                vec![Arc::new(ServerMessage::Pong)],
+                            ),
+                        ],
+                        Box::new(move || {
+                            Box::pin(async move {
+                                hook_calls.fetch_add(1, Ordering::AcqRel);
+                                Ok(true)
+                            })
+                        }),
+                        Box::new(move |failed_phase_zero| {
+                            assert_eq!(failed_phase_zero, 0);
+                            callback_calls.fetch_add(1, Ordering::AcqRel);
+                            true
+                        }),
+                    )
+                    .await
+            })
+        };
+        wait_for_counter("the sole physical frame is waiting", 10_000, || {
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        })
+        .await;
+
+        let mut replacement_receiver = None;
+        if let Some(kind) = replacement_kind {
+            let replacement_handle = match kind {
+                ControlQueueKind::Legacy => {
+                    let (sender, receiver) = mpsc::channel(1);
+                    replacement_receiver = Some(ControlReceiver::Legacy(receiver));
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached())
+                }
+                ControlQueueKind::Classified => ClientDeliveryHandle {
+                    sender: empty_next_generation
+                        .expect("classified replacement generation exists"),
+                    close: ConnectionCloseSignal::detached(),
+                },
+            };
+            coordinator
+                .local_clients
+                .write()
+                .await
+                .insert(empty_member, replacement_handle);
+        }
+        assert!(matches!(
+            phase_one_rx.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+
+        let outcome = transaction
+            .await
+            .expect("sparse transaction task must not panic")
+            .expect("sparse routing result is not an infrastructure failure");
+        if replacement_kind.is_some() {
+            assert_eq!(outcome, RoomMessageTransactionOutcome::RoutingChanged);
+            assert_eq!(hook_calls.load(Ordering::Acquire), 0);
+            assert_eq!(callback_calls.load(Ordering::Acquire), 0);
+            assert_eq!(
+                metrics
+                    .websocket_deliveries_canceled
+                    .load(Ordering::Relaxed),
+                1,
+                "the phase-one permit must be canceled when the empty member's sender changes"
+            );
+            let unexpected_phase_one = phase_one_rx.try_recv();
+            assert!(matches!(
+                unexpected_phase_one,
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            if let Some(receiver) = replacement_receiver.as_mut() {
+                receiver.assert_empty("legacy replacement identity-only queue");
+            }
+        } else {
+            assert_eq!(outcome, RoomMessageTransactionOutcome::Committed);
+            assert_eq!(hook_calls.load(Ordering::Acquire), 1);
+            assert_eq!(callback_calls.load(Ordering::Acquire), 1);
+            let committed_phase_one = phase_one_rx
+                .try_recv()
+                .expect("accepted sparse transaction must enqueue phase one");
+            assert!(matches!(committed_phase_one.as_ref(), ServerMessage::Pong));
+        }
+        empty_receiver.assert_empty("identity-only member queue");
+        phase_one_tx
+            .try_send(Arc::new(ServerMessage::Pong))
+            .expect("sparse transaction must leave phase-one capacity reusable");
+        let capacity_probe = phase_one_rx
+            .try_recv()
+            .expect("phase-one capacity probe must be queued");
+        assert!(matches!(capacity_probe.as_ref(), ServerMessage::Pong));
+    }
 }
 
 #[tokio::test]

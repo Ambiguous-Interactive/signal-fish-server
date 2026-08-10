@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add exhaustive formal verification and deterministic classified-queue
   integration coverage for exact two-phase room publication transactions. The
-  checks pin complete pre-hook reservation, final route-generation validation,
-  zero publication on hook rejection or error, phase ordering, exactly-once
-  degraded-delivery callbacks, and complete permit and failure accounting
-  (issue #220).
+  checks cover solo, empty-member, one-phase, phase-one-only, and full batches;
+  pin complete pre-hook reservation, canceled-attempt retry, final
+  route-generation validation (including zero-frame members), zero publication
+  on hook rejection or error, phase ordering, exactly-once degraded-delivery
+  callbacks, and complete permit and failure accounting (issue #220).
 
 ### Changed
 
