@@ -71,10 +71,22 @@ gauntlet, and hosted PR evidence are recorded before publication closure.
 
 The final adversarial pass reported zero actionable findings. Root formatting,
 warnings-denied Clippy, and the complete all-feature suite pass; the native
-workflow-equivalent 95-test library/binary suite, dependency audit, and five
+workflow-equivalent library/binary suite, dependency audit, and five
 fresh live two-process runs pass. Documentation, CI configuration, MSRV,
 tooling parity, workflow hygiene, all 212 live action-tag resolutions, LLM
 policy, and PowerShell pre-push checks pass. A profiled warm pre-commit run is
 915 ms (changed-file discovery 637 ms), within the one-second policy target.
+
+The first hosted PR matrix exposed rtc 0.20's separate peer-reflexive report
+shape: its selected pair and local candidate were present, but the remote
+candidate learned dynamically from an inbound connectivity check was never
+registered in the public stats report. Retrying could never fill that entry.
+The client now reports that exact shape as `prflx` with an unavailable remote
+address; strict address-family cells still fail closed on the missing address.
+The repository's explicit `try_recv` policy also found two discarded error
+states in the new drain/test seams; both now distinguish empty from disconnected
+channels. The exact policy scan, late-join authoritative replan, and three
+consecutive 16-process one-crippled meshes (105 healthy links each) pass.
+
 Hosted Linux/Windows/macOS WebRTC evidence and the remaining PR workflow matrix
 are the only validation still pending at commit time.

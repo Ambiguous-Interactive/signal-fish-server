@@ -601,18 +601,42 @@ fn selected_candidate_pair_from_report(report: &RTCStatsReport) -> Option<Select
     else {
         return None;
     };
-    let RTCStatsReportEntry::RemoteCandidate(remote) = report
+    let remote_entry = report
         .get(&pair.remote_candidate_id)
-        .or_else(|| report.get(&remote_id))?
-    else {
-        return None;
-    };
+        .or_else(|| report.get(&remote_id));
+    if remote_entry.is_none() {
+        tracing::debug!(
+            candidate_id = %pair.remote_candidate_id,
+            "selected remote candidate is peer-reflexive and absent from rtc stats"
+        );
+    }
+    let (remote_candidate_type, remote_candidate_address) =
+        selected_remote_candidate_details(remote_entry)?;
     Some(SelectedCandidatePair {
         local_candidate_type: local.candidate_type.to_string(),
-        remote_candidate_type: remote.candidate_type.to_string(),
+        remote_candidate_type,
         local_candidate_address: local.address.clone(),
-        remote_candidate_address: remote.address.clone(),
+        remote_candidate_address,
     })
+}
+
+fn selected_remote_candidate_details(
+    entry: Option<&RTCStatsReportEntry>,
+) -> Option<(String, Option<String>)> {
+    match entry {
+        Some(RTCStatsReportEntry::RemoteCandidate(remote)) => {
+            Some((remote.candidate_type.to_string(), remote.address.clone()))
+        }
+        Some(_) => None,
+        // rtc 0.20 registers every signaled remote candidate synchronously,
+        // but not a peer-reflexive candidate learned from an inbound ICE
+        // check. A selected pair that exists alongside its local candidate yet
+        // permanently lacks only the remote entry is therefore the library's
+        // prflx shape. Its public stats API exposes no address for that shape,
+        // so preserve the uncertainty rather than inventing a host address;
+        // strict family assertions still fail on `None`.
+        None => Some(("prflx".to_string(), None)),
+    }
 }
 
 /// A local ICE candidate this client gathered and advertised to a peer.
@@ -1136,10 +1160,13 @@ mod tests {
             .expect("detached probe reaches its deliberate hang");
         let unrelated_gameplay_work = async { "gameplay-ready" }.await;
         assert_eq!(unrelated_gameplay_work, "gameplay-ready");
-        assert!(
-            result_rx.try_recv().is_err(),
-            "the deliberately hanging diagnostic stays detached"
-        );
+        match result_rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("the deliberately hanging diagnostic task stays alive")
+            }
+            Ok(_) => panic!("the deliberately hanging diagnostic stays detached"),
+        }
 
         release_tx.send(()).expect("probe task remains alive");
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), result_rx.recv())
@@ -1149,6 +1176,14 @@ mod tests {
         assert_eq!(result.peer, peer);
         assert_eq!(result.generation, 9);
         assert!(result.selected.is_some());
+    }
+
+    #[test]
+    fn absent_selected_remote_stats_are_peer_reflexive() {
+        assert_eq!(
+            selected_remote_candidate_details(None),
+            Some(("prflx".to_string(), None))
+        );
     }
 
     /// Bind each candidate address and try to send [`ROUTE_PROBE`] to `server`,

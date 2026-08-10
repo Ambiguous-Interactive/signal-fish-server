@@ -196,8 +196,14 @@ fn take_ready_selected_pair_probes(
     receiver: &mut mpsc::UnboundedReceiver<SelectedPairProbeResult>,
 ) -> Vec<SelectedPairProbeResult> {
     let mut ready = Vec::new();
-    while let Ok(result) = receiver.try_recv() {
-        ready.push(result);
+    loop {
+        match receiver.try_recv() {
+            Ok(result) => ready.push(result),
+            Err(
+                tokio::sync::mpsc::error::TryRecvError::Empty
+                | tokio::sync::mpsc::error::TryRecvError::Disconnected,
+            ) => break,
+        }
     }
     ready
 }
