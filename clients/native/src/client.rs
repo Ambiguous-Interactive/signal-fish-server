@@ -53,7 +53,9 @@ use webrtc::peer_connection::RTCPeerConnectionState;
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
-use crate::engine::{Engine, EngineEvent, RELIABLE_LABEL, UNRELIABLE_LABEL};
+use crate::engine::{
+    Engine, EngineEvent, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
+};
 use crate::events::{emit, Event, PlanPeer, SignalKind};
 use crate::wire::{self, WsStream, HANDSHAKE_TIMEOUT};
 
@@ -86,6 +88,12 @@ fn checked_deadline(start: Instant, duration: Duration) -> Instant {
 const EXIT_LINGER: Duration = Duration::from_millis(250);
 /// Poll cadence for an optional harness-controlled success release file.
 const SUCCESS_RELEASE_POLL: Duration = Duration::from_millis(100);
+/// Poll cadence for selected ICE-pair evidence after a physical link opens.
+///
+/// This is intentionally a cadence, not a separate timeout. A clean exit keeps
+/// the evidence as a postcondition until the existing run deadline, while
+/// gameplay exchange proceeds as soon as both data channels open.
+const SELECTED_PAIR_POLL: Duration = Duration::from_millis(10);
 
 /// Defensive bounds for signals that legitimately race a held/current planned
 /// peer's local engine creation. Authoritative plan-before-signal ordering
@@ -100,6 +108,117 @@ const MAX_PENDING_SIGNALS_TOTAL: usize = 128;
 /// 10-second loss window.
 fn p2p_retry_delay(p2p_timeout_secs: u64) -> Duration {
     Duration::from_secs((p2p_timeout_secs / 2).clamp(1, 15))
+}
+
+#[derive(Default)]
+struct SelectedPairEvidence {
+    pending: BTreeSet<PlayerId>,
+    in_flight: BTreeSet<PlayerId>,
+    poll_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectedPairProbeDisposition {
+    Ignore,
+    Retry,
+    Observed,
+}
+
+impl SelectedPairEvidence {
+    fn require(&mut self, peer: PlayerId) {
+        self.pending.insert(peer);
+    }
+
+    fn begin_probe(&mut self, peer: PlayerId) -> bool {
+        self.pending.contains(&peer) && self.in_flight.insert(peer)
+    }
+
+    fn clear(&mut self, peer: PlayerId) {
+        self.pending.remove(&peer);
+        self.in_flight.remove(&peer);
+        if self.pending.is_empty() {
+            self.poll_at = None;
+        }
+    }
+
+    fn complete_probe(
+        &mut self,
+        peer: PlayerId,
+        completed_at: Instant,
+        evidence_deadline: Option<Instant>,
+        selected: bool,
+    ) -> SelectedPairProbeDisposition {
+        self.in_flight.remove(&peer);
+        if !self.pending.contains(&peer)
+            || evidence_deadline.is_some_and(|deadline| completed_at >= deadline)
+        {
+            return SelectedPairProbeDisposition::Ignore;
+        }
+        if selected {
+            self.clear(peer);
+            return SelectedPairProbeDisposition::Observed;
+        }
+        let retry_at = checked_deadline(completed_at, SELECTED_PAIR_POLL);
+        self.poll_at = Some(
+            self.poll_at
+                .map_or(retry_at, |current| current.min(retry_at)),
+        );
+        SelectedPairProbeDisposition::Retry
+    }
+
+    fn probe_unavailable(&mut self, peer: PlayerId, now: Instant) {
+        self.in_flight.remove(&peer);
+        if self.pending.contains(&peer) {
+            let retry_at = checked_deadline(now, SELECTED_PAIR_POLL);
+            self.poll_at = Some(
+                self.poll_at
+                    .map_or(retry_at, |current| current.min(retry_at)),
+            );
+        }
+    }
+
+    fn take_due(&mut self, now: Instant) -> Vec<PlayerId> {
+        if self.poll_at.is_none_or(|at| now < at) {
+            return Vec::new();
+        }
+        self.poll_at = None;
+        self.pending.difference(&self.in_flight).copied().collect()
+    }
+
+    fn append_unmet(&self, unmet: &mut Vec<String>) {
+        for peer in &self.pending {
+            unmet.push(format!("selected ICE pair evidence pending for {peer}"));
+        }
+    }
+}
+
+fn take_ready_selected_pair_probes(
+    receiver: &mut mpsc::UnboundedReceiver<SelectedPairProbeResult>,
+) -> Vec<SelectedPairProbeResult> {
+    let mut ready = Vec::new();
+    while let Ok(result) = receiver.try_recv() {
+        ready.push(result);
+    }
+    ready
+}
+
+fn apply_selected_pair_probes_before_run_deadline(
+    ready: Vec<SelectedPairProbeResult>,
+    mut apply: impl FnMut(SelectedPairProbeResult),
+    now: Instant,
+    run_deadline: Instant,
+) -> bool {
+    for result in ready {
+        apply(result);
+    }
+    now >= run_deadline
+}
+
+fn selected_pair_evidence_deadline(
+    run_deadline: Instant,
+    success_criteria_reported: bool,
+) -> Option<Instant> {
+    (!success_criteria_reported).then_some(run_deadline)
 }
 
 fn retryable_missing_peers(
@@ -268,6 +387,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     // one failure mode (a webrtc build without an async runtime) should not
     // cost a server-side room either.
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+    let (selected_pair_tx, selected_pair_rx) = mpsc::unbounded_channel();
     let engine = Engine::new(cli.engine_settings(), engine_tx)
         .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
@@ -293,6 +413,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         ws,
         engine,
         engine_rx,
+        selected_pair_tx,
+        selected_pair_rx,
         my_id,
         negotiated_version,
         accountability,
@@ -319,6 +441,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         pair_retry_attempts: BTreeMap::new(),
         connected_pairs: BTreeSet::new(),
         pair_connected_reported: BTreeSet::new(),
+        selected_pair_evidence: SelectedPairEvidence::default(),
         retrying_pairs: BTreeSet::new(),
         p2p_reconnected_pairs: BTreeSet::new(),
         ice_gathering_complete: BTreeSet::new(),
@@ -713,6 +836,7 @@ where
 enum LoopInput {
     Server(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Engine(Option<EngineEvent>),
+    SelectedPair(Option<SelectedPairProbeResult>),
     Tick,
 }
 
@@ -731,6 +855,8 @@ struct Orchestrator<'a> {
     ws: WsStream,
     engine: Engine,
     engine_rx: mpsc::UnboundedReceiver<EngineEvent>,
+    selected_pair_tx: mpsc::UnboundedSender<SelectedPairProbeResult>,
+    selected_pair_rx: mpsc::UnboundedReceiver<SelectedPairProbeResult>,
     my_id: PlayerId,
     negotiated_version: u16,
     /// Per-sender delivery sequence, exact-gap, and cumulative-counter state.
@@ -781,6 +907,9 @@ struct Orchestrator<'a> {
     /// connectivity but retains this set so the fresh generation is not
     /// misreported as a second logical pair.
     pair_connected_reported: BTreeSet<PlayerId>,
+    /// Connected physical links whose authoritative selected ICE-pair
+    /// statistics have not reached the wrapper snapshot yet.
+    selected_pair_evidence: SelectedPairEvidence,
     /// Peers whose previous generation was discarded for a coordinated retry
     /// and whose replacement is not connected yet. This blocks success during
     /// the reconnect gap without turning partial-connectivity fallback into an
@@ -868,6 +997,7 @@ impl Orchestrator<'_> {
             let input = tokio::select! {
                 frame = futures_util::StreamExt::next(&mut self.ws) => LoopInput::Server(frame),
                 event = self.engine_rx.recv() => LoopInput::Engine(event),
+                result = self.selected_pair_rx.recv() => LoopInput::SelectedPair(result),
                 _ = tokio::time::sleep_until(wake_at) => LoopInput::Tick,
             };
             match input {
@@ -933,6 +1063,13 @@ impl Orchestrator<'_> {
                     // Unreachable while the engine (which owns a sender) lives.
                     tracing::warn!("engine event channel closed");
                 }
+                LoopInput::SelectedPair(Some(result)) => {
+                    self.handle_selected_pair_probe(result);
+                }
+                LoopInput::SelectedPair(None) => {
+                    // Unreachable while the orchestrator owns the probe sender.
+                    tracing::warn!("selected-pair probe channel closed");
+                }
                 LoopInput::Tick => {}
             }
 
@@ -986,6 +1123,9 @@ impl Orchestrator<'_> {
             wake = wake.min(at);
         }
         if let Some(at) = self.success_release_poll_at {
+            wake = wake.min(at);
+        }
+        if let Some(at) = self.selected_pair_evidence.poll_at {
             wake = wake.min(at);
         }
         if let Some(at) = self.exchange_release_poll_at {
@@ -1056,6 +1196,15 @@ impl Orchestrator<'_> {
         self.process_p2p_rebuild_gate(now).await?;
         self.process_exchange_gate(now).await?;
         self.process_unreliable_exchange_gate(now).await?;
+        self.process_selected_pair_evidence(now);
+        let ready_probes = take_ready_selected_pair_probes(&mut self.selected_pair_rx);
+        let run_deadline = self.run_deadline;
+        let run_deadline_due = apply_selected_pair_probes_before_run_deadline(
+            ready_probes,
+            |result| self.handle_selected_pair_probe(result),
+            now,
+            run_deadline,
+        );
 
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
@@ -1074,7 +1223,7 @@ impl Orchestrator<'_> {
             self.linger_until = None;
         }
 
-        if now >= self.run_deadline {
+        if run_deadline_due {
             let release_pending = self.success_release_pending().await?;
             if should_defer_success_at_run_deadline(
                 release_pending,
@@ -1800,6 +1949,7 @@ impl Orchestrator<'_> {
 
     /// Tear down an unusable P2P link while retaining its planned obligation.
     async fn handle_peer_transport_loss(&mut self, peer: PlayerId) -> Result<(), FatalError> {
+        self.selected_pair_evidence.clear(peer);
         self.connected_pairs.remove(&peer);
         self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
@@ -1824,6 +1974,7 @@ impl Orchestrator<'_> {
     /// intact: the replacement is a transport generation of the same planned
     /// peer obligation, not a second gameplay peer.
     async fn prepare_retained_pair_replacement(&mut self, peer: PlayerId) {
+        self.selected_pair_evidence.clear(peer);
         self.connected_pairs.remove(&peer);
         self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
@@ -1946,6 +2097,7 @@ impl Orchestrator<'_> {
         })?;
         self.pair_retry_attempts.insert(peer, attempt);
         self.retrying_pairs.insert(peer);
+        self.selected_pair_evidence.clear(peer);
         self.p2p_reconnected_pairs.remove(&peer);
         self.connected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
@@ -2010,6 +2162,7 @@ impl Orchestrator<'_> {
         self.pair_retry_attempts.remove(&peer);
         self.connected_pairs.remove(&peer);
         self.pair_connected_reported.remove(&peer);
+        self.selected_pair_evidence.clear(peer);
         self.retrying_pairs.remove(&peer);
         self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
@@ -2132,17 +2285,8 @@ impl Orchestrator<'_> {
     /// Both channels toward `peer` are open: emit the pair event, run the
     /// optional exchange, and check the all-pairs resolution condition.
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        if let Some(selected) = self.engine.selected_candidate_pair(peer).await {
-            emit(&Event::SelectedCandidatePair {
-                peer,
-                local_candidate_type: selected.local_candidate_type,
-                remote_candidate_type: selected.remote_candidate_type,
-                local_candidate_address: selected.local_candidate_address,
-                remote_candidate_address: selected.remote_candidate_address,
-            });
-        } else {
-            tracing::warn!(%peer, "connected pair has no selected ICE candidate pair");
-        }
+        self.selected_pair_evidence.require(peer);
+        self.start_selected_pair_probe(peer);
         let coordinated_reconnect = self.retrying_pairs.contains(&peer)
             && self.pair_retry_attempts.get(&peer).is_some_and(|attempt| {
                 is_coordinated_p2p_rebuild_attempt(
@@ -2181,6 +2325,65 @@ impl Orchestrator<'_> {
             self.resolve_transport_status().await?;
         }
         Ok(())
+    }
+
+    fn start_selected_pair_probe(&mut self, peer: PlayerId) {
+        if self.selected_pair_evidence.begin_probe(peer)
+            && !self
+                .engine
+                .start_selected_candidate_pair_probe(peer, self.selected_pair_tx.clone())
+        {
+            self.selected_pair_evidence
+                .probe_unavailable(peer, Instant::now());
+        }
+    }
+
+    fn handle_selected_pair_probe(&mut self, result: SelectedPairProbeResult) {
+        let SelectedPairProbeResult {
+            peer,
+            generation,
+            completed_at,
+            selected,
+        } = result;
+        if !self.engine.is_current_generation(peer, generation) {
+            tracing::debug!(%peer, generation, "discarding stale selected-pair probe");
+            return;
+        }
+        let evidence_deadline =
+            selected_pair_evidence_deadline(self.run_deadline, self.success_criteria_reported);
+        match self.selected_pair_evidence.complete_probe(
+            peer,
+            completed_at,
+            evidence_deadline,
+            selected.is_some(),
+        ) {
+            SelectedPairProbeDisposition::Observed => {
+                if let Some(selected) = selected {
+                    emit(&Event::SelectedCandidatePair {
+                        peer,
+                        local_candidate_type: selected.local_candidate_type,
+                        remote_candidate_type: selected.remote_candidate_type,
+                        local_candidate_address: selected.local_candidate_address,
+                        remote_candidate_address: selected.remote_candidate_address,
+                    });
+                }
+            }
+            SelectedPairProbeDisposition::Retry => {
+                tracing::debug!(%peer, "selected ICE candidate pair evidence is pending");
+            }
+            SelectedPairProbeDisposition::Ignore => {}
+        }
+    }
+
+    fn process_selected_pair_evidence(&mut self, now: Instant) {
+        let due = self.selected_pair_evidence.take_due(now);
+        for peer in due {
+            if self.connected_pairs.contains(&peer) {
+                self.start_selected_pair_probe(peer);
+            } else {
+                self.selected_pair_evidence.clear(peer);
+            }
+        }
     }
 
     /// Appendix G early-resolution condition: at least one expected pair, and
@@ -2349,6 +2552,7 @@ impl Orchestrator<'_> {
             ));
         }
         if self.webrtc_session_expected() {
+            self.selected_pair_evidence.append_unmet(&mut unmet);
             for peer in &self.retrying_pairs {
                 unmet.push(format!("pair retry in progress for {peer}"));
             }
@@ -2572,8 +2776,8 @@ mod tests {
     use crate::wire;
 
     use super::{
-        arm_pair_window, authoritative_peer_delta, automatic_p2p_retry_count,
-        changed_transport_status, clear_departed_membership_plan,
+        apply_selected_pair_probes_before_run_deadline, arm_pair_window, authoritative_peer_delta,
+        automatic_p2p_retry_count, changed_transport_status, clear_departed_membership_plan,
         connection_targets_for_generation, consume_join_accountability_preface,
         direct_plan_rejection_message, exchange_label_complete, harness_aware_base_wake,
         is_coordinated_p2p_rebuild_attempt, is_current_session_generation,
@@ -2581,15 +2785,205 @@ mod tests {
         next_handshake_message, note_current_pair_connected, p2p_retry_delay,
         reject_unsupported_direct_plan_with, require_finalized_membership_plan,
         requires_authoritative_finalization_plan, resolve_drop_ice_from,
-        restore_reconnected_member, retryable_missing_peers, session_plan_peer_ids,
-        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
-        should_report_retry_gap, should_resolve_connected_pair, try_buffer_planned_signal,
+        restore_reconnected_member, retryable_missing_peers, selected_pair_evidence_deadline,
+        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
+        should_defer_success_at_run_deadline, should_report_retry_gap,
+        should_resolve_connected_pair, take_ready_selected_pair_probes, try_buffer_planned_signal,
         validate_json_negotiated_server_message, validate_p2p_rebuild_retry_count, PairGeneration,
-        EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL,
+        SelectedPairEvidence, SelectedPairProbeDisposition, EXIT_PROTOCOL_ERROR,
+        MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL, SELECTED_PAIR_POLL,
     };
-    use crate::engine::RELIABLE_LABEL;
+    use crate::engine::{SelectedCandidatePair, SelectedPairProbeResult, RELIABLE_LABEL};
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::RTCPeerConnectionState;
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_evidence_retries_past_old_budget_then_completes() {
+        let peer = PlayerId::from_u128(0x05E1_EC7E_D001);
+        let mut evidence = SelectedPairEvidence::default();
+        let started_at = tokio::time::Instant::now();
+        let run_deadline = started_at + Duration::from_secs(3);
+        evidence.require(peer);
+        assert!(evidence.begin_probe(peer));
+
+        // Session 110 used a one-second evidence deadline. The PR #332 macOS
+        // recurrence proved that boundary can expire while the live transport
+        // is healthy, so missing evidence must remain a success postcondition
+        // and continue polling under the existing whole-run deadline.
+        for attempt in 0..=100 {
+            let completed_at = tokio::time::Instant::now();
+            assert_eq!(
+                evidence.complete_probe(peer, completed_at, Some(run_deadline), false),
+                SelectedPairProbeDisposition::Retry
+            );
+            tokio::time::advance(SELECTED_PAIR_POLL).await;
+            let now = tokio::time::Instant::now();
+            assert_eq!(
+                evidence.take_due(now),
+                vec![peer],
+                "attempt {attempt} must retry the still-connected physical link"
+            );
+            assert!(evidence.begin_probe(peer));
+        }
+
+        let completed_at = tokio::time::Instant::now();
+        assert!(completed_at > started_at + Duration::from_secs(1));
+        assert_eq!(
+            evidence.complete_probe(peer, completed_at, Some(run_deadline), true),
+            SelectedPairProbeDisposition::Observed
+        );
+        let mut resolved = Vec::new();
+        evidence.append_unmet(&mut resolved);
+        assert!(resolved.is_empty());
+        assert_eq!(evidence.poll_at, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_evidence_deadline_fails_closed_without_busy_retry() {
+        let peer = PlayerId::from_u128(0x05E1_EC7E_D002);
+        let mut evidence = SelectedPairEvidence::default();
+        let run_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        evidence.require(peer);
+        assert!(evidence.begin_probe(peer));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let deadline_due = apply_selected_pair_probes_before_run_deadline(
+            Vec::new(),
+            |_result| unreachable!("the deliberately hanging probe has no completion"),
+            tokio::time::Instant::now(),
+            run_deadline,
+        );
+        assert!(deadline_due, "the hanging probe cannot postpone run expiry");
+        assert_eq!(
+            evidence.complete_probe(peer, tokio::time::Instant::now(), Some(run_deadline), true),
+            SelectedPairProbeDisposition::Ignore,
+            "evidence completing at the absolute run deadline is too late"
+        );
+        assert_eq!(evidence.poll_at, None, "late work must not busy-retry");
+        let mut unmet = Vec::new();
+        evidence.append_unmet(&mut unmet);
+        assert_eq!(
+            unmet,
+            [format!("selected ICE pair evidence pending for {peer}")]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_evidence_drains_predeadline_completion_at_boundary() {
+        let peer = PlayerId::from_u128(0x05E1_EC7E_D004);
+        let mut evidence = SelectedPairEvidence::default();
+        let started_at = tokio::time::Instant::now();
+        let run_deadline = started_at + Duration::from_secs(1);
+        evidence.require(peer);
+        assert!(evidence.begin_probe(peer));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(SelectedPairProbeResult {
+            peer,
+            generation: 7,
+            completed_at: run_deadline - Duration::from_millis(1),
+            selected: Some(SelectedCandidatePair {
+                local_candidate_type: "host".to_string(),
+                remote_candidate_type: "host".to_string(),
+                local_candidate_address: Some("127.0.0.1".to_string()),
+                remote_candidate_address: Some("127.0.0.1".to_string()),
+            }),
+        })
+        .expect("probe result receiver remains open");
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let ready = take_ready_selected_pair_probes(&mut rx);
+        let mut disposition = SelectedPairProbeDisposition::Ignore;
+        let deadline_due = apply_selected_pair_probes_before_run_deadline(
+            ready,
+            |result| {
+                disposition = evidence.complete_probe(
+                    result.peer,
+                    result.completed_at,
+                    selected_pair_evidence_deadline(run_deadline, false),
+                    result.selected.is_some(),
+                );
+            },
+            tokio::time::Instant::now(),
+            run_deadline,
+        );
+        assert!(deadline_due);
+        assert_eq!(disposition, SelectedPairProbeDisposition::Observed);
+        assert!(evidence.pending.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_evidence_held_success_accepts_replacement_after_soft_deadline() {
+        let peer = PlayerId::from_u128(0x05E1_EC7E_D005);
+        let mut evidence = SelectedPairEvidence::default();
+        let run_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        evidence.require(peer);
+        assert!(evidence.begin_probe(peer));
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let evidence_deadline = selected_pair_evidence_deadline(run_deadline, true);
+        assert_eq!(evidence_deadline, None);
+        assert_eq!(
+            evidence.complete_probe(peer, tokio::time::Instant::now(), evidence_deadline, true),
+            SelectedPairProbeDisposition::Observed,
+            "a harness-held replacement generation suspends the advisory soft cutoff"
+        );
+        assert!(tokio::time::Instant::now() > run_deadline);
+        assert!(evidence.pending.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_pair_evidence_teardown_and_duplicates_are_generation_safe() {
+        let first = PlayerId::from_u128(0x05E1_EC7E_D002);
+        let second = PlayerId::from_u128(0x05E1_EC7E_D003);
+        let mut evidence = SelectedPairEvidence::default();
+        let now = tokio::time::Instant::now();
+        let run_deadline = now + Duration::from_secs(2);
+        evidence.require(first);
+        evidence.require(second);
+        assert!(evidence.begin_probe(first));
+        assert!(evidence.begin_probe(second));
+
+        evidence.clear(first);
+        assert_eq!(
+            evidence.complete_probe(first, now, Some(run_deadline), true),
+            SelectedPairProbeDisposition::Ignore,
+            "a result from a torn-down physical generation must be discarded"
+        );
+        assert_eq!(
+            evidence.complete_probe(second, now, Some(run_deadline), false),
+            SelectedPairProbeDisposition::Retry
+        );
+        tokio::time::advance(SELECTED_PAIR_POLL).await;
+        assert_eq!(
+            evidence.take_due(tokio::time::Instant::now()),
+            vec![second],
+            "tearing down or replacing one pair must retain another pair's evidence obligation"
+        );
+
+        assert!(evidence.begin_probe(second));
+        assert_eq!(
+            evidence.complete_probe(
+                second,
+                tokio::time::Instant::now(),
+                Some(run_deadline),
+                true
+            ),
+            SelectedPairProbeDisposition::Observed
+        );
+        assert_eq!(
+            evidence.complete_probe(
+                second,
+                tokio::time::Instant::now(),
+                Some(run_deadline),
+                true
+            ),
+            SelectedPairProbeDisposition::Ignore,
+            "one physical generation emits evidence at most once"
+        );
+        assert!(evidence.pending.is_empty());
+        assert_eq!(evidence.poll_at, None);
+    }
 
     #[test]
     fn direct_plan_rejection_is_explicit_with_or_without_endpoint() {

@@ -81,13 +81,13 @@ jobs:
         run: cargo +nightly-2026-08-01 metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: fuzz
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2.85.7
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-fuzz
 
