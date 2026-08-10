@@ -6,7 +6,7 @@ The default branch began clean and green at `afe6d83`, with nine open issues.
 P56/issue #290 remains the highest gameplay risk but can advance only through
 its unchanged scheduled cohort (5/20 eligible attempts); P53 is likewise bound
 to scheduled three-platform evidence (4/20 per OS). The one open dependency PR,
-#332, carried grouped GitHub Actions updates but failed its macOS live WebRTC
+PR #332 carried grouped GitHub Actions updates but failed its macOS live WebRTC
 lane after a completely successful transport exchange omitted one selected-pair
 event. Issue #301 was reopened with the exact recurrence evidence.
 
