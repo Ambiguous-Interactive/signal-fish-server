@@ -8,11 +8,10 @@ model configurations that exhaustively check it.
 
 The spec mirrors the implementation, not an idealization: every operator corresponds to
 a concrete function in the Rust code, and each TLA+ action models one membership-touching
-event together with all of its session side effects as a single atomic step. That
-atomicity is a deliberate **sequential abstraction**: the server runs each event's side
-effects on one task, but it does not serialize distinct events on the same room against
-each other — see [Atomicity argument](#atomicity-argument) for exactly what the
-abstraction proves and what it leaves to the heal-on-next-event mechanism. When
+event together with all of its session side effects as a single atomic step. The server
+implements that **sequential abstraction** with a shared process-local per-room mutation
+gate and FIFO event lane — see [Atomicity argument](#atomicity-argument) for the exact
+correspondence and its cross-process boundary. When
 `src/server/session_policy.rs`,
 `src/server/signaling.rs`, or `src/server/room_service.rs` change behavior, the spec must
 be re-checked and, if the contract moved, updated deliberately — CI enforces a run via
@@ -34,6 +33,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
 | `tla/CapacityDeadlineArbitration.tla` | P56's classified queue deadline: continuous pre-deadline capacity, refill invalidation, and lock-atomic late admission |
 | `tla/CapacityPermitLifecycle.tla` | P73's classified control-permit lifecycle: exact reservation accounting, producer liveness, terminal release, and commit-time scope validation |
+| `tla/RoomMessageTransaction.tla` | P74's exact room-publication transaction: complete reservation, final routing validation, durable hook, ordered phases, and degraded accounting |
 | `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
@@ -283,35 +283,35 @@ ever stored, directly through the `RelayFloorOnly` invariant.
 ### Atomicity argument
 
 Each TLA+ action bundles one external event with all of its session side effects into a
-single atomic step. _Within_ one event the server really is sequential: `leave_room`
-runs the departure hook inline after the `PlayerLeft` broadcast
-(`src/server/room_service.rs`), the join/reconnect handlers run
-`handle_active_session_late_join` inline, finalize runs `emit_session_plan` inline, and
-`replan_host_session` rewrites the stored entry _before_ emitting, so every emission is
-computed from one membership snapshot and is internally consistent. Cross-room
-interleavings do not interact (state is per-room).
+single atomic step. The process-local server now supplies the corresponding per-room
+serialization explicitly. Every room, authority, ready-state, session, and spectator
+publisher acquires the shared `RoomEventMutationGuard`; `enqueue_room_event` transfers
+that guard into the room's FIFO `RoomEventSequencer` lane, and the lane runs one owned
+job at a time even if its caller drops the completion future. Finalization, active-room
+join, reconnect, and host replan publish through
+`commit_room_messages_if_members_with_hook`, which reserves every recipient frame,
+revalidates the exact routed member and connection-generation snapshot, commits durable
+state under that final routing guard, and only then commits the reserved frames in
+phase order. Departure replanning holds the same mutation gate across its refreshed
+storage snapshot, host election, sticky-plan update, and exact-membership publication.
+Cross-room interleavings do not interact because each lane and all modeled state are
+room-scoped.
 
-What the abstraction deliberately drops: distinct events on the same room are **not**
-serialized against each other. `leave_room` takes no per-room lock (see the concurrency
-note on `handle_session_member_departure` in `src/server/session_policy.rs`), so two
-concurrent departures can interleave: a stalled departure hook can insert a stored-host
-entry computed from its older membership snapshot _after_ a faster event already healed
-the entry — the stored-plan map is last-writer-wins — resurrecting an already-departed
-player as the stored host. The reconnect-failure rollback (`reject_claimed_reconnect`
-in `src/server/reconnection_service.rs`) is another window: it removes a just-restored
-member without running the departure hook.
+The abstraction still does not claim that every machine instruction is atomic. A
+physical receiver may close while the transaction's asynchronous durable hook runs.
+The transaction then reports the exact failed-frame count, calls the phase-zero decision
+callback once, and either continues independent healthy phase-one deliveries or cancels
+every dependent permit. The transaction's routing read guards block normal sender
+replacement during that hook. `RoomMessageTransaction.tla` nevertheless injects a
+synthetic permit-scope invalidation at the composition seam to verify that transaction
+accounting remains correct under P73's already-proved stale-permit cancellation lemma;
+it does not claim that invalidation is a normal routed lifecycle interleaving.
 
-`HostValid` is therefore a theorem **of the sequential abstraction**, not of every
-machine-level interleaving. The contract the running system keeps is _eventually
-healed_, not instantaneously valid: between heals a stored host is a current capable
-member; a concurrent-membership interleaving can transiently wedge the stored entry;
-and the next membership-touching event repairs or drops it, because the
-`host_invalid` trigger is deliberately "the stored host is invalid" rather than "the
-departed player was the host" — it was widened exactly so these windows self-heal (its
-doc comment enumerates them). The model proves the strong half — no _sequence_ of whole
-events ever wedges a room — and the Rust unit tests around the widened trigger
-(`session_policy_tests.rs`, `signaling_tests.rs`) cover the transient windows the
-abstraction collapses.
+`HostValid` is therefore a theorem of the process-local serialized event domain, not a
+claim about a future multi-node coordinator or an unavailable process. The widened
+`host_invalid` trigger remains defense in depth for legacy/stale state and recovery
+paths, but same-node membership publications no longer rely on a later event to heal a
+last-writer-wins race.
 
 ### Stale client-held plans (relay-floor soundness)
 
