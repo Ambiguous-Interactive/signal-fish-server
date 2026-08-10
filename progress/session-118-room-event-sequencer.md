@@ -96,3 +96,10 @@ worktree pre-commit/pre-push checks. The pre-commit hook remained functionally
 green but took 2,708 ms versus its 1,000 ms target; that known repository-wide
 latency is already tracked by issue #318. The single ready session pull request
 is monitored through hosted checks and reviewer feedback until green.
+
+## Publication closure
+
+PR #328 subsequently completed its hosted checks and merged to `main` as
+`b2eee7c`. All 18 applicable push workflows on that default-branch commit
+completed successfully. The monitored-PR wording above records the pre-merge
+session snapshot; this closure records the final publication evidence.

@@ -25,10 +25,9 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
-#[cfg(test)]
 use std::sync::Mutex as StdMutex;
 use thiserror::Error;
-use tokio::sync::{mpsc, watch, Notify, RwLock};
+use tokio::sync::{mpsc, watch, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::time::Duration;
 use uuid::Uuid;
 
@@ -988,6 +987,8 @@ impl EnhancedGameServer {
 pub struct InMemoryMessageCoordinator {
     local_clients: Arc<RwLock<HashMap<PlayerId, ClientDeliveryHandle>>>,
     room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
+    room_routing_gates: RoutingGateRegistry,
+    player_routing_gates: RoutingGateRegistry,
     metrics: Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: Duration,
     room_event_sequencer: Arc<RoomEventSequencer>,
@@ -995,6 +996,135 @@ pub struct InMemoryMessageCoordinator {
     fail_room_transactions: AtomicBool,
     #[allow(dead_code)]
     instance_id: Uuid,
+}
+
+/// Stable keyed routing fence used to contain recipient-map exclusion to one
+/// room (or one player identity) while an exact publication awaits.
+///
+/// The directory stores weak entries so inactive rooms and players do not
+/// accumulate. Owned guards retain the gate identity until they release the
+/// lock; pointer-checked cleanup prevents a stale destructor from deleting a
+/// replacement installed by a concurrent acquisition.
+#[derive(Clone, Default)]
+struct RoutingGateRegistry {
+    inner: Arc<RoutingGateRegistryInner>,
+}
+
+#[derive(Default)]
+struct RoutingGateRegistryInner {
+    gates: StdMutex<HashMap<Uuid, std::sync::Weak<RoutingGate>>>,
+    active: StdMutex<HashMap<Uuid, Arc<RoutingGate>>>,
+}
+
+struct RoutingGate {
+    key: Uuid,
+    owner: std::sync::Weak<RoutingGateRegistryInner>,
+    lock: Arc<RwLock<()>>,
+}
+
+struct RoutingReadGuard {
+    _guard: OwnedRwLockReadGuard<()>,
+    _gate: Arc<RoutingGate>,
+}
+
+struct RoutingWriteGuard {
+    _guard: OwnedRwLockWriteGuard<()>,
+    _gate: Arc<RoutingGate>,
+}
+
+struct PlayerRoutingWriteGuards {
+    _player: RoutingWriteGuard,
+    _rooms: Vec<RoutingWriteGuard>,
+}
+
+impl RoutingGateRegistry {
+    fn gate(&self, key: Uuid) -> Arc<RoutingGate> {
+        let mut gates = self
+            .inner
+            .gates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(gate) = gates.get(&key).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+
+        let gate = Arc::new(RoutingGate {
+            key,
+            owner: Arc::downgrade(&self.inner),
+            lock: Arc::new(RwLock::new(())),
+        });
+        gates.insert(key, Arc::downgrade(&gate));
+        gate
+    }
+
+    async fn read(&self, key: Uuid) -> RoutingReadGuard {
+        let gate = self.gate(key);
+        let guard = Arc::clone(&gate.lock).read_owned().await;
+        RoutingReadGuard {
+            _guard: guard,
+            _gate: gate,
+        }
+    }
+
+    fn try_read(&self, key: Uuid) -> Option<RoutingReadGuard> {
+        let gate = self.gate(key);
+        let guard = Arc::clone(&gate.lock).try_read_owned().ok()?;
+        Some(RoutingReadGuard {
+            _guard: guard,
+            _gate: gate,
+        })
+    }
+
+    async fn write(&self, key: Uuid) -> RoutingWriteGuard {
+        let gate = self.gate(key);
+        let guard = Arc::clone(&gate.lock).write_owned().await;
+        RoutingWriteGuard {
+            _guard: guard,
+            _gate: gate,
+        }
+    }
+
+    async fn write_many(&self, keys: &[Uuid]) -> Vec<RoutingWriteGuard> {
+        let mut guards = Vec::with_capacity(keys.len());
+        for key in keys {
+            guards.push(self.write(*key).await);
+        }
+        guards
+    }
+
+    fn mark_active(&self, gate: &Arc<RoutingGate>) {
+        self.inner
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(gate.key, Arc::clone(gate));
+    }
+
+    fn mark_inactive(&self, key: Uuid) {
+        self.inner
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&key);
+    }
+}
+
+impl Drop for RoutingGate {
+    fn drop(&mut self) {
+        let Some(owner) = self.owner.upgrade() else {
+            return;
+        };
+        let mut gates = owner
+            .gates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if gates
+            .get(&self.key)
+            .is_some_and(|gate| std::ptr::eq(gate.as_ptr(), self))
+        {
+            gates.remove(&self.key);
+        }
+    }
 }
 
 enum ConditionalDeliveryReservation {
@@ -1157,6 +1287,8 @@ impl InMemoryMessageCoordinator {
         Self {
             local_clients: Arc::new(RwLock::new(HashMap::new())),
             room_players: Arc::new(RwLock::new(HashMap::new())),
+            room_routing_gates: RoutingGateRegistry::default(),
+            player_routing_gates: RoutingGateRegistry::default(),
             metrics,
             slow_consumer_timeout,
             room_event_sequencer: Arc::new(RoomEventSequencer::default()),
@@ -1279,23 +1411,19 @@ impl InMemoryMessageCoordinator {
             // connection that is already closing; the connection's own
             // unregister flow performs the full cleanup (room membership,
             // reconnection window, peer notifications).
-            let mut clients = self.local_clients.write().await;
             for (player_id, attempted_sender) in &started.slow_consumers {
-                let still_attempted_connection = clients
-                    .get(player_id)
-                    .is_some_and(|current| current.sender.same_channel(attempted_sender));
-                if still_attempted_connection {
-                    clients.remove(player_id);
-                }
+                self.remove_client_if_same_sender(*player_id, attempted_sender)
+                    .await;
             }
         }
     }
 
     /// Start one exact routing snapshot without copying its recipients.
     ///
-    /// The caller holds both routing read guards throughout this synchronous
-    /// function. Any capacity wait is returned as owned state and must be
-    /// awaited only after those guards are dropped.
+    /// The caller holds the room routing gate plus both routing-map read
+    /// guards throughout this synchronous function. Any capacity wait is
+    /// returned as owned state and must be awaited only after those guards are
+    /// dropped.
     fn start_routed_deliveries(
         &self,
         room_players: &HashMap<RoomId, HashSet<PlayerId>>,
@@ -1403,6 +1531,67 @@ impl InMemoryMessageCoordinator {
         })
     }
 
+    fn try_borrowed_room_broadcast<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
+    ) -> ImmediateGameDataBroadcast<'a> {
+        let Some(_routing) = self.room_routing_gates.try_read(*room_id) else {
+            return ImmediateGameDataBroadcast::Unavailable;
+        };
+        let Ok(room_players) = self.room_players.try_read() else {
+            return ImmediateGameDataBroadcast::Unavailable;
+        };
+        let Ok(clients) = self.local_clients.try_read() else {
+            return ImmediateGameDataBroadcast::Unavailable;
+        };
+        let Some(message) = build_message() else {
+            return ImmediateGameDataBroadcast::Complete;
+        };
+        let started = self.start_routed_deliveries(
+            &room_players,
+            &clients,
+            room_id,
+            Some(except_player),
+            &message,
+        );
+        drop(clients);
+        drop(room_players);
+
+        if started.pending.is_empty() && started.slow_consumers.is_empty() {
+            ImmediateGameDataBroadcast::Complete
+        } else {
+            ImmediateGameDataBroadcast::Pending(Box::pin(self.finish_deliveries(started)))
+        }
+    }
+
+    async fn borrowed_room_broadcast_after_contention(
+        &self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
+    ) {
+        let _routing = self.room_routing_gates.read(*room_id).await;
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let started = build_message().map(|message| {
+            self.start_routed_deliveries(
+                &room_players,
+                &clients,
+                room_id,
+                Some(except_player),
+                &message,
+            )
+        });
+        drop(clients);
+        drop(room_players);
+        drop(_routing);
+        if let Some(started) = started {
+            self.finish_deliveries(started).await;
+        }
+    }
+
     fn collect_routed_recipients(
         room_players: &HashMap<RoomId, HashSet<PlayerId>>,
         clients: &HashMap<PlayerId, ClientDeliveryHandle>,
@@ -1434,19 +1623,82 @@ impl InMemoryMessageCoordinator {
     }
 
     /// Snapshot the delivery handles for a room's members (optionally skipping
-    /// one player) and release both locks before any await on delivery, so a
-    /// backpressured recipient can never stall registration or other
-    /// broadcasts through held locks.
+    /// one player) and release the room gate plus both map guards before any
+    /// await on delivery, so a backpressured recipient can never stall
+    /// registration or other broadcasts through held locks.
     async fn collect_room_recipients(
         &self,
         room_id: &RoomId,
         except_player: Option<&PlayerId>,
     ) -> Vec<(PlayerId, ClientDeliveryHandle)> {
+        let _routing = self.room_routing_gates.read(*room_id).await;
         // Lock ordering: room_players first, then local_clients (matches
         // register/unregister to prevent ABBA deadlocks).
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         Self::collect_routed_recipients(&room_players, &clients, room_id, except_player)
+    }
+
+    async fn lock_player_routing_write(
+        &self,
+        player_id: PlayerId,
+        target_room: Option<RoomId>,
+    ) -> PlayerRoutingWriteGuards {
+        // Serialize one identity first, then take every affected room in UUID
+        // order. The player gate closes the otherwise-disjoint empty-route
+        // race where two concurrent first registrations could each lock only
+        // their destination and leave the identity routed twice.
+        let player = self.player_routing_gates.write(player_id).await;
+        let mut room_ids: Vec<RoomId> = {
+            let room_players = self.room_players.read().await;
+            room_players
+                .iter()
+                .filter_map(|(room_id, players)| players.contains(&player_id).then_some(*room_id))
+                .collect()
+        };
+        if let Some(room_id) = target_room {
+            room_ids.push(room_id);
+        }
+        room_ids.sort_unstable();
+        room_ids.dedup();
+        let rooms = self.room_routing_gates.write_many(&room_ids).await;
+        PlayerRoutingWriteGuards {
+            _player: player,
+            _rooms: rooms,
+        }
+    }
+
+    async fn remove_client_if_same_sender(
+        &self,
+        player_id: PlayerId,
+        attempted_sender: &DeliverySender,
+    ) {
+        let _routing = self.lock_player_routing_write(player_id, None).await;
+        let mut clients = self.local_clients.write().await;
+        if clients
+            .get(&player_id)
+            .is_some_and(|current| current.sender.same_channel(attempted_sender))
+        {
+            clients.remove(&player_id);
+        }
+    }
+
+    fn sync_active_room_gates(
+        &self,
+        room_players: &HashMap<RoomId, HashSet<PlayerId>>,
+        routing: &PlayerRoutingWriteGuards,
+    ) {
+        for guard in &routing._rooms {
+            let room_id = guard._gate.key;
+            if room_players
+                .get(&room_id)
+                .is_some_and(|players| !players.is_empty())
+            {
+                self.room_routing_gates.mark_active(&guard._gate);
+            } else {
+                self.room_routing_gates.mark_inactive(room_id);
+            }
+        }
     }
 
     fn record_canceled_delivery(&self, player_id: PlayerId) {
@@ -2065,18 +2317,14 @@ impl InMemoryMessageCoordinator {
                 .collect();
             if !slow_consumers.is_empty() {
                 self.record_reserved_cancellations(&reservations);
-                let mut clients = self.local_clients.write().await;
                 for (player_id, attempted_sender) in &slow_consumers {
-                    let still_attempted_connection = clients
-                        .get(player_id)
-                        .is_some_and(|current| current.sender.same_channel(attempted_sender));
-                    if still_attempted_connection {
-                        clients.remove(player_id);
-                    }
+                    self.remove_client_if_same_sender(*player_id, attempted_sender)
+                        .await;
                 }
                 continue;
             }
 
+            let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
             let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
@@ -2122,9 +2370,13 @@ impl InMemoryMessageCoordinator {
                 return Ok(false);
             }
 
-            // No capacity wait happens while these routing locks are held.
-            // Once this final guard passes, replay recording and permit sends
-            // are one commit relative to reconnect registration's write lock.
+            drop(clients);
+            drop(room_players);
+
+            // No capacity wait happens while the room-scoped routing gate is
+            // held. Replay recording and permit sends remain one commit
+            // relative to this room's registration fence without excluding
+            // routing work in unrelated rooms.
             let Some(before_send) = before_send.take() else {
                 tracing::error!(%room_id, ?except_player, "Conditional room broadcast replay hook was already consumed");
                 return Ok(false);
@@ -2249,6 +2501,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<bool> {
         let handle = {
+            let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
             room_players
@@ -2270,18 +2523,14 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         )
         .await;
         if outcome == DeliveryOutcome::SlowConsumer {
-            let mut clients = self.local_clients.write().await;
-            if clients
-                .get(player_id)
-                .is_some_and(|current| current.sender.same_channel(&handle.sender))
-            {
-                clients.remove(player_id);
-            }
+            self.remove_client_if_same_sender(*player_id, &handle.sender)
+                .await;
         }
         Ok(outcome == DeliveryOutcome::Delivered)
     }
 
     async fn routed_player_ids(&self, room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {
+        let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         let mut players: Vec<PlayerId> = room_players
@@ -2302,6 +2551,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<bool> {
         let handle = {
+            let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
             room_players
@@ -2328,6 +2578,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             return Ok(false);
         };
 
+        let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         let mut current_members: Vec<PlayerId> = room_players
@@ -2388,13 +2639,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .deliver_to_one_if(*player_id, handle, message, should_send, drain)
             .await;
         if outcome == Some(DeliveryOutcome::SlowConsumer) {
-            let mut clients = self.local_clients.write().await;
-            let still_attempted_connection = clients
-                .get(player_id)
-                .is_some_and(|current| current.sender.same_channel(&attempted_sender));
-            if still_attempted_connection {
-                clients.remove(player_id);
-            }
+            self.remove_client_if_same_sender(*player_id, &attempted_sender)
+                .await;
         }
         Ok(outcome == Some(DeliveryOutcome::Delivered))
     }
@@ -2658,18 +2904,14 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .collect();
             if !unavailable_recipients.is_empty() {
                 self.record_batch_cancellations(&reservations);
-                let mut clients = self.local_clients.write().await;
                 for (player_id, attempted_sender) in &unavailable_recipients {
-                    if clients
-                        .get(player_id)
-                        .is_some_and(|current| current.sender.same_channel(attempted_sender))
-                    {
-                        clients.remove(player_id);
-                    }
+                    self.remove_client_if_same_sender(*player_id, attempted_sender)
+                        .await;
                 }
                 continue;
             }
 
+            let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
             let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
@@ -2696,6 +2938,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 self.record_batch_cancellations(&reservations);
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
             }
+
+            drop(clients);
+            drop(room_players);
 
             let Some(commit_hook) = before_send.take() else {
                 self.record_batch_cancellations(&reservations);
@@ -2874,6 +3119,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: Box<dyn FnOnce() -> Option<Arc<ServerMessage>> + Send + 'a>,
     ) -> anyhow::Result<()> {
+        let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         let started = build_message().map(|message| {
@@ -2887,6 +3133,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         });
         drop(clients);
         drop(room_players);
+        drop(_routing);
         if let Some(started) = started {
             self.finish_deliveries(started).await;
         }
@@ -2899,21 +3146,21 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &'a mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
     ) -> anyhow::Result<()> {
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
-        let started = build_message().map(|message| {
-            self.start_routed_deliveries(
-                &room_players,
-                &clients,
-                room_id,
-                Some(except_player),
-                &message,
-            )
-        });
-        drop(clients);
-        drop(room_players);
-        if let Some(started) = started {
-            self.finish_deliveries(started).await;
+        // Keep the uncontended borrowed handoff's boxed trait future compact:
+        // routing/map guards live only inside the synchronous helper. The
+        // larger wait state is boxed only on actual contention, preserving the
+        // checked-in P71 allocation-byte ceiling in the healthy path.
+        match self.try_borrowed_room_broadcast(room_id, except_player, build_message) {
+            ImmediateGameDataBroadcast::Complete => {}
+            ImmediateGameDataBroadcast::Pending(finish) => finish.await,
+            ImmediateGameDataBroadcast::Unavailable => {
+                Box::pin(self.borrowed_room_broadcast_after_contention(
+                    room_id,
+                    except_player,
+                    build_message,
+                ))
+                .await;
+            }
         }
         Ok(())
     }
@@ -2924,6 +3171,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> anyhow::Result<()> {
+        let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         let started = build_message().map(|message| {
@@ -2937,6 +3185,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         });
         drop(clients);
         drop(room_players);
+        drop(_routing);
         if let Some(started) = started {
             self.finish_deliveries(started).await;
         }
@@ -2949,6 +3198,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> ImmediateGameDataBroadcast<'a> {
+        let Some(_routing) = self.room_routing_gates.try_read(*room_id) else {
+            return ImmediateGameDataBroadcast::Unavailable;
+        };
         let Ok(room_players) = self.room_players.try_read() else {
             return ImmediateGameDataBroadcast::Unavailable;
         };
@@ -2981,6 +3233,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         room_id: Option<RoomId>,
         delivery: ClientDeliveryHandle,
     ) -> anyhow::Result<()> {
+        let routing = self.lock_player_routing_write(player_id, room_id).await;
         // Lock ordering: room_players first, then local_clients. Registration
         // replaces the player's routing scope, including `None` on leave; merely
         // updating the sender map would retain a stale old-room recipient.
@@ -2997,6 +3250,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         }
         let mut clients = self.local_clients.write().await;
         clients.insert(player_id, delivery);
+        self.sync_active_room_gates(&room_players, &routing);
         Ok(())
     }
 
@@ -3006,6 +3260,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         room_id: RoomId,
         clear_assignment: Box<dyn FnOnce() -> Option<(ClientDeliveryHandle, u32, u64)> + Send + 'a>,
     ) -> anyhow::Result<Option<(u32, u64)>> {
+        let routing = self
+            .lock_player_routing_write(player_id, Some(room_id))
+            .await;
         // Relay broadcasts hold the read side of these locks while allocating
         // the sender stamp and snapshotting recipients. Taking both write
         // locks makes the captured tail and route removal one indivisible
@@ -3029,6 +3286,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             clients.remove(&player_id);
             None
         };
+        self.sync_active_room_gates(&room_players, &routing);
         if !was_routed {
             tracing::debug!(%player_id, %room_id, "Player route was already absent at terminal watermark capture");
         }
@@ -3046,17 +3304,20 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             Ok(permit) => permit,
             Err(outcome) => return Ok(outcome),
         };
+        let routing = self
+            .lock_player_routing_write(player_id, Some(room_id))
+            .await;
         // Lock ordering matches `register_local_client` and
-        // `collect_room_recipients`. While this write lock is held, broadcasts
-        // cannot snapshot room recipients. The reconnect path uses that to:
+        // `collect_room_recipients`. While this room-scoped write gate is held,
+        // broadcasts for this room cannot snapshot recipients. The reconnect
+        // path uses that to:
         // (1) wait for every pre-existing broadcast snapshot to finish, (2)
         // capture the sender watermarks, (3) queue `Reconnected`, and (4)
         // register the player into the room before later broadcasts can route.
-        let mut room_players = self.room_players.write().await;
-        let mut clients = self.local_clients.write().await;
-
         let outcome = self.commit_initial_transition(player_id, permit, build_message());
         if outcome == DeliveryOutcome::Delivered {
+            let mut room_players = self.room_players.write().await;
+            let mut clients = self.local_clients.write().await;
             room_players.retain(|_, players| {
                 players.remove(&player_id);
                 !players.is_empty()
@@ -3066,6 +3327,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .or_insert_with(HashSet::new)
                 .insert(player_id);
             clients.insert(player_id, delivery.clone());
+            self.sync_active_room_gates(&room_players, &routing);
         }
 
         Ok(outcome)
@@ -3093,20 +3355,25 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             Ok(permit) => permit,
             Err(outcome) => return Ok(outcome),
         };
+        let routing = self
+            .lock_player_routing_write(player_id, Some(room_id))
+            .await;
         // Same lock ordering and routing transition as the sync builder, but
-        // the async builder itself is part of the critical section. Reconnect
-        // uses this to fetch replay after every older broadcast has either
-        // recorded or skipped its event, and before any newer broadcast can
-        // snapshot this restored socket as live.
-        let mut room_players = self.room_players.write().await;
-        let mut clients = self.local_clients.write().await;
-
-        let mut routed_players: Vec<PlayerId> = room_players
-            .get(&room_id)
-            .into_iter()
-            .flat_map(|players| players.iter().copied())
-            .filter(|routed_player| clients.contains_key(routed_player))
-            .collect();
+        // the async builder itself is fenced by only this room's gate. Global
+        // map guards are held only for the snapshots/updates around it.
+        // Reconnect uses this to fetch replay after every older same-room
+        // broadcast has either recorded or skipped its event, and before any
+        // newer same-room broadcast can snapshot this restored socket as live.
+        let mut routed_players: Vec<PlayerId> = {
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            room_players
+                .get(&room_id)
+                .into_iter()
+                .flat_map(|players| players.iter().copied())
+                .filter(|routed_player| clients.contains_key(routed_player))
+                .collect()
+        };
         if !routed_players.contains(&player_id) {
             routed_players.push(player_id);
         }
@@ -3114,6 +3381,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let message = build_message(routed_players).await?;
         let outcome = self.commit_initial_transition(player_id, permit, message);
         if outcome == DeliveryOutcome::Delivered {
+            let mut room_players = self.room_players.write().await;
+            let mut clients = self.local_clients.write().await;
             room_players.retain(|_, players| {
                 players.remove(&player_id);
                 !players.is_empty()
@@ -3123,12 +3392,14 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .or_insert_with(HashSet::new)
                 .insert(player_id);
             clients.insert(player_id, delivery.clone());
+            self.sync_active_room_gates(&room_players, &routing);
         }
 
         Ok(outcome)
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {
+        let routing = self.lock_player_routing_write(*player_id, None).await;
         // Lock ordering: room_players first, then local_clients
         // (consistent with broadcast_to_room / broadcast_to_room_except read paths
         //  to prevent ABBA deadlocks)
@@ -3140,6 +3411,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
 
         let mut clients = self.local_clients.write().await;
         clients.remove(player_id);
+        self.sync_active_room_gates(&room_players, &routing);
 
         Ok(())
     }

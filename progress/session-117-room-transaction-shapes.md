@@ -3,7 +3,7 @@
 ## Correctness-first scope
 
 GitHub triage found nine open issues and no open or draft pull requests. Issue
-Issue #290 remains the highest direct gameplay risk, but its deterministic fix is
+#290 remains the highest direct gameplay risk, but its deterministic fix is
 merged and the remaining P56 acceptance is the unchanged scheduled hosted
 cohort at 4/20; manual runs cannot advance it. P53 likewise remains at 3/20
 eligible scheduled allocations per operating system. No dependency pull
@@ -97,3 +97,9 @@ failure, every Z3 proof, cargo-deny, CI/MSRV/workflow/LLM policy, documentation
 consistency, and hook-readiness/pre-commit/pre-push checks. The change was
 published as ready pull request #327. Hosted results and automated reviewer
 feedback are monitored on that single session PR until green.
+
+## Publication closure
+
+PR #327 subsequently completed its hosted checks and merged to `main` as
+`e7234d6`. The monitored-PR wording above records the pre-merge session
+snapshot; this closure records the final publication evidence.

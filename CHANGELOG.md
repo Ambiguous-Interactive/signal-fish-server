@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Isolate room-local routing fences so a join, reconnect baseline, replay hook,
+  or exact session publication waiting in one room no longer blocks routing and
+  relay progress in unrelated rooms. Same-room baseline, replay, watermark, and
+  exact-membership ordering remain atomic (issues #220, #329).
 - Wake a classified WebSocket receiver when its final reserved control is
   canceled by a concurrent room-generation transition. The receiver now
   observes terminal disconnect instead of remaining parked after every sender
