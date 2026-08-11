@@ -88,7 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevent both reference clients from busy-spinning while an outstanding Ping
   is in its Pong drain grace. Exact native, browser, and TURN interoperability
   runs now also hold every successful client at a shared release barrier, so
-  peer teardown cannot hide a missing reliable data-channel tail.
+  peer teardown cannot hide a missing reliable data-channel tail. The native
+  barrier waits for completed gameplay criteria without coupling success to
+  unrelated ICE gathering after a selected path is already connected; signal-
+  ledger tests can opt into that stricter freeze independently.
 
 ### Security
 

@@ -2577,7 +2577,7 @@ impl Orchestrator<'_> {
                     }
                 }
             }
-            if self.cli.success_release_file.is_some() {
+            if self.cli.require_ice_gathering_complete {
                 for peer in &self.expected_peers {
                     if needs_ice_gathering_marker(
                         self.engine.is_paired(*peer),
@@ -2707,10 +2707,11 @@ fn should_defer_success_at_run_deadline(
     success_criteria_reported && (release_pending || success_linger_pending)
 }
 
-/// A harness freezes the signal ledger only after every live peer-connection
-/// generation reaches the end-of-gathering callback. A terminal generation is
-/// removed from the engine and cannot emit another candidate, so it is already
-/// settled even though its generation-scoped marker is cleared during cleanup.
+/// A signal-ledger harness freezes its observations only after every live
+/// peer-connection generation reaches the end-of-gathering callback. A
+/// terminal generation is removed from the engine and cannot emit another
+/// candidate, so it is already settled even though its generation-scoped
+/// marker is cleared during cleanup.
 fn needs_ice_gathering_marker(is_current_generation: bool, gathering_complete: bool) -> bool {
     is_current_generation && !gathering_complete
 }
@@ -3133,7 +3134,7 @@ mod tests {
     }
 
     #[test]
-    fn harness_waits_only_for_current_generation_ice_gathering() {
+    fn signal_ledger_waits_only_for_current_generation_ice_gathering() {
         let cases = [
             ("current and gathering", true, false, true),
             ("current and complete", true, true, false),

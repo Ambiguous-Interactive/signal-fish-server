@@ -71,6 +71,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--run-for-secs <S>` | `30` | Soft cap: exit 1 if the flag-driven success criteria are still unmet |
 | `--max-runtime-secs <S>` | `60` | Hard watchdog: abort with exit 4 no matter what (the no-hang guarantee) |
 | `--success-release-file <PATH>` | — | Test harness only: after success criteria hold, emit `success_criteria_met` and stay connected until PATH exists; the normal bounded exit behavior is unchanged when omitted |
+| `--require-ice-gathering-complete` | off | Signal-ledger harness only; requires `--success-release-file`. Add end-of-gathering for every live peer-connection generation to the success criteria. Ordinary gameplay barriers do not wait for unrelated candidate transactions after a selected path is connected |
 | `--protocol-version <V>` | `3` | `2` omits every v3 `Authenticate` field — a pure v2 client for mixed-room tests |
 | `--supported-topologies <LIST>` | `relay,host,mesh` | Comma-separated topologies advertised in v3 `Authenticate` |
 | `--supported-transports <LIST>` | `relay,webrtc` | Comma-separated transports advertised in v3 `Authenticate` |

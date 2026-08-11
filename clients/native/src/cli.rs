@@ -176,6 +176,14 @@ pub struct Cli {
     #[arg(long)]
     pub success_release_file: Option<PathBuf>,
 
+    /// Test-harness signal-ledger coordination: include completion of ICE
+    /// gathering for every live peer-connection generation in the success
+    /// criteria. This is deliberately separate from `--success-release-file`:
+    /// a connected selected path can carry gameplay while unrelated candidate
+    /// transactions are still settling.
+    #[arg(long, requires = "success_release_file")]
+    pub require_ice_gathering_complete: bool,
+
     /// Protocol version to advertise in Authenticate. 2 omits every v3 field
     /// entirely (a pure v2 client for mixed-room tests).
     #[arg(long, default_value_t = 3)]
@@ -361,6 +369,7 @@ mod tests {
         assert_eq!(cli.ice_transport_policy, IceTransportPolicyArg::All);
         assert_eq!(cli.p2p_release_file, None);
         assert_eq!(cli.success_release_file, None);
+        assert!(!cli.require_ice_gathering_complete);
         assert_eq!(cli.exchange_release_file, None);
         assert_eq!(
             cli.topologies(),
@@ -549,10 +558,24 @@ mod tests {
             "--create-room",
             "--success-release-file",
             "/tmp/signal-fish-release",
+            "--require-ice-gathering-complete",
         ]);
         assert_eq!(
             cli.success_release_file.as_deref(),
             Some(std::path::Path::new("/tmp/signal-fish-release"))
+        );
+        assert!(cli.require_ice_gathering_complete);
+
+        let without_release = Cli::try_parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--require-ice-gathering-complete",
+        ]);
+        assert!(
+            without_release.is_err(),
+            "the gather-complete success criterion requires a held success barrier"
         );
     }
 
