@@ -2511,7 +2511,8 @@ async fn finalized_db_room_with(
         // Distinct, increasing join times (the owner's `connected_at` is `now`,
         // far after `base_time()`), so post-departure re-election
         // deterministically picks the first `other`.
-        info.connected_at = base_time() + chrono::Duration::seconds(offset as i64);
+        info.connected_at = base_time()
+            + chrono::Duration::seconds(i64::try_from(offset).expect("test offset fits i64"));
         server
             .database
             .add_player_to_room(&room.id, info)

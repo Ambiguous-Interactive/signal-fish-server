@@ -3,20 +3,26 @@ use chrono::Utc;
 
 /// Render unified metrics snapshot into Prometheus text exposition format.
 pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
-    use std::fmt::Write;
+    use std::fmt::{Display, Write};
 
-    fn write_metric(buf: &mut String, name: &str, help: &str, metric_type: &str, value: f64) {
+    fn write_metric(
+        buf: &mut String,
+        name: &str,
+        help: &str,
+        metric_type: &str,
+        value: impl Display,
+    ) {
         let _ = writeln!(buf, "# HELP {name} {help}");
         let _ = writeln!(buf, "# TYPE {name} {metric_type}");
         let _ = writeln!(buf, "{name} {value}");
     }
 
     fn counter(buf: &mut String, name: &str, help: &str, value: u64) {
-        write_metric(buf, name, help, "counter", value as f64);
+        write_metric(buf, name, help, "counter", value);
     }
 
     fn gauge(buf: &mut String, name: &str, help: &str, value: u64) {
-        write_metric(buf, name, help, "gauge", value as f64);
+        write_metric(buf, name, help, "gauge", value);
     }
 
     fn gauge_f64(buf: &mut String, name: &str, help: &str, value: f64) {
@@ -619,7 +625,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         if last_refresh == 0 {
             0
         } else {
-            let now = Utc::now().timestamp().max(0) as u64;
+            let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
             now.saturating_sub(last_refresh)
         }
     };
@@ -646,6 +652,16 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::Ordering;
+
+    fn rendered_u64(rendered: &str, name: &str) -> u64 {
+        rendered
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} ")))
+            .expect("rendered metric must exist")
+            .parse()
+            .expect("rendered metric must be an exact u64")
+    }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
@@ -724,6 +740,23 @@ mod tests {
         assert!(
             rendered.contains("signal_fish_websocket_messages_dropped_total 0"),
             "expected websocket drop counter line"
+        );
+
+        metrics
+            .total_connections
+            .store((1_u64 << 53) + 1, Ordering::Relaxed);
+        metrics.disconnections.store(u64::MAX, Ordering::Relaxed);
+        let exact_integer_rendering = render_prometheus_metrics(&metrics.snapshot().await);
+        assert_eq!(
+            rendered_u64(&exact_integer_rendering, "signal_fish_connections_total"),
+            (1_u64 << 53) + 1
+        );
+        assert_eq!(
+            rendered_u64(
+                &exact_integer_rendering,
+                "signal_fish_connections_disconnections_total"
+            ),
+            u64::MAX
         );
         assert!(
             rendered.contains("signal_fish_websocket_ping_timeouts_total 0"),

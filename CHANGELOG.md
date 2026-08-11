@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce representative Rust pre-commit latency by overlapping worktree
+  discovery with hook setup and loading the line-aware panic scanner only for
+  added panic macros or removed test-context guards. Untracked Rust files and
+  Git errors still fail closed, and the hook remains PowerShell-and-Git-only
+  (issue #318).
 - Reduce relay allocation overhead whenever projection work repeats across a
   relay's recipients (issue #207). In addition to the shared frame cache's
   reduction from 680 to 472 bytes, newly built production relays now co-own
@@ -45,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep extreme configured reconnection windows valid instead of narrowing
+  them into negative durations that expire tokens immediately. Numeric
+  conversions that can truncate, wrap, or lose a sign are now rejected by the
+  root package's all-target Clippy policy (issue #213).
 - Isolate room-local routing fences so a join, reconnect baseline, replay hook,
   or exact session publication waiting in one room no longer blocks routing and
   relay progress in unrelated rooms. Same-room baseline, replay, watermark, and

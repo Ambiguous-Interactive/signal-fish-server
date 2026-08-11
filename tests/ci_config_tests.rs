@@ -20161,6 +20161,7 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 }
                 $script:InspectWorktree = $false
                 $script:NextExitCode = 0
+                $script:NextStdout = ""
                 $script:Calls = 0
                 $script:CapturedArguments = @()
                 function Invoke-Native {
@@ -20169,7 +20170,7 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                     $script:CapturedArguments = [string[]]$Arguments
                     [pscustomobject]@{
                         ExitCode = $script:NextExitCode
-                        Stdout = ""
+                        Stdout = $script:NextStdout
                         Stderr = "fixture failure"
                         Output = "fixture failure"
                     }
@@ -20179,15 +20180,25 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 Assert (-not $changed) "exit 0 should skip the full Rust scanner"
                 Assert ($script:Calls -eq 1) "staged fast gate should run one git query"
                 Assert ($script:CapturedArguments -contains "--cached") "fast gate must inspect the staged index"
-                Assert ($script:CapturedArguments -contains "--quiet") "fast gate should avoid materializing a diff"
+                Assert ($script:CapturedArguments -contains "--unified=0") "fast gate should materialize only matching zero-context hunks"
+                Assert ($script:CapturedArguments -contains "--no-color") "fast gate output must be stable for line classification"
                 $patternIndex = [array]::IndexOf($script:CapturedArguments, "-G") + 1
                 Assert ($patternIndex -gt 0) "fast gate must use a pickaxe regex"
                 $pattern = $script:CapturedArguments[$patternIndex]
                 Assert ($pattern.Contains("panic|todo|unimplemented|unreachable")) "fast gate must detect panic macro edits"
                 Assert ($pattern.Contains("tokio::test")) "fast gate must detect test-context edits"
 
-                $script:NextExitCode = 1
-                Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "exit 1 should load the full scanner"
+                $script:NextStdout = '+panic!("new production panic");'
+                Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "an added panic macro should load the full scanner"
+
+                $script:NextStdout = '+#[test]'
+                Assert (-not (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs"))) "an added test guard cannot expose a production panic"
+
+                $script:NextStdout = '-#[cfg(test)]'
+                Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "a removed test guard should load the full scanner"
+
+                $script:NextStdout = '-panic!("removed production panic");'
+                Assert (-not (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs"))) "a removed panic macro should stay on the fast path"
 
                 $script:NextExitCode = 2
                 $threw = $false
@@ -20202,11 +20213,19 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 $script:WorktreeUntrackedFileSet.Add("src/lib.rs") | Out-Null
                 $script:Calls = 0
                 Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "worktree mode must retain the full scanner"
-                Assert ($script:Calls -eq 0) "worktree mode must not trust a diff that omits untracked files"
+                Assert ($script:Calls -eq 1) "worktree mode should classify tracked changes once before failing closed for untracked files"
 
                 $script:WorktreeUntrackedFileSet.Clear()
                 $script:NextExitCode = 0
-                Assert (-not (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs"))) "tracked worktree edits should use the fast gate"
+                foreach ($case in @(
+                    @{ Diff = '+panic!("worktree panic");'; Expected = $true },
+                    @{ Diff = '+#[test]'; Expected = $false },
+                    @{ Diff = '-#[cfg(test)]'; Expected = $true },
+                    @{ Diff = '-panic!("removed worktree panic");'; Expected = $false }
+                )) {
+                    $script:NextStdout = $case.Diff
+                    Assert ((Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) -eq $case.Expected) "worktree directional classification failed for $($case.Diff)"
+                }
                 Assert ($script:CapturedArguments -contains "HEAD") "worktree fast gate must include staged and unstaged edits"
 
                 $nul = [char]0
@@ -20263,6 +20282,9 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
             && content.contains("Worktree/index policy consistency")
             && content.contains("Changed file discovery")
             && content.contains("CheckTimings.Add")
+            && content.contains("PendingWorktreeStatus")
+            && content.contains("PendingWorktreeRustDiff")
+            && content.contains("ReadToEndAsync")
             && content.contains("Get-WorktreeRustPanicMacroCandidates")
             && content.contains("HookPolicyChangedFiles")
             && content.contains("Hook speed policy")
@@ -22368,16 +22390,20 @@ fn test_proptest_tests_ignored_under_miri() {
                     in_proptest_block = true;
                     total_proptest_blocks += 1;
                     // Count opening braces on this line to set the initial depth
-                    let opens = trimmed.matches('{').count() as i32;
-                    let closes = trimmed.matches('}').count() as i32;
+                    let opens = i32::try_from(trimmed.matches('{').count())
+                        .expect("source-line brace count fits i32");
+                    let closes = i32::try_from(trimmed.matches('}').count())
+                        .expect("source-line brace count fits i32");
                     brace_depth = opens - closes;
                     proptest_brace_depth = 0; // the proptest block starts at depth 0
                     continue;
                 }
             } else {
                 // Track brace depth inside the proptest block
-                let opens = trimmed.matches('{').count() as i32;
-                let closes = trimmed.matches('}').count() as i32;
+                let opens = i32::try_from(trimmed.matches('{').count())
+                    .expect("source-line brace count fits i32");
+                let closes = i32::try_from(trimmed.matches('}').count())
+                    .expect("source-line brace count fits i32");
                 brace_depth += opens - closes;
 
                 // Check for #[test] attributes inside the proptest block
@@ -26835,7 +26861,7 @@ fn test_mutation_shard_matrix_is_complete_contiguous_partition() {
          File: .github/workflows/mutation.yml"
     );
 
-    let n = shards.len() as u32;
+    let n = u32::try_from(shards.len()).expect("mutation shard count fits u32");
 
     // Collect every `/<denominator>` token that follows a `shard` reference, so
     // we validate the job-name `shard .../<N>` and the `--shard ...{}/<N>` run step
@@ -26929,7 +26955,7 @@ fn test_mutation_shard_budget_is_feasible_vs_timeout() {
     let timeout = parse_mutants_job_timeout_minutes(&workflow);
 
     // Vacuous-pass guard: N>0 and a timeout value parsed.
-    let n = shards.len() as u32;
+    let n = u32::try_from(shards.len()).expect("mutation shard count fits u32");
     assert!(
         n > 0,
         "Could not parse a non-empty shard matrix from mutation.yml; the feasibility arithmetic \

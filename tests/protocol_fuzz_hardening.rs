@@ -320,7 +320,7 @@ fn json_deep_nesting_in_signal_errs_without_overflow() {
 fn msgpack_signal_depth_bomb(depth: usize) -> Vec<u8> {
     fn push_fixstr(buf: &mut Vec<u8>, s: &str) {
         assert!(s.len() < 32, "fixstr only");
-        buf.push(0xa0 | s.len() as u8);
+        buf.push(0xa0 | u8::try_from(s.len()).expect("fixstr length is below 32"));
         buf.extend_from_slice(s.as_bytes());
     }
 

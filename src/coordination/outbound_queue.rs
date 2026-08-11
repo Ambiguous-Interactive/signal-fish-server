@@ -3203,9 +3203,12 @@ mod tests {
                 .unwrap();
             let mut accountability_failed = false;
             for index in 0..count {
-                let seq = index as u64 + 2;
+                let seq = u64::try_from(index).expect("test index fits u64") + 2;
                 let (class, key) = if index.is_multiple_of(2) {
-                    (DeliveryClass::Latest, Some(seq as u32))
+                    (
+                        DeliveryClass::Latest,
+                        Some(u32::try_from(seq).expect("test sequence fits u32")),
+                    )
                 } else {
                     (DeliveryClass::Volatile, None)
                 };

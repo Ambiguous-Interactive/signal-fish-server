@@ -130,9 +130,11 @@ impl DashboardMetricsCache {
         let interval_secs = refresh_interval.as_secs().max(1);
         let window_secs = history_window_secs.max(interval_secs);
         let samples = window_secs.div_ceil(interval_secs);
-        samples
+        let bounded =
+            samples.min(u64::try_from(DASHBOARD_CACHE_HISTORY_MAX_CAPACITY).unwrap_or(u64::MAX));
+        usize::try_from(bounded)
+            .unwrap_or(DASHBOARD_CACHE_HISTORY_MAX_CAPACITY)
             .max(1)
-            .min(DASHBOARD_CACHE_HISTORY_MAX_CAPACITY as u64) as usize
     }
 
     pub(super) fn spawn(self: &Arc<Self>, database: Arc<dyn GameDatabase>) {

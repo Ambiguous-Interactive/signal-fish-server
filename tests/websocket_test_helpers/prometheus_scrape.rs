@@ -98,23 +98,22 @@ pub fn sample_value(text: &str, name: &str) -> u64 {
         if let Ok(exact) = raw_value.parse::<u64>() {
             return exact;
         }
-        // Fallback for a value rendered with a decimal point (an f64 gauge
-        // like `3.0`). Parsing back through f64 loses precision above 2^53 —
-        // the exact-integer limit of f64 — so that, not `u64::MAX`, is the
-        // honest ceiling: a value past it cannot round-trip and a naive
-        // `as u64` cast would silently saturate. Anything non-finite,
-        // fractional, negative, or past 2^53 is a broken/hostile exporter and
-        // must panic loudly, never coerce.
-        const F64_EXACT_INT_MAX: f64 = (1u64 << 53) as f64;
-        let value: f64 = raw_value.parse().unwrap_or_else(|error| {
-            panic!("sample {name} has non-numeric value {raw_value:?}: {error}")
-        });
-        assert!(
-            value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= F64_EXACT_INT_MAX,
-            "sample {name} must be a non-negative integer within the f64 exact-integer \
-             range (<= 2^53), got {value}"
-        );
-        return value as u64;
+        // Accept decimal rendering only when its fractional part is all zero.
+        // Parse the integer digits directly so large exact counters never pass
+        // through f64 and silently lose precision.
+        if let Some((integer, fraction)) = raw_value.split_once('.') {
+            assert!(
+                !integer.starts_with('-')
+                    && !integer.is_empty()
+                    && !fraction.is_empty()
+                    && fraction.bytes().all(|digit| digit == b'0'),
+                "sample {name} must be a non-negative integer, got {raw_value:?}"
+            );
+            return integer.parse::<u64>().unwrap_or_else(|error| {
+                panic!("sample {name} has out-of-range integer value {raw_value:?}: {error}")
+            });
+        }
+        panic!("sample {name} has non-integer value {raw_value:?}");
     }
     panic!("sample {name} not found in the scraped exposition:\n{text}");
 }
@@ -196,6 +195,13 @@ signal_fish_websocket_messages_dropped_total 0\n";
             ),
             1
         );
+        assert_eq!(
+            sample_value(
+                "signal_fish_large_integer_gauge 18446744073709551615.0\n",
+                "signal_fish_large_integer_gauge"
+            ),
+            u64::MAX
+        );
     }
 
     #[test]
@@ -213,11 +219,10 @@ signal_fish_websocket_messages_dropped_total 0\n";
     }
 
     #[test]
-    #[should_panic(expected = "must be a non-negative integer within the f64 exact-integer")]
+    #[should_panic(expected = "has non-integer value")]
     fn sample_value_panics_on_out_of_range_value() {
-        // Finite and whole, but far past the f64 exact-integer range: it does
-        // not parse as `u64`, and the f64 fallback's saturating cast would
-        // silently coerce it without the range guard.
+        // Scientific notation is not an exact integer representation for this
+        // test helper and must never silently saturate through an f64 cast.
         sample_value(
             "signal_fish_hostile_total 1e100\n",
             "signal_fish_hostile_total",

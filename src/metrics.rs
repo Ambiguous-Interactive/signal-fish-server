@@ -988,7 +988,7 @@ impl ServerMetrics {
     }
 
     pub fn set_dashboard_cache_last_refresh(&self, timestamp: chrono::DateTime<chrono::Utc>) {
-        let epoch = timestamp.timestamp().max(0) as u64;
+        let epoch = u64::try_from(timestamp.timestamp()).unwrap_or(0);
         self.dashboard_cache_last_refresh_epoch
             .store(epoch, Ordering::Relaxed);
     }
@@ -1721,7 +1721,7 @@ impl OperationLatencyHistogram {
 const MICROS_PER_MS: f64 = 1000.0;
 
 fn duration_to_micros(duration: Duration) -> u64 {
-    duration.as_micros().min(u128::from(u64::MAX)) as u64
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

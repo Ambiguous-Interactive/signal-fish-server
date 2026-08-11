@@ -283,7 +283,7 @@ where
             }
             tracing::warn!(
                 %player_id,
-                max_sojourn_ms = max_sojourn.as_millis() as u64,
+                max_sojourn_ms = u64::try_from(max_sojourn.as_millis()).unwrap_or(u64::MAX),
                 initiated_close,
                 "Outbound message exceeded the maximum queue sojourn; closing recipient"
             );

@@ -248,7 +248,8 @@ async fn test_load_concurrent_websocket_connections() {
                     )
                     .await;
 
-                    let latency = conn_start.elapsed().as_millis() as u64;
+                    let latency =
+                        u64::try_from(conn_start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     let success = result.is_ok();
 
                     metrics_clone.record_operation(success, latency);
@@ -325,7 +326,9 @@ async fn test_load_room_creation_throughput() {
                 server_clone.connect_client(player_id, tx).await;
 
                 // Create unique room
-                let room_code = load_room_code('L', (batch * concurrent_creates + i) as u32);
+                let room_ordinal = u32::try_from(batch * concurrent_creates + i)
+                    .expect("load-test room ordinal fits u32");
+                let room_code = load_room_code('L', room_ordinal);
                 let result = timeout(
                     Duration::from_secs(5),
                     server_clone.handle_join_room(
@@ -340,7 +343,7 @@ async fn test_load_room_creation_throughput() {
                 )
                 .await;
 
-                let latency = room_start.elapsed().as_millis() as u64;
+                let latency = u64::try_from(room_start.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let success =
                     result.is_ok() && server_clone.get_client_room(&player_id).await.is_some();
 
@@ -429,7 +432,7 @@ async fn test_load_sustained_concurrent_connections() {
                 )
                 .await;
 
-            let conn_latency = conn_start.elapsed().as_millis() as u64;
+            let conn_latency = u64::try_from(conn_start.elapsed().as_millis()).unwrap_or(u64::MAX);
             let connected = server_clone.get_client_room(&player_id).await.is_some();
 
             if connected {
@@ -442,7 +445,8 @@ async fn test_load_sustained_concurrent_connections() {
                     // Simulate activity: send ready signal
                     let op_start = Instant::now();
                     let _ = server_clone.handle_player_ready(&player_id).await;
-                    let op_latency = op_start.elapsed().as_millis() as u64;
+                    let op_latency =
+                        u64::try_from(op_start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
                     metrics_clone.record_operation(true, op_latency);
 
@@ -579,7 +583,8 @@ async fn test_load_message_latency_distribution() {
                 let _ = server.handle_player_ready(player_id).await;
 
                 // Measure how long it takes for message to be queued for all receivers
-                let broadcast_latency = send_start.elapsed().as_micros() as u64;
+                let broadcast_latency =
+                    u64::try_from(send_start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 all_latencies.push(broadcast_latency);
             }
         }
@@ -598,9 +603,9 @@ async fn test_load_message_latency_distribution() {
 
     // Calculate percentiles
     all_latencies.sort();
-    let p50_idx = (all_latencies.len() as f64 * 0.50) as usize;
-    let p95_idx = (all_latencies.len() as f64 * 0.95) as usize;
-    let p99_idx = (all_latencies.len() as f64 * 0.99) as usize;
+    let p50_idx = all_latencies.len().saturating_mul(50) / 100;
+    let p95_idx = all_latencies.len().saturating_mul(95) / 100;
+    let p99_idx = all_latencies.len().saturating_mul(99) / 100;
 
     let p50 = all_latencies[p50_idx] as f64 / 1000.0; // Convert to ms
     let p95 = all_latencies[p95_idx] as f64 / 1000.0;

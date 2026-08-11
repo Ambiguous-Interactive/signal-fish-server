@@ -38,6 +38,14 @@ allocation-tracking = []
 [lints.rust]
 unsafe_code = "forbid"
 
+# Numeric narrowing is always explicit. These lints cover conversions that can
+# silently truncate, wrap, or turn negative values into large unsigned values;
+# CI promotes them to errors through its existing `-D warnings` Clippy gate.
+[lints.clippy]
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+
 [dependencies]
 # Async runtime. `sync` (mpsc/watch delivery channels) and `time` (backpressure
 # timeouts) are load-bearing for the no-silent-drop delivery path — keep them

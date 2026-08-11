@@ -133,7 +133,7 @@ async fn ninth_join_fails_at_default_room_cap() {
         seated.push(handle);
     }
     assert_eq!(
-        seated.len() as u8,
+        u8::try_from(seated.len()).expect("default room capacity fits u8"),
         default_cap,
         "room fills to the default cap"
     );
