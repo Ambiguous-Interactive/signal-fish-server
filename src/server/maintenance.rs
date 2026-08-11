@@ -1,5 +1,6 @@
-use crate::protocol::{PlayerId, RoomId};
-use std::collections::HashSet;
+use crate::coordination::CloseReason;
+use crate::protocol::{ErrorCode, PlayerId, RoomId};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -205,6 +206,141 @@ impl EnhancedGameServer {
             );
         }
         count
+    }
+
+    /// Terminally reconcile connected players whose assigned room no longer
+    /// exists in storage.
+    ///
+    /// Inactive-room GC intentionally deletes occupied rooms. Storage is the
+    /// membership authority, but relay routing and connection assignments are
+    /// process-local, so deletion must be followed by an explicit terminal
+    /// transition. This all-clients sweep is also the retry path if a cleanup
+    /// task is cancelled after the durable delete but before local teardown.
+    pub(crate) async fn cleanup_clients_in_missing_rooms(self: &Arc<Self>) -> usize {
+        let mut candidates = HashMap::<RoomId, Vec<PlayerId>>::new();
+        for player_id in self.connection_manager.client_ids() {
+            if let Some(room_id) = self.connection_manager.get_client_room(&player_id) {
+                candidates.entry(room_id).or_default().push(player_id);
+            }
+        }
+
+        let mut cleaned = 0usize;
+        for (room_id, player_ids) in candidates {
+            match self.database.get_room_by_id(&room_id).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%room_id, %error, "Failed to verify assigned room during cleanup; retaining clients");
+                    continue;
+                }
+            }
+
+            for player_id in player_ids {
+                if self.is_draining() {
+                    return cleaned;
+                }
+                if self
+                    .cleanup_client_in_missing_room(player_id, room_id)
+                    .await
+                {
+                    cleaned = cleaned.saturating_add(1);
+                }
+            }
+        }
+        cleaned
+    }
+
+    async fn cleanup_client_in_missing_room(
+        self: &Arc<Self>,
+        player_id: PlayerId,
+        expected_room: RoomId,
+    ) -> bool {
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(&player_id) else {
+            return false;
+        };
+        let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let effective_player_id = lifecycle.player_id();
+        if effective_player_id != player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(&effective_player_id, &lifecycle)
+            || self
+                .connection_manager
+                .get_client_room(&effective_player_id)
+                != Some(expected_room)
+        {
+            return false;
+        }
+
+        // The scan above is only a hint. Revalidate under the same lifecycle
+        // gate used by join, leave, reconnect, and unregister so a client that
+        // moved to a live room cannot be closed from a stale cleanup snapshot.
+        match self.database.get_room_by_id(&expected_room).await {
+            Ok(Some(_)) => return false,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%effective_player_id, %expected_room, %error, "Failed final missing-room cleanup check; retaining client");
+                return false;
+            }
+        }
+
+        let close_pinned = AtomicBool::new(false);
+        let should_send = || {
+            if close_pinned.load(Ordering::Acquire) {
+                return true;
+            }
+            let pinned = !self.is_draining()
+                && self
+                    .connection_manager
+                    .get_client_room(&effective_player_id)
+                    == Some(expected_room)
+                && self
+                    .connection_manager
+                    .request_close_for(&effective_player_id, CloseReason::RoomInactive);
+            close_pinned.store(pinned, Ordering::Release);
+            pinned
+        };
+        let enqueued = self
+            .send_farewell_to_player_if(
+                &effective_player_id,
+                "Room closed after exceeding the inactivity timeout".to_string(),
+                Some(ErrorCode::RoomNotFound),
+                &should_send,
+            )
+            .await;
+
+        if self.is_draining() {
+            self.connection_manager
+                .request_close_for(&effective_player_id, CloseReason::Shutdown);
+            return false;
+        }
+        if !close_pinned.load(Ordering::Acquire) {
+            // A missing coordinator route does not evaluate the predicate.
+            // The close frame still needs the semantic 4005 attribution even
+            // when the best-effort farewell cannot be routed.
+            close_pinned.store(
+                self.connection_manager
+                    .request_close_for(&effective_player_id, CloseReason::RoomInactive),
+                Ordering::Release,
+            );
+        }
+        if !enqueued {
+            tracing::debug!(%effective_player_id, %expected_room, "Inactive-room farewell was not enqueued (queue full, route gone, or another close owner)");
+        }
+
+        // A deleted room cannot be a reconnection target. Clear both token
+        // stages before unregister runs so no cancellation point can mint or
+        // retain a claim for storage that is already gone.
+        self.discard_pre_issued_reconnection_token(&effective_player_id)
+            .await;
+        if let Some(reconnection_manager) = &self.reconnection_manager {
+            reconnection_manager
+                .discard_pending_reconnection(&effective_player_id)
+                .await;
+        }
+
+        self.unregister_client_locked(&effective_player_id).await;
+        !self.connection_manager.has_client(&effective_player_id)
     }
 
     /// Enhanced cleanup task with process-local coordination and idempotency.
@@ -478,6 +614,15 @@ impl EnhancedGameServer {
                 Err(e) => {
                     tracing::error!("Failed to cleanup expired rooms: {}", e);
                 }
+            }
+
+            let cleaned_missing_room_clients = self.cleanup_clients_in_missing_rooms().await;
+            if cleaned_missing_room_clients > 0 {
+                tracing::info!(
+                    count = cleaned_missing_room_clients,
+                    instance_id = %self.instance_id,
+                    "Terminally closed clients assigned to removed rooms"
+                );
             }
 
             // Inactive cleanup may deliberately close an occupied room. Its
