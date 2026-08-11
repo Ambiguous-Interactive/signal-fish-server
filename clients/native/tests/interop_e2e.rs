@@ -49,8 +49,10 @@
 //!    signaling/WebRTC activity occurs, and the GameData relay matrix completes.
 //! 6. `two_peer_mesh_exchanges_over_live_webrtc` — the cross-platform smoke
 //!    cell: the smallest complete session (two clients) establishes a direct
-//!    host/host pair and exchanges one message on both data channels. CI runs
-//!    this exact selector on Linux, Windows, and macOS.
+//!    host path and exchanges one message on both data channels. The remote
+//!    side may be reported as peer-reflexive when rtc omits its dynamically
+//!    learned registry entry; with no STUN or TURN configured, that remains a
+//!    direct path. CI runs this exact selector on Linux, Windows, and macOS.
 //! 7. `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` — the only cell whose
 //!    live path is IPv6. webrtc 0.20 turns each application-supplied UDP bind
 //!    directly into a host candidate, so the bound family decides the
@@ -159,12 +161,23 @@ impl ScenarioRun {
     }
 
     fn selected_pair_failure_context(&self, index: usize) -> String {
-        selected_pair_failure_context(
+        let local = selected_pair_failure_context(
             TWO_CLIENT_NAMES[index],
             self.exit_codes[index],
             &self.logs[index],
             self.diagnostics(index),
-        )
+        );
+        if self.logs.len() != TWO_CLIENT_NAMES.len() {
+            return local;
+        }
+        let peer_index = 1 - index;
+        let peer = selected_pair_failure_context(
+            TWO_CLIENT_NAMES[peer_index],
+            self.exit_codes[peer_index],
+            &self.logs[peer_index],
+            self.diagnostics(peer_index),
+        );
+        format!("local evidence:\n{local}\npeer corroboration:\n{peer}")
     }
 }
 
@@ -1598,13 +1611,19 @@ fn require_ipv6_ice_interface() {
 /// The IP address a `selected_candidate_pair` field carries, or a loud failure.
 /// A missing/`null` address fails: it would otherwise let a run that never
 /// proved a concrete live path pass.
-fn selected_ip_address(event: &Value, field: &str, who: &str) -> IpAddr {
-    let raw = event
-        .get(field)
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("{who}: selected pair has no `{field}`: {event}"));
-    raw.parse::<IpAddr>()
-        .unwrap_or_else(|error| panic!("{who}: `{field}` is not an IP address ({error}): {raw}"))
+fn selected_ip_address(event: &Value, field: &str, who: &str, failure_context: &str) -> IpAddr {
+    let raw = event.get(field).and_then(Value::as_str).unwrap_or_else(|| {
+        panic!("{who}: selected pair has no `{field}`: {event};\n{failure_context}")
+    });
+    raw.parse::<IpAddr>().unwrap_or_else(|error| {
+        panic!("{who}: `{field}` is not an IP address ({error}): {raw};\n{failure_context}")
+    })
+}
+
+fn selected_pair_is_exact_host_host(selected: &Value) -> bool {
+    ["local_candidate_type", "remote_candidate_type"]
+        .into_iter()
+        .all(|field| selected.get(field).and_then(Value::as_str) == Some("host"))
 }
 
 /// Assert this client's single selected pair is a direct host/host path toward
@@ -1629,16 +1648,14 @@ fn assert_direct_host_path(
         peer_id,
         "{who}: the selected pair must belong to the planned peer"
     );
-    for field in ["local_candidate_type", "remote_candidate_type"] {
-        assert_eq!(
-            str_field(selected, field),
-            "host",
-            "{who}: {field} must be a direct host candidate (no STUN/TURN is configured)"
-        );
-    }
+    assert!(
+        selected_pair_is_exact_host_host(selected),
+        "{who}: family-sensitive paths require exact host/host evidence: {selected};\n\
+         {failure_context}"
+    );
     let addresses = [
-        selected_ip_address(selected, "local_candidate_address", who),
-        selected_ip_address(selected, "remote_candidate_address", who),
+        selected_ip_address(selected, "local_candidate_address", who, failure_context),
+        selected_ip_address(selected, "remote_candidate_address", who, failure_context),
     ];
     for address in addresses {
         assert!(
@@ -1647,6 +1664,123 @@ fn assert_direct_host_path(
         );
     }
     addresses
+}
+
+/// Assert the cross-platform, no-STUN/no-TURN smoke cell selected a direct
+/// path. rtc can learn the remote host socket from an inbound connectivity
+/// check before its signaled candidate is registered, exposing that side as
+/// `prflx` with no address in rtc 0.20's public statistics. That shape is safe
+/// only for this baseline: both processes prove they advertised host-only
+/// candidates, and the cell configures neither STUN nor TURN. IPv6 and TURN
+/// assertions retain their exact address/type requirements.
+fn assert_baseline_direct_path(
+    events: &[Value],
+    peer_events: &[Value],
+    who: &str,
+    peer_id: &str,
+    failure_context: &str,
+) {
+    validate_baseline_direct_path(events, peer_events, peer_id)
+        .unwrap_or_else(|error| panic!("{who}: {error};\n{failure_context}"));
+}
+
+fn parse_concrete_unicast(raw: &str, field: &str) -> Result<IpAddr, String> {
+    let address = raw
+        .parse::<IpAddr>()
+        .map_err(|error| format!("`{field}` is not an IP address ({error}): {raw}"))?;
+    if address.is_unspecified() || address.is_multicast() {
+        return Err(format!(
+            "`{field}` must be a concrete unicast address, got {address}"
+        ));
+    }
+    Ok(address)
+}
+
+fn validate_baseline_direct_path(
+    events: &[Value],
+    peer_events: &[Value],
+    peer_id: &str,
+) -> Result<(), String> {
+    for (candidate_owner, candidate_events) in [("local", events), ("peer", peer_events)] {
+        let advertised = events_named(candidate_events, "local_candidate");
+        if advertised.is_empty() {
+            return Err(format!(
+                "{candidate_owner} advertised no candidate in the direct-path baseline"
+            ));
+        }
+        for candidate in advertised {
+            if candidate.get("candidate_type").and_then(Value::as_str) != Some("host") {
+                return Err(format!(
+                    "{candidate_owner} advertised a non-host candidate even though the \
+                     baseline configures no STUN/TURN: {candidate}"
+                ));
+            }
+            if candidate.get("protocol").and_then(Value::as_str) != Some("udp") {
+                return Err(format!(
+                    "{candidate_owner} advertised a non-UDP candidate in the UDP-only \
+                     native baseline: {candidate}"
+                ));
+            }
+            let address = candidate
+                .get("address")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("{candidate_owner} candidate has no address: {candidate}")
+                })?;
+            parse_concrete_unicast(address, "advertised candidate address")?;
+        }
+    }
+
+    let selected = events_named(events, "selected_candidate_pair");
+    if selected.len() != 1 {
+        return Err(format!(
+            "expected exactly one `selected_candidate_pair` event, got {}: {selected:?}",
+            selected.len()
+        ));
+    }
+    let selected = selected[0];
+    if selected.get("peer").and_then(Value::as_str) != Some(peer_id) {
+        return Err(format!(
+            "the selected pair must belong to planned peer {peer_id}: {selected}"
+        ));
+    }
+    if selected.get("local_candidate_type").and_then(Value::as_str) != Some("host") {
+        return Err(format!(
+            "the local side must be a host candidate: {selected}"
+        ));
+    }
+    let remote_type = selected
+        .get("remote_candidate_type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("selected pair has no remote candidate type: {selected}"))?;
+    if !matches!(remote_type, "host" | "prflx") {
+        return Err(format!(
+            "the no-STUN/no-TURN baseline requires a remote host or peer-reflexive \
+             candidate, got {remote_type}: {selected}"
+        ));
+    }
+
+    let local_address = selected
+        .get("local_candidate_address")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("selected pair has no local address: {selected}"))?;
+    parse_concrete_unicast(local_address, "local_candidate_address")?;
+    match selected
+        .get("remote_candidate_address")
+        .and_then(Value::as_str)
+    {
+        Some(raw) => {
+            parse_concrete_unicast(raw, "remote_candidate_address")?;
+        }
+        None if remote_type == "prflx" => {}
+        None => {
+            return Err(format!(
+                "only rtc's peer-reflexive missing-registry shape may omit the remote \
+                 address: {selected}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn selected_pair_failure_context(
@@ -1658,10 +1792,12 @@ fn selected_pair_failure_context(
     format!(
         "client {who} exit code: {exit_code}\n\
          emitted {} event(s): {}\n\
+         selected candidate pairs: {:?}\n\
          advertised local ICE candidates: {:?}\n\
          {diagnostics}",
         events.len(),
         event_tags(events),
+        events_named(events, "selected_candidate_pair"),
         advertised_candidates(events),
     )
 }
@@ -1721,6 +1857,125 @@ fn missing_selected_pair_reports_fully_drained_process_and_ice_evidence() {
         assert!(
             message.contains(required),
             "missing `{required}` in:\n{message}"
+        );
+    }
+}
+
+#[test]
+fn peer_reflexive_shape_is_accepted_only_by_baseline_direct_oracle() {
+    let local_events = vec![
+        json!({
+            "event": "local_candidate",
+            "candidate_type": "host",
+            "address": "192.0.2.7",
+            "port": 49152,
+            "protocol": "udp"
+        }),
+        json!({
+            "event": "selected_candidate_pair",
+            "peer": "peer-id",
+            "local_candidate_type": "host",
+            "remote_candidate_type": "prflx",
+            "local_candidate_address": "192.0.2.7",
+            "remote_candidate_address": null
+        }),
+    ];
+    let peer_events = vec![json!({
+        "event": "local_candidate",
+        "candidate_type": "host",
+        "address": "192.0.2.8",
+        "port": 49153,
+        "protocol": "udp"
+    })];
+
+    assert_baseline_direct_path(
+        &local_events,
+        &peer_events,
+        "c0",
+        "peer-id",
+        "deterministic issue #337 shape",
+    );
+
+    assert!(
+        !selected_pair_is_exact_host_host(&local_events[1]),
+        "the family-sensitive host/host oracle must reject missing remote evidence"
+    );
+}
+
+#[test]
+fn baseline_direct_oracle_rejects_non_direct_or_incomplete_evidence() {
+    let candidate = || {
+        json!({
+            "event": "local_candidate",
+            "candidate_type": "host",
+            "address": "192.0.2.7",
+            "port": 49152,
+            "protocol": "udp"
+        })
+    };
+    let selected = |local_type: &str, remote_type: &str, remote_address: Value| {
+        json!({
+            "event": "selected_candidate_pair",
+            "peer": "peer-id",
+            "local_candidate_type": local_type,
+            "remote_candidate_type": remote_type,
+            "local_candidate_address": "192.0.2.7",
+            "remote_candidate_address": remote_address
+        })
+    };
+    let valid_local = vec![candidate(), selected("host", "host", json!("192.0.2.8"))];
+    let valid_peer = vec![candidate()];
+    assert!(validate_baseline_direct_path(&valid_local, &valid_peer, "peer-id").is_ok());
+
+    let cases = [
+        (
+            "remote server-reflexive",
+            vec![candidate(), selected("host", "srflx", json!("192.0.2.8"))],
+            valid_peer.clone(),
+        ),
+        (
+            "remote relay",
+            vec![candidate(), selected("host", "relay", json!("192.0.2.8"))],
+            valid_peer.clone(),
+        ),
+        (
+            "local non-host",
+            vec![candidate(), selected("srflx", "host", json!("192.0.2.8"))],
+            valid_peer.clone(),
+        ),
+        ("peer advertised nothing", valid_local.clone(), Vec::new()),
+        (
+            "peer advertised relay",
+            valid_local.clone(),
+            vec![json!({
+                "event": "local_candidate",
+                "candidate_type": "relay",
+                "address": "192.0.2.8",
+                "port": 49153,
+                "protocol": "udp"
+            })],
+        ),
+        (
+            "peer advertised non-UDP host",
+            valid_local.clone(),
+            vec![json!({
+                "event": "local_candidate",
+                "candidate_type": "host",
+                "address": "192.0.2.8",
+                "port": 49153,
+                "protocol": "tcp"
+            })],
+        ),
+        (
+            "host omitted remote address",
+            vec![candidate(), selected("host", "host", Value::Null)],
+            valid_peer.clone(),
+        ),
+    ];
+    for (name, local, peer) in cases {
+        assert!(
+            validate_baseline_direct_path(&local, &peer, "peer-id").is_err(),
+            "{name} must fail closed"
         );
     }
 }
@@ -1791,7 +2046,13 @@ async fn two_peer_mesh_exchanges_over_live_webrtc() {
 
         assert_pair_connected_exactly(window, who, &peers);
         let failure_context = run.selected_pair_failure_context(index);
-        assert_direct_host_path(window, who, peer_id, &failure_context);
+        assert_baseline_direct_path(
+            window,
+            run.window(1 - index),
+            who,
+            peer_id,
+            &failure_context,
+        );
         assert_exchange_sent_to(window, who, &peers);
         assert_exchange_received_from(window, who, &peers);
         assert_transport_status_true(&run.logs[index], who);
