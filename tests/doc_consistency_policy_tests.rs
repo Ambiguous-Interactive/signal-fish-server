@@ -2,7 +2,10 @@
 
 mod common;
 
-use common::{bash_command, read_file, read_live_file, repo_root, strip_comment_lines};
+use common::{
+    bash_command, read_file, read_live_file, repo_root, strip_comment_lines, unique_temp_dir,
+    write_file,
+};
 
 #[test]
 fn test_repository_passes_doc_consistency_script() {
@@ -86,13 +89,15 @@ fn test_ci_workflow_has_file_based_actor_agnostic_dep_detect_step() {
         "ci.yml dep-detect step must set a skip_changelog output."
     );
     assert!(
-        dep_detect_step_live.contains("HAS_CARGO_CHANGE=\"false\"")
+        dep_detect_step_live.contains("HAS_DEPENDENCY_CHANGE=\"false\"")
             && dep_detect_step_live.contains(
-                "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+                "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_DEPENDENCY_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live
-                .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
-        "ci.yml dep-detect step must use file-based dependency-only detection for root and clients/native Cargo manifest/lock changes."
+                .contains("package.json|package-lock.json|clients/browser/package.json|clients/browser/package-lock.json) HAS_DEPENDENCY_CHANGE=\"true\" ;;")
+            && dep_detect_step_live
+                .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_DEPENDENCY_CHANGE\" = \"true\" ]; then"),
+        "ci.yml dep-detect step must use file-based dependency-only detection for every tracked Cargo and npm package graph."
     );
 
     assert!(
@@ -111,6 +116,69 @@ fn test_ci_workflow_has_file_based_actor_agnostic_dep_detect_step() {
             && !dep_detect_step.contains("grep -qiE"),
         "ci.yml dep-detect step must not rely on commit-message pattern matching."
     );
+}
+
+fn dependency_detection_script(step: &str) -> String {
+    step.split_once("        run: |\n")
+        .expect("dep-detect step must have a shell run block")
+        .1
+        .lines()
+        .map(|line| line.strip_prefix("          ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn test_ci_dependency_detection_classifies_cargo_npm_and_mixed_changes() {
+    let root = repo_root();
+    let workflow = read_file(&root.join(".github/workflows/ci.yml"));
+    let script = dependency_detection_script(&extract_ci_dep_detect_step_block(&workflow));
+    let cases = [
+        ("cargo-root", "Cargo.toml\nCargo.lock\n", true),
+        ("npm-root", "package.json\npackage-lock.json\n", true),
+        (
+            "npm-browser",
+            "clients/browser/package.json\nclients/browser/package-lock.json\n",
+            true,
+        ),
+        (
+            "npm-plus-internal",
+            "clients/browser/package-lock.json\ntests/ci_config_tests.rs\n",
+            true,
+        ),
+        (
+            "npm-plus-production",
+            "clients/browser/package-lock.json\nsrc/server.rs\n",
+            false,
+        ),
+        ("internal-only", "tests/ci_config_tests.rs\n", false),
+    ];
+
+    for (name, changed_files, expected_skip) in cases {
+        let fixture = unique_temp_dir(&format!("dep-detect-{name}"));
+        let github_output = fixture.path().join("github-output.txt");
+        write_file(&fixture.path().join("changed-files.txt"), changed_files);
+        write_file(&github_output, "");
+        let output = bash_command()
+            .arg("-c")
+            .arg(&script)
+            .current_dir(fixture.path())
+            .env("GITHUB_OUTPUT", &github_output)
+            .output()
+            .unwrap_or_else(|error| panic!("{name}: dep-detect failed to execute: {error}"));
+        assert!(
+            output.status.success(),
+            "{name}: dep-detect failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let outputs = read_file(&github_output);
+        assert_eq!(
+            outputs.lines().any(|line| line == "skip_changelog=true"),
+            expected_skip,
+            "{name}: unexpected dependency-only verdict in {outputs:?}"
+        );
+    }
 }
 
 #[test]
@@ -191,6 +259,10 @@ fn test_ci_dep_detect_allows_dependency_maintenance_touchpoints() {
     let dependency_maintenance_paths = [
         "clients/native/Cargo.toml",
         "clients/native/Cargo.lock",
+        "package.json",
+        "package-lock.json",
+        "clients/browser/package.json",
+        "clients/browser/package-lock.json",
         "docs/quickstart.md",
         "Dockerfile",
         "README.md",

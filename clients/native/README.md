@@ -235,8 +235,12 @@ The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop
 `browser-interop` cargo feature (this crate's default suite never compiles them; they additionally need
 `SIGNAL_FISH_BROWSER_CLI` pointing at the built [browser client](../browser/README.md) bundle).
 
-Scenario 6 is the smallest complete live WebRTC cell: two real clients negotiate a direct host/host pair and
-exchange exact messages on both SCTP channel labels. CI runs that selector on Linux, Windows, and macOS.
+Scenario 6 is the smallest complete live WebRTC cell: two real clients negotiate a direct host path and
+exchange exact messages on both SCTP channel labels. With no STUN or TURN configured, rtc may learn the
+remote host socket from an inbound connectivity check before its signaled candidate is registered, so that
+side is honestly reported as `prflx` with no address. The family-agnostic baseline accepts that shape only
+when both clients advertised non-empty host-only UDP candidate sets. CI runs the selector on Linux, Windows,
+and macOS.
 
 Scenario 7 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
 advertised, and the assertions require a host/host pair of concrete dialable IPv6 addresses plus the exact
@@ -287,8 +291,8 @@ says:
 | Platform | Compile + unit suite | Live WebRTC transport |
 |----------|----------------------|-----------------------|
 | Linux (`ubuntu-latest`) | ✅ `Native Client Interop (Linux)` | ✅ every native, browser, TURN-only, and IPv6 cell |
-| Windows (`windows-latest`) | ✅ `Native Client Build + Live WebRTC (windows-latest)` | ✅ two-peer direct host/host pair + both SCTP channels |
-| macOS (`macos-latest`) | ✅ `Native Client Build + Live WebRTC (macos-latest)` | ✅ two-peer direct host/host pair + both SCTP channels |
+| Windows (`windows-latest`) | ✅ `Native Client Build + Live WebRTC (windows-latest)` | ✅ two-peer direct host/host-or-prflx path + both SCTP channels |
+| macOS (`macos-latest`) | ✅ `Native Client Build + Live WebRTC (macos-latest)` | ✅ two-peer direct host/host-or-prflx path + both SCTP channels |
 
 The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs, on the repository MSRV:
 `cargo metadata --locked`, `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`,
@@ -296,8 +300,9 @@ The `native-platforms` matrix in `.github/workflows/webrtc-interop.yml` runs, on
 what actually builds and links the multi-process cells — clippy only type-checks them (`--emit=metadata`, no
 codegen). The matrix then builds the real server binary and runs
 `two_peer_mesh_exchanges_over_live_webrtc` on each host. That cell executes the platform's interface
-enumeration, UDP binding, ICE, DTLS, SCTP, child-process, and path semantics and requires an exact exchange on
-both data channels. Linux is absent from the matrix because the `interop` job runs the full seven-scenario suite,
+enumeration, UDP binding, ICE, DTLS, SCTP, child-process, and path semantics and requires a corroborated direct
+path plus an exact exchange on both data channels. Linux is absent from the matrix because the `interop` job
+runs the full seven-scenario suite,
 including the same two-peer cell. Windows and macOS now carry a live transport proof, while the larger topology,
 fault-injection, TURN, browser, and IPv6 matrices remain Linux-specific evidence.
 

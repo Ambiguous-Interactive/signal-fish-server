@@ -24883,7 +24883,10 @@ SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVE
         "async fn two_peer_mesh_exchanges_over_live_webrtc()",
         r#"let run = run_two_peer_mesh("interop-cross-platform-smoke", &[]).await;"#,
         "let failure_context = run.selected_pair_failure_context(index);",
-        "assert_direct_host_path(window, who, peer_id, &failure_context);",
+        "assert_baseline_direct_path(",
+        "run.window(1 - index)",
+        r#"matches!(remote_type, "host" | "prflx")"#,
+        r#"[("local", events), ("peer", peer_events)]"#,
         "assert_exchange_sent_to(window, who, &peers);",
         "assert_exchange_received_from(window, who, &peers);",
         "assert_transport_status_true(&run.logs[index], who);",
@@ -24910,10 +24913,10 @@ SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVE
         // The path is asserted to be direct IPv6 toward the planned peer.
         "fn assert_ipv6_host_path(",
         "assert_ipv6_host_path(window, who, peer_id, &failure_context);",
-        "fn selected_ip_address(event: &Value, field: &str, who: &str) -> IpAddr {",
+        "fn selected_ip_address(event: &Value, field: &str, who: &str, failure_context: &str) -> IpAddr {",
         "let IpAddr::V6(address) = address else {",
-        r#"for field in ["local_candidate_type", "remote_candidate_type"] {"#,
-        r#"selected_ip_address(selected, "local_candidate_address", who)"#,
+        "selected_pair_is_exact_host_host(selected)",
+        r#"selected_ip_address(selected, "local_candidate_address", who, failure_context)"#,
         // ...carrying a real session on both labels, not the relay floor.
         "assert_exchange_sent_to(window, who, &peers);",
         "assert_exchange_received_from(window, who, &peers);",
@@ -25555,33 +25558,36 @@ fn extract_ci_dep_detect_step(ci_content: &str) -> String {
 }
 
 #[test]
-fn test_ci_dep_detect_skips_dependency_only_cargo_changes_without_commit_message_gate() {
+fn test_ci_dep_detect_skips_dependency_only_package_changes_without_commit_message_gate() {
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
     let dep_detect_step = extract_ci_dep_detect_step(&ci_content);
     let dep_detect_step_live = strip_comment_lines(&dep_detect_step);
 
     assert!(
-        dep_detect_step_live.contains("HAS_CARGO_CHANGE=\"false\"")
+        dep_detect_step_live.contains("HAS_DEPENDENCY_CHANGE=\"false\"")
             && dep_detect_step_live.contains(
-                "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+                "Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_DEPENDENCY_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live.contains(
-                "fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+                "fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_DEPENDENCY_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live.contains(
-                "clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+                "clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_DEPENDENCY_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live.contains(
-                "clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_CARGO_CHANGE=\"true\" ;;"
+                "clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_DEPENDENCY_CHANGE=\"true\" ;;"
+            )
+            && dep_detect_step_live.contains(
+                "package.json|package-lock.json|clients/browser/package.json|clients/browser/package-lock.json) HAS_DEPENDENCY_CHANGE=\"true\" ;;"
             )
             && dep_detect_step_live
-                .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_CARGO_CHANGE\" = \"true\" ]; then"),
-        "dep-detect must skip changelog for dependency-only Cargo changes using file classification, \
+                .contains("if [ \"$NON_INTERNAL\" = \"false\" ] && [ \"$HAS_DEPENDENCY_CHANGE\" = \"true\" ]; then"),
+        "dep-detect must skip changelog for dependency-only Cargo and npm changes using file classification, \
          not commit message heuristics.\n\
          Required logic:\n\
-         1. Track whether root/native/fuzz/Fortress Cargo.toml/Cargo.lock changed (HAS_CARGO_CHANGE)\n\
-         2. Set skip_changelog=true when HAS_CARGO_CHANGE=true and NON_INTERNAL=false.\n\
+         1. Track whether a root/native/fuzz/Fortress/browser manifest or lock changed (HAS_DEPENDENCY_CHANGE)\n\
+         2. Set skip_changelog=true when HAS_DEPENDENCY_CHANGE=true and NON_INTERNAL=false.\n\
          This prevents merge commit messages from accidentally forcing the changelog gate."
     );
 

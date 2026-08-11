@@ -332,10 +332,11 @@ jobs:
         run: |
           set -euo pipefail
           SKIP_CHANGELOG="false"
-          HAS_CARGO_CHANGE="false"
+          HAS_DEPENDENCY_CHANGE="false"
 
           # Skip changelog when the change set is dependency-only:
-          # at least one Cargo.toml/Cargo.lock change and no non-internal files.
+          # at least one tracked package manifest/lock change and no
+          # non-internal files.
           # This is intentionally actor/message-agnostic so squash merges and
           # manual merges behave consistently.
           if [ -f changed-files.txt ]; then
@@ -344,12 +345,13 @@ jobs:
               # Dependency-only detection: skip paths that are internal to dev/CI (matches
               # is_internal_path() in scripts/check-doc-consistency.sh), plus known
               # dependency-maintenance files that can legitimately co-change with
-              # Cargo manifests/lockfiles (MSRV/toolchain/docs parity touchpoints).
+              # package manifests/lockfiles (MSRV/toolchain/docs parity touchpoints).
               case "$f" in
-                Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
-                fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
-                clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
-                clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_CARGO_CHANGE="true" ;;
+                Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
+                fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
+                clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
+                clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
+                package.json|package-lock.json|clients/browser/package.json|clients/browser/package-lock.json) HAS_DEPENDENCY_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs) ;;
@@ -365,7 +367,7 @@ jobs:
               esac
             done < changed-files.txt
 
-            if [ "$NON_INTERNAL" = "false" ] && [ "$HAS_CARGO_CHANGE" = "true" ]; then
+            if [ "$NON_INTERNAL" = "false" ] && [ "$HAS_DEPENDENCY_CHANGE" = "true" ]; then
               SKIP_CHANGELOG="true"
             fi
           fi

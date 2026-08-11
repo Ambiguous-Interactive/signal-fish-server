@@ -118,7 +118,8 @@ jobs:
     # The full suite above is the Linux proof. The other supported desktop
     # platforms run the smallest complete live mesh in addition to their build
     # and unit checks: two real client processes and the real server negotiate a
-    # direct host/host pair, then exchange on both SCTP data channels. Linux is
+    # corroborated direct host/host-or-prflx path, then exchange on both SCTP
+    # data channels. Linux is
     # deliberately absent because its full suite includes this exact selector.
     name: Native Client Build + Live WebRTC (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
