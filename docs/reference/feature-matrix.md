@@ -26,7 +26,7 @@ do not (see [the two invariants](../concepts/protocol-versions.md#the-two-invari
 | Metrics | both | `/metrics` and `/metrics/prom` always exposed; protect with `security.require_metrics_auth` + `security.metrics_auth_token` | Scrape `metricsSnapshot.connections.delivery_by_class` or `signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`; `TransportStatus` reports feed v3 transport counters |
 | Batching | both | `websocket.enable_batching` (default `true`); `websocket.batch_size`, `websocket.batch_interval_ms` | None (transparent to clients) |
 | TLS | both | `security.transport.tls.enabled` + `security.transport.tls.certificate_path` + `security.transport.tls.private_key_path` (optional `client_ca_cert_path`, `client_auth`) | Connect over `wss://`; present a client cert if `client_auth` requires it |
-| Token binding | both | `security.transport.token_binding.enabled` (+ `required`, `require_client_fingerprint`, `subprotocol`, `scheme`) | Negotiate the token-binding subprotocol; send token-bound frames (and an mTLS fingerprint if required) |
+| Token binding | both | `security.transport.token_binding.enabled` (+ `required`, `subprotocol`, `scheme`); `require_client_fingerprint` is reserved and rejected until verified peer-certificate extraction is available | Negotiate the token-binding subprotocol; send token-bound frames |
 | MessagePack game data | both | `protocol.enable_message_pack_game_data` (default `true`) | `Authenticate` with `game_data_format` of `message_pack`; decode the binary `GameDataBinary` carrier |
 
 ## Notes

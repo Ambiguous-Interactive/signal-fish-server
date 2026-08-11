@@ -1,20 +1,14 @@
 #![cfg_attr(not(test), deny(clippy::panic))]
 
-use axum::extract::Request;
-use axum::http::HeaderMap;
-use axum::middleware::{self, Next};
-use axum::response::Response;
 use axum::Router;
 use clap::Parser;
 use signal_fish_server::config;
 use signal_fish_server::database::DatabaseConfig;
 use signal_fish_server::logging;
-use signal_fish_server::security::{
-    ClientCertificateFingerprint, OriginPolicy, CLIENT_FINGERPRINT_HEADER_CANDIDATES,
-};
+use signal_fish_server::security::OriginPolicy;
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket;
-use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
@@ -237,7 +231,6 @@ async fn main() -> anyhow::Result<()> {
         .fallback(|| async {
             "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v1/metrics for metrics, /metrics/prom for Prometheus."
         })
-        .layer(middleware::from_fn(capture_client_fingerprint))
         .with_state(game_server)
         .layer(cors);
 
@@ -400,34 +393,6 @@ async fn wait_for_ctrl_c_shutdown(ctrl_c: impl std::future::Future<Output = std:
         tracing::error!(error = %err, "Failed to install Ctrl+C shutdown handler");
         std::future::pending::<()>().await;
     }
-}
-
-async fn capture_client_fingerprint(mut req: Request, next: Next) -> Result<Response, Infallible> {
-    if let Some(fingerprint) = extract_client_fingerprint(req.headers()) {
-        req.extensions_mut().insert(fingerprint);
-    }
-
-    Ok(next.run(req).await)
-}
-
-fn extract_client_fingerprint(headers: &HeaderMap) -> Option<ClientCertificateFingerprint> {
-    for header_name in CLIENT_FINGERPRINT_HEADER_CANDIDATES {
-        if let Some(value) = headers
-            .get(*header_name)
-            .and_then(|value| value.to_str().ok())
-        {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            return Some(ClientCertificateFingerprint {
-                fingerprint: Arc::<str>::from(trimmed.to_owned()),
-                source_header: header_name,
-            });
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]

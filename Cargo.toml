@@ -19,6 +19,12 @@ rust-version = "1.91.0"
 # packaged without this explicit exclude.
 exclude = ["clients/"]
 
+# Release workflows may be retried against older immutable sources. This
+# source-owned marker opts only new artifacts into the built-in TLS feature;
+# its absence preserves the feature set of historical releases.
+[package.metadata.signal-fish-release]
+built-in-tls = true
+
 [features]
 default = []
 legacy-fullmesh = ["matchbox_signaling"]
@@ -122,8 +128,17 @@ clap = { version = "4.6", features = ["derive", "env"] }
 matchbox_signaling = { version = "0.14", optional = true }
 
 # Optional: TLS support
-axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
-rustls = { version = "0.23", default-features = true, optional = true }
+axum-server = { version = "0.8", default-features = false, features = [
+    "tls-rustls-no-provider",
+], optional = true }
+# Pin the ring provider for official cross-platform artifacts. Its pre-generated
+# cross-target sources cover linux/arm/v7; the axum-server default selects
+# aws-lc-sys, whose bindgen fallback does not cover that published target.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+], optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
 
 [dev-dependencies]

@@ -71,6 +71,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--run-for-secs <S>` | `30` | Soft cap: exit 1 if the flag-driven success criteria are still unmet |
 | `--max-runtime-secs <S>` | `60` | Hard watchdog: abort with exit 4 no matter what (the no-hang guarantee) |
 | `--success-release-file <PATH>` | — | Test harness only: after success criteria hold, emit `success_criteria_met` and stay connected until PATH exists; the normal bounded exit behavior is unchanged when omitted |
+| `--require-ice-gathering-complete` | off | Signal-ledger harness only; requires `--success-release-file`. Add end-of-gathering for every live peer-connection generation to the success criteria. Ordinary gameplay barriers do not wait for unrelated candidate transactions after a selected path is connected |
 | `--protocol-version <V>` | `3` | `2` omits every v3 `Authenticate` field — a pure v2 client for mixed-room tests |
 | `--supported-topologies <LIST>` | `relay,host,mesh` | Comma-separated topologies advertised in v3 `Authenticate` |
 | `--supported-transports <LIST>` | `relay,webrtc` | Comma-separated transports advertised in v3 `Authenticate` |
@@ -242,7 +243,7 @@ side is honestly reported as `prflx` with no address. The family-agnostic baseli
 when both clients advertised non-empty host-only UDP candidate sets. CI runs the selector on Linux, Windows,
 and macOS.
 
-Scenario 7 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
+Scenario 8 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
 advertised, and the assertions require a host/host pair of concrete dialable IPv6 addresses plus the exact
 exchange on both channel labels. It shares the file's scenario-serialization guard, so it never overlaps another
 multi-process cell. Signaling still runs over the harness server's IPv4 loopback listener, so the IPv6 claim is
@@ -302,7 +303,7 @@ codegen). The matrix then builds the real server binary and runs
 `two_peer_mesh_exchanges_over_live_webrtc` on each host. That cell executes the platform's interface
 enumeration, UDP binding, ICE, DTLS, SCTP, child-process, and path semantics and requires a corroborated direct
 path plus an exact exchange on both data channels. Linux is absent from the matrix because the `interop` job
-runs the full seven-scenario suite,
+runs the full eight-scenario suite,
 including the same two-peer cell. Windows and macOS now carry a live transport proof, while the larger topology,
 fault-injection, TURN, browser, and IPv6 matrices remain Linux-specific evidence.
 

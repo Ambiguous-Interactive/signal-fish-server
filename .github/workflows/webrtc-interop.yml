@@ -7,11 +7,11 @@
 # brokered by the server's protocol v3 signaling. Scenarios cover the mesh
 # and host-star topologies, the crippled-ICE relay fallback, late-join
 # NewPeer pairing, mixed v2/v3 relay-floor rooms, and an IPv6-only pair
-# (scenario 7 of clients/native/tests/interop_e2e.rs). The interop server
+# (scenario 8 of clients/native/tests/interop_e2e.rs). The interop server
 # config disables TURN and configures zero STUN URLs, so the suite performs no
 # external network access.
 #
-# The full seven-scenario matrix runs on Linux. `native-platforms` adds the
+# The full eight-scenario matrix runs on Linux. `native-platforms` adds the
 # compile + unit-test proof and the smallest complete live WebRTC mesh on
 # Windows and macOS, so every supported desktop platform executes real ICE,
 # DTLS, SCTP, process, and socket behavior rather than stopping at linkage.

@@ -85,9 +85,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now select the unique first-parent commit that introduced the package version
   and reject shallow history or reused version boundaries instead of publishing
   a later tree under the prepared version.
+- Prevent both reference clients from busy-spinning while an outstanding Ping
+  is in its Pong drain grace. A connected peer's exact exchange debt now
+  survives later departure or transport loss instead of becoming vacuously
+  successful. Native, browser, and TURN interoperability runs also hold every
+  successful client at a shared release barrier. The native barrier waits for
+  completed gameplay criteria without coupling success to unrelated ICE
+  gathering after a selected path is already connected; signal-ledger tests
+  can opt into that stricter freeze independently. Browser runs preserve their
+  full post-success linger even when barrier release occurs after the soft run
+  deadline.
 
 ### Security
 
+- **Breaking:** Fail startup and `--validate-config` when TLS is enabled in
+  configuration but the server binary was compiled without the `tls` Cargo
+  feature, instead of silently serving plaintext HTTP. Newly prepared official
+  release archives and container images now compile built-in TLS explicitly,
+  while historical release retries preserve their source-owned feature set.
+  TURN's plaintext-signaling warning uses effective runtime TLS rather than
+  trusting configuration alone.
+- **Breaking:** Stop treating client-controlled forwarding headers as verified
+  mTLS fingerprints. The built-in listener now rejects
+  `require_client_fingerprint=true` until authenticated rustls peer-certificate
+  extraction is available; ordinary token binding and TLS client-certificate
+  authentication remain available independently (issue #344).
 - Enforce `security.cors_origins` on browser WebSocket upgrades at both
   `/v2/ws` and `/v3/ws`, using the same parsed policy as HTTP CORS responses.
   Disallowed origins now receive HTTP 403 and malformed allowlists fail

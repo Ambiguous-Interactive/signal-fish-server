@@ -213,6 +213,10 @@ async fn run_three_clients(
     let server = spawn_server(default_topology).await;
     // Holds the clients' captured stderr logs for failure diagnostics.
     let workdir = tempfile::tempdir().expect("create client workdir");
+    let success_release_file = workdir.path().join("release-successful-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
 
     let urls: Vec<String> = configs
         .iter()
@@ -230,6 +234,12 @@ async fn run_three_clients(
         .map(|(name, config)| config.relay.then(|| relay_payload_for(name)))
         .collect();
 
+    let creator_args: Vec<&str> = configs[0]
+        .extra_args
+        .iter()
+        .copied()
+        .chain(["--success-release-file", success_release_path])
+        .collect();
     let mut creator = spawn_configured(
         &configs[0],
         &ClientSpec {
@@ -240,7 +250,7 @@ async fn run_three_clients(
             peers: 3,
             exchange: configs[0].exchange,
             relay_payload: payloads[0].as_deref(),
-            extra_args: configs[0].extra_args,
+            extra_args: &creator_args,
         },
         workdir.path(),
     );
@@ -250,6 +260,12 @@ async fn run_three_clients(
 
     let mut clients: Vec<ClientProcess> = vec![creator];
     for (index, name) in CLIENT_NAMES.iter().enumerate().skip(1) {
+        let client_args: Vec<&str> = configs[index]
+            .extra_args
+            .iter()
+            .copied()
+            .chain(["--success-release-file", success_release_path])
+            .collect();
         clients.push(spawn_configured(
             &configs[index],
             &ClientSpec {
@@ -260,11 +276,39 @@ async fn run_three_clients(
                 peers: 3,
                 exchange: configs[index].exchange,
                 relay_payload: payloads[index].as_deref(),
-                extra_args: configs[index].extra_args,
+                extra_args: &client_args,
             },
             workdir.path(),
         ));
     }
+
+    // Hold every browser/native process at the same completed-criteria
+    // barrier. A locally enqueued SCTP send is not delivery, and WebSocket
+    // PlayerLeft has no ordering relationship with data-channel callbacks;
+    // releasing siblings one-by-one can therefore truncate a reliable tail or
+    // erase its obligation. No client may depart until all three have proved
+    // the full inbound/outbound matrix.
+    for client in &mut clients {
+        client
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+    }
+    // The normal post-success linger is 250 ms. Staying alive beyond it proves
+    // the browser page is actually held by the CLI release-file bridge rather
+    // than merely emitting the new event and following the old exit path.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    for client in &mut clients {
+        client.assert_running("while held at the shared success barrier");
+    }
+    for client in &clients {
+        assert!(
+            events_named(&client.events, "player_left").is_empty(),
+            "{} observed a departure before the success barrier;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+    }
+    std::fs::write(&success_release_file, b"release").expect("release successful clients together");
 
     for client in &mut clients {
         drain_expect_success(client).await;
@@ -624,8 +668,8 @@ fn assert_full_mesh_run(run: &ScenarioRun) {
         // 2 connected-pair events per client = 6 directed endpoints total.
         assert_pair_connected_exactly(run.window(index), who, &others);
         // Channel matrix: both labels from both peers = 12 receive events total.
-        assert_exchange_received_from(run.window(index), who, &others);
-        assert_exchange_sent_to(run.window(index), who, &others);
+        assert_exchange_received_from(&run.logs[index], who, &others);
+        assert_exchange_sent_to(&run.logs[index], who, &others);
         // Appendix G status + fan-out.
         assert_transport_status_true(&run.logs[index], who);
         assert_peer_status_fan_out(run.window(index), who, &others_true);
@@ -733,12 +777,12 @@ async fn host_star_n3_browser_client() {
     for (index, who) in CLIENT_NAMES.iter().enumerate().skip(1) {
         let host_only: BTreeSet<&str> = BTreeSet::from([host_id.as_str()]);
         assert_pair_connected_exactly(run.window(index), who, &host_only);
-        assert_exchange_received_from(run.window(index), who, &host_only);
-        assert_exchange_sent_to(run.window(index), who, &host_only);
+        assert_exchange_received_from(&run.logs[index], who, &host_only);
+        assert_exchange_sent_to(&run.logs[index], who, &host_only);
         assert_transport_status_true(&run.logs[index], who);
     }
-    assert_exchange_received_from(run.window(0), CLIENT_NAMES[0], &client_ids);
-    assert_exchange_sent_to(run.window(0), CLIENT_NAMES[0], &client_ids);
+    assert_exchange_received_from(&run.logs[0], CLIENT_NAMES[0], &client_ids);
+    assert_exchange_sent_to(&run.logs[0], CLIENT_NAMES[0], &client_ids);
     assert_transport_status_true(&run.logs[0], CLIENT_NAMES[0]);
 
     // The relay floor stays live in a star too.
@@ -813,8 +857,8 @@ async fn mesh_n3_browser_crippled_ice_fallback() {
         let who = CLIENT_NAMES[index];
         let other_only: BTreeSet<&str> = BTreeSet::from([run.ids[other].as_str()]);
         assert_pair_connected_exactly(run.window(index), who, &other_only);
-        assert_exchange_received_from(run.window(index), who, &other_only);
-        assert_exchange_sent_to(run.window(index), who, &other_only);
+        assert_exchange_received_from(&run.logs[index], who, &other_only);
+        assert_exchange_sent_to(&run.logs[index], who, &other_only);
         // >= 1 pair connected at the deadline => overall webrtc status true.
         assert_transport_status_true(&run.logs[index], who);
     }

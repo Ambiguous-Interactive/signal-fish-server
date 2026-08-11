@@ -367,6 +367,84 @@ export async function run(config: RunConfig): Promise<number> {
   }
 }
 
+/** Schedule one release-file probe without spinning while its Promise is live. */
+export function scheduleSuccessReleasePoll(
+  current: number | null,
+  inFlight: boolean,
+  now: number,
+): number | null {
+  return inFlight ? null : (current ?? now);
+}
+
+/** The outstanding Pong owns keepalive wake scheduling until it arrives. */
+export function nextKeepaliveWake(nextPingAt: number, pongDeadline: number | null): number {
+  return pongDeadline ?? nextPingAt;
+}
+
+/** A harness hold and its post-release linger supersede the soft deadline. */
+export function shouldDeferSuccessAtRunDeadline(
+  successReleaseEnabled: boolean,
+  successCriteriaReported: boolean,
+  successReleaseGranted: boolean,
+  lingerUntil: number | null,
+): boolean {
+  return (
+    successCriteriaReported &&
+    ((successReleaseEnabled && !successReleaseGranted) || lingerUntil !== null)
+  );
+}
+
+/** Monotonic logical exchange debt and evidence per connected peer. */
+export class ExchangeLedger {
+  private readonly obligations = new Set<string>();
+  private readonly sent = new Map<string, Set<string>>();
+  private readonly received = new Map<string, Set<string>>();
+
+  noteConnected(peer: string): void {
+    this.obligations.add(peer);
+  }
+
+  hasSent(peer: string, label: string): boolean {
+    return this.sent.get(peer)?.has(label) === true;
+  }
+
+  noteSent(peer: string, label: string): void {
+    let labels = this.sent.get(peer);
+    if (labels === undefined) {
+      labels = new Set();
+      this.sent.set(peer, labels);
+    }
+    labels.add(label);
+  }
+
+  noteReceived(peer: string, label: string): void {
+    let labels = this.received.get(peer);
+    if (labels === undefined) {
+      labels = new Set();
+      this.received.set(peer, labels);
+    }
+    labels.add(label);
+  }
+
+  unmetCriteria(): string[] {
+    const unmet: string[] = [];
+    for (const peer of this.obligations) {
+      const directions: Array<[string, ReadonlySet<string> | undefined]> = [
+        ['sent to', this.sent.get(peer)],
+        ['received from', this.received.get(peer)],
+      ];
+      for (const [direction, labels] of directions) {
+        const complete =
+          labels !== undefined && labels.has(RELIABLE_LABEL) && labels.has(UNRELIABLE_LABEL);
+        if (!complete) {
+          unmet.push(`exchange incomplete (${direction} ${peer})`);
+        }
+      }
+    }
+    return unmet;
+  }
+}
+
 /** Single-chain state machine driving the session (see module docs). */
 class Orchestrator {
   private readonly config: RunConfig;
@@ -419,14 +497,17 @@ class Orchestrator {
   private relaySent = false;
   private readonly relayReceivedFrom = new Set<string>();
   private readonly peerStatusFrom = new Set<string>();
-  private readonly sentLabels = new Map<string, Set<string>>();
-  private readonly receivedLabels = new Map<string, Set<string>>();
+  private readonly exchangeLedger = new ExchangeLedger();
   private readonly pendingExchangePeers = new Set<string>();
   private readonly reportedExchangeDiagnostics = new Set<string>();
   private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
   private lingerUntil: number | null = null;
+  private successCriteriaReported = false;
+  private successReleaseGranted = false;
+  private successReleasePollAt: number | null = null;
+  private successReleasePollInFlight = false;
   /** Next keepalive `Ping` send (the mandatory client keepalive contract). */
   private nextPingAt = 0;
   /**
@@ -490,12 +571,7 @@ class Orchestrator {
           if (!this.engine.isCurrentGeneration(peer, generation)) {
             return;
           }
-          let labels = this.receivedLabels.get(peer);
-          if (labels === undefined) {
-            labels = new Set();
-            this.receivedLabels.set(peer, labels);
-          }
-          labels.add(label);
+          this.exchangeLedger.noteReceived(peer, label);
           emit({ event: 'channel_message', peer, label, text });
         });
       },
@@ -845,7 +921,13 @@ class Orchestrator {
 
   /** Earliest pending timer (the run deadline at the latest). */
   private nextWake(): number {
-    let wake = this.runDeadline;
+    const deferringRunDeadline = shouldDeferSuccessAtRunDeadline(
+      this.config.successReleaseEnabled,
+      this.successCriteriaReported,
+      this.successReleaseGranted,
+      this.lingerUntil,
+    );
+    let wake = deferringRunDeadline ? Number.POSITIVE_INFINITY : this.runDeadline;
     if (!this.relaySent && this.relaySendAt !== null) {
       wake = Math.min(wake, this.relaySendAt);
     }
@@ -858,10 +940,10 @@ class Orchestrator {
     if (this.lingerUntil !== null) {
       wake = Math.min(wake, this.lingerUntil);
     }
-    wake = Math.min(wake, this.nextPingAt);
-    if (this.pongDeadline !== null) {
-      wake = Math.min(wake, this.pongDeadline);
+    if (!this.successReleasePollInFlight && this.successReleasePollAt !== null) {
+      wake = Math.min(wake, this.successReleasePollAt);
     }
+    wake = Math.min(wake, nextKeepaliveWake(this.nextPingAt, this.pongDeadline));
     return wake;
   }
 
@@ -929,6 +1011,10 @@ class Orchestrator {
       this.p2pDeadline = null;
     }
 
+    if (this.successReleasePollAt !== null && now >= this.successReleasePollAt) {
+      this.pollSuccessRelease();
+    }
+
     this.armSuccessLinger(now);
     if (this.lingerUntil !== null && now >= this.lingerUntil) {
       // Criteria can regress during the linger (an authoritative plan or a
@@ -941,7 +1027,13 @@ class Orchestrator {
       this.lingerUntil = null;
     }
 
-    if (now >= this.runDeadline) {
+    const deferringRunDeadline = shouldDeferSuccessAtRunDeadline(
+      this.config.successReleaseEnabled,
+      this.successCriteriaReported,
+      this.successReleaseGranted,
+      this.lingerUntil,
+    );
+    if (now >= this.runDeadline && !deferringRunDeadline) {
       if (this.criteriaMet()) {
         this.finish(EXIT_SUCCESS);
         return;
@@ -955,9 +1047,66 @@ class Orchestrator {
   }
 
   private armSuccessLinger(now: number): void {
-    if (this.lingerUntil === null && this.criteriaMet()) {
+    if (!this.criteriaMet()) {
+      if (
+        this.config.successReleaseEnabled &&
+        this.successCriteriaReported &&
+        !this.successReleaseGranted
+      ) {
+        this.lingerUntil = null;
+        this.successReleasePollAt = scheduleSuccessReleasePoll(
+          this.successReleasePollAt,
+          this.successReleasePollInFlight,
+          now,
+        );
+      }
+      return;
+    }
+    if (this.config.successReleaseEnabled && !this.successCriteriaReported) {
+      emit({ event: 'success_criteria_met' });
+      this.successCriteriaReported = true;
+    }
+    if (this.config.successReleaseEnabled && !this.successReleaseGranted) {
+      this.lingerUntil = null;
+      this.successReleasePollAt = scheduleSuccessReleasePoll(
+        this.successReleasePollAt,
+        this.successReleasePollInFlight,
+        now,
+      );
+      return;
+    }
+    this.successReleasePollAt = null;
+    if (this.lingerUntil === null) {
       this.lingerUntil = now + EXIT_LINGER_MS;
     }
+  }
+
+  private pollSuccessRelease(): void {
+    if (this.successReleasePollInFlight || this.successReleaseGranted) {
+      return;
+    }
+    const probe = window.__sf_success_released;
+    if (probe === undefined) {
+      throw FatalError.protocol('success-release bridge is unavailable');
+    }
+    this.successReleasePollInFlight = true;
+    this.successReleasePollAt = null;
+    void probe()
+      .then((released) => {
+        this.enqueue(async () => {
+          this.successReleasePollInFlight = false;
+          this.successReleaseGranted = released;
+          if (!released) {
+            this.successReleasePollAt = Date.now() + 100;
+          }
+        });
+      })
+      .catch((error: unknown) => {
+        this.enqueue(async () => {
+          this.successReleasePollInFlight = false;
+          this.fail(FatalError.protocol(`success-release probe failed: ${describe(error)}`));
+        });
+      });
   }
 
   // -------------------------------------------------------------------------
@@ -1330,8 +1479,6 @@ class Orchestrator {
     this.connectedPairs.delete(peer);
     this.pairConnectedReported.delete(peer);
     this.peerStatusFrom.delete(peer);
-    this.sentLabels.delete(peer);
-    this.receivedLabels.delete(peer);
     this.pendingExchangePeers.delete(peer);
     this.reportedExchangeDiagnostics.delete(peer);
     this.pendingSignals.delete(peer);
@@ -1341,8 +1488,6 @@ class Orchestrator {
   /** Tear down an unusable P2P link while retaining its planned obligation. */
   private handlePeerTransportLoss(peer: string): void {
     this.connectedPairs.delete(peer);
-    this.sentLabels.delete(peer);
-    this.receivedLabels.delete(peer);
     this.pendingExchangePeers.delete(peer);
     this.reportedExchangeDiagnostics.delete(peer);
     this.pendingSignals.delete(peer);
@@ -1442,6 +1587,7 @@ class Orchestrator {
       emit({ event: 'p2p_pair_connected', peer });
     }
     if (this.config.exchange) {
+      this.exchangeLedger.noteConnected(peer);
       this.pendingExchangePeers.add(peer);
       this.flushPendingExchangeSends();
     }
@@ -1471,8 +1617,7 @@ class Orchestrator {
   private trySendExchange(peer: string): boolean {
     let complete = true;
     for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
-      const sent = this.sentLabels.get(peer);
-      if (sent?.has(label)) {
+      if (this.exchangeLedger.hasSent(peer, label)) {
         continue;
       }
       const channel = this.engine.channel(peer, label);
@@ -1509,12 +1654,7 @@ class Orchestrator {
         complete = false;
         continue;
       }
-      let labels = this.sentLabels.get(peer);
-      if (labels === undefined) {
-        labels = new Set();
-        this.sentLabels.set(peer, labels);
-      }
-      labels.add(label);
+      this.exchangeLedger.noteSent(peer, label);
       emit({ event: 'channel_message_sent', peer, label, text });
     }
     return complete;
@@ -1683,24 +1823,9 @@ class Orchestrator {
       }
     }
     if (this.config.exchange) {
-      // Exchange obligations cover the expected peers whose pair actually
-      // connected (a never-connected pair owes no channel traffic).
-      for (const peer of this.expectedPeers) {
-        if (!this.connectedPairs.has(peer)) {
-          continue;
-        }
-        const directions: Array<[string, Set<string> | undefined]> = [
-          ['sent to', this.sentLabels.get(peer)],
-          ['received from', this.receivedLabels.get(peer)],
-        ];
-        for (const [direction, labels] of directions) {
-          const complete =
-            labels !== undefined && labels.has(RELIABLE_LABEL) && labels.has(UNRELIABLE_LABEL);
-          if (!complete) {
-            unmet.push(`exchange incomplete (${direction} ${peer})`);
-          }
-        }
-      }
+      // A connected peer's logical debt survives later membership or physical
+      // transport teardown. Never-connected fallback peers create no debt.
+      unmet.push(...this.exchangeLedger.unmetCriteria());
     }
     if (this.config.relayPayload !== null) {
       if (!this.relaySent) {

@@ -257,6 +257,7 @@ fn client_args(
         CLIENT_MAX_RUNTIME_SECS.to_string(),
         "--success-release-file".to_string(),
         success_release_file.to_string_lossy().into_owned(),
+        "--require-ice-gathering-complete".to_string(),
     ];
     if scenario.crippled_ordinal() == Some(ordinal) {
         args.push("--cripple-ice".to_string());
