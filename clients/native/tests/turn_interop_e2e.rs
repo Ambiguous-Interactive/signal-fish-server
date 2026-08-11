@@ -186,7 +186,9 @@ fn assert_relay_floor(run: &TurnRun, index: usize) {
 }
 
 fn assert_exact_channel_ledger(run: &TurnRun, index: usize) {
-    let events = scenario_window(&run.logs[index]);
+    // SCTP callbacks and WebSocket lifecycle events have no shared ordering;
+    // the barrier makes the complete drained log the exact exchange ledger.
+    let events = &run.logs[index];
     let peer = run.ids[1 - index].as_str();
     for event_name in ["channel_message_sent", "channel_message"] {
         let entries = events_named(events, event_name);

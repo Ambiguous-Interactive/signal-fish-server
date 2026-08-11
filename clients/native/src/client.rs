@@ -261,18 +261,61 @@ fn is_coordinated_p2p_rebuild_attempt(
     rebuild_configured && retry_count > 0 && attempt == retry_count
 }
 
-fn exchange_label_complete(
-    expected: &BTreeSet<PlayerId>,
-    sent: &BTreeMap<PlayerId, BTreeSet<String>>,
-    received: &BTreeMap<PlayerId, BTreeSet<String>>,
-    label: &str,
-) -> bool {
-    !expected.is_empty()
-        && expected.iter().all(|peer| {
-            [sent.get(peer), received.get(peer)]
-                .into_iter()
-                .all(|labels| labels.is_some_and(|labels| labels.contains(label)))
-        })
+/// Logical exchange evidence is monotonic across physical transport and room
+/// membership teardown. A fully opened pair creates a debt; only observing
+/// both labels in both directions satisfies it.
+#[derive(Default)]
+struct ExchangeLedger {
+    obligations: BTreeSet<PlayerId>,
+    sent: BTreeMap<PlayerId, BTreeSet<String>>,
+    received: BTreeMap<PlayerId, BTreeSet<String>>,
+}
+
+impl ExchangeLedger {
+    fn note_connected(&mut self, peer: PlayerId) {
+        self.obligations.insert(peer);
+    }
+
+    fn has_sent(&self, peer: PlayerId, label: &str) -> bool {
+        self.sent
+            .get(&peer)
+            .is_some_and(|labels| labels.contains(label))
+    }
+
+    fn note_sent(&mut self, peer: PlayerId, label: &str) {
+        self.sent.entry(peer).or_default().insert(label.to_string());
+    }
+
+    fn note_received(&mut self, peer: PlayerId, label: String) {
+        self.received.entry(peer).or_default().insert(label);
+    }
+
+    fn label_complete(&self, expected: &BTreeSet<PlayerId>, label: &str) -> bool {
+        !expected.is_empty()
+            && expected.iter().all(|peer| {
+                [self.sent.get(peer), self.received.get(peer)]
+                    .into_iter()
+                    .all(|labels| labels.is_some_and(|labels| labels.contains(label)))
+            })
+    }
+
+    fn unmet_criteria(&self) -> Vec<String> {
+        let mut unmet = Vec::new();
+        for peer in &self.obligations {
+            for (direction, labels) in [
+                ("sent to", self.sent.get(peer)),
+                ("received from", self.received.get(peer)),
+            ] {
+                let complete = labels.is_some_and(|labels| {
+                    labels.contains(RELIABLE_LABEL) && labels.contains(UNRELIABLE_LABEL)
+                });
+                if !complete {
+                    unmet.push(format!("exchange incomplete ({direction} {peer})"));
+                }
+            }
+        }
+        unmet
+    }
 }
 
 fn note_current_pair_connected(
@@ -465,8 +508,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         relay_sent: false,
         relay_received_from: BTreeSet::new(),
         peer_status_from: BTreeSet::new(),
-        sent_labels: BTreeMap::new(),
-        received_labels: BTreeMap::new(),
+        exchange_ledger: ExchangeLedger::default(),
         exchange_released: cli.exchange_release_file.is_none(),
         exchange_ready_reported: false,
         exchange_release_poll_at: None,
@@ -952,9 +994,8 @@ struct Orchestrator<'a> {
     relay_received_from: BTreeSet<PlayerId>,
     /// Peers whose `PeerTransportStatus` fan-out we observed (any state).
     peer_status_from: BTreeSet<PlayerId>,
-    /// Exchange bookkeeping: channel labels sent/received per peer.
-    sent_labels: BTreeMap<PlayerId, BTreeSet<String>>,
-    received_labels: BTreeMap<PlayerId, BTreeSet<String>>,
+    /// Monotonic logical exchange debt and evidence per connected peer.
+    exchange_ledger: ExchangeLedger,
     /// Whether an optional harness gate has released the application exchange.
     exchange_released: bool,
     /// Whether the stable all-planned-pairs-open barrier event was emitted.
@@ -1479,21 +1520,14 @@ impl Orchestrator<'_> {
     fn exchange_reliable_gate_ready(&self) -> bool {
         self.cli.unreliable_exchange_release_file.is_some()
             && self.all_expected_pairs_connected()
-            && exchange_label_complete(
-                &self.expected_peers,
-                &self.sent_labels,
-                &self.received_labels,
-                RELIABLE_LABEL,
-            )
+            && self
+                .exchange_ledger
+                .label_complete(&self.expected_peers, RELIABLE_LABEL)
     }
 
     async fn send_exchange(&mut self, peer: PlayerId, labels: &[&str]) -> Result<(), FatalError> {
         for &label in labels {
-            if self
-                .sent_labels
-                .get(&peer)
-                .is_some_and(|labels| labels.contains(label))
-            {
+            if self.exchange_ledger.has_sent(peer, label) {
                 continue;
             }
             let Some(channel) = self.engine.channel(peer, label) else {
@@ -1508,10 +1542,7 @@ impl Orchestrator<'_> {
             channel.send_text(&text).await.map_err(|error| {
                 FatalError::connection(format!("send on {label} to {peer} failed: {error}"))
             })?;
-            self.sent_labels
-                .entry(peer)
-                .or_default()
-                .insert(label.to_string());
+            self.exchange_ledger.note_sent(peer, label);
             emit(&Event::ChannelMessageSent {
                 peer,
                 label: label.to_string(),
@@ -1938,10 +1969,7 @@ impl Orchestrator<'_> {
             EngineEvent::ChannelMessage {
                 peer, label, text, ..
             } => {
-                self.received_labels
-                    .entry(peer)
-                    .or_default()
-                    .insert(label.clone());
+                self.exchange_ledger.note_received(peer, label.clone());
                 emit(&Event::ChannelMessage { peer, label, text });
             }
         }
@@ -1954,8 +1982,6 @@ impl Orchestrator<'_> {
         self.connected_pairs.remove(&peer);
         self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
-        self.sent_labels.remove(&peer);
-        self.received_labels.remove(&peer);
         self.pending_signals.remove(&peer);
         if let Err(error) = self.engine.remove_peer(peer).await {
             let message = format!(
@@ -2102,8 +2128,9 @@ impl Orchestrator<'_> {
         self.p2p_reconnected_pairs.remove(&peer);
         self.connected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
-        self.sent_labels.remove(&peer);
-        self.received_labels.remove(&peer);
+        // Sent/received labels are logical exchange evidence, not physical
+        // generation state. Retrying the transport cannot erase either side
+        // of an already observed debt.
         self.pending_signals.remove(&peer);
         self.pending_pair_directives.remove(&peer);
         self.engine.remove_peer(peer).await.map_err(|error| {
@@ -2168,8 +2195,6 @@ impl Orchestrator<'_> {
         self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
-        self.sent_labels.remove(&peer);
-        self.received_labels.remove(&peer);
         self.pending_signals.remove(&peer);
         if let Err(error) = self.engine.remove_peer(peer).await {
             tracing::debug!(%peer, %error, "failed to close removed peer connection");
@@ -2307,6 +2332,9 @@ impl Orchestrator<'_> {
         if coordinated_reconnect {
             self.p2p_reconnected_pairs.insert(peer);
             emit(&Event::P2pPairReconnected { peer });
+        }
+        if self.cli.exchange {
+            self.exchange_ledger.note_connected(peer);
         }
         if self.cli.exchange && self.exchange_released {
             let labels = if self.unreliable_exchange_released {
@@ -2589,30 +2617,11 @@ impl Orchestrator<'_> {
             }
         }
         if self.cli.exchange {
-            // Exchange obligations cover the expected peers whose pair
-            // actually connected: in a partially connected session (e.g. an
-            // ICE-crippled sibling) a never-connected pair owes no channel
-            // traffic — its failure is reported through the transport status,
-            // not by hanging the exchange. Fully connected sessions are
-            // unchanged: status resolution requires every pair connected, so
-            // all expected peers carry obligations by exit time.
-            for peer in self
-                .expected_peers
-                .iter()
-                .filter(|peer| self.connected_pairs.contains(*peer))
-            {
-                for (direction, labels) in [
-                    ("sent to", self.sent_labels.get(peer)),
-                    ("received from", self.received_labels.get(peer)),
-                ] {
-                    let complete = labels.is_some_and(|labels| {
-                        labels.contains(RELIABLE_LABEL) && labels.contains(UNRELIABLE_LABEL)
-                    });
-                    if !complete {
-                        unmet.push(format!("exchange incomplete ({direction} {peer})"));
-                    }
-                }
-            }
+            // A fully opened pair creates a monotonic logical debt. A peer's
+            // later departure or transport loss cannot make an incomplete
+            // exchange vacuously successful. Never-connected fallback peers
+            // create no debt and remain governed by transport status.
+            unmet.extend(self.exchange_ledger.unmet_criteria());
         }
         if self.cli.relay_payload.is_some() {
             if !self.relay_sent {
@@ -2785,21 +2794,23 @@ mod tests {
         apply_selected_pair_probes_before_run_deadline, arm_pair_window, authoritative_peer_delta,
         automatic_p2p_retry_count, changed_transport_status, clear_departed_membership_plan,
         connection_targets_for_generation, consume_join_accountability_preface,
-        direct_plan_rejection_message, exchange_label_complete, harness_aware_base_wake,
-        is_coordinated_p2p_rebuild_attempt, is_current_session_generation,
-        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
-        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
-        reject_unsupported_direct_plan_with, require_finalized_membership_plan,
-        requires_authoritative_finalization_plan, resolve_drop_ice_from,
-        restore_reconnected_member, retryable_missing_peers, selected_pair_evidence_deadline,
-        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
-        should_defer_success_at_run_deadline, should_report_retry_gap,
-        should_resolve_connected_pair, take_ready_selected_pair_probes, try_buffer_planned_signal,
-        validate_json_negotiated_server_message, validate_p2p_rebuild_retry_count, PairGeneration,
-        SelectedPairEvidence, SelectedPairProbeDisposition, EXIT_PROTOCOL_ERROR,
-        MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL, SELECTED_PAIR_POLL,
+        direct_plan_rejection_message, harness_aware_base_wake, is_coordinated_p2p_rebuild_attempt,
+        is_current_session_generation, is_terminal_peer_connection_state,
+        needs_ice_gathering_marker, negotiated_version_from, next_handshake_message,
+        note_current_pair_connected, p2p_retry_delay, reject_unsupported_direct_plan_with,
+        require_finalized_membership_plan, requires_authoritative_finalization_plan,
+        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
+        selected_pair_evidence_deadline, session_plan_peer_ids,
+        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
+        should_report_retry_gap, should_resolve_connected_pair, take_ready_selected_pair_probes,
+        try_buffer_planned_signal, validate_json_negotiated_server_message,
+        validate_p2p_rebuild_retry_count, ExchangeLedger, PairGeneration, SelectedPairEvidence,
+        SelectedPairProbeDisposition, EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER,
+        MAX_PENDING_SIGNALS_TOTAL, SELECTED_PAIR_POLL,
     };
-    use crate::engine::{SelectedCandidatePair, SelectedPairProbeResult, RELIABLE_LABEL};
+    use crate::engine::{
+        SelectedCandidatePair, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
+    };
     use tokio_tungstenite::tungstenite::{Bytes, Message};
     use webrtc::peer_connection::RTCPeerConnectionState;
 
@@ -3368,29 +3379,35 @@ mod tests {
         let left = PlayerId::from_u128(2);
         let right = PlayerId::from_u128(3);
         let expected = BTreeSet::from([left, right]);
-        let reliable = BTreeSet::from([RELIABLE_LABEL.to_string()]);
-        let sent = BTreeMap::from([(left, reliable.clone()), (right, reliable.clone())]);
-        let mut received = BTreeMap::from([(left, reliable.clone())]);
+        let mut ledger = ExchangeLedger::default();
+        for peer in [left, right] {
+            ledger.note_sent(peer, RELIABLE_LABEL);
+        }
+        ledger.note_received(left, RELIABLE_LABEL.to_string());
 
-        assert!(!exchange_label_complete(
-            &expected,
-            &sent,
-            &received,
-            RELIABLE_LABEL
-        ));
-        received.insert(right, reliable);
-        assert!(exchange_label_complete(
-            &expected,
-            &sent,
-            &received,
-            RELIABLE_LABEL
-        ));
-        assert!(!exchange_label_complete(
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            RELIABLE_LABEL
-        ));
+        assert!(!ledger.label_complete(&expected, RELIABLE_LABEL));
+        ledger.note_received(right, RELIABLE_LABEL.to_string());
+        assert!(ledger.label_complete(&expected, RELIABLE_LABEL));
+        assert!(!ledger.label_complete(&BTreeSet::new(), RELIABLE_LABEL));
+    }
+
+    #[test]
+    fn connected_departed_peer_exchange_debt_remains_latched() {
+        let departed = PlayerId::from_u128(2);
+        let mut ledger = ExchangeLedger::default();
+        assert!(ledger.unmet_criteria().is_empty());
+        ledger.note_connected(departed);
+        ledger.note_sent(departed, RELIABLE_LABEL);
+        ledger.note_received(departed, RELIABLE_LABEL.to_string());
+        assert_eq!(
+            ledger.unmet_criteria().len(),
+            2,
+            "membership/transport teardown must not erase either missing unreliable direction"
+        );
+
+        ledger.note_sent(departed, UNRELIABLE_LABEL);
+        ledger.note_received(departed, UNRELIABLE_LABEL.to_string());
+        assert!(ledger.unmet_criteria().is_empty());
     }
 
     #[test]

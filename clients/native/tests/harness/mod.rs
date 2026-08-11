@@ -464,6 +464,20 @@ pub struct ClientSpec<'a> {
 /// Spawn one reference-client binary; its stderr goes to a file under
 /// `workdir`, stdout is piped for JSONL event reading.
 pub fn spawn_client(spec: &ClientSpec<'_>, workdir: &Path) -> ClientProcess {
+    spawn_client_with_windows(spec, workdir, 45, 90)
+}
+
+/// Spawn a native client with explicit soft and hard deadlines.
+///
+/// Most scenarios use [`spawn_client`]'s generous CI ceilings. Failure-path
+/// regressions use shorter windows so a deliberately unmet criterion remains
+/// deterministic without adding tens of seconds to every interop run.
+pub fn spawn_client_with_windows(
+    spec: &ClientSpec<'_>,
+    workdir: &Path,
+    run_for_secs: u64,
+    max_runtime_secs: u64,
+) -> ClientProcess {
     let stderr_path = workdir.join(format!("client-{}-stderr.log", spec.name));
     let stderr_file = std::fs::File::create(&stderr_path).expect("create client stderr capture");
 
@@ -480,9 +494,9 @@ pub fn spawn_client(spec: &ClientSpec<'_>, workdir: &Path) -> ClientProcess {
         // Soft/hard windows sized for slow CI machines; clients exit as soon
         // as their criteria are met, so these are ceilings, not durations.
         .arg("--run-for-secs")
-        .arg("45")
+        .arg(run_for_secs.to_string())
         .arg("--max-runtime-secs")
-        .arg("90");
+        .arg(max_runtime_secs.to_string());
     match spec.join_code {
         Some(code) => {
             command.arg("--join-code").arg(code);
@@ -610,6 +624,18 @@ impl ClientProcess {
                 self.diagnostics()
             ),
         }
+    }
+
+    /// Terminate and reap a client to drive real sibling-departure paths.
+    pub async fn terminate(&mut self) {
+        let mut child = self.child.take().expect("client process already reaped");
+        child
+            .start_kill()
+            .unwrap_or_else(|error| panic!("failed to terminate client {}: {error}", self.name));
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap_or_else(|_| panic!("client {} did not terminate in time", self.name))
+            .unwrap_or_else(|error| panic!("failed to reap client {}: {error}", self.name));
     }
 
     /// Read events until one named `event_name` arrives; panics (with

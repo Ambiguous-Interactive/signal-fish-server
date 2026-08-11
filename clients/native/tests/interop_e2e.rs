@@ -53,7 +53,11 @@
 //!    side may be reported as peer-reflexive when rtc omits its dynamically
 //!    learned registry entry; with no STUN or TURN configured, that remains a
 //!    direct path. CI runs this exact selector on Linux, Windows, and macOS.
-//! 7. `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` — the only cell whose
+//! 7. `departed_connected_peer_keeps_unreliable_exchange_debt` — withholds the
+//!    unreliable half after both clients prove reliable exchange, terminates
+//!    one connected peer, and proves the survivor fails closed with the
+//!    departed peer's logical exchange debt still named.
+//! 8. `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` — the only cell whose
 //!    live path is IPv6. webrtc 0.20 turns each application-supplied UDP bind
 //!    directly into a host candidate, so the bound family decides the
 //!    negotiated family; every other cell leaves `--ip-family any`, and a
@@ -81,8 +85,8 @@ use std::time::Duration;
 
 use harness::{
     advertised_candidate_addresses, advertised_candidates, event_tags, events_named, player_id_of,
-    scenario_window, single_event, spawn_client, spawn_server, str_field, ClientProcess,
-    ClientSpec, CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
+    scenario_window, single_event, spawn_client, spawn_client_with_windows, spawn_server,
+    str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
 };
 use serde_json::{json, Value};
 use signal_fish_reference_native::engine::{local_udp_addrs, EngineSettings, IpFamily};
@@ -90,32 +94,33 @@ use uuid::Uuid;
 
 /// Serializes the multi-process scenarios (see module docs).
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-/// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
-/// the `#[tokio::test]` functions in this file).
-const SCENARIO_COUNT: u64 = 7;
-/// Generous ceiling for ONE scenario in a fully degraded run, sized to the
-/// worst-case shape — scenario 4's TWO client waves:
+/// Fully degraded ceiling for scenario 4's TWO client waves:
 ///  - server spawn: up to 3 attempts x 15 s health deadline each (see
 ///    `spawn_server`) = 45 s;
 ///  - first wave (incumbents + seat-holder): every process is hard-bounded
 ///    by its `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
 ///  - joiner wave (spawned only after the pre-join gates, i.e. while the
 ///    first wave still lives): bounded by its own 90 s watchdog = 90 s.
-///
-/// 45 + 90 + 90 = 225 s, with the remaining 15 s absorbing drain/reap
-/// overhead. Any single blocking harness await still panics at its own
-/// deadline (<= `CLIENT_EXIT_TIMEOUT`), releasing the lock via unwind.
-const SCENARIO_CEILING: Duration = Duration::from_secs(240);
-/// Worst case for the LAST test in the queue: every other scenario runs to
-/// its completion (or its panic deadline) first (6 x 240 s = 1,440 s).
-const SERIAL_ACQUIRE_TIMEOUT: Duration =
-    Duration::from_secs(SCENARIO_CEILING.as_secs() * (SCENARIO_COUNT - 1));
+const LATE_JOIN_SCENARIO_CEILING_SECS: u64 = 45 + 90 + 90;
+/// Each of the six ordinary one-wave scenarios is bounded by server startup
+/// plus one 90 s client watchdog; the departure regression uses 30 s clients.
+const STANDARD_SCENARIO_CEILING_SECS: u64 = 45 + 90;
+const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
+/// A test may queue behind every other test. Bounding that wait by the entire
+/// suite's real composition remains conservative while keeping a degraded run
+/// within the workflow's 30-minute job policy (unlike multiplying the unique
+/// two-wave ceiling by all eight scenarios).
+const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
+    LATE_JOIN_SCENARIO_CEILING_SECS
+        + 6 * STANDARD_SCENARIO_CEILING_SECS
+        + DEPARTURE_SCENARIO_CEILING_SECS,
+);
 
 const RELIABLE: &str = "reliable";
 const UNRELIABLE: &str = "unreliable";
 const CLIENT_NAMES: [&str; 3] = ["c0", "c1", "c2"];
 const TWO_CLIENT_NAMES: [&str; 2] = ["c0", "c1"];
-/// Scenario 7 only: bind IPv6 exclusively, so an IPv6 host candidate is the
+/// Scenario 8 only: bind IPv6 exclusively, so an IPv6 host candidate is the
 /// only thing this client can advertise. (No `--disable-mdns`: rtc 0.20's
 /// default multicast-DNS mode is query-only, so native host candidates are
 /// raw addresses either way.)
@@ -1638,7 +1643,7 @@ async fn mixed_v2_v3_n3_relay_floor_with_reference_client() {
 /// The precondition applies the client's OWN selection rule rather than an
 /// approximation of it, so "the harness says yes but the client says no" is
 /// impossible; it then binds one of the resulting addresses to prove the
-/// socket layer agrees with the interface table. Scenario 7's whole claim is
+/// socket layer agrees with the interface table. Scenario 8's whole claim is
 /// that a live path ran over IPv6, so a silent skip would report a green lane
 /// that proved nothing.
 fn require_ipv6_ice_interface() {
@@ -2122,6 +2127,92 @@ async fn two_peer_mesh_exchanges_over_live_webrtc() {
         assert_exchange_received_from(&run.logs[index], who, &peers);
         assert_transport_status_true(&run.logs[index], who);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn departed_connected_peer_keeps_unreliable_exchange_debt() {
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("mesh").await;
+    let workdir = tempfile::tempdir().expect("create client workdir");
+    let exchange_release_file = workdir.path().join("release-reliable-exchange");
+    let unreliable_release_file = workdir.path().join("hold-unreliable-exchange");
+    std::fs::write(&exchange_release_file, b"release").expect("pre-release the reliable exchange");
+    let exchange_release_path = exchange_release_file
+        .to_str()
+        .expect("temporary exchange-release path is UTF-8");
+    let unreliable_release_path = unreliable_release_file
+        .to_str()
+        .expect("temporary unreliable-release path is UTF-8");
+    let args = [
+        "--exchange-release-file",
+        exchange_release_path,
+        "--unreliable-exchange-release-file",
+        unreliable_release_path,
+        "--p2p-timeout-secs",
+        "5",
+    ];
+    let url = server.v3_ws_url();
+
+    let mut survivor = spawn_client_with_windows(
+        &ClientSpec {
+            name: TWO_CLIENT_NAMES[0],
+            server_url: &url,
+            game_name: "interop-departed-exchange-debt",
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &args,
+        },
+        workdir.path(),
+        15,
+        30,
+    );
+    let created = survivor.await_event("room_created", EVENT_TIMEOUT).await;
+    let room_code = str_field(&created, "room_code").to_string();
+    let mut departing = spawn_client_with_windows(
+        &ClientSpec {
+            name: TWO_CLIENT_NAMES[1],
+            server_url: &url,
+            game_name: "interop-departed-exchange-debt",
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &args,
+        },
+        workdir.path(),
+        15,
+        30,
+    );
+
+    survivor
+        .await_event("exchange_reliable_ready", CLIENT_EXIT_TIMEOUT)
+        .await;
+    departing
+        .await_event("exchange_reliable_ready", CLIENT_EXIT_TIMEOUT)
+        .await;
+    let departed_id = player_id_of(&departing.events, &departing.name);
+    departing.terminate().await;
+    survivor.await_event("player_left", EVENT_TIMEOUT).await;
+
+    let exit_code = survivor.drain_to_exit(Duration::from_secs(15)).await;
+    assert_eq!(
+        exit_code,
+        1,
+        "the survivor must fail closed when a connected peer departs before unreliable exchange;\n{}",
+        survivor.diagnostics()
+    );
+    let error = single_event(&survivor.events, "error", &survivor.name);
+    let message = str_field(error, "message");
+    assert!(
+        message.contains("exchange incomplete") && message.contains(&departed_id),
+        "the failure must retain the departed peer's exchange debt, got {message:?};\n{}",
+        survivor.diagnostics()
+    );
+    let exiting = single_event(&survivor.events, "exiting", &survivor.name);
+    assert_eq!(exiting.get("code").and_then(Value::as_i64), Some(1));
+    server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

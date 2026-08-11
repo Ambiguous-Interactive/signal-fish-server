@@ -86,12 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and reject shallow history or reused version boundaries instead of publishing
   a later tree under the prepared version.
 - Prevent both reference clients from busy-spinning while an outstanding Ping
-  is in its Pong drain grace. Exact native, browser, and TURN interoperability
-  runs now also hold every successful client at a shared release barrier, so
-  peer teardown cannot hide a missing reliable data-channel tail. The native
-  barrier waits for completed gameplay criteria without coupling success to
-  unrelated ICE gathering after a selected path is already connected; signal-
-  ledger tests can opt into that stricter freeze independently.
+  is in its Pong drain grace. A connected peer's exact exchange debt now
+  survives later departure or transport loss instead of becoming vacuously
+  successful. Native, browser, and TURN interoperability runs also hold every
+  successful client at a shared release barrier. The native barrier waits for
+  completed gameplay criteria without coupling success to unrelated ICE
+  gathering after a selected path is already connected; signal-ledger tests
+  can opt into that stricter freeze independently. Browser runs preserve their
+  full post-success linger even when barrier release occurs after the soft run
+  deadline.
 
 ### Security
 
