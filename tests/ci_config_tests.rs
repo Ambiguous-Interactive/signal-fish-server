@@ -5437,6 +5437,15 @@ fn test_official_binaries_compile_built_in_tls_support() {
         !manifest.contains("\"tls-rustls\""),
         "axum-server's provider-selecting TLS feature would restore aws-lc-sys and break arm/v7"
     );
+    let tokio_rustls_dependency = manifest
+        .lines()
+        .find(|line| line.trim_start().starts_with("tokio-rustls ="))
+        .expect("TLS peer-certificate extraction requires a direct tokio-rustls dependency");
+    assert!(
+        tokio_rustls_dependency.contains("default-features = false"),
+        "tokio-rustls defaults would restore aws-lc-sys and break the official ARMv7 graph; \
+         found: {tokio_rustls_dependency}"
+    );
     let tls_source = read_live_file(&root.join("src/security/tls.rs"));
     for required in [
         "rustls::crypto::ring::default_provider()",
@@ -18433,6 +18442,146 @@ fn test_analysis_nightly_version_consistency() {
     );
 }
 
+#[test]
+fn test_unused_deps_workflow_shares_setup_and_preserves_status_names() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/unused-deps.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("unused-deps workflow must parse");
+    let document = documents.first().expect("unused-deps workflow document");
+    let jobs = document
+        .as_mapping_get("jobs")
+        .expect("unused-deps workflow jobs");
+    let analyzer = jobs
+        .as_mapping_get("unused-deps")
+        .expect("consolidated analyzer job");
+    let analyzer_steps = analyzer
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("consolidated analyzer steps");
+
+    for (needle, expected) in [
+        ("uses: actions/checkout@", 1),
+        ("uses: dtolnay/rust-toolchain@", 1),
+        ("uses: Swatinem/rust-cache@", 1),
+        ("run: cargo machete", 1),
+        (
+            "run: cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features",
+            1,
+        ),
+    ] {
+        assert_eq!(
+            workflow.matches(needle).count(),
+            expected,
+            "unused-deps.yml must contain exactly {expected} occurrence(s) of {needle:?} so both \
+             analyzers share one checkout/toolchain/cache setup"
+        );
+    }
+
+    assert_eq!(
+        analyzer.as_mapping_get("name").and_then(Yaml::as_str),
+        Some("Check Unused Dependencies")
+    );
+    assert_eq!(
+        analyzer
+            .as_mapping_get("timeout-minutes")
+            .and_then(Yaml::as_integer),
+        Some(30),
+        "the sequential analyzer job needs explicit cold-cache headroom"
+    );
+
+    let step_named = |name: &str| {
+        analyzer_steps
+            .iter()
+            .find(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("missing analyzer step {name:?}"))
+    };
+    let machete_position = analyzer_steps
+        .iter()
+        .position(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Check for unused dependencies")
+        })
+        .expect("cargo-machete step");
+    assert_ne!(
+        step_named("Check for unused dependencies")
+            .as_mapping_get("continue-on-error")
+            .and_then(Yaml::as_bool),
+        Some(true),
+        "cargo-machete must remain the gating analyzer"
+    );
+    for name in [
+        "Cache cargo-udeps binary",
+        "Install cargo-udeps",
+        "Check for unused dependencies (udeps)",
+    ] {
+        let step = step_named(name);
+        let position = analyzer_steps
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, step))
+            .expect("step position");
+        assert!(
+            position > machete_position,
+            "{name} must follow cargo-machete"
+        );
+        assert_eq!(
+            step.as_mapping_get("if").and_then(Yaml::as_str),
+            Some("${{ !cancelled() }}"),
+            "{name} must still run after a cargo-machete failure while respecting cancellation"
+        );
+    }
+    assert_eq!(
+        step_named("Check for unused dependencies (udeps)")
+            .as_mapping_get("continue-on-error")
+            .and_then(Yaml::as_bool),
+        Some(true),
+        "cargo-udeps remains informational because it can report false positives"
+    );
+
+    let compatibility = jobs
+        .as_mapping_get("unused-features-status")
+        .expect("legacy check-name compatibility job");
+    assert_eq!(
+        compatibility.as_mapping_get("name").and_then(Yaml::as_str),
+        Some("Check Unused Features")
+    );
+    assert_eq!(
+        compatibility
+            .as_mapping_get("if")
+            .and_then(Yaml::as_str),
+        Some("${{ always() && github.event_name != 'schedule' }}"),
+        "compatibility status must fail closed on PR/push results without wasting a scheduled runner"
+    );
+    assert_eq!(
+        compatibility.as_mapping_get("needs").and_then(Yaml::as_str),
+        Some("unused-deps")
+    );
+    assert_eq!(
+        compatibility
+            .as_mapping_get("permissions")
+            .and_then(Yaml::as_mapping)
+            .map(|permissions| permissions.len()),
+        Some(0),
+        "the compatibility status must not receive repository permissions"
+    );
+    let compatibility_steps = compatibility
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("compatibility status steps");
+    assert_eq!(compatibility_steps.len(), 1);
+    let status_step = &compatibility_steps[0];
+    assert_eq!(
+        status_step.as_mapping_get("run").and_then(Yaml::as_str),
+        Some("test \"$ANALYZER_RESULT\" = success")
+    );
+    assert_eq!(
+        status_step
+            .as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("ANALYZER_RESULT"))
+            .and_then(Yaml::as_str),
+        Some("${{ needs.unused-deps.result }}")
+    );
+}
+
 /// Parse the `exclude_path = [...]` array from `.lychee.toml` content,
 /// returning the list of unescaped string values (path patterns).
 ///
@@ -18915,6 +19064,11 @@ test-group = 'powershell-subprocess'",
             ),
         ".config/nextest.toml must serialize direct PowerShell integration tests across \
          nextest's per-test processes. Keep those tests named `*_when_pwsh_available`."
+    );
+    assert!(
+        normalized.contains("binary(mtls_token_binding_e2e)")
+            && normalized.contains("test-group = 'process-spawning'"),
+        "the real-listener mTLS suite must run in nextest's serialized process-spawning group"
     );
 }
 
@@ -23440,20 +23594,18 @@ fn test_tls_feature_uses_rustls_pki_types() {
     let root = repo_root();
     let cargo_toml = read_live_file(&root.join("Cargo.toml"));
 
-    // The tls feature should include rustls-pki-types as the PEM parsing provider
-    let tls_line = cargo_toml
-        .lines()
-        .find(|line| line.starts_with("tls = ") || line.starts_with("tls="));
-
-    let tls_line = tls_line.expect(
-        "Cargo.toml must define a 'tls' feature.\n\
-         Expected: tls = [\"axum-server\", \"rustls\", \"rustls-pki-types\"]",
-    );
+    // The tls feature should include rustls-pki-types as the PEM parsing provider.
+    // Use the shared TOML-array parser so ordinary formatting changes (including
+    // adding enough explicit feature dependencies to wrap the TLS stream) do not
+    // turn this semantic guard into a one-line formatting constraint.
+    let tls_features = parse_toml_string_array(&cargo_toml, "tls");
 
     assert!(
-        tls_line.contains("rustls-pki-types"),
+        tls_features
+            .iter()
+            .any(|feature| feature == "rustls-pki-types"),
         "The tls feature must include rustls-pki-types for PEM parsing.\n\
-         Found: {tls_line}\n\
+         Found: {tls_features:?}\n\
          rustls-pki-types replaces the unmaintained rustls-pemfile crate."
     );
 }

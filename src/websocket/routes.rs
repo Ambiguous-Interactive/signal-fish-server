@@ -8,7 +8,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
+#[cfg(not(feature = "tls"))]
 use super::handler::{websocket_handler, websocket_handler_v3};
+#[cfg(feature = "tls")]
+use super::handler::{
+    websocket_handler_v3_with_verified_certificate as websocket_handler_v3,
+    websocket_handler_with_verified_certificate as websocket_handler,
+};
 use super::metrics::{metrics_handler, prometheus_metrics_handler};
 
 const LISTENER_BACKLOG: u32 = 1_024;

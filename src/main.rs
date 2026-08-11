@@ -260,7 +260,11 @@ async fn main() -> anyhow::Result<()> {
             .into_std()?;
         let serve_result = axum_server::from_tcp_rustls(listener, tls_config)?
             // Disable Nagle on the raw TCP stream before the TLS handshake (#197).
-            .map(|rustls| rustls.acceptor(websocket::ConfiguredAcceptor))
+            .map(|rustls| {
+                signal_fish_server::security::VerifiedClientCertificateAcceptor::new(
+                    rustls.acceptor(websocket::ConfiguredAcceptor),
+                )
+            })
             .handle(tls_handle)
             .serve(make_service)
             .await;

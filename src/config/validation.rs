@@ -81,25 +81,6 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // The built-in listener does not yet expose rustls's authenticated peer
-    // certificate to Axum request extensions. Never substitute an inbound
-    // HTTP header for that transport identity: a direct client controls those
-    // headers and could claim any fingerprint. Keep the configuration knob so
-    // embedded integrations can evolve compatibly, but reject it here until a
-    // verified certificate source is wired end to end.
-    if config
-        .security
-        .transport
-        .token_binding
-        .require_client_fingerprint
-    {
-        anyhow::bail!(
-            "security.transport.token_binding.require_client_fingerprint=true is not supported \
-             by the built-in listener: no verified client-certificate fingerprint is exposed \
-             to WebSocket requests, and client-supplied fingerprint headers are not trusted"
-        );
-    }
-
     // TLS validation
     if config.security.transport.tls.enabled {
         if !cfg!(feature = "tls") {
@@ -219,6 +200,14 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     }
 
     // Token binding validation
+    if config.security.transport.token_binding.required
+        && !config.security.transport.token_binding.enabled
+    {
+        anyhow::bail!(
+            "security.transport.token_binding.required=true requires \
+             security.transport.token_binding.enabled=true"
+        );
+    }
     if config.security.transport.token_binding.enabled {
         let binding = &config.security.transport.token_binding;
         if binding.required && !built_in_tls_active(config, cfg!(feature = "tls")) {
@@ -230,6 +219,41 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         if binding.subprotocol.trim().is_empty() {
             anyhow::bail!("security.transport.token_binding.subprotocol must not be empty");
         }
+        if binding.require_client_fingerprint {
+            if !binding.required {
+                anyhow::bail!(
+                    "security.transport.token_binding.require_client_fingerprint=true requires \
+                     security.transport.token_binding.required=true so clients cannot bypass \
+                     certificate binding by omitting the subprotocol"
+                );
+            }
+            if !built_in_tls_active(config, cfg!(feature = "tls")) {
+                anyhow::bail!(
+                    "security.transport.token_binding.require_client_fingerprint=true requires \
+                     active built-in TLS so the fingerprint comes from an authenticated rustls \
+                     peer certificate"
+                );
+            }
+            if matches!(
+                config.security.transport.tls.client_auth,
+                ClientAuthMode::None
+            ) {
+                anyhow::bail!(
+                    "security.transport.token_binding.require_client_fingerprint=true requires \
+                     security.transport.tls.client_auth to be `optional` or `require`"
+                );
+            }
+        }
+    } else if config
+        .security
+        .transport
+        .token_binding
+        .require_client_fingerprint
+    {
+        anyhow::bail!(
+            "security.transport.token_binding.require_client_fingerprint=true requires \
+             security.transport.token_binding.enabled=true"
+        );
     }
 
     // Cross-field: the room-activity refresh piggybacks on the per-player
@@ -399,8 +423,92 @@ mod tests {
             .contains("compiled with the `tls` Cargo feature"));
     }
 
+    #[cfg(not(feature = "tls"))]
     #[test]
-    fn unverified_client_fingerprint_binding_is_rejected() {
+    fn client_fingerprint_binding_is_rejected_without_tls_support() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.transport.token_binding.enabled = true;
+        config.security.transport.token_binding.required = true;
+        config
+            .security
+            .transport
+            .token_binding
+            .require_client_fingerprint = true;
+
+        let error = validate_config_security(&config)
+            .expect_err("a binary without TLS cannot derive authenticated certificate identity");
+        assert!(error.to_string().contains("requires active built-in TLS"));
+    }
+
+    #[test]
+    fn required_token_binding_cannot_be_disabled() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.transport.token_binding.required = true;
+
+        let error = validate_config_security(&config)
+            .expect_err("required token binding must not be disabled");
+        assert!(error
+            .to_string()
+            .contains("requires security.transport.token_binding.enabled=true"));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn client_fingerprint_binding_accepts_optional_or_required_mtls() {
+        for client_auth in [ClientAuthMode::Optional, ClientAuthMode::Require] {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.transport.tls.enabled = true;
+            config.security.transport.tls.certificate_path =
+                Some("tests/fixtures/tls/cert.pem".to_string());
+            config.security.transport.tls.private_key_path =
+                Some("tests/fixtures/tls/key.pem".to_string());
+            config.security.transport.tls.client_ca_cert_path =
+                Some("tests/fixtures/tls/cert.pem".to_string());
+            config.security.transport.tls.client_auth = client_auth;
+            config.security.transport.token_binding.enabled = true;
+            config.security.transport.token_binding.required = true;
+            config
+                .security
+                .transport
+                .token_binding
+                .require_client_fingerprint = true;
+
+            let result = validate_config_security(&config);
+            assert!(
+                result.is_ok(),
+                "{client_auth:?} mTLS must support verified fingerprint binding: {result:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn client_fingerprint_binding_rejects_disabled_client_auth() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.transport.tls.enabled = true;
+        config.security.transport.tls.certificate_path =
+            Some("tests/fixtures/tls/cert.pem".to_string());
+        config.security.transport.tls.private_key_path =
+            Some("tests/fixtures/tls/key.pem".to_string());
+        config.security.transport.token_binding.enabled = true;
+        config.security.transport.token_binding.required = true;
+        config
+            .security
+            .transport
+            .token_binding
+            .require_client_fingerprint = true;
+
+        let error = validate_config_security(&config)
+            .expect_err("client-auth none cannot produce a peer certificate");
+        assert!(error.to_string().contains("client_auth"));
+    }
+
+    #[test]
+    fn client_fingerprint_binding_requires_token_binding() {
         let mut config = Config::default();
         config.security.require_metrics_auth = false;
         config
@@ -410,13 +518,25 @@ mod tests {
             .require_client_fingerprint = true;
 
         let error = validate_config_security(&config)
-            .expect_err("untrusted request headers must not stand in for mTLS identity");
-        assert!(error
-            .to_string()
-            .contains("not supported by the built-in listener"));
-        assert!(error
-            .to_string()
-            .contains("client-supplied fingerprint headers are not trusted"));
+            .expect_err("fingerprint binding has no effect while token binding is disabled");
+        assert!(error.to_string().contains("token_binding.enabled=true"));
+    }
+
+    #[test]
+    fn client_fingerprint_binding_requires_mandatory_subprotocol() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.transport.token_binding.enabled = true;
+        config
+            .security
+            .transport
+            .token_binding
+            .require_client_fingerprint = true;
+
+        let error = validate_config_security(&config)
+            .expect_err("a client must not opt out of configured fingerprint binding");
+        assert!(error.to_string().contains("token_binding.required=true"));
+        assert!(error.to_string().contains("omitting the subprotocol"));
     }
 
     /// The warning predicate must not be affected by unrelated security knobs.

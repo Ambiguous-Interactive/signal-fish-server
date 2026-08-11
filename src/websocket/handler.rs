@@ -1,3 +1,5 @@
+#[cfg(feature = "tls")]
+use crate::security::VerifiedClientCertificate;
 use crate::security::{ClientCertificateFingerprint, OriginPolicy};
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::WebSocketUpgrade;
@@ -28,6 +30,8 @@ pub async fn websocket_handler(
         state,
         headers,
         fingerprint,
+        #[cfg(feature = "tls")]
+        None,
         origin_policy,
         2,
     )
@@ -54,6 +58,59 @@ pub async fn websocket_handler_v3(
         state,
         headers,
         fingerprint,
+        #[cfg(feature = "tls")]
+        None,
+        origin_policy,
+        3,
+    )
+    .await
+}
+
+/// Listener-integrated v2 handler that consumes rustls-authenticated peer
+/// certificate metadata. Kept crate-private so the public handler signature
+/// remains source-compatible for library callers.
+#[cfg(feature = "tls")]
+pub(crate) async fn websocket_handler_with_verified_certificate(
+    ws: WebSocketUpgrade,
+    connect_info: ConnectInfo<SocketAddr>,
+    state: State<Arc<EnhancedGameServer>>,
+    headers: HeaderMap,
+    fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+    verified_certificate: Option<Extension<VerifiedClientCertificate>>,
+    origin_policy: Extension<OriginPolicy>,
+) -> Response {
+    websocket_handler_with_default(
+        ws,
+        connect_info,
+        state,
+        headers,
+        fingerprint,
+        verified_certificate,
+        origin_policy,
+        2,
+    )
+    .await
+}
+
+/// Listener-integrated v3 handler; see
+/// [`websocket_handler_with_verified_certificate`].
+#[cfg(feature = "tls")]
+pub(crate) async fn websocket_handler_v3_with_verified_certificate(
+    ws: WebSocketUpgrade,
+    connect_info: ConnectInfo<SocketAddr>,
+    state: State<Arc<EnhancedGameServer>>,
+    headers: HeaderMap,
+    fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+    verified_certificate: Option<Extension<VerifiedClientCertificate>>,
+    origin_policy: Extension<OriginPolicy>,
+) -> Response {
+    websocket_handler_with_default(
+        ws,
+        connect_info,
+        state,
+        headers,
+        fingerprint,
+        verified_certificate,
         origin_policy,
         3,
     )
@@ -66,6 +123,7 @@ async fn websocket_handler_with_default(
     State(server): State<Arc<EnhancedGameServer>>,
     headers: HeaderMap,
     fingerprint: Option<Extension<ClientCertificateFingerprint>>,
+    #[cfg(feature = "tls")] verified_certificate: Option<Extension<VerifiedClientCertificate>>,
     Extension(origin_policy): Extension<OriginPolicy>,
     default_protocol_version: u16,
 ) -> Response {
@@ -82,6 +140,11 @@ async fn websocket_handler_with_default(
     let client_offered_binding =
         client_requested_subprotocol(&headers, &token_binding_cfg.subprotocol);
     let client_fingerprint = fingerprint.map(|Extension(fp)| fp);
+    #[cfg(feature = "tls")]
+    let client_fingerprint = match verified_certificate {
+        Some(Extension(VerifiedClientCertificate(verified))) => verified,
+        None => client_fingerprint,
+    };
 
     let binding_session = match negotiate_token_binding(
         &token_binding_cfg,

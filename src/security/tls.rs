@@ -1,13 +1,19 @@
 use std::sync::Arc;
 
 #[cfg(feature = "tls")]
-use std::fs;
+use std::{fs, io};
 
 #[cfg(feature = "tls")]
 use anyhow::{anyhow, Context, Result};
 
 #[cfg(feature = "tls")]
-use axum_server::tls_rustls::RustlsConfig;
+use axum::{middleware::AddExtension, Extension};
+
+#[cfg(feature = "tls")]
+use axum_server::{accept::Accept, tls_rustls::RustlsConfig};
+
+#[cfg(feature = "tls")]
+use futures_util::future::BoxFuture;
 
 #[cfg(feature = "tls")]
 use rustls::{
@@ -22,6 +28,18 @@ use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 #[cfg(feature = "tls")]
 use crate::config::{ClientAuthMode, TlsServerConfig};
 
+#[cfg(feature = "tls")]
+use sha2::{Digest, Sha256};
+
+#[cfg(feature = "tls")]
+use tokio::net::TcpStream;
+
+#[cfg(feature = "tls")]
+use tokio_rustls::server::TlsStream;
+
+#[cfg(feature = "tls")]
+use tower::Layer;
+
 /// Header names an embedding layer may map to a fingerprint only after it has
 /// authenticated and stripped client-supplied forwarding headers. The built-in
 /// listener deliberately does not consume these headers.
@@ -34,8 +52,81 @@ pub const CLIENT_FINGERPRINT_HEADER_CANDIDATES: &[&str] = &[
 /// Verified client certificate fingerprint metadata propagated through request extensions.
 #[derive(Debug, Clone)]
 pub struct ClientCertificateFingerprint {
+    /// Lowercase hexadecimal SHA-256 digest of the authenticated leaf certificate DER.
     pub fingerprint: Arc<str>,
+    /// Origin of the verified value. Kept for source compatibility with embedded listeners.
+    /// The built-in listener always uses `rustls-peer-certificate`, never an HTTP header.
     pub source_header: &'static str,
+}
+
+/// TLS connection metadata installed by the built-in listener after the rustls handshake.
+///
+/// `None` is meaningful for optional mTLS: the TLS connection is valid, but the client did not
+/// present a certificate. The WebSocket token-binding policy decides whether that is acceptable.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone, Default)]
+pub struct VerifiedClientCertificate(pub Option<ClientCertificateFingerprint>);
+
+/// Acceptor wrapper that derives request identity exclusively from rustls's authenticated peer.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone)]
+pub struct VerifiedClientCertificateAcceptor<A> {
+    inner: A,
+}
+
+#[cfg(feature = "tls")]
+impl<A> VerifiedClientCertificateAcceptor<A> {
+    pub fn new(inner: A) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<A, S> Accept<TcpStream, S> for VerifiedClientCertificateAcceptor<A>
+where
+    A: Accept<TcpStream, S, Stream = TlsStream<TcpStream>> + Clone + Send + Sync + 'static,
+    A::Future: Send + 'static,
+    A::Service: Send + 'static,
+    S: Send + 'static,
+{
+    type Stream = TlsStream<TcpStream>;
+    type Service = AddExtension<A::Service, VerifiedClientCertificate>;
+    type Future = BoxFuture<'static, io::Result<(Self::Stream, Self::Service)>>;
+
+    fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
+        let inner = self.inner.clone();
+
+        Box::pin(async move {
+            let (stream, service) = inner.accept(stream, service).await?;
+            let verified = stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certificates| certificates.first())
+                .map(client_certificate_fingerprint);
+            let service = Extension(VerifiedClientCertificate(verified)).layer(service);
+            Ok((stream, service))
+        })
+    }
+}
+
+#[cfg(feature = "tls")]
+fn client_certificate_fingerprint(
+    certificate: &CertificateDer<'_>,
+) -> ClientCertificateFingerprint {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let digest = Sha256::digest(certificate.as_ref());
+    let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+
+    ClientCertificateFingerprint {
+        fingerprint: Arc::from(encoded),
+        source_header: "rustls-peer-certificate",
+    }
 }
 
 #[cfg(feature = "tls")]
@@ -149,4 +240,22 @@ fn build_client_verifier(
         .map_err(|err| anyhow!("failed to initialize client certificate verifier: {err}"))?;
 
     Ok(verifier)
+}
+
+#[cfg(all(test, feature = "tls"))]
+mod tests {
+    use super::client_certificate_fingerprint;
+    use rustls_pki_types::CertificateDer;
+
+    #[test]
+    fn certificate_fingerprint_is_lowercase_sha256_of_exact_der() {
+        let certificate = CertificateDer::from(b"authenticated-leaf".to_vec());
+        let fingerprint = client_certificate_fingerprint(&certificate);
+
+        assert_eq!(
+            fingerprint.fingerprint.as_ref(),
+            "8dd83ea96bac3f14faf9bf8815f141245166897c602eadbe5142f848521d3217"
+        );
+        assert_eq!(fingerprint.source_header, "rustls-peer-certificate");
+    }
 }

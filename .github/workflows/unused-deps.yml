@@ -1,7 +1,8 @@
 # Unused Dependencies Workflow
 #
 # Detects unused dependencies and features to keep the project lean and maintainable.
-# Uses two complementary tools:
+# Runs two complementary tools in one analyzer job so checkout, toolchain, and
+# dependency-cache setup are paid once:
 #   - cargo-machete: Detects unused dependencies in Cargo.toml
 #   - cargo-udeps: Detects unused dependencies and features (requires nightly)
 #
@@ -10,10 +11,12 @@
 #   - Pull requests to main
 #   - Weekly schedule (Monday at 00:00 UTC) for proactive dependency cleanup
 #
-# all-jobs-run-on-schedule
+# The analyzer runs on schedule; the legacy status alias is PR/push-only.
 #
 # Features:
+#   - Shared checkout, nightly toolchain, and Rust dependency cache
 #   - Binary caching for cargo-machete and cargo-udeps
+#   - Legacy `Check Unused Features` status retained for push/PR compatibility
 #   - Nightly toolchain pinned for reproducibility (see nightly version below)
 #   - cargo-udeps uses continue-on-error as it may have false positives
 #
@@ -72,10 +75,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # runs-on-schedule
   unused-deps:
     name: Check Unused Dependencies
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Two analyzers share setup but run sequentially. Keep cold-cache install
+    # headroom until hosted warm/cold measurements establish a tighter bound.
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -102,24 +108,8 @@ jobs:
 
       - name: Check for unused dependencies
         run: cargo machete
-
-  unused-features:
-    name: Check Unused Features
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: nightly-2026-08-01
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Cache cargo-udeps binary
+        if: ${{ !cancelled() }}
         id: cache-udeps
         uses: actions/cache@v6.1.0
         with:
@@ -127,6 +117,7 @@ jobs:
           key: ${{ runner.os }}-cargo-udeps-0.1.61-nightly-2026-08-01
 
       - name: Install cargo-udeps
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           if cargo +nightly-2026-08-01 udeps --version 2>/dev/null | grep -Fxq 'cargo-udeps 0.1.61'; then
@@ -136,6 +127,7 @@ jobs:
           fi
 
       - name: Check for unused dependencies (udeps)
+        if: ${{ !cancelled() }}
         # Note: continue-on-error is enabled because cargo-udeps may report
         # false positives for:
         #   - Proc-macro dependencies (used at compile-time)
@@ -144,3 +136,19 @@ jobs:
         # Always review udeps output manually before removing dependencies.
         run: cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features
         continue-on-error: true
+
+  # Preserve the historical status name until repository rules can be audited
+  # with administrator credentials. This fail-closed compatibility status
+  # avoids a permanently missing/Expected context without repeating analysis.
+  unused-features-status:
+    name: Check Unused Features
+    if: ${{ always() && github.event_name != 'schedule' }}
+    needs: unused-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Report consolidated unused-dependency result
+        env:
+          ANALYZER_RESULT: ${{ needs.unused-deps.result }}
+        run: test "$ANALYZER_RESULT" = success

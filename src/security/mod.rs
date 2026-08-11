@@ -23,7 +23,7 @@ pub use turn_credentials::{
 pub use tls::{ClientCertificateFingerprint, CLIENT_FINGERPRINT_HEADER_CANDIDATES};
 
 #[cfg(feature = "tls")]
-pub use tls::build_rustls_config;
+pub use tls::{build_rustls_config, VerifiedClientCertificate, VerifiedClientCertificateAcceptor};
 
 /// Compare two secrets without leaking, via timing, how many leading bytes
 /// matched.

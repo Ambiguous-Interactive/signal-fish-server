@@ -1965,9 +1965,16 @@ pub(super) async fn handle_socket(
                                     server_clone
                                         .set_client_app_context(&active_player_id, info.clone());
                                     server_clone.apply_app_bandwidth_policy(&info);
-                                    let supported_formats = server_clone
+                                    let mut supported_formats = server_clone
                                         .protocol_config()
                                         .supported_game_data_formats();
+                                    if token_binding
+                                        .as_ref()
+                                        .is_some_and(|binding| binding.verifier.require_fingerprint)
+                                    {
+                                        supported_formats
+                                            .retain(|format| *format == GameDataEncoding::Json);
+                                    }
                                     let negotiated_format = match game_data_format {
                                         Some(format) if supported_formats.contains(&format) => {
                                             format
@@ -2219,6 +2226,29 @@ pub(super) async fn handle_socket(
                     }
                 }
                 Message::Binary(payload) => {
+                    if token_binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.verifier.require_fingerprint)
+                    {
+                        tracing::warn!(
+                            %active_player_id,
+                            "Received unsigned binary frame on fingerprint-bound connection"
+                        );
+                        enqueue_farewell_message(
+                            &tx_clone,
+                            &close_signal,
+                            &active_player_id,
+                            ServerMessage::Error {
+                                message:
+                                    "Certificate-bound connections require signed JSON messages"
+                                        .to_string(),
+                                error_code: Some(ErrorCode::Unauthorized),
+                            },
+                            "unsigned binary frame on fingerprint-bound connection",
+                        );
+                        break;
+                    }
+
                     if !app_handshake_complete {
                         tracing::warn!(%active_player_id, "Received binary message before app-ID handshake");
                         // Farewell semantics: closing immediately.

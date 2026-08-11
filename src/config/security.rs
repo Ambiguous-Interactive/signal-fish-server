@@ -128,11 +128,11 @@ pub struct TokenBindingConfig {
     #[serde(default)]
     pub enabled: bool,
     /// Require clients to request/comply with the token binding subprotocol.
+    /// Requires [`Self::enabled`] to be true.
     #[serde(default)]
     pub required: bool,
-    /// Reserved for verified mTLS fingerprint binding. The built-in listener
-    /// currently rejects this because it cannot expose peer certificates to
-    /// the WebSocket handler safely.
+    /// Bind every proof to the authenticated mTLS leaf-certificate SHA-256 fingerprint.
+    /// Requires mandatory token binding, built-in TLS, and optional or required TLS client auth.
     #[serde(default)]
     pub require_client_fingerprint: bool,
     /// Name of the WebSocket subprotocol clients must advertise.

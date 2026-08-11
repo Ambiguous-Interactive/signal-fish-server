@@ -28,7 +28,13 @@ built-in-tls = true
 [features]
 default = []
 legacy-fullmesh = ["matchbox_signaling"]
-tls = ["axum-server", "rustls", "rustls-pki-types"]
+tls = [
+    "axum-server",
+    "rustls",
+    "rustls-pki-types",
+    "tokio-rustls",
+    "tower",
+]
 # Internal verification seam for P10.D7. The feature only exposes inert trace
 # hooks; a caller must explicitly attach a recorder to a connection.
 trace-validation = []
@@ -140,6 +146,8 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
 ], optional = true }
 rustls-pki-types = { version = "1.14", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, optional = true }
+tower = { version = "0.5", optional = true }
 
 [dev-dependencies]
 # Test-only tokio feature additions (feature-unified with the main dependency
