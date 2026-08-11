@@ -103,7 +103,7 @@ where
                 .1
                 .peer_certificates()
                 .and_then(|certificates| certificates.first())
-                .map(client_certificate_fingerprint);
+                .and_then(client_certificate_fingerprint);
             let service = Extension(VerifiedClientCertificate(verified)).layer(service);
             Ok((stream, service))
         })
@@ -113,20 +113,18 @@ where
 #[cfg(feature = "tls")]
 fn client_certificate_fingerprint(
     certificate: &CertificateDer<'_>,
-) -> ClientCertificateFingerprint {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
+) -> Option<ClientCertificateFingerprint> {
     let digest = Sha256::digest(certificate.as_ref());
     let mut encoded = String::with_capacity(digest.len().saturating_mul(2));
     for byte in digest {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        encoded.push(char::from_digit(u32::from(byte >> 4), 16)?);
+        encoded.push(char::from_digit(u32::from(byte & 0x0f), 16)?);
     }
 
-    ClientCertificateFingerprint {
+    Some(ClientCertificateFingerprint {
         fingerprint: Arc::from(encoded),
         source_header: "rustls-peer-certificate",
-    }
+    })
 }
 
 #[cfg(feature = "tls")]
@@ -253,9 +251,14 @@ mod tests {
         let fingerprint = client_certificate_fingerprint(&certificate);
 
         assert_eq!(
-            fingerprint.fingerprint.as_ref(),
-            "8dd83ea96bac3f14faf9bf8815f141245166897c602eadbe5142f848521d3217"
+            fingerprint
+                .as_ref()
+                .map(|fingerprint| fingerprint.fingerprint.as_ref()),
+            Some("8dd83ea96bac3f14faf9bf8815f141245166897c602eadbe5142f848521d3217")
         );
-        assert_eq!(fingerprint.source_header, "rustls-peer-certificate");
+        assert_eq!(
+            fingerprint.map(|fingerprint| fingerprint.source_header),
+            Some("rustls-peer-certificate")
+        );
     }
 }
