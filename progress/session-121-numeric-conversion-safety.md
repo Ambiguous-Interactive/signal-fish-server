@@ -102,3 +102,29 @@ executable-probed, an executable reporting exactly 0.1.61 is reused, and a
 missing, incompatible, or mismatched binary is force-replaced. A CI-config
 regression pins the cache key, unconditional version probe, analysis-nightly
 install, and force-replacement fallback together.
+
+## Publication evidence
+
+PR #336 published implementation head
+`78e64a989da7e7ecefe0d1eb1bd501279ed8fbeb`. Its 20 pull-request workflow
+runs settled with 19 successes and only the expected Dependabot auto-merge
+skip. The full CI run (`31462190669`) passed all 16 jobs, including three-OS
+lint and nextest, coverage, MSRV, panic policy, dependency audits, SBOM, Docker,
+documentation consistency, and relay ceilings. Advanced Safety passed Miri and
+AddressSanitizer. Fuzzing, mutation testing, formal verification, all interop
+lanes, and the scheduled Verification Nightly run also passed.
+
+Unused Dependencies run `31462190661` proved the hosted repair: the
+unconditional cargo-udeps probe/install step completed, the udeps analysis ran,
+and both jobs succeeded. WebRTC Interop run `31462190720` initially found a
+Windows-only remote-`prflx` selected-pair report while Linux and macOS passed;
+the exact-SHA Windows rerun passed. Issue #337 retains that distinct hosted
+evidence and strict follow-up acceptance without weakening the host/host,
+IPv6, or TURN oracles.
+
+The PR is ready, mergeable, and has no unresolved review thread. Copilot's two
+quota notices are non-actionable. Cursor's sole inline claim about the version
+string was disproved by the exact command output (`cargo-udeps 0.1.61`) and the
+green hosted analysis; the evidence was posted and the thread resolved. The
+publication-only successor commit records this closure and is monitored on its
+own exact head before handoff.
