@@ -106,7 +106,7 @@ if [[ -f Dockerfile ]]; then
     # evaluating their contents, then inspect only the final-stage HEALTHCHECK.
     HEALTHCHECK_RESULT=$(
         awk '
-            function inspect_instruction(    instruction, lower, arguments) {
+            function inspect_instruction(    instruction, lower, arguments, remainder, port, tls_port) {
                 instruction = logical
                 sub(/^[[:space:]]+/, "", instruction)
                 sub(/[[:space:]]+$/, "", instruction)
@@ -140,11 +140,19 @@ if [[ -f Dockerfile ]]; then
                     return
                 }
                 sub(/^CMD[[:space:]]*/, "", arguments)
-                if (arguments ~ /^curl[[:space:]]+-f[[:space:]]+http:\/\/localhost:[0-9][0-9]*\/v2\/health[[:space:]]+[|][|][[:space:]]+exit[[:space:]]+1$/) {
+                if (arguments ~ /^curl[[:space:]]+-fsS[[:space:]]+--max-time[[:space:]]+2[[:space:]]+http:\/\/localhost:[0-9][0-9]*\/v2\/health[[:space:]]+[|][|][[:space:]]+curl[[:space:]]+-fkSs[[:space:]]+--max-time[[:space:]]+2[[:space:]]+--config[[:space:]]+"[$][{]SF_HEALTHCHECK_CURL_CONFIG:-\/dev\/null[}]"[[:space:]]+https:\/\/localhost:[0-9][0-9]*\/v2\/health[[:space:]]+[|][|][[:space:]]+exit[[:space:]]+1$/) {
                     match(arguments, /localhost:[0-9][0-9]*/)
                     port = substr(arguments, RSTART, RLENGTH)
                     sub(/^.*:/, "", port)
-                    healthcheck = "port:" port
+                    remainder = substr(arguments, RSTART + RLENGTH)
+                    match(remainder, /localhost:[0-9][0-9]*/)
+                    tls_port = substr(remainder, RSTART, RLENGTH)
+                    sub(/^.*:/, "", tls_port)
+                    if (port == tls_port) {
+                        healthcheck = "port:" port
+                    } else {
+                        healthcheck = "probe-port-mismatch"
+                    }
                 } else {
                     healthcheck = "unsupported"
                 }
@@ -197,7 +205,9 @@ if [[ -f Dockerfile ]]; then
     elif [[ "$HEALTHCHECK_RESULT" == "malformed" ]]; then
         error "Dockerfile HEALTHCHECK must use 'CMD ...' or 'NONE' grammar."
     elif [[ "$HEALTHCHECK_RESULT" == "unsupported" ]]; then
-        error "Dockerfile HEALTHCHECK must run the supported localhost curl probe."
+        error "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes."
+    elif [[ "$HEALTHCHECK_RESULT" == "probe-port-mismatch" ]]; then
+        error "Dockerfile HEALTHCHECK HTTP and HTTPS probes must use the same port."
     elif [[ "$HEALTHCHECK_RESULT" == "unsupported-heredoc" ]]; then
         error "Dockerfile healthcheck audit cannot safely inspect heredoc instructions."
     elif [[ "$HEALTHCHECK_RESULT" == "unterminated-continuation" ]]; then

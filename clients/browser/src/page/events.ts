@@ -35,6 +35,8 @@ declare global {
   interface Window {
     /** stdout bridge exposed by the CLI before the page bundle is injected. */
     __sf_emit?: (line: string) => void;
+    /** CLI-side release-file probe used only by deterministic test harnesses. */
+    __sf_success_released?: () => Promise<boolean>;
   }
 }
 

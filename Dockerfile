@@ -91,7 +91,7 @@ COPY --from=planner /app/recipe.json recipe.json
 
 # Build dependencies ONLY for the target triple - this layer is cached until
 # Cargo.toml/Cargo.lock (and thus recipe.json) change.
-RUN cargo chef cook --release --locked --target "$(cat /tmp/rust-triple)" --recipe-path recipe.json
+RUN cargo chef cook --release --locked --features tls --target "$(cat /tmp/rust-triple)" --recipe-path recipe.json
 
 # Copy actual source code
 COPY Cargo.toml Cargo.lock build.rs ./
@@ -101,7 +101,7 @@ COPY benches ./benches
 # Build the application for the target triple - only recompiles when source
 # changes. Copy the produced binary to a fixed, arch-independent path so the
 # runtime stage's COPY does not need to know the triple.
-RUN cargo build --release --locked --target "$(cat /tmp/rust-triple)" \
+RUN cargo build --release --locked --features tls --target "$(cat /tmp/rust-triple)" \
     && cp "target/$(cat /tmp/rust-triple)/release/signal-fish-server" /app/signal-fish-server
 
 # Stage 4: Runtime image (slim Debian).
@@ -128,9 +128,13 @@ COPY --from=builder /app/signal-fish-server ./signal-fish-server
 # Expose the WebSocket signaling server port (TCP)
 EXPOSE 3536
 
-# Health check endpoint
+# Probe both supported listener modes. HTTPS uses -k only for this in-container
+# liveness check because deployments commonly mount a certificate whose public
+# name is not "localhost"; clients must still perform normal verification. An
+# mTLS deployment can point SF_HEALTHCHECK_CURL_CONFIG at a readable
+# curl config containing its client certificate and key.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3536/v2/health || exit 1
+    CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config "${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}" https://localhost:3536/v2/health || exit 1
 
 # Use non-root
 USER appuser

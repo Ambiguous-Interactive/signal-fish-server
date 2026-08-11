@@ -130,7 +130,9 @@ pub struct TokenBindingConfig {
     /// Require clients to request/comply with the token binding subprotocol.
     #[serde(default)]
     pub required: bool,
-    /// Require a verified mTLS fingerprint on every signed frame.
+    /// Reserved for verified mTLS fingerprint binding. The built-in listener
+    /// currently rejects this because it cannot expose peer certificates to
+    /// the WebSocket handler safely.
     #[serde(default)]
     pub require_client_fingerprint: bool,
     /// Name of the WebSocket subprotocol clients must advertise.

@@ -81,8 +81,33 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // The built-in listener does not yet expose rustls's authenticated peer
+    // certificate to Axum request extensions. Never substitute an inbound
+    // HTTP header for that transport identity: a direct client controls those
+    // headers and could claim any fingerprint. Keep the configuration knob so
+    // embedded integrations can evolve compatibly, but reject it here until a
+    // verified certificate source is wired end to end.
+    if config
+        .security
+        .transport
+        .token_binding
+        .require_client_fingerprint
+    {
+        anyhow::bail!(
+            "security.transport.token_binding.require_client_fingerprint=true is not supported \
+             by the built-in listener: no verified client-certificate fingerprint is exposed \
+             to WebSocket requests, and client-supplied fingerprint headers are not trusted"
+        );
+    }
+
     // TLS validation
     if config.security.transport.tls.enabled {
+        if !cfg!(feature = "tls") {
+            anyhow::bail!(
+                "security.transport.tls.enabled=true requires a binary compiled with the `tls` \
+                 Cargo feature; this binary cannot serve HTTPS (rebuild with `--features tls`)"
+            );
+        }
         let tls = &config.security.transport.tls;
         let cert_path = tls
             .certificate_path
@@ -196,21 +221,10 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // Token binding validation
     if config.security.transport.token_binding.enabled {
         let binding = &config.security.transport.token_binding;
-        if binding.required && !config.security.transport.tls.enabled {
+        if binding.required && !built_in_tls_active(config, cfg!(feature = "tls")) {
             anyhow::bail!(
-                "security.transport.token_binding.required=true requires TLS termination \
-                 (set security.transport.tls.enabled=true)"
-            );
-        }
-        if binding.require_client_fingerprint
-            && !matches!(
-                config.security.transport.tls.client_auth,
-                ClientAuthMode::Optional | ClientAuthMode::Require
-            )
-        {
-            anyhow::bail!(
-                "security.transport.token_binding.require_client_fingerprint=true requires \
-                 client certificate authentication (client_auth must be \"optional\" or \"require\")"
+                "security.transport.token_binding.required=true requires active built-in TLS \
+                 (set security.transport.tls.enabled=true and compile with `--features tls`)"
             );
         }
         if binding.subprotocol.trim().is_empty() {
@@ -316,7 +330,11 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
 /// production deployment and is perfectly safe.
 #[must_use]
 pub fn should_warn_missing_signaling_tls(config: &Config) -> bool {
-    config.turn.enabled && !config.security.transport.tls.enabled
+    config.turn.enabled && !built_in_tls_active(config, cfg!(feature = "tls"))
+}
+
+fn built_in_tls_active(config: &Config, tls_feature_compiled: bool) -> bool {
+    config.security.transport.tls.enabled && tls_feature_compiled
 }
 
 /// Detect if we're running in production mode.
@@ -342,26 +360,63 @@ mod tests {
     use crate::config::AppRegistrationEntry;
 
     /// Truth table for the TURN-without-TLS startup warning: it fires exactly
-    /// when the server brokers WebRTC (`turn.enabled`) over a plaintext
-    /// listener (`tls.enabled == false`).
+    /// when the server brokers WebRTC (`turn.enabled`) without an effective
+    /// built-in TLS listener. Configuration alone must not hide the warning
+    /// when the binary was compiled without the `tls` feature.
     #[test]
     fn signaling_tls_warning_fires_only_for_turn_without_tls() {
         let cases = [
-            (false, false, false),
-            (false, true, false),
-            (true, false, true),
-            (true, true, false),
+            (false, false, false, false),
+            (false, true, false, false),
+            (true, false, false, true),
+            (true, true, false, true),
+            (true, true, true, false),
         ];
-        for (turn_enabled, tls_enabled, expected) in cases {
+        for (turn_enabled, tls_enabled, tls_feature_compiled, expected) in cases {
             let mut config = Config::default();
             config.turn.enabled = turn_enabled;
             config.security.transport.tls.enabled = tls_enabled;
             assert_eq!(
-                should_warn_missing_signaling_tls(&config),
+                turn_enabled && !built_in_tls_active(&config, tls_feature_compiled),
                 expected,
-                "turn.enabled={turn_enabled}, tls.enabled={tls_enabled}"
+                "turn.enabled={turn_enabled}, tls.enabled={tls_enabled}, \
+                 tls_feature_compiled={tls_feature_compiled}"
             );
         }
+    }
+
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn tls_enabled_is_rejected_when_the_binary_lacks_tls_support() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.transport.tls.enabled = true;
+
+        let error = validate_config_security(&config)
+            .expect_err("a non-TLS binary must never accept an HTTPS configuration");
+        assert!(error
+            .to_string()
+            .contains("compiled with the `tls` Cargo feature"));
+    }
+
+    #[test]
+    fn unverified_client_fingerprint_binding_is_rejected() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config
+            .security
+            .transport
+            .token_binding
+            .require_client_fingerprint = true;
+
+        let error = validate_config_security(&config)
+            .expect_err("untrusted request headers must not stand in for mTLS identity");
+        assert!(error
+            .to_string()
+            .contains("not supported by the built-in listener"));
+        assert!(error
+            .to_string()
+            .contains("client-supplied fingerprint headers are not trusted"));
     }
 
     /// The warning predicate must not be affected by unrelated security knobs.

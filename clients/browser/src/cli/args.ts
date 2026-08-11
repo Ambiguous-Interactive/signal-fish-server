@@ -21,6 +21,8 @@ export interface CliOptions {
   config: RunConfig;
   /** Hard watchdog: abort with exit code 4 after this many seconds. */
   maxRuntimeSecs: number;
+  /** Test-harness barrier path; null preserves the normal bounded exit. */
+  successReleaseFile: string | null;
   /**
    * Leave Chromium's default mDNS candidate obfuscation ON (the `.local`
    * trap). Default OFF: Chromium is launched with
@@ -59,6 +61,8 @@ Options:
   --p2p-timeout-secs <S>        WebRTC establishment window [default: 15]
   --run-for-secs <S>            Soft cap: exit 1 if criteria unmet [default: 30]
   --max-runtime-secs <S>        Hard watchdog: abort with exit 4 [default: 60]
+  --success-release-file <PATH> Test harness only: after success criteria hold,
+                                emit success_criteria_met and wait for PATH
   --protocol-version <V>        2 omits every v3 Authenticate field [default: 3]
   --supported-topologies <LIST> Comma-separated topologies [default: relay,host,mesh]
   --supported-transports <LIST> Comma-separated transports [default: relay,webrtc]
@@ -86,6 +90,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     '--p2p-timeout-secs',
     '--run-for-secs',
     '--max-runtime-secs',
+    '--success-release-file',
     '--protocol-version',
     '--supported-topologies',
     '--supported-transports',
@@ -202,6 +207,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     crippleIce: flags.get('--cripple-ice') === true,
     p2pTimeoutSecs: numberFlag('--p2p-timeout-secs', 15),
     runForSecs: numberFlag('--run-for-secs', 30),
+    successReleaseEnabled: flags.has('--success-release-file'),
     protocolVersion: numberFlag('--protocol-version', 3),
     supportedTopologies: listFlag<Topology>('--supported-topologies', TOPOLOGIES, [
       'relay',
@@ -220,6 +226,9 @@ export function parseArgs(argv: string[]): CliOptions | null {
   return {
     config,
     maxRuntimeSecs: numberFlag('--max-runtime-secs', 60),
+    successReleaseFile: flags.has('--success-release-file')
+      ? stringFlag('--success-release-file', '')
+      : null,
     mdnsObfuscation: flags.get('--mdns-obfuscation') === true,
   };
 }

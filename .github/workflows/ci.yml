@@ -276,6 +276,13 @@ jobs:
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: cargo nextest run --profile ci --locked --all-features
 
+      - name: Reject TLS configuration in a non-TLS binary
+        if: matrix.os == 'ubuntu-latest'
+        run: >-
+          cargo test --locked --no-default-features
+          --test config_and_endpoints_tests
+          validate_config_rejects_tls_for_a_binary_without_tls_support -- --exact
+
       - name: Drop trybuild artifacts before cache save
         # trybuild builds nested cargo projects under `<target>/tests`. Swatinem/rust-cache's
         # restore-time cleanup probes `<target>/tests/target` (a path trybuild never creates) in a
@@ -589,26 +596,59 @@ jobs:
           docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
           # Exponential backoff health check: 1s, 2s, 4s, 8s, 8s (max 23s total wait)
           DELAY=1
+          HTTP_READY=false
           for i in 1 2 3 4 5; do
             if curl -sf http://localhost:3536/v2/health > /dev/null 2>&1; then
               echo "Health check passed on attempt $i/5"
-              exit 0
+              HTTP_READY=true
+              break
             fi
             echo "Attempt $i/5: server not ready, retrying in ${DELAY}s..."
             sleep "$DELAY"
             DELAY=$((DELAY * 2))
             [ "$DELAY" -gt 8 ] && DELAY=8
           done
-          echo "ERROR: Server failed to become healthy"
-          echo "=== Docker logs ==="
-          docker logs test-server
-          exit 1
+          if [ "$HTTP_READY" != true ]; then
+            echo "ERROR: HTTP server failed to become healthy"
+            docker logs test-server
+            exit 1
+          fi
+          docker stop test-server
+          docker rm test-server
+
+          # The official image compiles built-in TLS, and its image-level
+          # healthcheck must follow the effective HTTPS listener mode.
+          docker run -d --name test-server-tls -p 3543:3536 \
+            --health-interval=1s --health-start-period=1s --health-retries=5 \
+            -v "$PWD/tests/fixtures/tls:/tls:ro" \
+            -e SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true \
+            -e SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH=/tls/cert.pem \
+            -e SIGNAL_FISH__SECURITY__TRANSPORT__TLS__PRIVATE_KEY_PATH=/tls/key.pem \
+            signal-fish-server:ci
+          TLS_READY=false
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect --format '{{.State.Health.Status}}' test-server-tls)
+            if [ "$STATUS" = healthy ] && curl -skf https://localhost:3543/v2/health > /dev/null; then
+              echo "TLS image health check passed on attempt $i/30"
+              TLS_READY=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$TLS_READY" != true ]; then
+            echo "ERROR: TLS server or image health check failed"
+            docker inspect --format '{{json .State.Health}}' test-server-tls
+            docker logs test-server-tls
+            exit 1
+          fi
 
       - name: Cleanup smoke test
         if: always()
         run: |
           docker stop test-server || true
           docker rm test-server || true
+          docker stop test-server-tls || true
+          docker rm test-server-tls || true
 
   coverage:
     name: Coverage (llvm-cov)

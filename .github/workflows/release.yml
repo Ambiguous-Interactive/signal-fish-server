@@ -607,11 +607,12 @@ jobs:
   #     through one upload avoids the race where N parallel matrix jobs upload
   #     to the same Release concurrently (intermittent 422s / clobbering).
   #
-  # Binaries are built with DEFAULT features (no `tls`) to match the published
-  # container image and to keep cross-compilation free of C-crypto toolchain
-  # requirements (aws-lc-sys / ring are only pulled in by the optional `tls`
-  # feature). Keep the matrix target list in lockstep with
-  # REQUIRED_RELEASE_TARGETS in tests/ci_config_tests.rs.
+  # New sources opt official binaries into built-in TLS with a source-owned
+  # Cargo metadata marker. Its absence preserves historical releases' exact
+  # default-feature contract on retries. The TLS graph selects rustls's ring
+  # provider so every advertised target has a supported cross-build path.
+  # Keep the matrix target list in lockstep with REQUIRED_RELEASE_TARGETS in
+  # tests/ci_config_tests.rs.
   #
   # `fail-fast: false` so one platform's toolchain hiccup does not strip
   # binaries for every other platform off the release.
@@ -659,6 +660,7 @@ jobs:
           path: publication-tools
           sparse-checkout: |
             scripts/read-toml-string.sh
+            scripts/release-binary-features.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -688,6 +690,15 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
+      - name: Select source-owned binary features
+        id: binary_features
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          ARGS=$(bash ../publication-tools/scripts/release-binary-features.sh Cargo.toml)
+          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+
       - name: Install cross linker (Linux cross targets)
         if: matrix.linker_pkg != ''
         shell: bash
@@ -706,7 +717,7 @@ jobs:
       - name: Build release binary
         shell: bash
         working-directory: source
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked ${{ steps.binary_features.outputs.args }} --target ${{ matrix.target }}
 
       - name: Package binary and checksum
         id: package

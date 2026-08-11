@@ -11,6 +11,7 @@ use axum_server::tls_rustls::RustlsConfig;
 
 #[cfg(feature = "tls")]
 use rustls::{
+    crypto::CryptoProvider,
     server::{danger::ClientCertVerifier, WebPkiClientVerifier},
     RootCertStore, ServerConfig as RustlsServerConfig,
 };
@@ -21,14 +22,16 @@ use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 #[cfg(feature = "tls")]
 use crate::config::{ClientAuthMode, TlsServerConfig};
 
-/// Header names that may carry a precomputed client certificate SHA-256 fingerprint.
+/// Header names an embedding layer may map to a fingerprint only after it has
+/// authenticated and stripped client-supplied forwarding headers. The built-in
+/// listener deliberately does not consume these headers.
 pub const CLIENT_FINGERPRINT_HEADER_CANDIDATES: &[&str] = &[
     "x-signalfish-client-cert-sha256",
     "x-forwarded-client-cert-sha256",
     "x-amzn-mtls-clientcert",
 ];
 
-/// Captured client certificate fingerprint metadata propagated through request extensions.
+/// Verified client certificate fingerprint metadata propagated through request extensions.
 #[derive(Debug, Clone)]
 pub struct ClientCertificateFingerprint {
     pub fingerprint: Arc<str>,
@@ -46,9 +49,15 @@ pub fn build_rustls_config(tls: &TlsServerConfig) -> Result<RustlsConfig> {
 fn build_server_config(tls: &TlsServerConfig) -> Result<RustlsServerConfig> {
     let cert_chain = load_cert_chain(tls)?;
     let private_key = load_private_key(tls)?;
-    let verifier = build_client_verifier(tls)?;
+    // Select our provider explicitly. Dev dependencies and downstream
+    // embedders may enable another rustls provider in the unified graph; the
+    // implicit builder panics when it cannot infer one global default.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = build_client_verifier(tls, Arc::clone(&provider))?;
 
-    let mut config = RustlsServerConfig::builder()
+    let mut config = RustlsServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("failed to configure safe default TLS protocol versions")?
         .with_client_cert_verifier(verifier)
         .with_single_cert(cert_chain, private_key)
         .map_err(|err| anyhow!("invalid TLS certificate/private key pair: {err}"))?;
@@ -95,7 +104,10 @@ fn load_private_key(tls: &TlsServerConfig) -> Result<PrivateKeyDer<'static>> {
 }
 
 #[cfg(feature = "tls")]
-fn build_client_verifier(tls: &TlsServerConfig) -> Result<Arc<dyn ClientCertVerifier>> {
+fn build_client_verifier(
+    tls: &TlsServerConfig,
+    provider: Arc<CryptoProvider>,
+) -> Result<Arc<dyn ClientCertVerifier>> {
     if matches!(tls.client_auth, ClientAuthMode::None) {
         return Ok(WebPkiClientVerifier::no_client_auth());
     }
@@ -126,7 +138,7 @@ fn build_client_verifier(tls: &TlsServerConfig) -> Result<Arc<dyn ClientCertVeri
         );
     }
 
-    let builder = WebPkiClientVerifier::builder(Arc::new(store));
+    let builder = WebPkiClientVerifier::builder_with_provider(Arc::new(store), provider);
     let builder = if matches!(tls.client_auth, ClientAuthMode::Optional) {
         builder.allow_unauthenticated()
     } else {

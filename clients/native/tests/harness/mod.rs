@@ -594,6 +594,24 @@ impl ClientProcess {
             .expect("client process already exited or was reaped")
     }
 
+    /// Assert that the child is still alive without consuming its stdout.
+    pub fn assert_running(&mut self, context: &str) {
+        let child = self.child.as_mut().expect("client process already reaped");
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => panic!(
+                "client {} exited early ({status}) {context};\n{}",
+                self.name,
+                self.diagnostics()
+            ),
+            Err(error) => panic!(
+                "client {} could not be polled {context}: {error};\n{}",
+                self.name,
+                self.diagnostics()
+            ),
+        }
+    }
+
     /// Read events until one named `event_name` arrives; panics (with
     /// diagnostics) on timeout, EOF, or a non-JSONL stdout line.
     pub async fn await_event(&mut self, event_name: &str, timeout: Duration) -> Value {
@@ -832,16 +850,13 @@ pub fn player_id_of(events: &[Value], who: &str) -> String {
 ///   (which include receiving that same traffic), hence strictly before any
 ///   `PlayerLeft` is enqueued. For these the boundary is a true ordering
 ///   guarantee.
-/// - **Data-channel events** (`channel_message`, delivered over SCTP outside
-///   the WS FIFO): no cross-transport ordering guarantee exists, so the
-///   claim is necessarily weaker. The argument is: a sibling's exit criteria
-///   chain through RECEIPT of this client's exchange messages, so the
-///   sibling's own sends preceded its exit by at least its post-criteria
-///   exit linger; delivery is loopback SCTP (sub-millisecond), the
-///   `reliable` channel retransmits while the association lives, and the
-///   single `unreliable` send rides the same loopback. A late or lost
-///   message would fail the window assertions loudly (missing event), never
-///   pass silently.
+///
+/// Data-channel events are deliberately NOT covered by this window. SCTP and
+/// the server WebSocket have no cross-transport ordering relationship: a
+/// reliable channel message may be received after the server has delivered a
+/// sibling's `PlayerLeft`, even when every client met its exchange criteria
+/// and exited successfully. Assertions over data-channel traffic must use the
+/// complete drained client log.
 pub fn scenario_window(events: &[Value]) -> &[Value] {
     let end = events
         .iter()

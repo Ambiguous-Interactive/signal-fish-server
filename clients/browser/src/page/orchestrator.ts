@@ -367,6 +367,20 @@ export async function run(config: RunConfig): Promise<number> {
   }
 }
 
+/** Schedule one release-file probe without spinning while its Promise is live. */
+export function scheduleSuccessReleasePoll(
+  current: number | null,
+  inFlight: boolean,
+  now: number,
+): number | null {
+  return inFlight ? null : (current ?? now);
+}
+
+/** The outstanding Pong owns keepalive wake scheduling until it arrives. */
+export function nextKeepaliveWake(nextPingAt: number, pongDeadline: number | null): number {
+  return pongDeadline ?? nextPingAt;
+}
+
 /** Single-chain state machine driving the session (see module docs). */
 class Orchestrator {
   private readonly config: RunConfig;
@@ -427,6 +441,10 @@ class Orchestrator {
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
   private lingerUntil: number | null = null;
+  private successCriteriaReported = false;
+  private successReleaseGranted = false;
+  private successReleasePollAt: number | null = null;
+  private successReleasePollInFlight = false;
   /** Next keepalive `Ping` send (the mandatory client keepalive contract). */
   private nextPingAt = 0;
   /**
@@ -845,7 +863,11 @@ class Orchestrator {
 
   /** Earliest pending timer (the run deadline at the latest). */
   private nextWake(): number {
-    let wake = this.runDeadline;
+    const holdingAtSuccessBarrier =
+      this.config.successReleaseEnabled &&
+      this.successCriteriaReported &&
+      !this.successReleaseGranted;
+    let wake = holdingAtSuccessBarrier ? Number.POSITIVE_INFINITY : this.runDeadline;
     if (!this.relaySent && this.relaySendAt !== null) {
       wake = Math.min(wake, this.relaySendAt);
     }
@@ -858,10 +880,10 @@ class Orchestrator {
     if (this.lingerUntil !== null) {
       wake = Math.min(wake, this.lingerUntil);
     }
-    wake = Math.min(wake, this.nextPingAt);
-    if (this.pongDeadline !== null) {
-      wake = Math.min(wake, this.pongDeadline);
+    if (!this.successReleasePollInFlight && this.successReleasePollAt !== null) {
+      wake = Math.min(wake, this.successReleasePollAt);
     }
+    wake = Math.min(wake, nextKeepaliveWake(this.nextPingAt, this.pongDeadline));
     return wake;
   }
 
@@ -929,6 +951,10 @@ class Orchestrator {
       this.p2pDeadline = null;
     }
 
+    if (this.successReleasePollAt !== null && now >= this.successReleasePollAt) {
+      this.pollSuccessRelease();
+    }
+
     this.armSuccessLinger(now);
     if (this.lingerUntil !== null && now >= this.lingerUntil) {
       // Criteria can regress during the linger (an authoritative plan or a
@@ -941,7 +967,11 @@ class Orchestrator {
       this.lingerUntil = null;
     }
 
-    if (now >= this.runDeadline) {
+    const holdingAtSuccessBarrier =
+      this.config.successReleaseEnabled &&
+      this.successCriteriaReported &&
+      !this.successReleaseGranted;
+    if (now >= this.runDeadline && !holdingAtSuccessBarrier) {
       if (this.criteriaMet()) {
         this.finish(EXIT_SUCCESS);
         return;
@@ -955,9 +985,66 @@ class Orchestrator {
   }
 
   private armSuccessLinger(now: number): void {
-    if (this.lingerUntil === null && this.criteriaMet()) {
+    if (!this.criteriaMet()) {
+      if (
+        this.config.successReleaseEnabled &&
+        this.successCriteriaReported &&
+        !this.successReleaseGranted
+      ) {
+        this.lingerUntil = null;
+        this.successReleasePollAt = scheduleSuccessReleasePoll(
+          this.successReleasePollAt,
+          this.successReleasePollInFlight,
+          now,
+        );
+      }
+      return;
+    }
+    if (this.config.successReleaseEnabled && !this.successCriteriaReported) {
+      emit({ event: 'success_criteria_met' });
+      this.successCriteriaReported = true;
+    }
+    if (this.config.successReleaseEnabled && !this.successReleaseGranted) {
+      this.lingerUntil = null;
+      this.successReleasePollAt = scheduleSuccessReleasePoll(
+        this.successReleasePollAt,
+        this.successReleasePollInFlight,
+        now,
+      );
+      return;
+    }
+    this.successReleasePollAt = null;
+    if (this.lingerUntil === null) {
       this.lingerUntil = now + EXIT_LINGER_MS;
     }
+  }
+
+  private pollSuccessRelease(): void {
+    if (this.successReleasePollInFlight || this.successReleaseGranted) {
+      return;
+    }
+    const probe = window.__sf_success_released;
+    if (probe === undefined) {
+      throw FatalError.protocol('success-release bridge is unavailable');
+    }
+    this.successReleasePollInFlight = true;
+    this.successReleasePollAt = null;
+    void probe()
+      .then((released) => {
+        this.enqueue(async () => {
+          this.successReleasePollInFlight = false;
+          this.successReleaseGranted = released;
+          if (!released) {
+            this.successReleasePollAt = Date.now() + 100;
+          }
+        });
+      })
+      .catch((error: unknown) => {
+        this.enqueue(async () => {
+          this.successReleasePollInFlight = false;
+          this.fail(FatalError.protocol(`success-release probe failed: ${describe(error)}`));
+        });
+      });
   }
 
   // -------------------------------------------------------------------------

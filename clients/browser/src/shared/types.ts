@@ -43,6 +43,8 @@ export interface RunConfig {
   crippleIce: boolean;
   p2pTimeoutSecs: number;
   runForSecs: number;
+  /** Hold a successful run open until the CLI's release-file bridge returns true. */
+  successReleaseEnabled: boolean;
   protocolVersion: number;
   supportedTopologies: Topology[];
   supportedTransports: Transport[];

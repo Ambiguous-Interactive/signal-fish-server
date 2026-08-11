@@ -143,28 +143,28 @@ fn test_ci_config_healthcheck_parser_accepts_logical_instruction_shapes() {
     let cases = [
         (
             "single-line",
-            "HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1\n",
+            "HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n",
         ),
         (
             "multiline",
             "HEALTHCHECK --interval=30s --timeout=5s \\\n\
-                 CMD curl -f http://localhost:3536/v2/health || exit 1\n",
+                 CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n",
         ),
         (
             "continued-comment",
             "HEALTHCHECK --interval=30s \\\n\
                  # ignored full-line comment\n\
-                 CMD curl -f http://localhost:3536/v2/health || exit 1\n",
+                 CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n",
         ),
         (
             "crlf",
             "HEALTHCHECK --interval=30s \\\r\n\
-                 CMD curl -f http://localhost:3536/v2/health || exit 1\r\n",
+                 CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\r\n",
         ),
         (
             "non-heredoc-angle-token",
             "LABEL documentation=<<not-a-heredoc\n\
-             HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1\n",
+             HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n",
         ),
     ];
 
@@ -184,7 +184,7 @@ fn test_ci_config_healthcheck_parser_rejects_inactive_or_unsafe_shapes() {
     let cases = [
         (
             "commented-out",
-            "# HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1\n",
+            "# HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n",
             "No active HEALTHCHECK directive found in Dockerfile.",
         ),
         (
@@ -205,17 +205,37 @@ fn test_ci_config_healthcheck_parser_rejects_inactive_or_unsafe_shapes() {
         (
             "malformed-continuation",
             "HEALTHCHECK --interval=30s \\ \n\
-             CMD curl -f http://localhost:3536/v2/health || exit 1\n",
+             CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n",
             "Dockerfile HEALTHCHECK must use 'CMD ...' or 'NONE' grammar.",
         ),
         (
             "wrong-port",
-            "HEALTHCHECK CMD curl -f http://localhost:9000/v2/health || exit 1\n",
+            "HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:9000/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:9000/v2/health || exit 1\n",
             "HEALTHCHECK port (9000) does not match EXPOSE port (3536).",
         ),
         (
+            "probe-port-mismatch",
+            "HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:4443/v2/health || exit 1\n",
+            "Dockerfile HEALTHCHECK HTTP and HTTPS probes must use the same port.",
+        ),
+        (
+            "http-only",
+            "HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || exit 1\n",
+            "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes.",
+        ),
+        (
+            "https-without-mtls-config",
+            "HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 https://localhost:3536/v2/health || exit 1\n",
+            "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes.",
+        ),
+        (
+            "unbounded-dual-probe",
+            "HEALTHCHECK CMD curl -fsS http://localhost:3536/v2/health || curl -fkSs --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n",
+            "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes.",
+        ),
+        (
             "builder-stage-only",
-            "HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1\n\
+            "HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1\n\
              FROM scratch\n\
              CMD [\"./signal-fish-server\"]\n",
             "No active HEALTHCHECK directive found in Dockerfile.",
@@ -223,26 +243,26 @@ fn test_ci_config_healthcheck_parser_rejects_inactive_or_unsafe_shapes() {
         (
             "arbitrary-command-with-url",
             "HEALTHCHECK CMD echo http://localhost:3536/v2/health\n",
-            "Dockerfile HEALTHCHECK must run the supported localhost curl probe.",
+            "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes.",
         ),
         (
             "inert-comment-url",
             "HEALTHCHECK CMD true # curl -f http://localhost:3536/v2/health || exit 1\n",
-            "Dockerfile HEALTHCHECK must run the supported localhost curl probe.",
+            "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes.",
         ),
         (
             "different-host",
             "HEALTHCHECK CMD curl -f http://notlocalhost:3536/v2/health || exit 1\n",
-            "Dockerfile HEALTHCHECK must run the supported localhost curl probe.",
+            "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes.",
         ),
         (
             "wrong-path",
             "HEALTHCHECK CMD curl -f http://localhost:3536/metrics || exit 1\n",
-            "Dockerfile HEALTHCHECK must run the supported localhost curl probe.",
+            "Dockerfile HEALTHCHECK must run bounded localhost HTTP and HTTPS curl probes.",
         ),
         (
             "eof-after-continuation",
-            "HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1 \\",
+            "HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}\" https://localhost:3536/v2/health || exit 1 \\",
             "Dockerfile HEALTHCHECK has an unterminated backslash continuation.",
         ),
     ];
@@ -265,7 +285,7 @@ fn test_ci_config_healthcheck_parser_rejects_inactive_or_unsafe_shapes() {
         let dockerfile_tail = format!(
             "{opener}\n\
              FROM scratch\n\
-             HEALTHCHECK CMD curl -f http://localhost:3536/v2/health || exit 1\n\
+             HEALTHCHECK CMD curl -fsS --max-time 2 http://localhost:3536/v2/health || curl -fkSs --max-time 2 --config \"${{SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}}\" https://localhost:3536/v2/health || exit 1\n\
              EOF\n"
         );
         let (exit_code, output) = run_validator_with_dockerfile(&dockerfile_tail);

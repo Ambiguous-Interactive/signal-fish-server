@@ -1138,10 +1138,7 @@ impl Orchestrator<'_> {
         if let Some(at) = self.unreliable_exchange_release_poll_at {
             wake = wake.min(at);
         }
-        wake = wake.min(self.next_ping_at);
-        if let Some(at) = self.pong_deadline {
-            wake = wake.min(at);
-        }
+        wake = wake.min(keepalive_wake(self.next_ping_at, self.pong_deadline));
         wake
     }
 
@@ -2762,6 +2759,10 @@ fn harness_aware_base_wake(
     }
 }
 
+fn keepalive_wake(next_ping_at: Instant, pong_deadline: Option<Instant>) -> Instant {
+    pong_deadline.unwrap_or(next_ping_at)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -3171,6 +3172,18 @@ mod tests {
             elapsed_run_deadline,
             "ordinary clients retain the soft-deadline behavior"
         );
+    }
+
+    #[test]
+    fn pending_pong_deadline_owns_keepalive_wake() {
+        let now = tokio::time::Instant::now();
+        let overdue_ping = now - std::time::Duration::from_secs(1);
+        let pong_grace = now + super::PONG_DRAIN_GRACE;
+        assert_eq!(
+            super::keepalive_wake(overdue_ping, Some(pong_grace)),
+            pong_grace
+        );
+        assert_eq!(super::keepalive_wake(overdue_ping, None), overdue_ping);
     }
 
     #[test]

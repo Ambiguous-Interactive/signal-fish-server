@@ -69,11 +69,27 @@ services:
 
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3536/v2/health"]
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS --max-time 2 http://localhost:3536/v2/health ||
+          curl -fkSs --max-time 2
+          --config "$${SF_HEALTHCHECK_CURL_CONFIG:-/dev/null}"
+          https://localhost:3536/v2/health
       interval: 30s
       timeout: 10s
       retries: 3
 
+```
+
+The image health check supports both the default HTTP listener and built-in
+HTTPS. When `client_auth` is `require`, mount a curl config readable by the
+container user and set `SF_HEALTHCHECK_CURL_CONFIG` to its path. The
+config must name the health probe's client certificate and key, for example:
+
+```text
+cert = "/run/secrets/health-client.pem"
+key = "/run/secrets/health-client-key.pem"
 ```
 
 ### TURN Relay Profile

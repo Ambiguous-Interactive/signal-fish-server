@@ -90,7 +90,7 @@ accounting lifetime from `sender_watermarks`. Thus the shared
 The shared flag surface mirrors the native client's ([canonical reference](../native/README.md#cli-reference)):
 `--server-url`, `--create-room`/`--join-code`, `--peers`, `--expect-total-peers`, `--leave-on-game-start`,
 `--game-name`, `--player-name`, `--app-id`, `--platform`, `--exchange`, `--relay-payload`, `--cripple-ice`,
-`--p2p-timeout-secs`, `--run-for-secs`, `--max-runtime-secs`, `--protocol-version`,
+`--p2p-timeout-secs`, `--run-for-secs`, `--max-runtime-secs`, `--success-release-file`, `--protocol-version`,
 `--supported-topologies`, `--supported-transports` — identical semantics and defaults, except the
 identity defaults are browser-flavored (`--game-name reference-browser`, `--player-name RefBrowser`,
 `--app-id reference-browser-app`, `--platform reference-browser`). As with clap, a known flag token never

@@ -252,6 +252,10 @@ async fn run_three_clients(
     let server = spawn_server(default_topology).await;
     // Holds the clients' captured stderr logs for failure diagnostics.
     let workdir = tempfile::tempdir().expect("create client workdir");
+    let success_release_file = workdir.path().join("release-successful-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
 
     let urls: Vec<String> = configs
         .iter()
@@ -269,6 +273,12 @@ async fn run_three_clients(
         .map(|(name, config)| config.relay.then(|| relay_payload_for(name)))
         .collect();
 
+    let creator_args: Vec<&str> = configs[0]
+        .extra_args
+        .iter()
+        .copied()
+        .chain(["--success-release-file", success_release_path])
+        .collect();
     let mut creator = spawn_client(
         &ClientSpec {
             name: CLIENT_NAMES[0],
@@ -278,7 +288,7 @@ async fn run_three_clients(
             peers: 3,
             exchange: configs[0].exchange,
             relay_payload: payloads[0].as_deref(),
-            extra_args: configs[0].extra_args,
+            extra_args: &creator_args,
         },
         workdir.path(),
     );
@@ -288,6 +298,12 @@ async fn run_three_clients(
 
     let mut clients: Vec<ClientProcess> = vec![creator];
     for (index, name) in CLIENT_NAMES.iter().enumerate().skip(1) {
+        let client_args: Vec<&str> = configs[index]
+            .extra_args
+            .iter()
+            .copied()
+            .chain(["--success-release-file", success_release_path])
+            .collect();
         clients.push(spawn_client(
             &ClientSpec {
                 name,
@@ -297,14 +313,36 @@ async fn run_three_clients(
                 peers: 3,
                 exchange: configs[index].exchange,
                 relay_payload: payloads[index].as_deref(),
-                extra_args: configs[index].extra_args,
+                extra_args: &client_args,
             },
             workdir.path(),
         ));
     }
 
-    // Drain everyone to EOF + reap; every client must succeed on its own
-    // (their internal success criteria) AND report it via the exiting event.
+    // A local SCTP send completion is not remote delivery. Hold all clients
+    // until every process independently reports complete success criteria, so
+    // sibling teardown cannot erase an outstanding exchange obligation.
+    for client in &mut clients {
+        client
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    for client in &mut clients {
+        client.assert_running("while held at the shared success barrier");
+    }
+    for client in &clients {
+        assert!(
+            events_named(&client.events, "player_left").is_empty(),
+            "{} observed a departure before the success barrier;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+    }
+    std::fs::write(&success_release_file, b"release").expect("release successful clients together");
+
+    // Drain everyone to EOF + reap; every client must succeed on its own and
+    // report that through the exiting event.
     let mut exit_codes = Vec::with_capacity(clients.len());
     for client in &mut clients {
         exit_codes.push(drain_expect_success(client).await);
@@ -353,6 +391,15 @@ async fn run_two_peer_mesh(game_name: &str, extra_args: &'static [&'static str])
     let mut server = spawn_server("mesh").await;
     let workdir = tempfile::tempdir().expect("create client workdir");
     let url = server.v3_ws_url();
+    let success_release_file = workdir.path().join("release-successful-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
+    let client_args: Vec<&str> = extra_args
+        .iter()
+        .copied()
+        .chain(["--success-release-file", success_release_path])
+        .collect();
 
     let mut creator = spawn_client(
         &ClientSpec {
@@ -363,7 +410,7 @@ async fn run_two_peer_mesh(game_name: &str, extra_args: &'static [&'static str])
             peers: 2,
             exchange: true,
             relay_payload: None,
-            extra_args,
+            extra_args: &client_args,
         },
         workdir.path(),
     );
@@ -378,12 +425,30 @@ async fn run_two_peer_mesh(game_name: &str, extra_args: &'static [&'static str])
             peers: 2,
             exchange: true,
             relay_payload: None,
-            extra_args,
+            extra_args: &client_args,
         },
         workdir.path(),
     );
 
     let mut clients = vec![creator, joiner];
+    for client in &mut clients {
+        client
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    for client in &mut clients {
+        client.assert_running("while held at the shared success barrier");
+    }
+    for client in &clients {
+        assert!(
+            events_named(&client.events, "player_left").is_empty(),
+            "{} observed a departure before the success barrier;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+    }
+    std::fs::write(&success_release_file, b"release").expect("release successful clients together");
     let mut exit_codes = Vec::with_capacity(clients.len());
     for client in &mut clients {
         exit_codes.push(drain_expect_success(client).await);
@@ -791,8 +856,8 @@ async fn mesh_n3_full_webrtc_session_with_live_relay_floor() {
         // 2 connected-pair events per client = 6 directed endpoints total.
         assert_pair_connected_exactly(run.window(index), who, &others);
         // Channel matrix: both labels from both peers = 12 receive events total.
-        assert_exchange_received_from(run.window(index), who, &others);
-        assert_exchange_sent_to(run.window(index), who, &others);
+        assert_exchange_received_from(&run.logs[index], who, &others);
+        assert_exchange_sent_to(&run.logs[index], who, &others);
         // Appendix G status + session-008 fan-out.
         assert_transport_status_true(&run.logs[index], who);
         assert_peer_status_fan_out(run.window(index), who, &others_true);
@@ -860,12 +925,12 @@ async fn host_star_n3_webrtc() {
         // Exchange completes host<->client in both directions on both
         // channels; the receive/send assertions also reject any
         // client<->client channel traffic.
-        assert_exchange_received_from(run.window(index), who, &host_only);
-        assert_exchange_sent_to(run.window(index), who, &host_only);
+        assert_exchange_received_from(&run.logs[index], who, &host_only);
+        assert_exchange_sent_to(&run.logs[index], who, &host_only);
         assert_transport_status_true(&run.logs[index], who);
     }
-    assert_exchange_received_from(run.window(0), CLIENT_NAMES[0], &client_ids);
-    assert_exchange_sent_to(run.window(0), CLIENT_NAMES[0], &client_ids);
+    assert_exchange_received_from(&run.logs[0], CLIENT_NAMES[0], &client_ids);
+    assert_exchange_sent_to(&run.logs[0], CLIENT_NAMES[0], &client_ids);
     assert_transport_status_true(&run.logs[0], CLIENT_NAMES[0]);
 
     // The relay floor stays live in a star too.
@@ -946,8 +1011,8 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
         let who = CLIENT_NAMES[index];
         let other_only: BTreeSet<&str> = BTreeSet::from([run.ids[other].as_str()]);
         assert_pair_connected_exactly(run.window(index), who, &other_only);
-        assert_exchange_received_from(run.window(index), who, &other_only);
-        assert_exchange_sent_to(run.window(index), who, &other_only);
+        assert_exchange_received_from(&run.logs[index], who, &other_only);
+        assert_exchange_sent_to(&run.logs[index], who, &other_only);
         // >= 1 pair connected at the deadline => overall webrtc status true.
         assert_transport_status_true(&run.logs[index], who);
     }
@@ -2053,8 +2118,8 @@ async fn two_peer_mesh_exchanges_over_live_webrtc() {
             peer_id,
             &failure_context,
         );
-        assert_exchange_sent_to(window, who, &peers);
-        assert_exchange_received_from(window, who, &peers);
+        assert_exchange_sent_to(&run.logs[index], who, &peers);
+        assert_exchange_received_from(&run.logs[index], who, &peers);
         assert_transport_status_true(&run.logs[index], who);
     }
 }
@@ -2109,7 +2174,7 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
         let failure_context = run.selected_pair_failure_context(index);
         assert_ipv6_host_path(window, who, peer_id, &failure_context);
         assert_no_ipv4_candidate_advertised(window, who);
-        assert_exchange_sent_to(window, who, &peers);
-        assert_exchange_received_from(window, who, &peers);
+        assert_exchange_sent_to(&run.logs[index], who, &peers);
+        assert_exchange_received_from(&run.logs[index], who, &peers);
     }
 }

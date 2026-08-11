@@ -17,7 +17,7 @@
 //     died). Chromium's helper processes exit with their main process.
 
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -231,6 +231,10 @@ async function setupPage(options: CliOptions): Promise<Page> {
     if (typeof line === 'string') {
       writeEventLine(line);
     }
+  });
+  await page.exposeFunction('__sf_success_released', () => {
+    const releaseFile = options.successReleaseFile;
+    return releaseFile === null || existsSync(releaseFile);
   });
   await page.addScriptTag({ content: pageBundle });
   return page;

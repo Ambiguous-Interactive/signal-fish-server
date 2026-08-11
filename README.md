@@ -458,6 +458,11 @@ instead of built-in TLS.
 cargo build --features tls
 ```
 
+Official release archives and container images include this feature. Source
+builds keep it optional; requesting `security.transport.tls.enabled=true` from
+a binary built without it fails validation instead of falling back to
+plaintext HTTP.
+
 Build with all optional features:
 
 ```bash
@@ -585,7 +590,10 @@ curl http://localhost:3536/v2/health
 
 The Docker image uses a multi-stage build with `cargo-chef` for dependency
 caching and `mold` for fast linking. The final runtime image is based on
-`debian:bookworm-slim` and runs as a non-root user.
+`debian:bookworm-slim` and runs as a non-root user. Its health check probes
+both HTTP and HTTPS. Required-mTLS deployments can set
+`SF_HEALTHCHECK_CURL_CONFIG` to a mounted curl config containing the
+health probe's client certificate and key.
 
 ## Project Structure
 

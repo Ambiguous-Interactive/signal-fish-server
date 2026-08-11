@@ -2251,6 +2251,68 @@ fn test_validate_config_security_tls_validation() {
     }
 }
 
+#[cfg(not(feature = "tls"))]
+#[test]
+fn validate_config_rejects_tls_for_a_binary_without_tls_support() {
+    let workdir = tempfile::tempdir().expect("create temp workdir");
+    let cert_path = workdir.path().join("cert.pem");
+    let key_path = workdir.path().join("key.pem");
+    fs::write(&cert_path, b"placeholder").expect("write placeholder certificate");
+    fs::write(&key_path, b"placeholder").expect("write placeholder private key");
+    let mut config = Config::default();
+    config.security.require_metrics_auth = false;
+    config.security.transport.tls.enabled = true;
+    config.security.transport.tls.certificate_path = Some(cert_path.to_string_lossy().into_owned());
+    config.security.transport.tls.private_key_path = Some(key_path.to_string_lossy().into_owned());
+    let library_error = validate_config_security(&config)
+        .expect_err("library validation must reject TLS without compiled support");
+    assert!(
+        library_error
+            .to_string()
+            .contains("compiled with the `tls` Cargo feature"),
+        "library validation must explain the unavailable feature: {library_error}"
+    );
+
+    let config_path = workdir.path().join("config.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec(&serde_json::json!({
+            "security": {
+                "require_metrics_auth": false,
+                "transport": {
+                    "tls": {
+                        "enabled": true,
+                        "certificate_path": cert_path,
+                        "private_key_path": key_path
+                    }
+                }
+            }
+        }))
+        .expect("serialize TLS config"),
+    )
+    .expect("write TLS config");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-server"))
+        .arg("--validate-config")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("SIGNAL_FISH_CONFIG_PATH", &config_path)
+        .current_dir(workdir.path())
+        .output()
+        .expect("run non-TLS server validation");
+
+    assert!(!output.status.success(), "TLS validation must fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("compiled with the `tls` Cargo feature"),
+        "validation must explain that the binary cannot serve HTTPS: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("Configuration validation passed"),
+        "the non-TLS binary must never report a TLS configuration as valid"
+    );
+}
+
 /// `--print-config` must never leak credential material: every *set* secret in
 /// the printed JSON is replaced with the [`REDACTED_SECRET`] marker. This
 /// drives the REAL compiled binary (`CARGO_BIN_EXE_signal-fish-server`)

@@ -5390,6 +5390,119 @@ fn test_release_binary_builds_use_dispatch_tooling_with_exact_source() {
 }
 
 #[test]
+fn test_official_binaries_compile_built_in_tls_support() {
+    let root = repo_root();
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let binaries = extract_workflow_job_block(&release, "build-binaries")
+        .expect("release.yml must define build-binaries");
+    for required in [
+        "scripts/release-binary-features.sh",
+        "- name: Select source-owned binary features",
+        "bash ../publication-tools/scripts/release-binary-features.sh Cargo.toml",
+        "cargo build --release --locked ${{ steps.binary_features.outputs.args }} --target",
+    ] {
+        assert!(
+            binaries.contains(required),
+            "release binaries must select feature arguments from the exact source marker; \
+             missing `{required}`"
+        );
+    }
+
+    let dockerfile = read_live_file(&root.join("Dockerfile"));
+    for command in [
+        "cargo chef cook --release --locked --features tls",
+        "cargo build --release --locked --features tls",
+    ] {
+        assert!(
+            dockerfile.contains(command),
+            "the official container must compile built-in TLS in both dependency and \
+             application layers; missing `{command}`"
+        );
+    }
+
+    let manifest = read_live_file(&root.join("Cargo.toml"));
+    for required in [
+        "[package.metadata.signal-fish-release]",
+        "built-in-tls = true",
+        "\"tls-rustls-no-provider\"",
+        "\"ring\"",
+    ] {
+        assert!(
+            manifest.contains(required),
+            "official TLS artifacts require the source marker and portable ring graph; \
+             missing `{required}`"
+        );
+    }
+    assert!(
+        !manifest.contains("\"tls-rustls\""),
+        "axum-server's provider-selecting TLS feature would restore aws-lc-sys and break arm/v7"
+    );
+    let tls_source = read_live_file(&root.join("src/security/tls.rs"));
+    for required in [
+        "rustls::crypto::ring::default_provider()",
+        "RustlsServerConfig::builder_with_provider(provider)",
+        "WebPkiClientVerifier::builder_with_provider(Arc::new(store), provider)",
+    ] {
+        assert!(
+            tls_source.contains(required),
+            "TLS construction must explicitly select ring even when test/downstream graphs \
+             enable another provider; missing `{required}`"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_release_binary_feature_selection_preserves_historical_sources() {
+    let root = repo_root();
+    let script = root.join("scripts/release-binary-features.sh");
+    let temp = unique_temp_dir("release-binary-features");
+    let cases = [
+        ("historical", "[package]\nversion = \"0.6.0\"\n", true, ""),
+        (
+            "opted-in",
+            "[package]\nversion = \"0.7.0\"\n\n[package.metadata.signal-fish-release]\nbuilt-in-tls = true\n",
+            true,
+            "--features tls",
+        ),
+        (
+            "explicitly-disabled",
+            "[package]\nversion = \"0.7.0\"\n\n[package.metadata.signal-fish-release]\nbuilt-in-tls = false\n",
+            true,
+            "",
+        ),
+        (
+            "invalid",
+            "[package]\nversion = \"0.7.0\"\n\n[package.metadata.signal-fish-release]\nbuilt-in-tls = maybe\n",
+            false,
+            "",
+        ),
+    ];
+
+    for (name, manifest, should_succeed, expected_stdout) in cases {
+        let path = temp.path().join(format!("{name}.toml"));
+        write_file(&path, manifest);
+        let output = bash_command()
+            .arg(&script)
+            .arg(&path)
+            .output()
+            .expect("release feature selector should execute");
+        assert_eq!(
+            output.status.success(),
+            should_succeed,
+            "unexpected selector status for {name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if should_succeed {
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                expected_stdout
+            );
+        }
+    }
+}
+
+#[test]
 fn test_release_workflow_attaches_binaries_with_checksums() {
     // Prebuilt binaries are only trustworthy/usable if they are (a) uploaded to
     // the Release and (b) accompanied by checksums users can verify. Match on
@@ -18868,6 +18981,49 @@ fn test_ci_nextest_uses_ci_profile() {
 }
 
 #[test]
+fn test_ci_executes_non_tls_fail_closed_regression() {
+    let root = repo_root();
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let nextest = extract_workflow_job_block(&ci_content, "nextest")
+        .expect("ci.yml must define the nextest job");
+    for required in [
+        "- name: Reject TLS configuration in a non-TLS binary",
+        "if: matrix.os == 'ubuntu-latest'",
+        "cargo test --locked --no-default-features",
+        "--test config_and_endpoints_tests",
+        "validate_config_rejects_tls_for_a_binary_without_tls_support -- --exact",
+    ] {
+        assert!(
+            nextest.contains(required),
+            "the cached Linux nextest job must execute the non-TLS fail-closed regression; \
+             missing `{required}`"
+        );
+    }
+}
+
+#[test]
+fn test_ci_smokes_effective_tls_container_health() {
+    let root = repo_root();
+    let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let docker = extract_workflow_job_block(&ci_content, "docker")
+        .expect("ci.yml must define the Docker job");
+    for required in [
+        "--name test-server-tls",
+        "SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true",
+        "SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH=/tls/cert.pem",
+        "SIGNAL_FISH__SECURITY__TRANSPORT__TLS__PRIVATE_KEY_PATH=/tls/key.pem",
+        "docker inspect --format '{{.State.Health.Status}}' test-server-tls",
+        "curl -skf https://localhost:3543/v2/health",
+    ] {
+        assert!(
+            docker.contains(required),
+            "the official container must exercise its image healthcheck in effective TLS mode; \
+             missing `{required}`"
+        );
+    }
+}
+
+#[test]
 fn test_ci_safety_shared_nightly_cache_prefix() {
     // The Miri and ASan jobs in ci-safety.yml should share a cache prefix so
     // that compiled nightly artifacts can be reused between the two jobs,
@@ -24887,8 +25043,8 @@ SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVE
         "run.window(1 - index)",
         r#"matches!(remote_type, "host" | "prflx")"#,
         r#"[("local", events), ("peer", peer_events)]"#,
-        "assert_exchange_sent_to(window, who, &peers);",
-        "assert_exchange_received_from(window, who, &peers);",
+        "assert_exchange_sent_to(&run.logs[index], who, &peers);",
+        "assert_exchange_received_from(&run.logs[index], who, &peers);",
         "assert_transport_status_true(&run.logs[index], who);",
     ] {
         assert!(
@@ -24918,8 +25074,8 @@ SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVE
         "selected_pair_is_exact_host_host(selected)",
         r#"selected_ip_address(selected, "local_candidate_address", who, failure_context)"#,
         // ...carrying a real session on both labels, not the relay floor.
-        "assert_exchange_sent_to(window, who, &peers);",
-        "assert_exchange_received_from(window, who, &peers);",
+        "assert_exchange_sent_to(&run.logs[index], who, &peers);",
+        "assert_exchange_received_from(&run.logs[index], who, &peers);",
         "assert_pair_connected_exactly(window, who, &peers);",
         r#"events_named(&run.logs[index][..live_end], "fallback_engaged").is_empty(),"#,
     ] {

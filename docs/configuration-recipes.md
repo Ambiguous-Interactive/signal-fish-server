@@ -210,17 +210,19 @@ What it does and how to enable it:
 - `required=true` rejects clients that do not advertise the subprotocol. Set this
   only after every client in your fleet supports token binding, or you will lock
   out existing clients.
-- `require_client_fingerprint=true` additionally requires a verified mTLS client
-  certificate fingerprint on every signed frame; pair it with TLS `client_auth`
-  set to `require` and a `client_ca_cert_path` (see [TLS](#tls)).
+- `require_client_fingerprint=true` is reserved for binding proofs to a verified
+  mTLS peer certificate. The built-in listener currently rejects this setting:
+  its authenticated rustls peer certificate is not yet exposed to the
+  WebSocket handler, and client-supplied forwarding headers are deliberately
+  not trusted as identity. Track issue #344's verified extraction work before
+  enabling this knob.
 - `scheme` selects the per-frame signing scheme (default
   `sec_websocket_key_sha256`).
 
 Client impact: when `enabled` but not `required`, none — non-participating
-clients are unaffected. When `required` (or `require_client_fingerprint`),
-clients **must** implement the subprotocol (and present a client certificate),
-so roll those out fleet-wide first. Start with `enabled=true, required=false`,
-confirm clients negotiate it, then tighten.
+clients are unaffected. When `required`, clients **must** implement the
+subprotocol, so roll that out fleet-wide first. Start with `enabled=true,
+required=false`, confirm clients negotiate it, then tighten.
 
 ## Metrics auth
 

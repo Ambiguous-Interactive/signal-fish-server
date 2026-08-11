@@ -8,6 +8,7 @@
 mod harness;
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use harness::{
     advertised_candidates, events_named, player_id_of, scenario_window, single_event, spawn_client,
@@ -224,6 +225,8 @@ async fn turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live(
     let release_dir = tempfile::tempdir().expect("create P2P gate directory");
     let release_path = release_dir.path().join("release-p2p");
     let release_arg = release_path.display().to_string();
+    let success_release_path = release_dir.path().join("release-successful-clients");
+    let success_release_arg = success_release_path.display().to_string();
     let args = [
         "--ice-transport-policy",
         "relay",
@@ -232,6 +235,8 @@ async fn turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live(
         "30",
         "--p2p-release-file",
         release_arg.as_str(),
+        "--success-release-file",
+        success_release_arg.as_str(),
     ];
     let mut active = spawn_two_clients(&secret, true, &args).await;
 
@@ -259,6 +264,25 @@ async fn turn_only_pair_selects_relay_candidates_and_keeps_websocket_floor_live(
             client.name
         );
     }
+    for client in &mut active.clients {
+        client
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    for client in &mut active.clients {
+        client.assert_running("while held at the shared success barrier");
+    }
+    for client in &active.clients {
+        assert!(
+            events_named(&client.events, "player_left").is_empty(),
+            "{} observed a departure before the success barrier;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+    }
+    std::fs::write(&success_release_path, b"release")
+        .expect("release successful TURN clients together");
     let run = finish_two_clients(active).await;
 
     for (index, who) in CLIENT_NAMES.iter().copied().enumerate() {
