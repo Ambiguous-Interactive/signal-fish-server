@@ -18297,14 +18297,27 @@ fn test_analysis_nightly_version_consistency() {
     for required in [
         "cargo-udeps-0.1.61-nightly-2026-08-01",
         "cargo +nightly-2026-08-01 install cargo-udeps --version 0.1.61 --locked",
+        "cargo +nightly-2026-08-01 udeps --version 2>/dev/null | grep -Fxq 'cargo-udeps 0.1.61'",
+        "--locked --force",
         "cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features",
     ] {
         assert!(
             unused_deps.contains(required),
-            "unused-deps.yml must install cargo-udeps 0.1.61 with the analysis nightly and key \
-             its binary cache by the same version; missing '{required}'"
+            "unused-deps.yml must reuse an exact cached cargo-udeps 0.1.61 or force-install it \
+             with the analysis nightly, and key its binary cache by the same version; \
+             missing '{required}'"
         );
     }
+
+    let install_block = unused_deps
+        .split("- name: Install cargo-udeps")
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .expect("unused-deps.yml must define the cargo-udeps install step");
+    assert!(
+        !install_block.contains("steps.cache-udeps.outputs.cache-hit"),
+        "the exact cargo-udeps executable probe must run even on dedicated cache hits"
+    );
 }
 
 /// Parse the `exclude_path = [...]` array from `.lychee.toml` content,

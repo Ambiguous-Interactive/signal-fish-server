@@ -93,3 +93,12 @@ tests; doc, workflow, LLM-file, hook-readiness, pre-commit, and pre-push gates;
 and cargo-deny's advisory, ban, license, and source checks. Exact-head hosted
 checks, pull-request review state, and publication closure are recorded after
 the branch is published.
+
+PR #336's first hosted attempt exposed an unrelated cache-layer race in Unused
+Dependencies: the general Rust cache restored `cargo-udeps`, the dedicated
+binary cache missed, and the unconditional install refused to overwrite the
+existing executable. The install is now idempotent: every cache result is
+executable-probed, an executable reporting exactly 0.1.61 is reused, and a
+missing, incompatible, or mismatched binary is force-replaced. A CI-config
+regression pins the cache key, unconditional version probe, analysis-nightly
+install, and force-replacement fallback together.

@@ -127,8 +127,13 @@ jobs:
           key: ${{ runner.os }}-cargo-udeps-0.1.61-nightly-2026-08-01
 
       - name: Install cargo-udeps
-        if: steps.cache-udeps.outputs.cache-hit != 'true'
-        run: cargo +nightly-2026-08-01 install cargo-udeps --version 0.1.61 --locked
+        run: |
+          set -euo pipefail
+          if cargo +nightly-2026-08-01 udeps --version 2>/dev/null | grep -Fxq 'cargo-udeps 0.1.61'; then
+            echo "cargo-udeps 0.1.61 already restored by the Rust cache"
+          else
+            cargo +nightly-2026-08-01 install cargo-udeps --version 0.1.61 --locked --force
+          fi
 
       - name: Check for unused dependencies (udeps)
         # Note: continue-on-error is enabled because cargo-udeps may report
