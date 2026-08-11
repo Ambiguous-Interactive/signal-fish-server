@@ -1590,7 +1590,7 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
             }
             tracing::warn!(
                 %player_id,
-                timeout_ms = timeout.as_millis() as u64,
+                timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
                 initiated_close,
                 "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
                  instead of silently dropping messages"

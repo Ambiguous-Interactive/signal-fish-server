@@ -1281,11 +1281,11 @@ impl GameDatabase for InMemoryDatabase {
         player_counts.sort_unstable();
 
         let mut percentiles = HashMap::new();
-        percentiles.insert("p50".to_string(), percentile(&player_counts, 0.5));
-        percentiles.insert("p90".to_string(), percentile(&player_counts, 0.9));
-        percentiles.insert("p99".to_string(), percentile(&player_counts, 0.99));
-        percentiles.insert("p99_5".to_string(), percentile(&player_counts, 0.995));
-        percentiles.insert("p99_9".to_string(), percentile(&player_counts, 0.999));
+        percentiles.insert("p50".to_string(), percentile(&player_counts, 500));
+        percentiles.insert("p90".to_string(), percentile(&player_counts, 900));
+        percentiles.insert("p99".to_string(), percentile(&player_counts, 990));
+        percentiles.insert("p99_5".to_string(), percentile(&player_counts, 995));
+        percentiles.insert("p99_9".to_string(), percentile(&player_counts, 999));
         // SAFETY: We checked player_counts.is_empty() above, so .last() is guaranteed to succeed
         percentiles.insert(
             "p100".to_string(),
@@ -1313,11 +1313,11 @@ impl GameDatabase for InMemoryDatabase {
                 player_counts.sort_unstable();
 
                 let mut percentiles = HashMap::new();
-                percentiles.insert("p50".to_string(), percentile(&player_counts, 0.5));
-                percentiles.insert("p90".to_string(), percentile(&player_counts, 0.9));
-                percentiles.insert("p99".to_string(), percentile(&player_counts, 0.99));
-                percentiles.insert("p99_5".to_string(), percentile(&player_counts, 0.995));
-                percentiles.insert("p99_9".to_string(), percentile(&player_counts, 0.999));
+                percentiles.insert("p50".to_string(), percentile(&player_counts, 500));
+                percentiles.insert("p90".to_string(), percentile(&player_counts, 900));
+                percentiles.insert("p99".to_string(), percentile(&player_counts, 990));
+                percentiles.insert("p99_5".to_string(), percentile(&player_counts, 995));
+                percentiles.insert("p99_9".to_string(), percentile(&player_counts, 999));
                 // SAFETY: We're inside if !player_counts.is_empty(), so .last() is guaranteed to succeed
                 percentiles.insert(
                     "p100".to_string(),
@@ -1538,7 +1538,7 @@ impl GameDatabase for InMemoryDatabase {
         cleanup_events.retain(|_, entry| entry.processed_at > cutoff);
         let deleted_count = initial_count.saturating_sub(cleanup_events.len());
 
-        Ok(deleted_count as u64)
+        Ok(u64::try_from(deleted_count).unwrap_or(u64::MAX))
     }
 
     fn as_any(&self) -> &(dyn Any + Send + Sync) {
@@ -1550,18 +1550,31 @@ impl GameDatabase for InMemoryDatabase {
     }
 }
 
-fn percentile(sorted_values: &[usize], p: f64) -> f64 {
+const PERCENTILE_SCALE: usize = 1_000;
+
+fn percentile(sorted_values: &[usize], per_mille: usize) -> f64 {
     if sorted_values.is_empty() {
         return 0.0;
     }
 
     let max_index = sorted_values.len().saturating_sub(1);
-    let index = p.mul_add(max_index as f64, 0.0).round() as usize;
+    let index = percentile_index(max_index, per_mille);
     let value = sorted_values
         .get(index.min(max_index))
         .copied()
         .unwrap_or_default();
     value as f64
+}
+
+fn percentile_index(max_index: usize, per_mille: usize) -> usize {
+    let per_mille = per_mille.min(PERCENTILE_SCALE);
+    let whole = (max_index / PERCENTILE_SCALE).saturating_mul(per_mille);
+    let remainder = max_index % PERCENTILE_SCALE;
+    let rounded_remainder = remainder
+        .saturating_mul(per_mille)
+        .saturating_add(PERCENTILE_SCALE / 2)
+        / PERCENTILE_SCALE;
+    whole.saturating_add(rounded_remainder).min(max_index)
 }
 
 #[cfg(test)]
@@ -1570,6 +1583,35 @@ mod tests {
     use crate::protocol::ErrorCode;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    #[test]
+    fn test_percentile_index_rounds_without_overflow() {
+        let cases = [
+            (0, 500, 0, "empty index range"),
+            (1, 500, 1, "half rounds upward"),
+            (9, 500, 5, "median of ten values"),
+            (999, 999, 998, "p99.9 boundary"),
+            (usize::MAX, 1_000, usize::MAX, "maximum rank"),
+            (usize::MAX, usize::MAX, usize::MAX, "percentile clamps"),
+        ];
+
+        for (max_index, per_mille, expected, description) in cases {
+            assert_eq!(
+                percentile_index(max_index, per_mille),
+                expected,
+                "{description}: max_index={max_index}, per_mille={per_mille}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_percentile_uses_exact_integer_ranks() {
+        let values = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90];
+        assert_eq!(percentile(&values, 500), 50.0);
+        assert_eq!(percentile(&values, 900), 80.0);
+        assert_eq!(percentile(&values, 999), 90.0);
+        assert_eq!(percentile(&[], 999), 0.0);
+    }
 
     // NOTE: These tests run under Miri. `InMemoryDatabase::create_room` calls
     // `chrono::Utc::now()` (which invokes `clock_gettime(CLOCK_REALTIME)`), but the

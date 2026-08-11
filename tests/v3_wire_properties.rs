@@ -290,7 +290,7 @@ proptest! {
             .and_then(Value::as_f64)
             .expect("float survives as a number");
 
-        let ulp_distance = (roundtripped.to_bits() as i64).abs_diff(float.to_bits() as i64);
+        let ulp_distance = roundtripped.to_bits().abs_diff(float.to_bits());
         prop_assert!(
             ulp_distance <= 4,
             "JSON float drift exceeded the pinned bound: {float} -> {roundtripped} ({ulp_distance} ULP)"

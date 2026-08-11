@@ -304,7 +304,7 @@ async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch:
     let drain = server.begin_shutdown_drain();
     tracing::info!(
         deadline_ms = drain.deadline_ms,
-        grace_ms = drain.grace.as_millis() as u64,
+        grace_ms = u64::try_from(drain.grace.as_millis()).unwrap_or(u64::MAX),
         started_by_this_call = drain.started_by_this_call,
         "Server shutdown drain started"
     );
@@ -330,7 +330,7 @@ async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch:
     if remaining_connections > 0 {
         tracing::warn!(
             remaining_connections,
-            settle_ms = settle_timeout.as_millis() as u64,
+            settle_ms = u64::try_from(settle_timeout.as_millis()).unwrap_or(u64::MAX),
             "Shutdown drain ended with connections still registered"
         );
     }

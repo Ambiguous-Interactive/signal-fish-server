@@ -373,16 +373,21 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
         let Some(items) = value.as_array() else {
             return false;
         };
-        if schema
-            .as_mapping_get("minItems")
-            .and_then(Yaml::as_integer)
-            .is_some_and(|minimum| items.len() < minimum as usize)
-            || schema
-                .as_mapping_get("maxItems")
-                .and_then(Yaml::as_integer)
-                .is_some_and(|maximum| items.len() > maximum as usize)
-        {
-            return false;
+        if let Some(minimum) = schema.as_mapping_get("minItems").and_then(Yaml::as_integer) {
+            let Ok(minimum) = usize::try_from(minimum) else {
+                return false;
+            };
+            if items.len() < minimum {
+                return false;
+            }
+        }
+        if let Some(maximum) = schema.as_mapping_get("maxItems").and_then(Yaml::as_integer) {
+            let Ok(maximum) = usize::try_from(maximum) else {
+                return false;
+            };
+            if items.len() > maximum {
+                return false;
+            }
         }
         if let Some(item_schema) = schema.as_mapping_get("items") {
             if !items
@@ -739,7 +744,7 @@ fn spec_delivery_report_gap_bound_matches_protocol_constant() {
     );
     assert_eq!(
         gaps.as_mapping_get("maxItems").and_then(Yaml::as_integer),
-        Some(DELIVERY_REPORT_MAX_GAPS as i64),
+        Some(i64::try_from(DELIVERY_REPORT_MAX_GAPS).expect("gap limit fits i64")),
         "AsyncAPI DeliveryReport.gaps maxItems must match DELIVERY_REPORT_MAX_GAPS"
     );
 }

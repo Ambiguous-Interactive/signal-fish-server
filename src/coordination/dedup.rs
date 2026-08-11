@@ -116,12 +116,14 @@ impl DedupCache {
 
                 let (expired, size) = cache.cleanup_expired().await;
                 if expired > 0 {
-                    metrics.add_dedup_cache_evictions(expired as u64);
+                    metrics.add_dedup_cache_evictions(u64::try_from(expired).unwrap_or(u64::MAX));
                 }
-                metrics.set_dedup_cache_size(size as u64);
+                metrics.set_dedup_cache_size(u64::try_from(size).unwrap_or(u64::MAX));
 
                 if capacity > 0 {
-                    let ninety_percent = (capacity as f64 * 0.9).ceil() as usize;
+                    // ceil(capacity * 0.9), expressed without a lossy float
+                    // round-trip or an overflowing multiplication.
+                    let ninety_percent = capacity.saturating_sub(capacity / 10);
                     if size >= ninety_percent {
                         tracing::warn!(
                             cache_size = size,

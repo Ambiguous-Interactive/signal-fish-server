@@ -71,7 +71,7 @@ pub async fn metrics_handler(
     let cache_fetched_at = dashboard_metrics.fetched_at.map(|ts| ts.to_rfc3339());
     let cache_age_seconds = dashboard_metrics
         .fetched_at
-        .map(|ts| now.signed_duration_since(ts).num_seconds().max(0) as u64);
+        .map(|ts| u64::try_from(now.signed_duration_since(ts).num_seconds()).unwrap_or(0));
     let cache_history: Vec<serde_json::Value> = dashboard_metrics
         .history
         .into_iter()

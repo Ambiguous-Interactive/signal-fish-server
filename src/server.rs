@@ -1802,7 +1802,8 @@ impl InMemoryMessageCoordinator {
                         }
                         tracing::warn!(
                             %player_id,
-                            timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
+                            timeout_ms = u64::try_from(self.slow_consumer_timeout.as_millis())
+                                .unwrap_or(u64::MAX),
                             initiated_close,
                             "Initial room transition queue stayed full; closing recipient"
                         );
@@ -1960,7 +1961,8 @@ impl InMemoryMessageCoordinator {
                 }
                 tracing::warn!(
                     %player_id,
-                    timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
+                    timeout_ms = u64::try_from(self.slow_consumer_timeout.as_millis())
+                        .unwrap_or(u64::MAX),
                     initiated_close,
                     "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
                      instead of silently dropping messages"
@@ -2113,7 +2115,8 @@ impl InMemoryMessageCoordinator {
                         }
                         tracing::warn!(
                             %player_id,
-                            timeout_ms = self.slow_consumer_timeout.as_millis() as u64,
+                            timeout_ms = u64::try_from(self.slow_consumer_timeout.as_millis())
+                                .unwrap_or(u64::MAX),
                             initiated_close,
                             "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
                              instead of silently dropping messages"

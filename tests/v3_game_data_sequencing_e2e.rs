@@ -268,7 +268,11 @@ async fn v3_burst_is_seq_stamped_contiguously_from_one() {
     });
 
     let reader = tokio::spawn(async move {
-        let frames = collect_game_data(&mut recipient, BURST_MESSAGE_COUNT as usize).await;
+        let frames = collect_game_data(
+            &mut recipient,
+            usize::try_from(BURST_MESSAGE_COUNT).expect("test burst fits usize"),
+        )
+        .await;
         (frames, recipient)
     });
 
@@ -568,7 +572,10 @@ async fn interleaved_senders_have_independent_contiguous_seqs() {
 
     let frames = tokio::time::timeout(
         TEST_DEADLINE,
-        collect_game_data(&mut recipient, (PER_SENDER * 2) as usize),
+        collect_game_data(
+            &mut recipient,
+            usize::try_from(PER_SENDER * 2).expect("test message count fits usize"),
+        ),
     )
     .await
     .expect("two-sender test exceeded its deadline");
@@ -629,7 +636,11 @@ async fn sender_leave_and_rejoin_restarts_seq_at_one() {
         )
         .await;
     }
-    let before = collect_game_data(&mut recipient, BEFORE_LEAVE as usize).await;
+    let before = collect_game_data(
+        &mut recipient,
+        usize::try_from(BEFORE_LEAVE).expect("test message count fits usize"),
+    )
+    .await;
     assert_contiguous_seqs(&before, 1, BEFORE_LEAVE, "recipient before leave");
     // First incarnation ⇒ epoch 1 on every pre-leave frame.
     for frame in &before {
@@ -820,7 +831,11 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
         )
         .await;
     }
-    let warmup_frames = collect_game_data(&mut victim, WARMUP as usize).await;
+    let warmup_frames = collect_game_data(
+        &mut victim,
+        usize::try_from(WARMUP).expect("test warmup count fits usize"),
+    )
+    .await;
     assert_contiguous_seqs(&warmup_frames, 1, WARMUP, "victim warm-up");
     let mut last_seen = WARMUP;
 

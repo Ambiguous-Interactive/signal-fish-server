@@ -128,7 +128,9 @@ async fn run_iteration(iteration: u64) {
     // Invariant 1: every task terminates within the deadline on EVERY
     // schedule — a wedged delivery here is the bug this lane exists to find.
     let (outcomes, close_task_won) = tokio::time::timeout(ITERATION_JOIN_DEADLINE, async {
-        let mut outcomes = Vec::with_capacity(DELIVERY_TASKS as usize);
+        let mut outcomes = Vec::with_capacity(
+            usize::try_from(DELIVERY_TASKS).expect("delivery task count fits usize"),
+        );
         for delivery in deliveries {
             outcomes.push(delivery.await.expect("delivery task must not panic"));
         }

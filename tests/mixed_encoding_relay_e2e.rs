@@ -889,7 +889,8 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
         let mut player_left = Vec::new();
         let mut errors = Vec::new();
         let mut wire_bytes = 0u64;
-        let mut audit_frames = Vec::with_capacity(BURST as usize);
+        let mut audit_frames =
+            Vec::with_capacity(usize::try_from(BURST).expect("test burst fits usize"));
         let terminal = loop {
             if delivered >= BURST {
                 break ReaderTerminal::Complete;

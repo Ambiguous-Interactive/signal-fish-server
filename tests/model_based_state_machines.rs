@@ -109,7 +109,9 @@ fn tagged_event(seq: u64) -> ServerMessage {
 /// Extract the tag from a replayed event.
 fn event_tag(message: &ServerMessage) -> u64 {
     match message {
-        ServerMessage::PlayerLeft { player_id, .. } => player_id.as_u128() as u64,
+        ServerMessage::PlayerLeft { player_id, .. } => {
+            u64::try_from(player_id.as_u128()).expect("test event tag was created from u64")
+        }
         other => panic!("replay returned a message the test never recorded: {other:?}"),
     }
 }

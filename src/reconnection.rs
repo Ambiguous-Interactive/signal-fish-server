@@ -88,7 +88,22 @@ impl ReconnectionToken {
             player_id,
             room_id,
             created_at: now,
-            expires_at: expiration_from(now, validity_seconds),
+            expires_at: expiration_from_signed(now, validity_seconds),
+        }
+    }
+
+    fn new_with_unsigned_window(
+        player_id: PlayerId,
+        room_id: RoomId,
+        validity_seconds: u64,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            token: Uuid::new_v4().to_string(),
+            player_id,
+            room_id,
+            created_at: now,
+            expires_at: expiration_from_unsigned(now, validity_seconds),
         }
     }
 
@@ -103,10 +118,23 @@ impl ReconnectionToken {
     }
 }
 
-fn expiration_from(now: DateTime<Utc>, validity_seconds: i64) -> DateTime<Utc> {
+fn expiration_from_signed(now: DateTime<Utc>, validity_seconds: i64) -> DateTime<Utc> {
     Duration::try_seconds(validity_seconds)
         .and_then(|validity| now.checked_add_signed(validity))
-        .unwrap_or(now)
+        .unwrap_or_else(|| {
+            if validity_seconds.is_negative() {
+                DateTime::<Utc>::MIN_UTC
+            } else {
+                DateTime::<Utc>::MAX_UTC
+            }
+        })
+}
+
+fn expiration_from_unsigned(now: DateTime<Utc>, validity_seconds: u64) -> DateTime<Utc> {
+    let Ok(validity_seconds) = i64::try_from(validity_seconds) else {
+        return DateTime::<Utc>::MAX_UTC;
+    };
+    expiration_from_signed(now, validity_seconds)
 }
 
 /// Event buffer for a room
@@ -245,7 +273,12 @@ struct PreservedPending {
 impl DisconnectedPlayer {
     /// Check if reconnection window has expired
     pub fn is_expired(&self, window_seconds: i64) -> bool {
-        let expiry = expiration_from(self.disconnected_at, window_seconds);
+        let expiry = expiration_from_signed(self.disconnected_at, window_seconds);
+        Utc::now() > expiry
+    }
+
+    fn is_expired_with_unsigned_window(&self, window_seconds: u64) -> bool {
+        let expiry = expiration_from_unsigned(self.disconnected_at, window_seconds);
         Utc::now() > expiry
     }
 }
@@ -347,7 +380,7 @@ pub struct ReconnectionManager {
     /// roomless teardown, and overwritten (rotated) by the next join.
     pre_issued: RwLock<HashMap<PlayerId, ReconnectionToken>>,
     /// Reconnection window in seconds
-    reconnection_window: i64,
+    reconnection_window: u64,
     /// Event buffer size per room
     event_buffer_size: usize,
     /// Metrics sink
@@ -370,7 +403,7 @@ impl ReconnectionManager {
         Self {
             replay_state: RwLock::new(ReplayState::default()),
             pre_issued: RwLock::new(HashMap::new()),
-            reconnection_window: reconnection_window as i64,
+            reconnection_window,
             event_buffer_size,
             metrics,
             #[cfg(test)]
@@ -409,7 +442,11 @@ impl ReconnectionManager {
     /// the disconnect", exactly as before — the client just finally KNOWS the
     /// token it will need.
     pub async fn pre_issue_token(&self, player_id: PlayerId, room_id: RoomId) -> String {
-        let token = ReconnectionToken::new(player_id, room_id, self.reconnection_window);
+        let token = ReconnectionToken::new_with_unsigned_window(
+            player_id,
+            room_id,
+            self.reconnection_window,
+        );
         let token_string = token.token.clone();
         self.pre_issued.write().await.insert(player_id, token);
         self.metrics.increment_reconnection_tokens_issued();
@@ -512,7 +549,7 @@ impl ReconnectionManager {
                     player_id,
                     room_id,
                     created_at: existing.token_created_at,
-                    expires_at: expiration_from(now, self.reconnection_window),
+                    expires_at: expiration_from_unsigned(now, self.reconnection_window),
                 },
                 false,
             ),
@@ -523,12 +560,16 @@ impl ReconnectionManager {
                         player_id,
                         room_id,
                         created_at: pre_issued.created_at,
-                        expires_at: expiration_from(now, self.reconnection_window),
+                        expires_at: expiration_from_unsigned(now, self.reconnection_window),
                     },
                     false,
                 ),
                 _ => (
-                    ReconnectionToken::new(player_id, room_id, self.reconnection_window),
+                    ReconnectionToken::new_with_unsigned_window(
+                        player_id,
+                        room_id,
+                        self.reconnection_window,
+                    ),
                     true,
                 ),
             },
@@ -665,7 +706,7 @@ impl ReconnectionManager {
             return Err(ReconnectionError::TokenInvalid);
         }
 
-        if player.is_expired(self.reconnection_window) {
+        if player.is_expired_with_unsigned_window(self.reconnection_window) {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::WindowExpired);
         }
@@ -717,7 +758,7 @@ impl ReconnectionManager {
             return Err(ReconnectionError::TokenInvalid);
         }
 
-        if player.is_expired(self.reconnection_window) {
+        if player.is_expired_with_unsigned_window(self.reconnection_window) {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::WindowExpired);
         }
@@ -967,7 +1008,10 @@ impl ReconnectionManager {
             .disconnected_players
             .iter()
             .filter(|(_, record)| {
-                record.claim.is_none() && record.disconnected.is_expired(self.reconnection_window)
+                record.claim.is_none()
+                    && record
+                        .disconnected
+                        .is_expired_with_unsigned_window(self.reconnection_window)
             })
             .map(|(player_id, record)| (*player_id, record.disconnected.room_id))
             .collect()
@@ -981,7 +1025,10 @@ impl ReconnectionManager {
             .disconnected_players
             .get(player_id)
             .is_some_and(|record| {
-                record.claim.is_none() && record.disconnected.is_expired(self.reconnection_window)
+                record.claim.is_none()
+                    && record
+                        .disconnected
+                        .is_expired_with_unsigned_window(self.reconnection_window)
             });
         if !removable {
             return false;
@@ -1017,8 +1064,10 @@ impl ReconnectionManager {
         let mut expired_rooms = Vec::new();
 
         state.disconnected_players.retain(|player_id, record| {
-            let expired =
-                record.claim.is_none() && record.disconnected.is_expired(self.reconnection_window);
+            let expired = record.claim.is_none()
+                && record
+                    .disconnected
+                    .is_expired_with_unsigned_window(self.reconnection_window);
             if expired {
                 tracing::info!(%player_id, "Removing expired reconnection record");
                 expired_rooms.push(record.disconnected.room_id);
@@ -1088,7 +1137,10 @@ impl ReconnectionManager {
             .await
             .disconnected_players
             .values()
-            .filter(|record| record.claim.is_some() || !record.disconnected.is_expired(window))
+            .filter(|record| {
+                record.claim.is_some()
+                    || !record.disconnected.is_expired_with_unsigned_window(window)
+            })
             .map(|record| record.disconnected.room_id)
             .collect()
     }
@@ -1159,10 +1211,34 @@ mod tests {
     fn test_reconnection_token_creation() {
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
-        let token = ReconnectionToken::new(player_id, room_id, 300);
+        let validity_seconds: i64 = 300;
+        let token = ReconnectionToken::new(player_id, room_id, validity_seconds);
 
         assert_eq!(token.player_id, player_id);
         assert_eq!(token.room_id, room_id);
+        assert!(!token.is_expired());
+        assert!(token.is_valid(&player_id, &room_id));
+
+        let now = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("fixed test timestamp must parse")
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            expiration_from_unsigned(now, 300),
+            now.checked_add_signed(Duration::seconds(300))
+                .expect("ordinary window fits")
+        );
+        for window in [i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
+            assert_eq!(
+                expiration_from_unsigned(now, window),
+                DateTime::<Utc>::MAX_UTC,
+                "window {window} must saturate at Chrono's upper bound"
+            );
+        }
+
+        let token = ReconnectionToken::new_with_unsigned_window(player_id, room_id, u64::MAX);
+
+        assert_eq!(token.expires_at, DateTime::<Utc>::MAX_UTC);
         assert!(!token.is_expired());
         assert!(token.is_valid(&player_id, &room_id));
     }

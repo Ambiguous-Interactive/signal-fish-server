@@ -41,8 +41,54 @@ $script:SkillsIndexToolingFiles = @(
     ".llm/skills/manage-skills/scripts/validate_skills.py"
 )
 $script:HookPolicyChangedFiles = @()
+$script:DocVersionSyncFiles = @("docs/library-usage.md", ".llm/context.md")
+$script:WorktreePolicyPathspecs = @(
+    "src",
+    ".llm",
+    "README.md",
+    "scripts/generate-skills-index.sh",
+    "Cargo.toml"
+) + $script:DocVersionSyncFiles + $script:HookPolicyFiles
+$script:PendingWorktreeStatus = $null
+$script:PendingWorktreeRustDiff = $null
+$script:WorktreeDiscoveryTimer = $null
+$script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!)|(#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest))"
 
 . (Join-Path $PSScriptRoot "native-process.ps1")
+
+# Worktree discovery is dominated by refreshing the Git index on repository
+# filesystems. Start it before PowerShell registers the policy functions below,
+# so that unavoidable I/O overlaps script setup instead of extending the hook's
+# critical path. The result is consumed exactly once by
+# Get-WorktreeChangedFiles; staged hooks retain their cheaper index-only query.
+if (-not $SourceOnly) {
+    $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
+    Set-Location $script:RepoRoot
+    $script:InspectWorktree = [bool]$Worktree
+    if ($script:InspectWorktree) {
+        $statusArguments = @(
+            "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--no-renames", "--"
+        ) + $script:WorktreePolicyPathspecs
+        $statusStartInfo = New-NativeProcessStartInfo -FileName "git" -Arguments $statusArguments
+        $statusProcess = [System.Diagnostics.Process]::Start($statusStartInfo)
+        $script:WorktreeDiscoveryTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $script:PendingWorktreeStatus = [pscustomobject]@{
+            Process = $statusProcess
+            StdoutTask = $statusProcess.StandardOutput.ReadToEndAsync()
+            StderrTask = $statusProcess.StandardError.ReadToEndAsync()
+        }
+        $rustDiffArguments = @(
+            "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--", "src"
+        )
+        $rustDiffStartInfo = New-NativeProcessStartInfo -FileName "git" -Arguments $rustDiffArguments
+        $rustDiffProcess = [System.Diagnostics.Process]::Start($rustDiffStartInfo)
+        $script:PendingWorktreeRustDiff = [pscustomobject]@{
+            Process = $rustDiffProcess
+            StdoutTask = $rustDiffProcess.StandardOutput.ReadToEndAsync()
+            StderrTask = $rustDiffProcess.StandardError.ReadToEndAsync()
+        }
+    }
+}
 
 function Write-Step {
     param([string]$Message)
@@ -161,7 +207,29 @@ function Get-WorktreeChangedFiles {
     # Policy checks only need the current paths, so skip rename similarity
     # detection. Git will report those changes as delete/add records instead.
     $arguments = @("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--no-renames", "--") + $Pathspecs
-    $records = (Invoke-Git -Arguments $arguments).Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
+    if ($null -eq $script:PendingWorktreeStatus) {
+        $statusResult = Invoke-Git -Arguments $arguments
+    } else {
+        $pending = $script:PendingWorktreeStatus
+        $script:PendingWorktreeStatus = $null
+        try {
+            $pending.Process.WaitForExit()
+            $stdout = $pending.StdoutTask.GetAwaiter().GetResult()
+            $stderr = $pending.StderrTask.GetAwaiter().GetResult()
+            $statusResult = [pscustomobject]@{
+                ExitCode = $pending.Process.ExitCode
+                Stdout = $stdout
+                Stderr = $stderr
+                Output = $stdout + $stderr
+            }
+        } finally {
+            $pending.Process.Dispose()
+        }
+        if ($statusResult.ExitCode -ne 0) {
+            throw "git $($arguments -join ' ') failed:`n$($statusResult.Output)"
+        }
+    }
+    $records = $statusResult.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
     $skipRenameSource = $false
     foreach ($record in $records) {
         if ($skipRenameSource) {
@@ -674,33 +742,65 @@ function Test-RustPanicPolicyRelevantDiff {
         return $false
     }
 
-    # `git diff HEAD` cannot see untracked files, so keep their full scanner
-    # fail-closed. Tracked worktree edits and staged changes can share the fast
-    # pickaxe query below.
-    if ($script:InspectWorktree -and @($Pathspecs | Where-Object {
+    $hasUntrackedProductionRust = $script:InspectWorktree -and @($Pathspecs | Where-Object {
                 $script:WorktreeUntrackedFileSet.Contains($_)
-            }).Count -gt 0) {
-        return $true
-    }
+            }).Count -gt 0
 
-    $panicPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
-    $testContextPattern = "#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest)"
-    $grepPattern = "($panicPattern)|($testContextPattern)"
     $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
-    $result = Invoke-Native -FileName "git" -Arguments (@(
-            "diff", $diffBase, "--quiet", "-G", $grepPattern, "--"
-        ) + $Pathspecs)
-    if ($result.ExitCode -eq 0) {
-        return $false
+    if ($null -eq $script:PendingWorktreeRustDiff) {
+        $result = Invoke-Native -FileName "git" -Arguments (@(
+                "diff", $diffBase, "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--"
+            ) + $Pathspecs)
+    } else {
+        $pending = $script:PendingWorktreeRustDiff
+        $script:PendingWorktreeRustDiff = $null
+        try {
+            $pending.Process.WaitForExit()
+            $stdout = $pending.StdoutTask.GetAwaiter().GetResult()
+            $stderr = $pending.StderrTask.GetAwaiter().GetResult()
+            $result = [pscustomobject]@{
+                ExitCode = $pending.Process.ExitCode
+                Stdout = $stdout
+                Stderr = $stderr
+                Output = $stdout + $stderr
+            }
+        } finally {
+            $pending.Process.Dispose()
+        }
     }
-    if ($result.ExitCode -eq 1) {
+    # `git diff HEAD` cannot see untracked files, so keep their full scanner
+    # fail-closed after consuming the already-started query above.
+    if ($hasUntrackedProductionRust) {
         return $true
     }
-    if ($script:InspectWorktree -and $result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
+    if ($result.ExitCode -ne 0 -and $script:InspectWorktree -and $result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
         return $true
+    }
+    if ($result.ExitCode -ne 0) {
+        throw "git diff Rust panic policy precheck failed:`n$($result.Output)"
     }
 
-    throw "git diff Rust panic policy precheck failed:`n$($result.Output)"
+    # The full, line-aware Rust scanner is needed only when a panic macro is
+    # added or a test-context guard is removed. A new #[test]/#[cfg(test)] can
+    # only narrow production exposure, while removed panic macros cannot create
+    # a new production panic. Parsing zero-context matching hunks avoids loading
+    # the large scanner for those safe, common test-only additions.
+    $panicLinePattern = '(^|[^A-Za-z0-9_])(panic|todo|unimplemented|unreachable)\s*(/\*.*\*/\s*)*!'
+    $testContextLinePattern = '#\[\s*(cfg\s*\(|test|tokio::test|async_std::test|rstest)'
+    foreach ($rawLine in $result.Stdout -split "`n") {
+        $line = $rawLine.TrimEnd("`r")
+        if ($line.StartsWith("+++") -or $line.StartsWith("---")) {
+            continue
+        }
+        if ($line.StartsWith("+") -and $line.Substring(1) -match $panicLinePattern) {
+            return $true
+        }
+        if ($line.StartsWith("-") -and $line.Substring(1) -match $testContextLinePattern) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Test-WorktreeIndexPolicyConsistency {
@@ -1222,8 +1322,6 @@ function Repair-SkillsIndexIfNeeded {
 #   - .llm/context.md       : - **Version:** X
 # Dependency lines containing a <version> placeholder are intentionally left
 # untouched, matching the checker.
-$script:DocVersionSyncFiles = @("docs/library-usage.md", ".llm/context.md")
-
 function Read-CargoPackageVersion {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][AllowNull()][string]$CargoTomlText)
 
@@ -1505,6 +1603,17 @@ if ($SourceOnly) {
 }
 
 function Complete-PreCommit {
+    if ($null -ne $script:PendingWorktreeRustDiff) {
+        $pending = $script:PendingWorktreeRustDiff
+        $script:PendingWorktreeRustDiff = $null
+        try {
+            $pending.Process.WaitForExit()
+            [void]$pending.StdoutTask.GetAwaiter().GetResult()
+            [void]$pending.StderrTask.GetAwaiter().GetResult()
+        } finally {
+            $pending.Process.Dispose()
+        }
+    }
     $script:PreCommitTimer.Stop()
     Write-Host "[pre-commit] Completed in $($script:PreCommitTimer.ElapsedMilliseconds)ms"
 
@@ -1537,19 +1646,13 @@ function Complete-PreCommit {
     exit 0
 }
 
-$script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
-Set-Location $script:RepoRoot
-$script:InspectWorktree = [bool]$Worktree
-$worktreePolicyPathspecs = @(
-    "src",
-    ".llm",
-    "README.md",
-    "scripts/generate-skills-index.sh",
-    "Cargo.toml"
-) + $script:DocVersionSyncFiles + $script:HookPolicyFiles
-$changedFilesTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$changedFilesTimer = if ($script:InspectWorktree) {
+    $script:WorktreeDiscoveryTimer
+} else {
+    [System.Diagnostics.Stopwatch]::StartNew()
+}
 $allChangedFiles = [string[]]@(if ($script:InspectWorktree) {
-        Get-WorktreeChangedFiles -Pathspecs $worktreePolicyPathspecs
+        Get-WorktreeChangedFiles -Pathspecs $script:WorktreePolicyPathspecs
     } else {
         Get-StagedFiles
     })
