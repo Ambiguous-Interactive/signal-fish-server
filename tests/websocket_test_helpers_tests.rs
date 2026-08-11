@@ -2144,6 +2144,7 @@ fn conformance_close_causes_remain_distinct() {
         (4002, ReceiverDisconnectCause::SlowConsumer),
         (4003, ReceiverDisconnectCause::ActivityTimeout),
         (4004, ReceiverDisconnectCause::IdleTimeout),
+        (4005, ReceiverDisconnectCause::RoomInactive),
     ];
     for (code, expected) in cases {
         let auditor = ConformanceAuditor::new(ReceiverProtocolMode::V3);
@@ -2152,6 +2153,7 @@ fn conformance_close_causes_remain_distinct() {
             4002 => "slow_consumer",
             4003 => "activity_timeout",
             4004 => "idle_timeout",
+            4005 => "room_inactive",
             _ => "fixture",
         };
         auditor.record_close("receiver", code, reason);
@@ -2176,6 +2178,7 @@ fn conformance_close_causes_remain_distinct() {
         (4002, "slow-consumer"),
         (4003, "activity-timeout"),
         (4004, "idle-timeout"),
+        (4005, "room-inactive"),
     ] {
         let auditor = ConformanceAuditor::new(ReceiverProtocolMode::V3);
         assert!(

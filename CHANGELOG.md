@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Terminally reconcile connected players when inactive-room maintenance
+  deletes their room. Cleanup now generation-fences relay routing, clears local
+  assignments and reconnect state, closes the sockets with the distinct `4005
+  room_inactive` reason, and retries convergence after an interrupted sweep
+  instead of leaving a deleted ghost room able to relay gameplay.
 - Keep extreme configured reconnection windows valid instead of narrowing
   them into negative durations that expire tokens immediately. Numeric
   conversions that can truncate, wrap, or lose a sign are now rejected by the

@@ -707,6 +707,7 @@ async fn finalize_closed_connection(
             | CloseReason::AuthTimeout
             | CloseReason::ActivityTimeout
             | CloseReason::IdleTimeout
+            | CloseReason::RoomInactive
             | CloseReason::Unregistered,
         )
         | None
@@ -743,6 +744,7 @@ async fn finalize_closed_connection(
             | CloseReason::AuthTimeout
             | CloseReason::ActivityTimeout
             | CloseReason::IdleTimeout
+            | CloseReason::RoomInactive
             | CloseReason::Unregistered,
         )
         | None => {
@@ -835,8 +837,8 @@ async fn finalize_closed_connection(
     // the close frame's code travels in the closing handshake itself, so a
     // client that observes only the stream termination can still attribute
     // it (4000 shutdown, 4001 auth timeout, 4002 slow consumer, 4003
-    // activity timeout, 4004 idle timeout; plain unregistration closes with a
-    // normal 1000).
+    // activity timeout, 4004 idle timeout, 4005 inactive-room cleanup; plain
+    // unregistration closes with a normal 1000).
     // A `None` reason — every close signal clone dropped without an explicit
     // request, i.e. the connection was simply unregistered everywhere — is
     // the same normal closure, so the coded frame is TOTAL over server-side

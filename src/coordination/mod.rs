@@ -341,6 +341,10 @@ pub enum CloseReason {
     ActivityTimeout,
     /// No inbound frame arrived within `websocket.idle_timeout_secs`.
     IdleTimeout,
+    /// The client's room exceeded `server.inactive_room_timeout` and was
+    /// deleted by maintenance. This is terminal: the deleted room cannot be
+    /// resumed through a stale local assignment or reconnection token.
+    RoomInactive,
     /// The connection was unregistered server-side (explicit disconnect,
     /// normal teardown). Socket tasks should flush whatever is already
     /// queued and exit instead of lingering until a socket timeout.
@@ -363,6 +367,7 @@ impl CloseReason {
             Self::SlowConsumer => 4002,
             Self::ActivityTimeout => 4003,
             Self::IdleTimeout => 4004,
+            Self::RoomInactive => 4005,
             // A plain unregistration (leave, replaced connection, normal
             // teardown) is a normal closure, not an application fault.
             Self::Unregistered => 1000,
@@ -378,6 +383,7 @@ impl CloseReason {
             Self::SlowConsumer => "slow_consumer",
             Self::ActivityTimeout => "activity_timeout",
             Self::IdleTimeout => "idle_timeout",
+            Self::RoomInactive => "room_inactive",
             Self::Unregistered => "unregistered",
         }
     }
@@ -4809,6 +4815,7 @@ mod tests {
             (CloseReason::SlowConsumer, 4002, "slow_consumer"),
             (CloseReason::ActivityTimeout, 4003, "activity_timeout"),
             (CloseReason::IdleTimeout, 4004, "idle_timeout"),
+            (CloseReason::RoomInactive, 4005, "room_inactive"),
             (CloseReason::Unregistered, 1000, "unregistered"),
         ];
         for (reason, code, text) in expectations {

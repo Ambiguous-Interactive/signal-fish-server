@@ -15,6 +15,8 @@
 //!   missed its deadline, or the `server.ping_timeout` reaper evicted it;
 //! - `4004 idle_timeout` — no inbound frame within
 //!   `websocket.idle_timeout_secs`.
+//! - `4005 room_inactive` — the assigned room was deleted after exceeding
+//!   `server.inactive_room_timeout`.
 //!
 //! (`4000 server_shutdown` is defined in the contract but has no in-process
 //! trigger today; `CloseReason::Unregistered` closes with a normal `1000`.)
@@ -238,6 +240,31 @@ async fn idle_timeout_closes_with_4004() {
     let (code, reason) = read_close_frame(&mut ws, "idle timeout").await;
     assert_eq!(code, 4004, "idle timeout must close with 4004 ({reason})");
     assert_eq!(reason, "idle_timeout");
+    running_server.shutdown().await;
+}
+
+/// A seated client whose room exceeds `server.inactive_room_timeout` is
+/// terminally unrouted and closed with `4005 room_inactive`.
+#[tokio::test]
+async fn inactive_room_cleanup_closes_with_4005() {
+    let mut config = base_config();
+    config.room_cleanup_interval = std::time::Duration::from_secs(1);
+    config.inactive_room_timeout = std::time::Duration::from_secs(1);
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let cleanup = server.clone();
+    tokio::spawn(async move { cleanup.cleanup_task().await });
+    let running_server = start_server(server).await;
+
+    let mut ws = connect(running_server.addr()).await;
+    authenticate(&mut ws).await;
+    join(&mut ws, "inactive member").await;
+
+    let (code, reason) = read_close_frame(&mut ws, "inactive room cleanup").await;
+    assert_eq!(
+        code, 4005,
+        "inactive room cleanup must close with 4005 ({reason})"
+    );
+    assert_eq!(reason, "room_inactive");
     running_server.shutdown().await;
 }
 

@@ -87,6 +87,7 @@ pub enum ReceiverDisconnectCause {
     SlowConsumer,
     ActivityTimeout,
     IdleTimeout,
+    RoomInactive,
     ServerShutdown,
     ServerRestart,
     ServerClose { code: u16, reason: String },
@@ -389,6 +390,18 @@ impl ConformanceAuditor {
                 (
                     ReceiverDisconnectCause::IdleTimeout,
                     DisconnectReason::InjectedFault(format!("idle-timeout close {code}: {reason}")),
+                )
+            }
+            4005 => {
+                assert_eq!(
+                    reason, "room_inactive",
+                    "{receiver}: close code 4005 must carry the room_inactive reason"
+                );
+                (
+                    ReceiverDisconnectCause::RoomInactive,
+                    DisconnectReason::InjectedFault(format!(
+                        "inactive-room close {code}: {reason}"
+                    )),
                 )
             }
             _ => (

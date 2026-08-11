@@ -4719,6 +4719,277 @@ async fn maintenance_cleanup_removes_expired_reconnections() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
+    let server = create_test_server_with_config(ServerConfig {
+        ping_timeout: Duration::ZERO,
+        room_cleanup_interval: Duration::from_secs(1),
+        empty_room_timeout: Duration::from_secs(60),
+        inactive_room_timeout: Duration::from_secs(60),
+        ..ServerConfig::default()
+    })
+    .await;
+
+    let (creator_tx, mut creator_rx) = mpsc::channel(16);
+    let (creator_close, creator_close_listener) =
+        crate::coordination::ConnectionCloseSignal::channel();
+    let creator = server
+        .register_client_with_close(
+            creator_tx,
+            creator_close,
+            "127.0.0.1:48031".parse().unwrap(),
+        )
+        .await
+        .expect("creator registration succeeds");
+    let (peer_tx, mut peer_rx) = mpsc::channel(16);
+    let (peer_close, peer_close_listener) = crate::coordination::ConnectionCloseSignal::channel();
+    let peer = server
+        .register_client_with_close(peer_tx, peer_close, "127.0.0.1:48032".parse().unwrap())
+        .await
+        .expect("peer registration succeeds");
+
+    server
+        .handle_join_room(
+            &creator,
+            "inactive-cleanup".to_string(),
+            Some("INACT1".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &peer,
+            "inactive-cleanup".to_string(),
+            Some("INACT1".to_string()),
+            "peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let room_id = server
+        .get_client_room(&creator)
+        .await
+        .expect("creator is assigned before cleanup");
+    assert_eq!(server.get_client_room(&peer).await, Some(room_id));
+    drain_queued_messages(&mut creator_rx);
+    drain_queued_messages(&mut peer_rx);
+
+    let (active_sender, mut active_sender_rx) =
+        register_client(&server, "127.0.0.1:48033".parse().unwrap()).await;
+    let (active_peer, mut active_peer_rx) =
+        register_client(&server, "127.0.0.1:48034".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &active_sender,
+            "active-control".to_string(),
+            Some("ACTV01".to_string()),
+            "active sender".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &active_peer,
+            "active-control".to_string(),
+            Some("ACTV01".to_string()),
+            "active peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let active_room_id = server
+        .get_client_room(&active_sender)
+        .await
+        .expect("control sender is assigned before cleanup");
+    assert_ne!(active_room_id, room_id);
+    drain_queued_messages(&mut active_sender_rx);
+    drain_queued_messages(&mut active_peer_rx);
+
+    server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory storage")
+        .backdate_room_activity_for_test(&room_id, chrono::Duration::minutes(2))
+        .await;
+
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .expect("room lookup succeeds")
+                .is_none()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first maintenance tick should reap the inactive room");
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
+
+    for player_id in [creator, peer] {
+        assert_eq!(
+            server.get_client_room(&player_id).await,
+            None,
+            "a deleted room must not leave a stale local assignment"
+        );
+        assert!(
+            !server.connection_manager.has_client(&player_id),
+            "inactive-room cleanup must terminate the associated connection"
+        );
+        assert!(
+            !server
+                .reconnection_manager()
+                .expect("reconnection enabled")
+                .has_pending_reconnection(&player_id)
+                .await,
+            "a deleted room must not gain a reconnect reservation"
+        );
+    }
+    assert_eq!(
+        server
+            .message_coordinator
+            .routed_player_ids(&room_id)
+            .await
+            .expect("routing lookup succeeds"),
+        Some(Vec::new()),
+        "a deleted room must have no relay recipients"
+    );
+    assert!(
+        server
+            .database
+            .get_room_by_id(&active_room_id)
+            .await
+            .expect("control room lookup succeeds")
+            .is_some(),
+        "cleanup must preserve a fresh room"
+    );
+    assert_eq!(
+        server.get_client_room(&active_sender).await,
+        Some(active_room_id)
+    );
+    assert_eq!(
+        server.get_client_room(&active_peer).await,
+        Some(active_room_id)
+    );
+    assert_eq!(
+        creator_close_listener.requested_reason(),
+        Some(crate::coordination::CloseReason::RoomInactive)
+    );
+    assert_eq!(
+        peer_close_listener.requested_reason(),
+        Some(crate::coordination::CloseReason::RoomInactive)
+    );
+    let creator_messages = drain_queued_messages(&mut creator_rx);
+    let peer_messages = drain_queued_messages(&mut peer_rx);
+    for messages in [&creator_messages, &peer_messages] {
+        assert!(
+            messages.iter().any(|message| matches!(
+                message.as_ref(),
+                ServerMessage::Error {
+                    error_code: Some(ErrorCode::RoomNotFound),
+                    ..
+                }
+            )),
+            "inactive-room cleanup should enqueue its best-effort farewell"
+        );
+    }
+
+    server
+        .handle_game_data(&creator, serde_json::json!({"ghost": true}), None, None)
+        .await;
+    assert!(
+        drain_queued_messages(&mut peer_rx).iter().all(|message| {
+            !matches!(
+                message.as_ref(),
+                ServerMessage::GameData { from_player, .. } if *from_player == creator
+            )
+        }),
+        "a former member must not relay JSON through the deleted ghost room"
+    );
+
+    let control_json = serde_json::json!({"control": true});
+    server
+        .handle_game_data(&active_sender, control_json.clone(), None, None)
+        .await;
+    let control_message = timeout(Duration::from_secs(1), active_peer_rx.recv())
+        .await
+        .expect("fresh-room JSON relay should not stall")
+        .expect("fresh-room recipient remains connected");
+    assert!(matches!(
+        control_message.as_ref(),
+        ServerMessage::GameData {
+            from_player,
+            data,
+            ..
+        } if *from_player == active_sender && *data == control_json
+    ));
+
+    server
+        .handle_game_data_binary(
+            &creator,
+            crate::protocol::GameDataEncoding::MessagePack,
+            bytes::Bytes::from_static(b"ghost"),
+        )
+        .await;
+    assert!(
+        drain_queued_messages(&mut peer_rx).iter().all(|message| {
+            !matches!(
+                message.as_ref(),
+                ServerMessage::GameDataBinary { from_player, .. } if *from_player == creator
+            )
+        }),
+        "a former member must not relay binary data through the deleted ghost room"
+    );
+
+    let control_binary = bytes::Bytes::from_static(b"control-binary");
+    server
+        .handle_game_data_binary(
+            &active_sender,
+            crate::protocol::GameDataEncoding::MessagePack,
+            control_binary.clone(),
+        )
+        .await;
+    let control_message = timeout(Duration::from_secs(1), active_peer_rx.recv())
+        .await
+        .expect("fresh-room binary relay should not stall")
+        .expect("fresh-room recipient remains connected");
+    assert!(matches!(
+        control_message.as_ref(),
+        ServerMessage::GameDataBinary {
+            from_player,
+            encoding: crate::protocol::GameDataEncoding::MessagePack,
+            payload,
+            ..
+        } if *from_player == active_sender && *payload == control_binary
+    ));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn zero_ping_timeout_disables_activity_reaper() {
     let server = create_test_server_with_config(ServerConfig {
         ping_timeout: Duration::ZERO,

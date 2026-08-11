@@ -100,7 +100,7 @@ Errors related to room lifecycle, capacity, and membership.
 
 | Error Code | Description |
 |---|---|
-| `ROOM_NOT_FOUND` | The requested room could not be found. It may have been closed. |
+| `ROOM_NOT_FOUND` | The requested room could not be found. It may have been closed. Inactive-room maintenance sends this as a best-effort farewell before authoritative close `4005 room_inactive`. |
 | `ROOM_FULL` | The room has reached its maximum player capacity. |
 | `ALREADY_IN_ROOM` | You are already in a room. Leave the current room first. |
 | `NOT_IN_ROOM` | You are not currently in any room. Join a room first. |
