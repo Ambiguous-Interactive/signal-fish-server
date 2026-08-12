@@ -277,7 +277,7 @@ without changing non-token traffic. HMAC-SHA-256 covers, in order:
 Insert the standard-base64 MAC as the signature:
 
 ```json
-"token_binding":{"version":2,"scheme":"server_nonce_hkdf_sha256","sequence":1,"signature":"BASE64_MAC","fingerprint":null}
+{"type":"Ping","token_binding":{"version":2,"scheme":"server_nonce_hkdf_sha256","sequence":1,"signature":"BASE64_MAC","fingerprint":null}}
 ```
 
 For binary data, retain the existing inner MessagePack game-data bytes exactly.
