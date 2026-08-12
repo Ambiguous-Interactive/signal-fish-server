@@ -440,7 +440,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | ✅ Done (s129, PR #353) |
 | P89 | CI validation and scheduling integrity | S | P88 | CI | ✅ Done (s130, PR #354) |
 | P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | ✅ Done (s131, PR #356) |
-| P91 | Fail-closed CI bootstrap and H14 PR isolation | S | P56, P89 | CI | 🟡 In progress (s132) |
+| P91 | Fail-closed CI bootstrap and H14 PR isolation | S | P56, P89 | CI | ✅ Done (s132, PR #357) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3209,7 +3209,7 @@ mandatory local and hosted gates pass.
 
 ---
 
-### P91 — Fail-closed CI bootstrap and H14 PR isolation (Size S) — 🟡 IN PROGRESS
+### P91 — Fail-closed CI bootstrap and H14 PR isolation (Size S) — ✅ DONE
 
 Session 132 follows a `main` documentation-validation failure that occurred
 before link checking: `lychee-action` used a single release-download attempt,
@@ -3230,7 +3230,7 @@ nightly trigger would instead allocate every long-running nightly job.
 - [x] Leave the scheduled P56 cohort's command, job, contract identifier,
   manifest, artifact shape, and contention context unchanged; only suppress
   the duplicate H14 invocation on pull-request runs of the broad workflow.
-- [ ] Complete mandatory local and hosted validation, adversarial review, and
+- [x] Complete mandatory local and hosted validation, adversarial review, and
   exact-head CI/review rollup.
 
 **Acceptance:** a transient release-download failure receives bounded retries
