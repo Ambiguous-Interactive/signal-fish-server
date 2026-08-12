@@ -257,7 +257,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (issue #243). Miri, AddressSanitizer, cargo-udeps, and cargo-fuzz now use
   `nightly-2026-08-01`; cargo-udeps 0.1.61 validates all targets and features,
   the fuzz workflow smoke-runs all four declared targets, and policy tests
-  prevent partial pin or fuzz-matrix updates.
+  prevent partial pin or fuzz-target inventory updates.
 - Reduce binary relay serialization allocation operations by pre-sizing the
   MessagePack envelope from the known opaque payload length (issue #207).
   Direct protocol-v3 binary relays now use 5–6 allocation operations instead

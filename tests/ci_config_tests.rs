@@ -1246,12 +1246,9 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
 
 /// Required doc-validation workflow jobs: (job_key, display_name, description)
 ///
-/// Note: `doc-validation.yml` defines 5 jobs total, but only these 4 are listed here.
-/// The excluded job is:
-///   - `shellcheck-workflow` ("Shellcheck Workflow Scripts") — auxiliary static analysis
-///     of inline shell scripts; not a documentation quality gate
-///
-/// Auxiliary checks improve workflow quality without joining this stable-name set.
+/// Workflow-script shellcheck coverage runs inside `markdown-code-samples` so
+/// it reuses the checkout and shellcheck installation without allocating a
+/// fifth runner or introducing another status name.
 const REQUIRED_DOC_VALIDATION_JOBS: &[(&str, &str, &str)] = &[
     (
         "rustdoc",
@@ -6924,9 +6921,19 @@ fn test_doc_validation_workflow_has_required_jobs() {
         .and_then(|document| document.as_mapping_get("jobs"))
         .and_then(Yaml::as_mapping)
         .expect("doc-validation.yml must define jobs");
+    assert_eq!(
+        jobs.len(),
+        REQUIRED_DOC_VALIDATION_JOBS.len(),
+        "doc-validation.yml must use exactly the four stable documentation jobs; auxiliary \
+         validation belongs in an existing job instead of consuming another runner"
+    );
     assert!(
         !jobs.contains_key(&Yaml::value_from_str("inline-code-references")),
         "a no-op inline-code placeholder must not consume a hosted runner allocation"
+    );
+    assert!(
+        !jobs.contains_key(&Yaml::value_from_str("shellcheck-workflow")),
+        "workflow-script shellcheck must reuse the Markdown Code Validation runner"
     );
 }
 
@@ -9472,7 +9479,7 @@ fn test_awk_script_syntax_validation() {
              2. Run: awk --lint -f script.awk /dev/null\n\
              3. Fix any warnings or errors\n\
              4. Test with actual markdown files\n\n\
-             The shellcheck-workflow job in CI validates inline bash scripts,\n\
+             The Shellcheck workflow scripts step in Markdown Code Validation validates inline bash scripts,\n\
              but AWK syntax requires separate validation.",
             violations.join("\n\n")
         );
@@ -9648,20 +9655,64 @@ fn test_doc_validation_workflow_has_shellcheck() {
 
     let content = read_live_file(&workflow);
 
-    // Verify workflow has shellcheck job or step
+    let documents = Yaml::load_from_str(&content).expect("doc-validation.yml must parse as YAML");
+    let markdown_steps = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("markdown-code-samples"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("Markdown Code Validation must define steps");
+
+    let named_step = |name: &str| {
+        markdown_steps
+            .iter()
+            .position(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+    };
+    let install_index = named_step("Install shellcheck")
+        .expect("Markdown Code Validation must install shellcheck on its existing runner");
+    let workflow_shellcheck_index = named_step("Shellcheck workflow scripts")
+        .expect("Markdown Code Validation must retain workflow-script shellcheck coverage");
+    let markdown_bash_index = named_step("Validate Bash code blocks")
+        .expect("Markdown Code Validation must retain Markdown Bash validation");
     assert!(
-        content.contains("shellcheck") || content.contains("Shellcheck"),
-        "doc-validation.yml should include shellcheck validation of inline scripts.\n\
-         This prevents shell/AWK syntax errors in workflow scripts.\n\
-         Add a shellcheck job that validates inline bash scripts in the workflow."
+        install_index < workflow_shellcheck_index
+            && workflow_shellcheck_index < markdown_bash_index,
+        "one shellcheck installation must precede both workflow-script and Markdown Bash checks"
     );
 
-    // Verify shellcheck is installed in the workflow
-    if content.contains("shellcheck") {
+    let install = markdown_steps[install_index]
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("Install shellcheck must define a run script");
+    assert!(
+        install.contains("apt-get install -y shellcheck"),
+        "Markdown Code Validation must install shellcheck before either consumer"
+    );
+    assert_eq!(
+        content.matches("apt-get install -y shellcheck").count(),
+        1,
+        "doc-validation.yml must install shellcheck exactly once"
+    );
+
+    let workflow_shellcheck = markdown_steps[workflow_shellcheck_index]
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("Shellcheck workflow scripts must define a run script");
+    for required_input in [
+        "found==0 && /^      - name: Extract and validate Rust code blocks/",
+        "for script in \"$TEMP_DIR\"/*.sh",
+        "if ! shellcheck -s bash \"$script\"",
+        "Shellcheck found issues in inline script",
+        "if ! shellcheck -s bash .github/scripts/validate-rust-markdown-blocks.sh",
+        "Shellcheck found issues in Rust markdown validator helper",
+        "if ! shellcheck -s bash .github/scripts/run-fuzz-targets.sh",
+        "Shellcheck found issues in concurrent fuzz supervisor helper",
+    ] {
         assert!(
-            content.contains("apt-get install") && content.contains("shellcheck")
-                || content.contains("brew install shellcheck"),
-            "doc-validation.yml should install shellcheck to validate scripts"
+            workflow_shellcheck.contains(required_input),
+            "consolidated workflow shellcheck must preserve `{required_input}` from the \
+             former standalone job\nRun script:\n{workflow_shellcheck}"
         );
     }
 }
@@ -17048,7 +17099,13 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
     let pull_request_paths: BTreeSet<String> = extract_workflow_event_paths(&fuzz, "pull_request")
         .into_iter()
         .collect();
-    for required_path in ["Cargo.toml", "build.rs", "src/**"] {
+    for required_path in [
+        "Cargo.toml",
+        "build.rs",
+        "src/**",
+        ".llm/code-samples/protocol/**",
+        ".github/scripts/run-fuzz-targets.sh",
+    ] {
         assert!(
             pull_request_paths.contains(required_path),
             "fuzz.yml pull_request paths must include {required_path} because the declared \
@@ -17063,26 +17120,23 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
         .and_then(|document| document.as_mapping_get("jobs"))
         .and_then(|jobs| jobs.as_mapping_get("fuzz"))
         .unwrap_or_else(|| panic!("fuzz.yml must define jobs.fuzz"));
-    let matrix_target_sequence = fuzz_job
-        .as_mapping_get("strategy")
-        .and_then(|strategy| strategy.as_mapping_get("matrix"))
-        .and_then(|matrix| matrix.as_mapping_get("target"))
-        .and_then(Yaml::as_sequence)
-        .unwrap_or_else(|| panic!("fuzz.yml must define jobs.fuzz.strategy.matrix.target"));
-    let matrix_target_list: Vec<String> = matrix_target_sequence
-        .iter()
-        .map(|target| {
-            target
-                .as_str()
-                .unwrap_or_else(|| panic!("every fuzz matrix target must be a string"))
-                .to_string()
-        })
+    assert!(
+        fuzz_job.as_mapping_get("strategy").is_none(),
+        "fuzz.yml must keep all fuzz targets in one hosted job so they share one build"
+    );
+    let configured_target_list: Vec<String> = fuzz_job
+        .as_mapping_get("env")
+        .and_then(|env| env.as_mapping_get("FUZZ_TARGETS"))
+        .and_then(Yaml::as_str)
+        .unwrap_or_else(|| panic!("fuzz.yml jobs.fuzz.env.FUZZ_TARGETS must be a string"))
+        .split_whitespace()
+        .map(str::to_string)
         .collect();
-    let matrix_targets: BTreeSet<String> = matrix_target_list.iter().cloned().collect();
+    let configured_targets: BTreeSet<String> = configured_target_list.iter().cloned().collect();
     assert_eq!(
-        matrix_target_list.len(),
-        matrix_targets.len(),
-        "fuzz.yml must list every fuzz matrix target exactly once"
+        configured_target_list.len(),
+        configured_targets.len(),
+        "fuzz.yml must list every fuzz target exactly once"
     );
     let fuzz_manifest = read_file(&root.join("fuzz/Cargo.toml"));
     let mut in_bin = false;
@@ -17140,10 +17194,10 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
     assert_eq!(
         manifest_bin_count,
         manifest_targets.len(),
-        "every fuzz [[bin]] block must contribute one unique matrix target"
+        "every fuzz [[bin]] block must contribute one unique target"
     );
     assert_eq!(
-        matrix_targets, manifest_targets,
+        configured_targets, manifest_targets,
         "fuzz.yml must smoke-run every fuzz/Cargo.toml [[bin]] target. A compile-only stable \
          check cannot replace nightly libFuzzer execution."
     );
@@ -17171,27 +17225,161 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
          does not accept `--locked`, so the preflight is the reproducibility gate."
     );
 
+    let shared_build_index = fuzz_steps
+        .iter()
+        .position(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Build all fuzz targets once")
+        })
+        .unwrap_or_else(|| panic!("fuzz.yml must define one live all-target cargo-fuzz build"));
+    let shared_build = fuzz_steps
+        .get(shared_build_index)
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .unwrap_or_else(|| panic!("the shared fuzz build step must define `run`"));
+    assert_eq!(
+        shared_build,
+        "timeout --signal=TERM --kill-after=10s 600s cargo +nightly-2026-08-01 fuzz build --target x86_64-unknown-linux-gnu",
+        "fuzz.yml must build every declared bin together so Cargo shares the production-crate \
+         and libFuzzer compile prefix, while bounding a stuck best-effort prewarm below the job \
+         timeout so authoritative target runs still execute"
+    );
     let fuzz_run_index = fuzz_steps
         .iter()
         .position(|step| {
-            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Fuzz ${{ matrix.target }}")
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Fuzz all targets concurrently")
         })
-        .unwrap_or_else(|| panic!("fuzz.yml must define the live matrix cargo-fuzz command"));
+        .unwrap_or_else(|| panic!("fuzz.yml must define the concurrent cargo-fuzz command"));
     let fuzz_run = fuzz_steps
         .get(fuzz_run_index)
         .and_then(|step| step.as_mapping_get("run"))
         .and_then(Yaml::as_str)
-        .unwrap_or_else(|| panic!("the live matrix cargo-fuzz step must define `run`"));
+        .unwrap_or_else(|| panic!("the live all-target cargo-fuzz step must define `run`"));
     assert!(
-        locked_preflight_index < fuzz_run_index,
+        locked_preflight_index < shared_build_index && shared_build_index < fuzz_run_index,
         "fuzz.yml must verify the committed dependency graph before cargo-fuzz can resolve or \
-         build it (preflight step {locked_preflight_index}, fuzz step {fuzz_run_index})."
+         build it, then finish the shared build before launching targets \
+         (preflight {locked_preflight_index}, build {shared_build_index}, fuzz {fuzz_run_index})."
     );
+    assert_eq!(
+        fuzz_run, "bash .github/scripts/run-fuzz-targets.sh",
+        "the fuzz workflow must delegate supervision to its regression-tested helper"
+    );
+    let fuzz_supervisor = read_live_file(&root.join(".github/scripts/run-fuzz-targets.sh"));
+    for required_fragment in [
+        "10#$MAX_TOTAL_TIME > 300",
+        "watchdog_seconds=$((10#$MAX_TOTAL_TIME + 10#$watchdog_grace_seconds))",
+        "read -r -a targets <<< \"$FUZZ_TARGETS\"",
+        "if ((${#targets[@]} == 0))",
+        "for target in \"${targets[@]}\"",
+        "timeout --signal=TERM --kill-after=10s",
+        "fuzz run \"$target\"",
+        ">\"$logs_dir/$target.log\" 2>&1 &",
+        "pids+=(\"$!\")",
+        "trap cleanup_children EXIT",
+        "trap 'exit 130' INT TERM",
+        "for index in \"${!targets[@]}\"",
+        "if wait \"${pids[$index]}\"",
+        "pids[index]=\"\"",
+        "cat \"$logs_dir/$target.log\"",
+        "failures+=(\"$target:$status\")",
+        "if ((${#failures[@]} != 0))",
+        "exit 1",
+    ] {
+        assert!(
+            fuzz_supervisor.contains(required_fragment),
+            "the concurrent fuzz supervisor must contain `{required_fragment}` so every \
+             target starts independently, reaches a terminal result, retains diagnostics, and \
+             contributes to the final failure status.\nSupervisor:\n{fuzz_supervisor}"
+        );
+    }
     assert!(
-        fuzz_run.contains("fuzz run ${{ matrix.target }}") && !fuzz_run.contains("--locked"),
+        !fuzz_supervisor.contains("--locked"),
         "cargo-fuzz 0.13 rejects `--locked`; fuzz.yml must enforce the committed graph with \
          the native Cargo metadata preflight and leave the cargo-fuzz invocation unflagged.\n\
-         Run command:\n{fuzz_run}"
+         Supervisor:\n{fuzz_supervisor}"
+    );
+
+    let cache_index = fuzz_steps
+        .iter()
+        .position(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Cache cargo build")
+        })
+        .unwrap_or_else(|| panic!("fuzz.yml must define the Rust build cache step"));
+    let cache_step = fuzz_steps
+        .get(cache_index)
+        .unwrap_or_else(|| panic!("the fuzz cache step index must remain valid"));
+    let shared_build_step = fuzz_steps
+        .get(shared_build_index)
+        .unwrap_or_else(|| panic!("the shared fuzz build step index must remain valid"));
+    assert!(
+        cache_index < shared_build_index
+            && cache_step.as_mapping_get("continue-on-error").is_none()
+            && shared_build_step.as_mapping_get("if").is_none()
+            && shared_build_step
+                .as_mapping_get("continue-on-error")
+                .and_then(Yaml::as_bool)
+                == Some(true)
+            && fuzz_steps
+                .get(fuzz_run_index)
+                .is_some_and(|step| step.as_mapping_get("if").is_none()),
+        "the Rust cache and shared prebuild may accelerate the fuzz job but must never substitute \
+         for the unconditional, gating per-target runs. A cache miss or restore warning must fall \
+         back to live compilation; a target-specific prebuild failure must still let every target \
+         report independently."
+    );
+
+    let upload_steps: BTreeSet<(String, String)> = fuzz_steps
+        .iter()
+        .filter_map(|step| {
+            let uses = step.as_mapping_get("uses").and_then(Yaml::as_str)?;
+            if !uses.starts_with("actions/upload-artifact@") {
+                return None;
+            }
+            let with = step.as_mapping_get("with")?;
+            let name = with.as_mapping_get("name").and_then(Yaml::as_str)?;
+            let path = with.as_mapping_get("path").and_then(Yaml::as_str)?;
+            assert_eq!(
+                step.as_mapping_get("if").and_then(Yaml::as_str),
+                Some("failure()"),
+                "fuzz failure artifacts must upload after any target failure"
+            );
+            assert_eq!(
+                with.as_mapping_get("if-no-files-found").and_then(Yaml::as_str),
+                Some("ignore"),
+                "a target that failed before writing an artifact must not hide the original failure"
+            );
+            Some((name.to_string(), path.to_string()))
+        })
+        .collect();
+    let expected_upload_steps: BTreeSet<(String, String)> = configured_targets
+        .iter()
+        .map(|target| {
+            (
+                format!("fuzz-artifacts-{target}"),
+                format!(
+                    "fuzz/artifacts/{target}/\n${{{{ runner.temp }}}}/fuzz-logs/{target}.log\n"
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(
+        upload_steps, expected_upload_steps,
+        "fuzz.yml must retain one independently named artifact bundle and log per fuzz target"
+    );
+    assert_eq!(
+        fuzz_steps
+            .iter()
+            .skip(fuzz_run_index + 1)
+            .filter(|step| {
+                step.as_mapping_get("uses")
+                    .and_then(Yaml::as_str)
+                    .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+            })
+            .count(),
+        configured_targets.len(),
+        "every per-target artifact upload must run after the authoritative fuzz supervisor"
     );
 
     let ci_documents =
@@ -17227,6 +17415,183 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
                 .any(|command| command == "cargo audit --file fuzz/Cargo.lock"),
         "ci.yml must apply both cargo-deny policy and the cargo-audit second opinion to the \
          committed standalone fuzz graph."
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_fuzz_supervisor_waits_logs_times_out_and_aggregates_all_targets() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let root = repo_root();
+    let supervisor = root.join(".github/scripts/run-fuzz-targets.sh");
+    let fixture = unique_temp_dir("fuzz-supervisor");
+    let fake_bin = fixture.path().join("bin");
+    let fake_cargo = fake_bin.join("cargo");
+    let trace = fixture.path().join("trace.txt");
+    let hung_pid = fixture.path().join("hung.pid");
+    write_file(
+        &fake_cargo,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+target=$4
+printf 'started:%s\n' "$target" >> "$TRACE_FILE"
+case "$target" in
+  succeeds)
+    echo "succeeds-complete"
+    ;;
+  fails_seven)
+    echo "fails-seven-diagnostic"
+    exit 7
+    ;;
+  fails_nine)
+    echo "fails-nine-diagnostic"
+    exit 9
+    ;;
+  hangs)
+    echo "hang-diagnostic"
+    printf '%s\n' "$$" > "$HUNG_PID_FILE"
+    exec sleep 10
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+"#,
+    );
+    let mut permissions = fs::metadata(&fake_cargo)
+        .expect("fake cargo metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_cargo, permissions).expect("make fake cargo executable");
+
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let path = std::env::join_paths(paths).expect("join fake cargo PATH");
+    let started = Instant::now();
+    let output = bash_command()
+        .arg(&supervisor)
+        .current_dir(fixture.path())
+        .env("PATH", &path)
+        .env("FUZZ_TARGETS", "succeeds fails_seven fails_nine hangs")
+        .env("MAX_TOTAL_TIME", "1")
+        .env("FUZZ_WATCHDOG_GRACE_SECONDS", "0")
+        .env("RUNNER_TEMP", fixture.path())
+        .env("TRACE_FILE", &trace)
+        .env("HUNG_PID_FILE", &hung_pid)
+        .output()
+        .expect("execute fuzz supervisor with fake cargo");
+    let elapsed = started.elapsed();
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        !output.status.success(),
+        "multiple target failures and a timeout must fail the aggregate supervisor\n{combined}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the external watchdog must bound a stuck fuzz iteration; elapsed {elapsed:?}"
+    );
+    let started_targets: BTreeSet<String> = read_file(&trace).lines().map(str::to_string).collect();
+    let expected_starts: BTreeSet<String> = [
+        "started:succeeds",
+        "started:fails_seven",
+        "started:fails_nine",
+        "started:hangs",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(
+        started_targets, expected_starts,
+        "all targets must launch before the supervisor aggregates results"
+    );
+    for diagnostic in [
+        "succeeds-complete",
+        "fails-seven-diagnostic",
+        "fails-nine-diagnostic",
+        "hang-diagnostic",
+        "fails_seven:7",
+        "fails_nine:9",
+        "hangs:124",
+    ] {
+        assert!(
+            combined.contains(diagnostic),
+            "the aggregate output must retain `{diagnostic}` from every terminal result\n{combined}"
+        );
+    }
+    for target in ["succeeds", "fails_seven", "fails_nine", "hangs"] {
+        assert!(
+            fixture
+                .path()
+                .join(format!("fuzz-logs/{target}.log"))
+                .is_file(),
+            "the supervisor must retain a log for {target}"
+        );
+    }
+    let timed_out_pid = read_file(&hung_pid).trim().to_string();
+    let lingering = Command::new("kill")
+        .args(["-0", &timed_out_pid])
+        .output()
+        .expect("probe timed-out fake cargo PID");
+    assert!(
+        !lingering.status.success(),
+        "the watchdog must reap the timed-out fuzz process {timed_out_pid}"
+    );
+
+    let success_temp = fixture.path().join("success-temp");
+    fs::create_dir_all(&success_temp).expect("create successful supervisor temp directory");
+    let success = bash_command()
+        .arg(&supervisor)
+        .current_dir(fixture.path())
+        .env("PATH", &path)
+        .env("FUZZ_TARGETS", "succeeds")
+        .env("MAX_TOTAL_TIME", "1")
+        .env("FUZZ_WATCHDOG_GRACE_SECONDS", "0")
+        .env("RUNNER_TEMP", &success_temp)
+        .env("TRACE_FILE", &trace)
+        .env("HUNG_PID_FILE", &hung_pid)
+        .output()
+        .expect("execute successful fuzz supervisor case");
+    assert!(
+        success.status.success(),
+        "an all-success target inventory must exit zero\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&success.stdout),
+        String::from_utf8_lossy(&success.stderr)
+    );
+    assert!(
+        read_file(&success_temp.join("fuzz-logs/succeeds.log")).contains("succeeds-complete"),
+        "the all-success case must retain the target's complete log"
+    );
+
+    let invalid = bash_command()
+        .arg(&supervisor)
+        .current_dir(fixture.path())
+        .env("FUZZ_TARGETS", "succeeds")
+        .env("MAX_TOTAL_TIME", "301")
+        .env("RUNNER_TEMP", fixture.path())
+        .output()
+        .expect("execute fuzz supervisor with an excessive budget");
+    assert_eq!(
+        invalid.status.code(),
+        Some(64),
+        "dispatch budgets above the hosted-job-safe cap must fail before launching cargo"
+    );
+    let empty = bash_command()
+        .arg(&supervisor)
+        .current_dir(fixture.path())
+        .env("FUZZ_TARGETS", "   ")
+        .env("MAX_TOTAL_TIME", "1")
+        .env("RUNNER_TEMP", fixture.path())
+        .output()
+        .expect("execute fuzz supervisor with an empty target inventory");
+    assert_eq!(
+        empty.status.code(),
+        Some(64),
+        "a whitespace-only target inventory must fail before claiming success"
     );
 }
 

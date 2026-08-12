@@ -3,9 +3,10 @@
 # The NIGHTLY counterpart to the stable in-suite proptest fuzzer
 # (tests/protocol_fuzz_hardening.rs, run on every `cargo test`). This job builds
 # the out-of-workspace fuzz crate (fuzz/) on the nightly toolchain and smoke-runs
-# each target for a bounded time, with protocol decoding seeded from canonical
-# wire samples. A crash or failed state-machine assertion fails the job and
-# uploads the reproducing artifact.
+# every target concurrently for a bounded time after one shared build, with
+# protocol decoding seeded from canonical wire samples. Every target reaches a
+# terminal result even if a sibling crashes; any crash or failed state-machine
+# assertion fails the job and uploads the reproducing artifacts.
 #
 # Kept off the stable toolchain and out of the workspace so it never perturbs the
 # pinned-stable build (ADR-0003); see fuzz/README.md.
@@ -19,14 +20,16 @@ on:
   workflow_dispatch:
     inputs:
       max_total_time:
-        description: "Seconds to fuzz each target"
+        description: "Seconds to fuzz each target (1-300)"
         required: false
         default: "120"
   pull_request:
     branches: [main]
     paths:
       - "fuzz/**"
+      - ".llm/code-samples/protocol/**"
       - ".github/workflows/fuzz.yml"
+      - ".github/scripts/run-fuzz-targets.sh"
       - "Cargo.toml"
       - "build.rs"
       - "src/**"
@@ -40,13 +43,13 @@ permissions:
 
 jobs:
   fuzz:
-    name: cargo-fuzz smoke (${{ matrix.target }})
+    name: cargo-fuzz smoke (all targets)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [decode_protocol, validate_inputs, fuzz_session_machine, fuzz_reconnect_tokens]
+    # The supervisor caps each target at 10 minutes including grace. Retain
+    # another 20 minutes for cold setup/prebuild and failure-artifact uploads.
+    timeout-minutes: 30
+    env:
+      FUZZ_TARGETS: decode_protocol validate_inputs fuzz_session_machine fuzz_reconnect_tokens
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -92,7 +95,6 @@ jobs:
           tool: cargo-fuzz
 
       - name: Seed corpus from canonical wire samples
-        if: matrix.target == 'decode_protocol'
         run: |
           mkdir -p fuzz/corpus/decode_protocol
           i=0
@@ -105,7 +107,16 @@ jobs:
           done
           echo "Seeded $i corpus entries"
 
-      - name: Fuzz ${{ matrix.target }}
+      - name: Build all fuzz targets once
+        # One all-target build shares the expensive server and libFuzzer compile
+        # prefix across all targets. The unconditional live build also means a
+        # missing or stale Rust cache can affect speed, never correctness.
+        # A target-specific compile failure is re-observed by that target's
+        # gating run below without preventing its independent siblings.
+        continue-on-error: true
+        run: timeout --signal=TERM --kill-after=10s 600s cargo +nightly-2026-08-01 fuzz build --target x86_64-unknown-linux-gnu
+
+      - name: Fuzz all targets concurrently
         env:
           MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '120' }}
         # `--target x86_64-unknown-linux-gnu` is REQUIRED, not cosmetic. cargo-fuzz
@@ -117,15 +128,44 @@ jobs:
         # makes the instrumented build use gnu std + a working sanitizer. Do not
         # remove. cargo-fuzz rejects `--locked`; the locked metadata preflight
         # above therefore guards the committed graph before this build starts.
-        run: |
-          cargo +nightly-2026-08-01 fuzz run ${{ matrix.target }} \
-            --target x86_64-unknown-linux-gnu -- \
-            -max_total_time="${MAX_TOTAL_TIME}" -max_len=65536
+        run: bash .github/scripts/run-fuzz-targets.sh
 
-      - name: Upload crash artifacts
+      - name: Upload decode_protocol failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
-          path: fuzz/artifacts/
+          name: fuzz-artifacts-decode_protocol
+          path: |
+            fuzz/artifacts/decode_protocol/
+            ${{ runner.temp }}/fuzz-logs/decode_protocol.log
+          if-no-files-found: ignore
+
+      - name: Upload validate_inputs failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: fuzz-artifacts-validate_inputs
+          path: |
+            fuzz/artifacts/validate_inputs/
+            ${{ runner.temp }}/fuzz-logs/validate_inputs.log
+          if-no-files-found: ignore
+
+      - name: Upload fuzz_session_machine failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: fuzz-artifacts-fuzz_session_machine
+          path: |
+            fuzz/artifacts/fuzz_session_machine/
+            ${{ runner.temp }}/fuzz-logs/fuzz_session_machine.log
+          if-no-files-found: ignore
+
+      - name: Upload fuzz_reconnect_tokens failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: fuzz-artifacts-fuzz_reconnect_tokens
+          path: |
+            fuzz/artifacts/fuzz_reconnect_tokens/
+            ${{ runner.temp }}/fuzz-logs/fuzz_reconnect_tokens.log
           if-no-files-found: ignore

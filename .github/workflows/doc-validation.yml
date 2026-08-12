@@ -65,65 +65,6 @@ env:
   RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
 
 jobs:
-  shellcheck-workflow:
-    name: Shellcheck Workflow Scripts
-    runs-on: ubuntu-latest
-    timeout-minutes: 5 # Short timeout - this is a fast validation step
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Install shellcheck
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-
-      - name: Extract and validate inline shell scripts
-        run: |
-          set -euo pipefail
-
-          echo "Validating inline shell scripts in workflow..."
-          TEMP_DIR=$(mktemp -d)
-          trap 'rm -rf "$TEMP_DIR"' EXIT
-
-          workflow_file=".github/workflows/doc-validation.yml"
-
-          # Extract inline shell scripts (run: | blocks) and validate with shellcheck
-          # This is a simplified check - we extract major script blocks manually
-          # Future improvement: automated extraction of all run: | blocks
-
-          # Extract the main Rust code validation script
-          # Note: The AWK program for Rust block extraction lives in .github/scripts/extract-rust-blocks.awk
-          # (external file avoids shell quoting issues that confuse shellcheck).
-          awk '
-            # Use flag-based extraction instead of range pattern to avoid
-            # the start line matching the end pattern (both begin with "      - name:")
-            found==0 && /^      - name: Extract and validate Rust code blocks/ { found=1; next }
-            found && /run: \|/ { in_script=1; next }
-            in_script && /^      - name:/ { exit }
-            # Extract script content: skip the 10-space indentation (6 spaces for YAML step level + 4 for script content)
-            # plus line number + tab from workflow YAML structure = 11 characters to skip
-            in_script && /^          / { print substr($0, 11) }
-          ' "$workflow_file" > "$TEMP_DIR/rust_validation.sh"
-
-          # Validate extracted scripts
-          for script in "$TEMP_DIR"/*.sh; do
-            [ -f "$script" ] || continue
-            echo "Checking: $(basename "$script")"
-            if ! shellcheck -s bash "$script"; then
-              echo "✗ Shellcheck found issues in inline script: $(basename "$script")"
-              exit 1  # Non-zero exit code indicates failure
-            fi
-          done
-
-          echo "Validating workflow helper shell scripts..."
-          echo "Checking Rust markdown validator helper"
-          if ! shellcheck -s bash .github/scripts/validate-rust-markdown-blocks.sh; then
-            echo "✗ Shellcheck found issues in Rust markdown validator helper"
-            exit 1
-          fi
-
-          echo "✓ All workflow inline scripts pass shellcheck validation"
-
   rustdoc:
     name: Rustdoc Validation
     runs-on: ubuntu-latest
@@ -207,6 +148,56 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install shellcheck
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Shellcheck workflow scripts
+        run: |
+          set -euo pipefail
+
+          echo "Validating inline shell scripts in workflow..."
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          workflow_file=".github/workflows/doc-validation.yml"
+
+          # Preserve the exact inline wrapper and helper coverage formerly run
+          # in a separate hosted job.
+          awk '
+            # Use flag-based extraction instead of range pattern to avoid
+            # the start line matching the end pattern (both begin with "      - name:")
+            found==0 && /^      - name: Extract and validate Rust code blocks/ { found=1; next }
+            found && /run: \|/ { in_script=1; next }
+            in_script && /^      - name:/ { exit }
+            # Extract script content: skip the 10-space indentation.
+            in_script && /^          / { print substr($0, 11) }
+          ' "$workflow_file" > "$TEMP_DIR/rust_validation.sh"
+
+          for script in "$TEMP_DIR"/*.sh; do
+            [ -f "$script" ] || continue
+            echo "Checking: $(basename "$script")"
+            if ! shellcheck -s bash "$script"; then
+              echo "✗ Shellcheck found issues in inline script: $(basename "$script")"
+              exit 1
+            fi
+          done
+
+          echo "Validating workflow helper shell scripts..."
+          echo "Checking Rust markdown validator helper"
+          if ! shellcheck -s bash .github/scripts/validate-rust-markdown-blocks.sh; then
+            echo "✗ Shellcheck found issues in Rust markdown validator helper"
+            exit 1
+          fi
+          echo "Checking concurrent fuzz supervisor helper"
+          if ! shellcheck -s bash .github/scripts/run-fuzz-targets.sh; then
+            echo "✗ Shellcheck found issues in concurrent fuzz supervisor helper"
+            exit 1
+          fi
+          echo "✓ All workflow inline scripts pass shellcheck validation"
+
       # Build the library first so we have it available for compilation validation
       - name: Build library
         run: cargo build --lib --locked --all-features
@@ -523,11 +514,6 @@ jobs:
           # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
-
-          # Install shellcheck for comprehensive shell script validation
-          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
           COUNTER_FILE="$TEMP_DIR/counters"
