@@ -186,9 +186,7 @@ impl EnhancedGameServer {
         max_wait: Duration,
         mut after_active_check: impl FnMut(),
     ) -> usize {
-        let deadline = tokio::time::Instant::now()
-            .checked_add(max_wait)
-            .unwrap_or_else(tokio::time::Instant::now);
+        let deadline = crate::deadline::after(tokio::time::Instant::now(), max_wait);
         loop {
             let notified = self.active_socket_tasks_notify.notified();
             tokio::pin!(notified);
@@ -202,7 +200,7 @@ impl EnhancedGameServer {
             }
 
             let now = tokio::time::Instant::now();
-            if now >= deadline {
+            if deadline.is_some_and(|deadline| now >= deadline) {
                 return active_tasks;
             }
 
@@ -210,7 +208,7 @@ impl EnhancedGameServer {
 
             tokio::select! {
                 () = &mut notified => {}
-                () = tokio::time::sleep_until(deadline) => {
+                _ = crate::deadline::wait_until(deadline) => {
                     return self.active_socket_tasks.load(Ordering::Acquire);
                 }
             }
@@ -400,5 +398,35 @@ mod tests {
         };
 
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_shutdown_wait_does_not_expire_immediately() {
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+        let mut guard = Some(server.track_socket_task());
+
+        let remaining = server
+            .wait_for_shutdown_connections_after_active_check(Duration::from_secs(u64::MAX), || {
+                drop(guard.take())
+            })
+            .await;
+
+        assert_eq!(
+            remaining, 0,
+            "deadline overflow must still allow the active socket to settle"
+        );
     }
 }

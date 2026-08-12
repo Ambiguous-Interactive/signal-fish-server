@@ -2,7 +2,7 @@ mod test_helpers;
 
 use signal_fish_server::protocol::*;
 use std::sync::Arc;
-use test_helpers::create_test_server;
+use test_helpers::{create_test_server, create_test_server_with_config, test_server_config};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -408,7 +408,7 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
         .handle_join_as_spectator(
             &spectator_id,
             game_name.to_string(),
-            room_code.to_string(),
+            room_code.to_ascii_lowercase(),
             "ViewerOne".to_string(),
         )
         .await;
@@ -522,6 +522,326 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn spectator_and_seated_joins_share_the_attempt_budget() {
+    let mut config = test_server_config();
+    config.rate_limit_config.max_join_attempts = 1;
+    config.rate_limit_config.time_window = std::time::Duration::from_millis(20);
+
+    // Repeated spectator misses cannot perform unbounded storage lookups and
+    // error publications under a one-attempt budget.
+    let server = create_test_server_with_config(config.clone(), Default::default()).await;
+    let spectator_id = Uuid::new_v4();
+    let (spectator_tx, mut spectator_rx) = mpsc::channel(64);
+    server.connect_client(spectator_id, spectator_tx).await;
+
+    for expected_code in [ErrorCode::RoomNotFound, ErrorCode::RateLimitExceeded] {
+        server
+            .handle_join_as_spectator(
+                &spectator_id,
+                "rate_limit_spectator".to_string(),
+                "MISS01".to_string(),
+                "Viewer".to_string(),
+            )
+            .await;
+        match recv_now(&mut spectator_rx, "spectator rate-limit outcome").as_ref() {
+            ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+                assert_eq!(*error_code, Some(expected_code));
+            }
+            other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+        }
+        assert_no_pending_message(
+            &mut spectator_rx,
+            "one spectator request produces exactly one terminal response",
+        );
+    }
+    let snapshot = server.metrics().snapshot().await;
+    assert_eq!(snapshot.rate_limiting.join_attempt_rejections, 1);
+
+    tokio::time::advance(std::time::Duration::from_millis(21)).await;
+    server
+        .handle_join_as_spectator(
+            &spectator_id,
+            "rate_limit_spectator".to_string(),
+            "MISS01".to_string(),
+            "Viewer".to_string(),
+        )
+        .await;
+    match recv_now(&mut spectator_rx, "spectator budget after reset").as_ref() {
+        ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
+        }
+        other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+    }
+    assert_no_pending_message(
+        &mut spectator_rx,
+        "the reset attempt produces exactly one terminal response",
+    );
+
+    // A successful seated join consumes the same counter before spectator
+    // role checks, so changing roles cannot reset or bypass the budget.
+    let server = create_test_server_with_config(config.clone(), Default::default()).await;
+    let player_id = Uuid::new_v4();
+    let (player_tx, mut player_rx) = mpsc::channel(64);
+    server.connect_client(player_id, player_tx).await;
+    server
+        .handle_join_room(
+            &player_id,
+            "rate_limit_shared".to_string(),
+            Some("SHARE1".to_string()),
+            "Player".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    expect_room_joined(&mut player_rx, "seated attempt consumes shared budget");
+    expect_lobby_state_changed(&mut player_rx, "seated room enters lobby");
+
+    server
+        .handle_join_as_spectator(
+            &player_id,
+            "rate_limit_shared".to_string(),
+            "SHARE1".to_string(),
+            "Viewer".to_string(),
+        )
+        .await;
+    match recv_now(&mut player_rx, "cross-role rate-limit outcome").as_ref() {
+        ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::RateLimitExceeded));
+        }
+        other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+    }
+    assert_no_pending_message(
+        &mut player_rx,
+        "the cross-role rejection produces exactly one terminal response",
+    );
+
+    // Sharing is symmetric: a spectator attempt also exhausts the next seated
+    // admission attempt on the same connection.
+    let server = create_test_server_with_config(config.clone(), Default::default()).await;
+    let player_id = Uuid::new_v4();
+    let (player_tx, mut player_rx) = mpsc::channel(64);
+    server.connect_client(player_id, player_tx).await;
+    server
+        .handle_join_as_spectator(
+            &player_id,
+            "rate_limit_reverse".to_string(),
+            "MISS02".to_string(),
+            "Viewer".to_string(),
+        )
+        .await;
+    match recv_now(&mut player_rx, "spectator attempt consumes shared budget").as_ref() {
+        ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
+        }
+        other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+    }
+    server
+        .handle_join_room(
+            &player_id,
+            "rate_limit_reverse".to_string(),
+            Some("MISS02".to_string()),
+            "Player".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    match recv_now(&mut player_rx, "spectator-to-seated rate-limit outcome").as_ref() {
+        ServerMessage::RoomJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::RateLimitExceeded));
+        }
+        other => panic!("expected RoomJoinFailed, got {other:?}"),
+    }
+    assert_no_pending_message(&mut player_rx, "spectator-to-seated shared budget");
+
+    // Validation failures are admission attempts too. Prove both validation
+    // branches consume quota before a later storage lookup can run.
+    for (game_name, room_code, expected_code, context) in [
+        (
+            "",
+            "MISS03",
+            ErrorCode::InvalidGameName,
+            "invalid game name consumes quota",
+        ),
+        (
+            "rate_limit_invalid",
+            "BAD!03",
+            ErrorCode::InvalidRoomCode,
+            "invalid room code consumes quota",
+        ),
+    ] {
+        let server = create_test_server_with_config(config.clone(), Default::default()).await;
+        let spectator_id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel(64);
+        server.connect_client(spectator_id, tx).await;
+        server
+            .handle_join_as_spectator(
+                &spectator_id,
+                game_name.to_string(),
+                room_code.to_string(),
+                "Viewer".to_string(),
+            )
+            .await;
+        match recv_now(&mut rx, context).as_ref() {
+            ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+                assert_eq!(*error_code, Some(expected_code), "{context}");
+            }
+            other => panic!("{context}: expected SpectatorJoinFailed, got {other:?}"),
+        }
+        server
+            .handle_join_as_spectator(
+                &spectator_id,
+                "rate_limit_invalid".to_string(),
+                "MISS03".to_string(),
+                "Viewer".to_string(),
+            )
+            .await;
+        match recv_now(&mut rx, "quota after invalid spectator input").as_ref() {
+            ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+                assert_eq!(*error_code, Some(ErrorCode::RateLimitExceeded));
+            }
+            other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+        }
+        assert_no_pending_message(&mut rx, context);
+    }
+
+    let server = create_test_server_with_config(config, Default::default()).await;
+    let spectator_id = Uuid::new_v4();
+    let (tx, mut rx) = mpsc::channel(64);
+    server.connect_client(spectator_id, tx).await;
+    server
+        .handle_join_as_spectator(
+            &spectator_id,
+            "rate_limit_invalid".to_string(),
+            "MISS04".to_string(),
+            "".to_string(),
+        )
+        .await;
+    match recv_now(&mut rx, "invalid spectator name consumes quota").as_ref() {
+        ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::InvalidPlayerName));
+        }
+        other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+    }
+    server
+        .handle_join_as_spectator(
+            &spectator_id,
+            "rate_limit_invalid".to_string(),
+            "MISS04".to_string(),
+            "Viewer".to_string(),
+        )
+        .await;
+    match recv_now(&mut rx, "quota after invalid spectator name").as_ref() {
+        ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::RateLimitExceeded));
+        }
+        other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+    }
+    assert_no_pending_message(&mut rx, "invalid spectator-name quota outcomes");
+}
+
+#[tokio::test]
+async fn spectator_admission_uses_configured_name_and_room_code_boundaries() {
+    let protocol = signal_fish_server::config::ProtocolConfig {
+        max_game_name_length: 4,
+        room_code_length: 4,
+        ..Default::default()
+    };
+    let server = create_test_server_with_config(test_server_config(), protocol).await;
+    let host_id = Uuid::new_v4();
+    let (host_tx, mut host_rx) = mpsc::channel(64);
+    server.connect_client(host_id, host_tx).await;
+    server
+        .handle_join_room(
+            &host_id,
+            "G123".to_string(),
+            Some("ABCD".to_string()),
+            "Host".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let room_id = match expect_room_joined(&mut host_rx, "custom-boundary host join").as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_id,
+        other => panic!("expected RoomJoined, got {other:?}"),
+    };
+
+    let accepted_id = Uuid::new_v4();
+    let (accepted_tx, mut accepted_rx) = mpsc::channel(64);
+    server.connect_client(accepted_id, accepted_tx).await;
+    server
+        .handle_join_as_spectator(
+            &accepted_id,
+            "G123".to_string(),
+            "abcd".to_string(),
+            "Viewer".to_string(),
+        )
+        .await;
+    match recv_now(&mut accepted_rx, "configured-boundary spectator join").as_ref() {
+        ServerMessage::SpectatorJoined(payload) => {
+            assert_eq!(payload.room_id, room_id);
+            assert_eq!(payload.room_code, "ABCD");
+        }
+        other => panic!("expected SpectatorJoined, got {other:?}"),
+    }
+    assert_no_pending_message(&mut accepted_rx, "configured-boundary accepted response");
+
+    for (game_name, room_code, expected_code, context) in [
+        (
+            "G1234",
+            "ABCD",
+            ErrorCode::InvalidGameName,
+            "configured maximum game-name length",
+        ),
+        (
+            "G123",
+            "ABCDEF",
+            ErrorCode::InvalidRoomCode,
+            "configured exact room-code length",
+        ),
+    ] {
+        let spectator_id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel(64);
+        server.connect_client(spectator_id, tx).await;
+        server
+            .handle_join_as_spectator(
+                &spectator_id,
+                game_name.to_string(),
+                room_code.to_string(),
+                "Viewer".to_string(),
+            )
+            .await;
+        match recv_now(&mut rx, context).as_ref() {
+            ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+                assert_eq!(*error_code, Some(expected_code), "{context}");
+            }
+            other => panic!("{context}: expected SpectatorJoinFailed, got {other:?}"),
+        }
+        assert_no_pending_message(&mut rx, context);
+    }
+
+    // An established spectator role retains precedence over a malformed name
+    // while the request is still within quota.
+    server
+        .handle_join_as_spectator(
+            &accepted_id,
+            "G123".to_string(),
+            "ABCD".to_string(),
+            "".to_string(),
+        )
+        .await;
+    match recv_now(&mut accepted_rx, "role precedes invalid spectator name").as_ref() {
+        ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::SpectatorJoinFailed));
+        }
+        other => panic!("expected SpectatorJoinFailed, got {other:?}"),
+    }
+    assert_no_pending_message(&mut accepted_rx, "role-before-name precedence");
+}
+
 /// Every rejected `JoinAsSpectator` answers with the terminal `SpectatorJoinFailed`
 /// that `docs/protocol.md` and the AsyncAPI document pair with `SpectatorJoined`.
 /// A client that awaits that pair — the documented contract — otherwise waits out
@@ -548,14 +868,30 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
 
     // One case per distinct rejection source: the room lookup, and the role
     // check that precedes it.
-    for (room_code, spectate_first, context, expected_code) in [
+    for (game_name, room_code, spectate_first, context, expected_code) in [
         (
+            "spectator_failure",
             "NOSUCH",
             false,
             "no such room code",
             ErrorCode::RoomNotFound,
         ),
         (
+            "",
+            "SPECF1",
+            false,
+            "invalid game name",
+            ErrorCode::InvalidGameName,
+        ),
+        (
+            "spectator_failure",
+            "BAD!01",
+            false,
+            "invalid room code",
+            ErrorCode::InvalidRoomCode,
+        ),
+        (
+            "spectator_failure",
             "SPECF1",
             true,
             "already spectating this room",
@@ -569,7 +905,7 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
             server
                 .handle_join_as_spectator(
                     &spectator_id,
-                    "spectator_failure".to_string(),
+                    game_name.to_string(),
                     room_code.to_string(),
                     "Viewer".to_string(),
                 )
@@ -580,7 +916,7 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
         server
             .handle_join_as_spectator(
                 &spectator_id,
-                "spectator_failure".to_string(),
+                game_name.to_string(),
                 room_code.to_string(),
                 "Viewer".to_string(),
             )
@@ -593,6 +929,7 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
             }
             other => panic!("{context}: expected SpectatorJoinFailed, got {other:?}"),
         }
+        assert_no_pending_message(&mut rx, context);
     }
 }
 

@@ -1905,7 +1905,7 @@ impl OutboundReceiver {
                 Err(BatchedPopState::WaitUntil(deadline)) => {
                     tokio::select! {
                         () = notified.as_mut() => {}
-                        () = tokio::time::sleep_until(deadline) => {}
+                        _ = crate::deadline::wait_until(deadline) => {}
                     }
                 }
             }
@@ -2024,13 +2024,15 @@ impl OutboundReceiver {
             let ready = front.class() != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || state.legacy.len() >= batch_size
+                || !state.receiver_open
+                || !state.producers_open()
                 || front
                     .enqueued_at
                     .checked_add(batch_interval)
-                    .is_none_or(|deadline| now >= deadline);
+                    .is_some_and(|deadline| now >= deadline);
             if !ready {
                 return Err(BatchedPopState::WaitUntil(
-                    front.enqueued_at.checked_add(batch_interval).unwrap_or(now),
+                    front.enqueued_at.checked_add(batch_interval),
                 ));
             }
             if front.class() == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
@@ -2071,12 +2073,14 @@ impl OutboundReceiver {
             let ready = front_class != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || phase_len >= batch_size
+                || !state.receiver_open
+                || !state.producers_open()
                 || front_enqueued_at
                     .checked_add(batch_interval)
-                    .is_none_or(|deadline| now >= deadline);
+                    .is_some_and(|deadline| now >= deadline);
             if !ready {
                 return Err(BatchedPopState::WaitUntil(
-                    front_enqueued_at.checked_add(batch_interval).unwrap_or(now),
+                    front_enqueued_at.checked_add(batch_interval),
                 ));
             }
             if front_class == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
@@ -2371,7 +2375,7 @@ enum BatchedPopState {
     Empty,
     Disconnected,
     Terminal,
-    WaitUntil(Instant),
+    WaitUntil(Option<Instant>),
 }
 
 fn valid_class_key(class: Option<DeliveryClass>, key: Option<u32>) -> bool {
@@ -2929,6 +2933,124 @@ mod tests {
         let (gap, successor) = waiter.await.unwrap();
         assert_eq!(report(gap).gaps[0].from_seq, 1);
         assert_eq!(message_id(&successor), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_batch_deadline_waits_for_queue_progress() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .expect("enqueue first latest value");
+
+        let mut waiter = std::pin::pin!(rx.recv_batched(2, std::time::Duration::MAX));
+        assert!(
+            futures_util::poll!(waiter.as_mut()).is_pending(),
+            "an overflowing coalesce deadline must not flush immediately"
+        );
+
+        tx.try_enqueue_data(data(2, DeliveryClass::Latest, Some(11), 2))
+            .expect("enqueue enough data to complete the batch");
+        let released = waiter
+            .await
+            .expect("queue remains healthy")
+            .expect("batch threshold releases an item");
+        assert_eq!(message_id(&released), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_batch_deadline_drains_after_last_sender_drops() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .expect("enqueue final latest value");
+
+        let mut receive = Box::pin(rx.recv_batched(2, std::time::Duration::MAX));
+        assert!(
+            futures_util::poll!(receive.as_mut()).is_pending(),
+            "an open producer keeps coalescing active"
+        );
+        drop(tx);
+        let item = receive
+            .await
+            .expect("queue remains healthy")
+            .expect("last-sender wake releases buffered data");
+        assert_eq!(message_id(&item), 1);
+        assert!(rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue reaches clean EOF")
+            .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_batch_deadline_drains_after_receiver_closes() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .expect("enqueue final latest value");
+
+        rx.close();
+        let item = rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue remains healthy")
+            .expect("receiver close releases buffered data");
+        assert_eq!(message_id(&item), 1);
+        assert!(rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue reaches clean EOF")
+            .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_v3_data_never_arms_latest_coalescing_deadline() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .expect("enqueue pre-v3 data");
+
+        let item = rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue remains healthy")
+            .expect("pre-v3 data releases immediately as reliable FIFO");
+        assert_eq!(item.class(), Some(DeliveryClass::Reliable));
+        assert_eq!(message_id(&item), 1);
+        drop(tx);
+        assert!(rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("pre-v3 queue reaches clean EOF")
+            .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_batch_deadline_waits_for_last_permit() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .expect("enqueue final latest value");
+        let permit = tx
+            .try_reserve_control()
+            .expect("reserve producer capability");
+        drop(tx);
+
+        let mut receive = Box::pin(rx.recv_batched(2, std::time::Duration::MAX));
+        assert!(
+            futures_util::poll!(receive.as_mut()).is_pending(),
+            "an outstanding permit keeps coalescing open after the last sender drops"
+        );
+        drop(permit);
+        let item = receive
+            .await
+            .expect("queue remains healthy")
+            .expect("final permit wake drains buffered data");
+        assert_eq!(message_id(&item), 1);
+        assert!(rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue reaches EOF after final permit")
+            .is_none());
     }
 
     /// A `Latest` key that is superseded faster than `batch_interval` must

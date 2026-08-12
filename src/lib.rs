@@ -28,6 +28,8 @@ pub mod coordination;
 /// Database abstraction layer (in-memory implementation)
 pub mod database;
 
+mod deadline;
+
 /// Process-local locking behind a future coordination extension seam
 pub mod distributed;
 

@@ -92,7 +92,8 @@ pub struct RateLimitConfig {
     /// Time window for rate limiting (seconds)
     #[serde(default = "default_rate_limit_time_window")]
     pub time_window: u64,
-    /// Maximum number of join attempts per time window
+    /// Shared maximum room-creation, seated-join, and spectator-join attempts
+    /// per time window.
     #[serde(default = "default_max_join_attempts")]
     pub max_join_attempts: u32,
     /// Maximum number of WebRTC signaling messages per time window

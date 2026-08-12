@@ -296,8 +296,13 @@ Join a room as a spectator (read-only observer).
 Required fields:
 
 - `game_name` - Name of the game
-- `room_code` - Code of the room to spectate
+- `room_code` - Code of the room to spectate (validated and matched case-insensitively)
 - `spectator_name` - Name for the spectator
+
+Spectator admission consumes the same per-player room-admission attempt budget
+as seated joins and room creation. Invalid game names, invalid room codes, and
+exhausted admission budgets return `SpectatorJoinFailed` with `INVALID_GAME_NAME`,
+`INVALID_ROOM_CODE`, or `RATE_LIMIT_EXCEEDED`, respectively.
 
 ### LeaveSpectator
 
@@ -1046,7 +1051,9 @@ Failed to join as spectator.
 
 ```
 
-Note: The `error_code` field is optional.
+Note: The `error_code` field is optional. Spectator admission validation and
+throttling use `INVALID_GAME_NAME`, `INVALID_ROOM_CODE`, and
+`RATE_LIMIT_EXCEEDED` on this role-specific response.
 
 ### SpectatorLeft
 

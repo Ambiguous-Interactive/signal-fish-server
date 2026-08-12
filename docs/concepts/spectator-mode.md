@@ -178,8 +178,9 @@ The server confirms with a `SpectatorLeft` response:
 
 ## When Spectator Join Fails
 
-If the room does not exist or spectating is not allowed, the server
-responds with a `SpectatorJoinFailed` carrying the reason and an
+If the room does not exist, admission input is invalid, the shared
+room-admission attempt budget is exhausted, or spectating is not allowed, the
+server responds with a `SpectatorJoinFailed` carrying the reason and an
 `error_code` (for a missing room, the literal reason is `Room not found`):
 
 ```json
@@ -195,6 +196,9 @@ responds with a `SpectatorJoinFailed` carrying the reason and an
 Every `JoinAsSpectator` is answered by exactly one of `SpectatorJoined` or
 `SpectatorJoinFailed`, so a client can await that pair without a timeout —
 the same contract `JoinRoom` has with `RoomJoined` / `RoomJoinFailed`.
+Valid room codes are case-insensitive and normalized before lookup. Invalid
+game names and room codes use `INVALID_GAME_NAME` and `INVALID_ROOM_CODE`;
+exhausted shared admission budgets use `RATE_LIMIT_EXCEEDED`.
 
 ## Use Cases
 

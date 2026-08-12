@@ -398,6 +398,7 @@ impl EnhancedGameServer {
             reconnection_manager.clone(),
             Arc::clone(&connection_manager),
             config.app_id_allowlist_enabled,
+            Arc::clone(&rate_limiter),
         );
 
         let (shutdown_drain_tx, _) = watch::channel(false);
@@ -1751,9 +1752,7 @@ impl InMemoryMessageCoordinator {
             .as_ref()
             .map(|witness| witness.full_observed_at())
             .unwrap_or_else(tokio::time::Instant::now);
-        let deadline = full_observed_at
-            .checked_add(self.slow_consumer_timeout)
-            .unwrap_or(full_observed_at);
+        let deadline = crate::deadline::after(full_observed_at, self.slow_consumer_timeout);
         self.metrics.increment_websocket_backpressure_events();
         if let Some(stats) = &stats {
             stats
@@ -1762,25 +1761,31 @@ impl InMemoryMessageCoordinator {
         }
         let reserve = delivery.sender.reserve_control(None);
         tokio::pin!(reserve);
+        enum ReservationWait {
+            Deadline(tokio::time::Instant),
+            Result(Result<DeliveryPermit, DeliveryReserveError>),
+        }
         let reservation = tokio::select! {
             // Capacity returning at or after the deadline cannot revive an
             // expired transition. Tokio's `timeout` polls its inner future
             // first, so use a timer-first biased select here.
             biased;
-            _ = tokio::time::sleep_until(deadline) => None,
-            result = &mut reserve => Some(result),
+            deadline = crate::deadline::wait_until(deadline) => ReservationWait::Deadline(deadline),
+            result = &mut reserve => ReservationWait::Result(result),
         };
         match reservation {
-            Some(Ok(permit)) => Ok(permit),
-            Some(Err(DeliveryReserveError::Canceled)) => {
+            ReservationWait::Result(Ok(permit)) => Ok(permit),
+            ReservationWait::Result(Err(DeliveryReserveError::Canceled)) => {
                 self.record_canceled_delivery(player_id);
                 Err(DeliveryOutcome::Canceled)
             }
-            Some(Err(DeliveryReserveError::Closed | DeliveryReserveError::Full(_))) => {
+            ReservationWait::Result(Err(
+                DeliveryReserveError::Closed | DeliveryReserveError::Full(_),
+            )) => {
                 self.metrics.increment_websocket_deliveries_channel_closed();
                 Err(DeliveryOutcome::ChannelClosed)
             }
-            None => {
+            ReservationWait::Deadline(deadline) => {
                 match delivery.sender.try_reserve_control_released_before(
                     None,
                     capacity_witness.as_ref(),
@@ -1895,9 +1900,7 @@ impl InMemoryMessageCoordinator {
             .as_ref()
             .map(|witness| witness.full_observed_at())
             .unwrap_or_else(tokio::time::Instant::now);
-        let deadline = full_observed_at
-            .checked_add(self.slow_consumer_timeout)
-            .unwrap_or(full_observed_at);
+        let deadline = crate::deadline::after(full_observed_at, self.slow_consumer_timeout);
         let (message, _) = message.into_parts();
 
         self.metrics.increment_websocket_backpressure_events();
@@ -1909,7 +1912,7 @@ impl InMemoryMessageCoordinator {
 
         let reserve = handle.sender.reserve_control(None);
         tokio::pin!(reserve);
-        let timeout = tokio::time::sleep_until(deadline);
+        let timeout = crate::deadline::wait_until(deadline);
         tokio::pin!(timeout);
 
         tokio::select! {
@@ -1923,7 +1926,7 @@ impl InMemoryMessageCoordinator {
                 self.record_canceled_delivery(player_id);
                 None
             }
-            _ = &mut timeout => {
+            deadline = &mut timeout => {
                 if *drain.borrow() || !should_send() {
                     self.record_canceled_delivery(player_id);
                     return None;
@@ -2057,9 +2060,7 @@ impl InMemoryMessageCoordinator {
                     .as_ref()
                     .map(|witness| witness.full_observed_at())
                     .unwrap_or_else(tokio::time::Instant::now);
-                let deadline = full_observed_at
-                    .checked_add(self.slow_consumer_timeout)
-                    .unwrap_or(full_observed_at);
+                let deadline = crate::deadline::after(full_observed_at, self.slow_consumer_timeout);
                 self.metrics.increment_websocket_backpressure_events();
                 if let Some(stats) = &stats {
                     stats
@@ -2070,7 +2071,7 @@ impl InMemoryMessageCoordinator {
                 let reserved_sender = sender.clone();
                 let reserve = sender.reserve_control(room_id);
                 tokio::pin!(reserve);
-                let timeout = tokio::time::sleep_until(deadline);
+                let timeout = crate::deadline::wait_until(deadline);
                 tokio::pin!(timeout);
 
                 tokio::select! {
@@ -2084,7 +2085,7 @@ impl InMemoryMessageCoordinator {
                         self.record_canceled_delivery(player_id);
                         ConditionalDeliveryReservation::Canceled
                     }
-                    _ = &mut timeout => {
+                    deadline = &mut timeout => {
                         if *drain.borrow() || !should_send() {
                             self.record_canceled_delivery(player_id);
                             return ConditionalDeliveryReservation::Canceled;
@@ -3791,6 +3792,54 @@ mod relay_projection_cache_tests {
             task.await.expect("deadline task must not panic").2,
             DeliveryOutcome::SlowConsumer,
             "only the unspent portion of the original grace may remain"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_backpressure_deadline_waits_for_capacity() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = PlayerId::from_u128(1);
+        let (handle, mut receiver) = legacy_delivery_handle(1);
+        handle
+            .sender
+            .try_send(Arc::new(ServerMessage::Pong), None)
+            .expect("prefill must fit");
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(u64::MAX),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(Arc::new(ServerMessage::RoomLeft)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+
+        let task_metrics = Arc::clone(&metrics);
+        let task = tokio::spawn(async move {
+            finish_backpressured_delivery_in_room(&task_metrics, pending).await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "deadline overflow must not expire a backpressured delivery immediately"
+        );
+
+        receiver.recv().await.expect("drain the queue prefill");
+        let (_, _, outcome) = task.await.expect("delivery task must not panic");
+        assert_eq!(outcome, DeliveryOutcome::Delivered);
+        assert!(matches!(
+            receiver.recv().await.as_deref(),
+            Some(ServerMessage::RoomLeft)
+        ));
+        assert_eq!(
+            metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0
         );
     }
 

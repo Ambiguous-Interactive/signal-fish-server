@@ -25,7 +25,9 @@ use tokio::time::Instant;
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
 use super::sending::{send_immediate_server_message, write_pending_unsupported_report};
 use super::token_binding::{parse_binary_message, parse_client_message, TokenBindingHandshake};
-use super::{complete_before_deadline, CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT};
+use super::{
+    complete_before_deadline, deadline_after, CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT,
+};
 
 const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -240,7 +242,7 @@ impl InboundDeadline {
     ) -> Self {
         if app_handshake_complete {
             Self {
-                at: idle_timeout.map(|window| checked_deadline(Instant::now(), window)),
+                at: idle_timeout.and_then(|window| deadline_after(Instant::now(), window)),
                 kind: InboundDeadlineKind::Idle,
                 timeout_secs: idle_timeout_secs,
             }
@@ -2894,6 +2896,30 @@ mod tests {
         for _ in 0..1_024 {
             assert_ne!(random_ping_nonce(), 0);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn extreme_idle_timeout_does_not_become_immediate_expiry() {
+        let deadline = InboundDeadline::for_connection(
+            true,
+            Instant::now(),
+            10,
+            Some(Duration::from_secs(u64::MAX)),
+            u64::MAX,
+        );
+
+        assert_eq!(
+            deadline.at, None,
+            "an unrepresentable positive idle timeout is beyond the process lifetime"
+        );
+        assert_eq!(deadline.kind, InboundDeadlineKind::Idle);
+
+        let (_close_signal, mut close) = ConnectionCloseSignal::channel();
+        assert_eq!(
+            deadline.read(&mut close, async { 7 }).await,
+            InboundRead::Completed(7),
+            "the production inbound-read seam must still accept ready input"
+        );
     }
 
     #[test]

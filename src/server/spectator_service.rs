@@ -13,6 +13,7 @@ use crate::protocol::{
     validation, ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage, SpectatorInfo,
     SpectatorJoinedPayload, SpectatorStateChangeReason,
 };
+use crate::rate_limit::RoomRateLimiter;
 use crate::reconnection::ReconnectionManager;
 use tokio::sync::watch;
 
@@ -38,6 +39,7 @@ pub(crate) struct SpectatorService {
     reconnection_manager: Option<Arc<ReconnectionManager>>,
     connection_manager: Arc<ConnectionManager>,
     app_id_allowlist_enabled: bool,
+    rate_limiter: Arc<RoomRateLimiter>,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,7 @@ impl SpectatorService {
         reconnection_manager: Option<Arc<ReconnectionManager>>,
         connection_manager: Arc<ConnectionManager>,
         app_id_allowlist_enabled: bool,
+        rate_limiter: Arc<RoomRateLimiter>,
     ) -> Self {
         Self {
             spectator_rooms: Arc::new(DashMap::new()),
@@ -76,6 +79,7 @@ impl SpectatorService {
             reconnection_manager,
             connection_manager,
             app_id_allowlist_enabled,
+            rate_limiter,
         }
     }
 
@@ -141,6 +145,12 @@ impl SpectatorService {
                 Some(ErrorCode::SpectatorJoinFailed),
             ));
         }
+        if let Err(error) = self.rate_limiter.check_join_attempt(player_id).await {
+            return Err(SpectatorError::new(
+                error.to_string(),
+                Some(ErrorCode::RateLimitExceeded),
+            ));
+        }
 
         if self.connection_manager.get_client_room(player_id).is_some() {
             return Err(SpectatorError::new(
@@ -159,6 +169,17 @@ impl SpectatorService {
         {
             return Err(SpectatorError::new(err, Some(ErrorCode::InvalidPlayerName)));
         }
+        if let Err(err) =
+            validation::validate_game_name_with_config(&game_name, &self.protocol_config)
+        {
+            return Err(SpectatorError::new(err, Some(ErrorCode::InvalidGameName)));
+        }
+        if let Err(err) =
+            validation::validate_room_code_with_config(&room_code, &self.protocol_config)
+        {
+            return Err(SpectatorError::new(err, Some(ErrorCode::InvalidRoomCode)));
+        }
+        let room_code = room_code.to_ascii_uppercase();
 
         let room = match self.database.get_room(&game_name, &room_code).await {
             Ok(Some(room)) => room,
@@ -1172,6 +1193,9 @@ mod tests {
             None,
             connection_manager,
             false,
+            Arc::new(RoomRateLimiter::new(
+                crate::rate_limit::RateLimitConfig::default(),
+            )),
         );
 
         (spectator_service, room, creator_id, coordinator, database)
@@ -1778,7 +1802,7 @@ mod tests {
             .join(
                 &spectator_id,
                 "missing-game".to_string(),
-                "MISSING".to_string(),
+                "ABSENT".to_string(),
                 "Can Try Again".to_string(),
             )
             .await
