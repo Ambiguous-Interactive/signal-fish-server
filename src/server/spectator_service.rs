@@ -1802,7 +1802,7 @@ mod tests {
             .join(
                 &spectator_id,
                 "missing-game".to_string(),
-                "MISSNG".to_string(),
+                "ABSENT".to_string(),
                 "Can Try Again".to_string(),
             )
             .await
