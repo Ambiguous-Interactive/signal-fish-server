@@ -68,6 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep accepted native and browser reference-client run, WebRTC, handshake,
+  and watchdog durations from expiring immediately when their absolute
+  deadline exceeds the platform clock or timer range. Browser numeric flags
+  now reject imprecise integers and long host timers advance in bounded
+  chunks, while ordinary and zero-duration behavior remains unchanged (issue
+  #360).
 - Make spectator admission validate and case-normalize room codes, enforce
   configured game/room naming rules, and share the room-admission attempt budget.
   Also keep extreme valid idle timeouts and unrepresentably distant internal

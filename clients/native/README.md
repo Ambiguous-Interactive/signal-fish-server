@@ -69,7 +69,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--p2p-timeout-secs <S>` | `15` | Window for WebRTC pair establishment before the overall transport status resolves |
 | `--p2p-retry-count <N>` | `0` | Bounded coordinated rebuilds for a planned pair whose data channels do not open. Both endpoints must support the reference client's `PairRetry` signal extension; homogeneous recovery tests opt in, while general interoperability stays matchbox-only |
 | `--run-for-secs <S>` | `30` | Soft cap: exit 1 if the flag-driven success criteria are still unmet |
-| `--max-runtime-secs <S>` | `60` | Hard watchdog: abort with exit 4 no matter what (the no-hang guarantee) |
+| `--max-runtime-secs <S>` | `60` | Watchdog: abort with exit 4 when its absolute deadline is representable; larger accepted values remain beyond the process lifetime as described below |
 | `--success-release-file <PATH>` | — | Test harness only: after success criteria hold, emit `success_criteria_met` and stay connected until PATH exists; the normal bounded exit behavior is unchanged when omitted |
 | `--require-ice-gathering-complete` | off | Signal-ledger harness only; requires `--success-release-file`. Add end-of-gathering for every live peer-connection generation to the success criteria. Ordinary gameplay barriers do not wait for unrelated candidate transactions after a selected path is connected |
 | `--protocol-version <V>` | `3` | `2` omits every v3 `Authenticate` field — a pure v2 client for mixed-room tests |
@@ -77,6 +77,12 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--supported-transports <LIST>` | `relay,webrtc` | Comma-separated transports advertised in v3 `Authenticate` |
 | `--runtime <FLAVOR>` | `multi` | Tokio runtime flavor: `multi` (multi-threaded) or `current` (single current-thread runtime — the shape most susceptible to being starved by a blocking game loop) |
 | `--tick-stall-ms <MS>` | `0` | **Fault injection**: block the orchestrator's executor thread for this many ms after each processed input (`std::thread::sleep`, deliberately not async), simulating a game loop that hogs the runtime instead of continuously driving it. Used by the starved-runtime conformance matrix to pin the server's slow-consumer contract and the docs' "continuously drive your runtime" requirement (`docs/protocol.md`, Delivery reliability and backpressure) |
+
+Duration flags accept the complete `u64` seconds range. When a requested
+absolute deadline is later than Tokio can represent on the current platform,
+the client treats it as beyond the process lifetime instead of expiring it
+immediately; zero and ordinary representable durations retain their exact
+boundary behavior.
 
 ## Delivery accountability
 
@@ -317,6 +323,7 @@ fault-injection, TURN, browser, and IPv6 matrices remain Linux-specific evidence
   expected but only the debug profile was built). Rebuild, or re-run the script with the matching profile.
 - **First build is slow:** the webrtc dependency tree is large; budget a few minutes cold. The crate mirrors the
   root dev-profile trick (`debug = 1` for the leaf, `debug = 0` for dependencies) to keep rebuilds fast.
-- **Unit tests pass but interop hangs locally:** every client process self-bounds (`--max-runtime-secs`, exit 4)
-  and every harness await carries a deadline that panics with the child's recent events and stderr — check that
-  diagnostic output first; it names the event being awaited.
+- **Unit tests pass but interop hangs locally:** the harness passes ordinary, representable
+  `--max-runtime-secs` values, so every client process self-bounds with exit 4, and every harness await carries
+  a deadline that panics with the child's recent events and stderr — check that diagnostic output first; it
+  names the event being awaited.

@@ -164,8 +164,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 30)]
     pub run_for_secs: u64,
 
-    /// Hard watchdog: abort with exit code 4 after this many seconds no matter
-    /// what (the guarantee that this process can never hang a harness).
+    /// Watchdog: abort with exit code 4 after this many seconds when the
+    /// absolute deadline is representable. Larger accepted values remain
+    /// beyond the process lifetime.
     #[arg(long, default_value_t = 60)]
     pub max_runtime_secs: u64,
 

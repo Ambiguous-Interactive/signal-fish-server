@@ -149,8 +149,8 @@ export function parseArgs(argv: string[]): CliOptions | null {
       return fallback;
     }
     const parsed = Number(value);
-    if (!Number.isInteger(parsed) || parsed < 0) {
-      throw new UsageError(`flag ${flag} requires a non-negative integer, got '${value}'`);
+    if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(parsed)) {
+      throw new UsageError(`flag ${flag} requires a non-negative safe integer, got '${value}'`);
     }
     return parsed;
   };

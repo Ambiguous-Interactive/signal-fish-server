@@ -16,6 +16,7 @@ use signal_fish_server::protocol::{ClientMessage, DeliveryClass, ServerMessage};
 pub use signal_fish_server::protocol::{decode_v3_binary_game_data, V3BinaryGameDataFrame};
 
 use crate::accountability::validate_class_key;
+use crate::deadline::Deadline;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
 /// The concrete stream type produced by `tokio_tungstenite::connect_async`.
@@ -117,16 +118,11 @@ pub async fn next_server_message<S>(
 where
     S: Stream<Item = std::result::Result<Message, WebSocketError>> + Unpin,
 {
-    let now = tokio::time::Instant::now();
-    let deadline = now.checked_add(timeout).unwrap_or(now);
+    let deadline = Deadline::after(tokio::time::Instant::now(), timeout);
     loop {
-        let frame = tokio::time::timeout_at(deadline, ws.next())
-            .await
-            .map_err(|_elapsed| {
-                ServerMessageReadError::Connection(
-                    "timed out waiting for a ServerMessage".to_string(),
-                )
-            })?;
+        let frame = deadline.timeout(ws.next()).await.map_err(|_elapsed| {
+            ServerMessageReadError::Connection("timed out waiting for a ServerMessage".to_string())
+        })?;
         match frame {
             Some(Ok(Message::Text(text))) => {
                 return serde_json::from_str(&text).map_err(|error| {
@@ -172,6 +168,23 @@ mod tests {
     use super::*;
 
     const PATTERNED_PLAYER_ID: u128 = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+
+    #[tokio::test]
+    async fn unrepresentable_message_wait_does_not_expire_immediately() {
+        let mut stream =
+            futures_util::stream::pending::<std::result::Result<Message, WebSocketError>>();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(20),
+            next_server_message(&mut stream, Duration::from_secs(u64::MAX)),
+        )
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "the finite outer test deadline must expire before the distant message wait"
+        );
+    }
 
     #[test]
     fn reliable_game_data_preserves_the_legacy_wire_shape() {

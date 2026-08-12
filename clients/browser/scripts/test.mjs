@@ -1,6 +1,7 @@
 import { build } from 'esbuild';
 
 for (const entryPoint of [
+  'src/shared/deadline.test.ts',
   'src/page/accountability.test.ts',
   'src/page/orchestrator.test.ts',
   'src/cli/args.test.ts',
