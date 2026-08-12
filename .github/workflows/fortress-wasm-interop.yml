@@ -183,8 +183,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # Central CI audits this graph on push, pull request, and its daily schedule.
+  # Keep this local audit only for manually dispatched unmerged refs, which do
+  # not trigger ci.yml.
   dependency-audit:
     name: Fortress WASM Dependency Audit
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

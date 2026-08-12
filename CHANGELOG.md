@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add exhaustive formal verification for the atomic reconnection-claim
+  lifecycle, including duplicate claimants, invalid identity, stale claim
+  handles, expiry cleanup, restore failure, and one-time consumption. Four
+  expected-failure models keep the individual safety properties non-vacuous,
+  with a deterministic Rust regression pinning stale-handle rejection (issue
+  #220).
 - Add formal verification and deterministic concurrency coverage for exact
   two-phase room publication transactions and the process-local room-event
   mutation handoff. Publication checks cover solo, empty-member, one-phase,
@@ -23,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce GitHub Actions runner allocations by removing the obsolete unused-
+  features status alias and a no-op documentation job, and by limiting three
+  interop-local dependency audits to manual dispatch. Central CI continues to
+  audit every tracked Cargo graph on pushes, pull requests, and its daily
+  schedule; manually selected unmerged interop refs retain local audit coverage
+  (issue #345).
 - Reduce representative Rust pre-commit latency by overlapping worktree
   discovery with hook setup and loading the line-aware panic scanner only for
   added panic macros or removed test-context guards. Untracked Rust files and

@@ -11,12 +11,9 @@
 #   - Pull requests to main
 #   - Weekly schedule (Monday at 00:00 UTC) for proactive dependency cleanup
 #
-# The analyzer runs on schedule; the legacy status alias is PR/push-only.
-#
 # Features:
 #   - Shared checkout, nightly toolchain, and Rust dependency cache
 #   - Checksum-verified release binaries for cargo-machete and cargo-udeps
-#   - Legacy `Check Unused Features` status retained for push/PR compatibility
 #   - Nightly toolchain pinned for reproducibility (see nightly version below)
 #   - cargo-udeps uses continue-on-error as it may have false positives
 #
@@ -120,19 +117,3 @@ jobs:
         # Always review udeps output manually before removing dependencies.
         run: cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features
         continue-on-error: true
-
-  # Preserve the historical status name until repository rules can be audited
-  # with administrator credentials. This fail-closed compatibility status
-  # avoids a permanently missing/Expected context without repeating analysis.
-  unused-features-status:
-    name: Check Unused Features
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
-    needs: unused-deps
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions: {}
-    steps:
-      - name: Report consolidated unused-dependency result
-        env:
-          ANALYZER_RESULT: ${{ needs.unused-deps.result }}
-        run: test "$ANALYZER_RESULT" = success

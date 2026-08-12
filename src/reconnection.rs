@@ -1573,6 +1573,47 @@ mod tests {
         assert!(!manager.has_pending_reconnection(&player_id).await);
     }
 
+    /// A released claim handle may outlive its restore attempt. If another
+    /// socket subsequently reserves the same record, the stale handle must be
+    /// unable to release or complete that newer reservation.
+    #[tokio::test]
+    async fn stale_reconnection_claim_handle_cannot_mutate_retry() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+
+        let stale_claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player_id, &room_id, &token)
+            .await
+            .expect("first claim succeeds");
+        assert!(manager.release_reconnection_claim(&stale_claim).await);
+
+        let active_claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player_id, &room_id, &token)
+            .await
+            .expect("released credential can be claimed again");
+
+        assert!(
+            !manager.release_reconnection_claim(&stale_claim).await,
+            "a stale handle must not release the active retry"
+        );
+        assert!(
+            !manager.complete_claimed_reconnection(&stale_claim).await,
+            "a stale handle must not consume the active retry"
+        );
+        assert!(
+            manager.has_pending_reconnection(&player_id).await,
+            "rejecting stale mutations must preserve the active record"
+        );
+
+        assert!(manager.complete_claimed_reconnection(&active_claim).await);
+        assert!(!manager.has_pending_reconnection(&player_id).await);
+    }
+
     #[tokio::test]
     async fn test_reconnection_cleanup_updates_active_session_gauge() {
         let metrics = Arc::new(ServerMetrics::new());

@@ -13,7 +13,6 @@
 #   - doc-tests: Run tests embedded in documentation comments
 #   - markdown-code-samples: Extract and validate code blocks from Markdown
 #   - link-check: Validate all internal and external links
-#   - inline-code-references: Validate inline code references (placeholder)
 #
 # Features:
 #   - Strict rustdoc validation (broken links, invalid code blocks)
@@ -683,17 +682,3 @@ jobs:
       # Fallback: Custom internal link validator (more detailed errors)
       - name: Check internal markdown links
         run: bash scripts/check-internal-links.sh --all
-
-  # Validate inline code references match actual code (future enhancement)
-  # This would check that references like `ServerConfig` actually exist in the codebase
-  inline-code-references:
-    name: Validate Inline Code References
-    runs-on: ubuntu-latest
-    timeout-minutes: 10 # Moderate timeout for future implementation of code reference validation
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Check inline code references
-        run: |
-          echo "Inline code reference validation - placeholder for future implementation"
-          echo "This would validate that code like \`MyStruct\` actually exists in src/"
-          echo "Skipping for now - not a blocker"

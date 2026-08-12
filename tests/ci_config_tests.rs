@@ -1107,7 +1107,7 @@ fn validate_workflow_has_required_jobs(
                         "  x {job_key}: job exists but display name \"{wrong_name}\" does not match \
                          expected \"{display_name}\".\n\
                          Expected line: `    name: {display_name}`\n\
-                         This will change the GitHub check name, which breaks branch protection.\n\
+                         This changes the repository's stable GitHub check-name contract.\n\
                          To fix: Update the job's `name:` field to \"{display_name}\""
                     ));
                 }
@@ -1115,7 +1115,7 @@ fn validate_workflow_has_required_jobs(
                     missing_jobs.push(format!(
                         "  x {job_key}: job exists but has no `name:` field.\n\
                          Expected line: `    name: {display_name}`\n\
-                         This will change the GitHub check name, which breaks branch protection.\n\
+                         This changes the repository's stable GitHub check-name contract.\n\
                          To fix: Add `name: {display_name}` to the job definition"
                     ));
                 }
@@ -1136,7 +1136,7 @@ fn validate_workflow_has_required_jobs(
              1. Review git history to see when the job was removed or renamed\n\
              2. Restore the job definition in the jobs: section\n\
              3. Ensure the job key AND name: field match exactly (case-sensitive)\n\
-             4. Update branch protection settings if a rename was intentional",
+             4. Update the repository-owned check-name policy if a rename was intentional",
             missing_jobs.join("\n"),
             found_jobs.join("\n"),
             workflow_path.display()
@@ -1148,17 +1148,18 @@ fn validate_workflow_has_required_jobs(
 // Required Check Naming Contract
 // ============================================================================
 //
-// These constants define the exact GitHub check names that are required for
-// branch protection on `main`. Workflow and job names are treated as API
-// surface — any rename requires a synchronized update to:
+// These constants define the exact GitHub check names that this repository
+// treats as its stable validation contract. They do not assert that every name
+// is currently configured in GitHub branch protection. Workflow and job names
+// are treated as API surface — any rename requires a synchronized update to:
 //   1. The workflow/job definition in .github/workflows/
 //   2. These constants and tests
-//   3. Branch protection settings in GitHub
-//   4. CI/CD documentation (docs/ci-cd-testing.md, docs/ci-cd-testing-summary.md)
+//   3. CI/CD documentation (docs/ci-cd-testing.md, docs/ci-cd-testing-summary.md)
+//   4. Any external consumer that has selected the check name
 //
 // GitHub constructs check names as: "{workflow name} / {job display name}"
 //
-// Current required checks (Phase 1-2):
+// Current stable validation checks (Phase 1-2):
 //   - CI / Lint (ubuntu-latest)
 //   - CI / Lint (windows-latest)
 //   - CI / Lint (macos-latest)
@@ -1177,12 +1178,12 @@ fn validate_workflow_has_required_jobs(
 //   - Documentation Validation / Markdown Code Validation
 //   - Documentation Validation / Documentation Link Check
 
-/// Workflow file -> workflow display name mapping for **branch-protection-relevant**
-/// workflows only.
+/// Workflow file -> workflow display name mapping for workflows covered by the
+/// repository-owned stable check-name policy.
 ///
 /// Unlike `REQUIRED_WORKFLOW_FILES` (which lists all workflows that must exist for
 /// CI hygiene), this constant only covers workflows whose jobs produce GitHub check
-/// names that are configured as required status checks in branch protection rules.
+/// names that the repository intentionally keeps stable.
 /// The check name format is `"{workflow display name} / {job display name}"`.
 const REQUIRED_WORKFLOW_NAMES: &[(&str, &str)] = &[
     ("ci.yml", "CI"),
@@ -1245,15 +1246,12 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
 
 /// Required doc-validation workflow jobs: (job_key, display_name, description)
 ///
-/// Note: `doc-validation.yml` defines 6 jobs total, but only these 4 are listed here.
-/// The excluded jobs are:
+/// Note: `doc-validation.yml` defines 5 jobs total, but only these 4 are listed here.
+/// The excluded job is:
 ///   - `shellcheck-workflow` ("Shellcheck Workflow Scripts") — auxiliary static analysis
 ///     of inline shell scripts; not a documentation quality gate
-///   - `inline-code-references` ("Validate Inline Code References") — placeholder job
-///     for future inline code reference validation; not required for branch protection
 ///
-/// These auxiliary checks improve workflow quality but are not required for branch
-/// protection on `main`.
+/// Auxiliary checks improve workflow quality without joining this stable-name set.
 const REQUIRED_DOC_VALIDATION_JOBS: &[(&str, &str, &str)] = &[
     (
         "rustdoc",
@@ -1312,7 +1310,7 @@ fn display_name_matches_template(concrete: &str, template: &str) -> bool {
     })
 }
 
-/// All required GitHub check names for branch protection.
+/// All GitHub check names in the repository-owned stable naming contract.
 /// Format: "{workflow_name} / {job_display_name}"
 const REQUIRED_CHECK_NAMES: &[&str] = &[
     "CI / Lint (ubuntu-latest)",
@@ -1337,8 +1335,8 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
 
 /// All workflow files that must exist for CI hygiene.
 ///
-/// Unlike `REQUIRED_WORKFLOW_NAMES` (which only lists workflows whose jobs feed
-/// branch protection checks), this constant lists **every** workflow file that
+/// Unlike `REQUIRED_WORKFLOW_NAMES` (which only lists stable-name workflows),
+/// this constant lists **every** workflow file that
 /// the repository depends on for quality assurance.
 ///
 /// Note: `docs-deploy.yml` exists in `.github/workflows/` but is intentionally
@@ -6908,8 +6906,8 @@ fn test_action_reference_parsing_and_validation_data_driven() {
 fn test_doc_validation_workflow_has_required_jobs() {
     // This test validates that the doc-validation workflow has all required jobs
     // with the correct display names. Prevents accidental removal or renaming of
-    // documentation validation jobs, which would silently break branch protection
-    // rules that reference the GitHub check name "{workflow_name} / {job_display_name}".
+    // documentation validation jobs, which would silently change the repository's
+    // stable GitHub check name "{workflow_name} / {job_display_name}".
 
     let root = repo_root();
     let workflow = root.join(".github/workflows/doc-validation.yml");
@@ -6917,6 +6915,18 @@ fn test_doc_validation_workflow_has_required_jobs() {
         &workflow,
         REQUIRED_DOC_VALIDATION_JOBS,
         "Documentation Validation",
+    );
+
+    let content = read_live_file(&workflow);
+    let documents = Yaml::load_from_str(&content).expect("doc-validation.yml must parse as YAML");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(Yaml::as_mapping)
+        .expect("doc-validation.yml must define jobs");
+    assert!(
+        !jobs.contains_key(&Yaml::value_from_str("inline-code-references")),
+        "a no-op inline-code placeholder must not consume a hosted runner allocation"
     );
 }
 
@@ -7195,7 +7205,7 @@ fn test_required_check_names_match_workflow_definitions() {
     //
     // GitHub constructs check names as: "{workflow name} / {job display name}"
     // If either the workflow name or job display name changes, the GitHub check
-    // name changes too, silently breaking branch protection rules.
+    // name changes too, silently changing a repository-owned stable identifier.
     //
     // This test prevents that by:
     //   1. Reading the workflow `name:` field from each required workflow file
@@ -7305,7 +7315,7 @@ fn test_required_check_names_match_workflow_definitions() {
              Expected check names from REQUIRED_CHECK_NAMES:\n{}\n\n\
              GitHub constructs check names as: \"{{workflow name}} / {{job display name}}\"\n\
              Any mismatch between these constants and the actual workflow files will cause\n\
-             branch protection rules to silently stop matching.",
+             repository policy and external check-name consumers to drift.",
             errors.join("\n\n"),
             constructed_check_names
                 .iter()
@@ -7325,7 +7335,7 @@ fn test_required_check_names_match_workflow_definitions() {
 fn test_required_workflow_triggers() {
     // This test validates that required workflows have the correct triggers
     // (push to main, pull_request to main). Without these triggers, the
-    // workflows would not run on the events that matter for branch protection.
+    // workflows would not run on the repository's primary integration events.
     //
     // Both ci.yml and doc-validation.yml must trigger on:
     //   - pull_request with branches: [main]
@@ -7420,8 +7430,8 @@ fn test_required_workflow_triggers() {
         panic!(
             "Required workflow trigger validation failed:\n\n{}\n\n\
              Required workflows must trigger on both push and pull_request events\n\
-             targeting the main branch. Without these triggers, branch protection\n\
-             checks will not run and PRs cannot be validated.",
+             targeting the main branch. Without these triggers, repository validation\n\
+             will not run for the changes it is intended to cover.",
             errors.join("\n\n")
         );
     }
@@ -7434,7 +7444,7 @@ fn test_workflow_display_names_match_contract() {
     //
     // The workflow display name is the first component of a GitHub check name.
     // If it changes, all check names produced by that workflow change too,
-    // silently breaking branch protection rules.
+    // silently changing the repository-owned stable check-name contract.
 
     let root = repo_root();
     let mut errors = Vec::new();
@@ -7473,7 +7483,7 @@ fn test_workflow_display_names_match_contract() {
                          This changes ALL GitHub check names produced by this workflow.\n\
                          To fix: Either restore the name to \"{expected_name}\" or update\n\
                          REQUIRED_WORKFLOW_NAMES and REQUIRED_CHECK_NAMES constants,\n\
-                         then update branch protection settings in GitHub."
+                         then update documentation and any external consumers."
                     ));
                 }
             }
@@ -7492,13 +7502,13 @@ fn test_workflow_display_names_match_contract() {
             "Workflow display name contract violations:\n\n{}\n\n\
              Workflow display names are the first component of GitHub check names.\n\
              Changing a workflow name from \"CI\" to \"Build\" would change check names\n\
-             from \"CI / Test\" to \"Build / Test\", breaking branch protection.\n\n\
+             from \"CI / Test\" to \"Build / Test\", breaking stable-name consumers.\n\n\
              If a rename is intentional, update ALL of:\n\
              1. The workflow file's name: field\n\
              2. REQUIRED_WORKFLOW_NAMES constant\n\
              3. REQUIRED_CHECK_NAMES constant\n\
-             4. Branch protection settings in GitHub\n\
-             5. Documentation references",
+             4. Documentation references\n\
+             5. Any external check-name consumers",
             errors.join("\n\n")
         );
     }
@@ -18320,9 +18330,9 @@ fn test_ci_safety_workflow_uploads_artifacts() {
 
 #[test]
 fn test_ci_safety_jobs_not_in_required_check_names() {
-    // Validates that ci-safety.yml jobs are NOT in the required check names.
-    // Branch-protection configuration is independent of whether a job-level
-    // failure propagates to the workflow.
+    // Validates that ci-safety.yml jobs are NOT in the stable-name set. They
+    // remain experimental promotion candidates whose names may evolve with
+    // their evidence and failure policy.
 
     let safety_workflow_name = "Advanced Safety";
 
@@ -18330,7 +18340,7 @@ fn test_ci_safety_jobs_not_in_required_check_names() {
         assert!(
             !check_name.starts_with(&format!("{safety_workflow_name} /")),
             "Found '{check_name}' in REQUIRED_CHECK_NAMES, but ci-safety.yml \
-             jobs are not yet branch-protection required checks.\n\
+             jobs have not completed stable-name promotion.\n\
              Remove from REQUIRED_CHECK_NAMES until promotion criteria are met.\n\
              See PLAN.md Phase 3, Promotion Policy."
         );
@@ -18534,7 +18544,7 @@ fn test_analysis_nightly_version_consistency() {
 }
 
 #[test]
-fn test_unused_deps_workflow_shares_setup_and_preserves_status_names() {
+fn test_unused_deps_workflow_uses_one_shared_analyzer_job() {
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/unused-deps.yml"));
     let documents = Yaml::load_from_str(&workflow).expect("unused-deps workflow must parse");
@@ -18542,6 +18552,15 @@ fn test_unused_deps_workflow_shares_setup_and_preserves_status_names() {
     let jobs = document
         .as_mapping_get("jobs")
         .expect("unused-deps workflow jobs");
+    assert_eq!(
+        jobs.as_mapping().map(|mapping| mapping.len()),
+        Some(1),
+        "unused-deps.yml must use one hosted job; adding a status-only compatibility job wastes a runner allocation"
+    );
+    assert!(
+        jobs.as_mapping_get("unused-features-status").is_none(),
+        "the audited, non-required Check Unused Features compatibility status must not return"
+    );
     let analyzer = jobs
         .as_mapping_get("unused-deps")
         .expect("consolidated analyzer job");
@@ -18620,50 +18639,6 @@ fn test_unused_deps_workflow_shares_setup_and_preserves_status_names() {
             .and_then(Yaml::as_bool),
         Some(true),
         "cargo-udeps remains informational because it can report false positives"
-    );
-
-    let compatibility = jobs
-        .as_mapping_get("unused-features-status")
-        .expect("legacy check-name compatibility job");
-    assert_eq!(
-        compatibility.as_mapping_get("name").and_then(Yaml::as_str),
-        Some("Check Unused Features")
-    );
-    assert_eq!(
-        compatibility
-            .as_mapping_get("if")
-            .and_then(Yaml::as_str),
-        Some("${{ !cancelled() && github.event_name != 'schedule' }}"),
-        "compatibility status must fail closed on PR/push results without wasting a scheduled runner"
-    );
-    assert_eq!(
-        compatibility.as_mapping_get("needs").and_then(Yaml::as_str),
-        Some("unused-deps")
-    );
-    assert_eq!(
-        compatibility
-            .as_mapping_get("permissions")
-            .and_then(Yaml::as_mapping)
-            .map(|permissions| permissions.len()),
-        Some(0),
-        "the compatibility status must not receive repository permissions"
-    );
-    let compatibility_steps = compatibility
-        .as_mapping_get("steps")
-        .and_then(Yaml::as_sequence)
-        .expect("compatibility status steps");
-    assert_eq!(compatibility_steps.len(), 1);
-    let status_step = &compatibility_steps[0];
-    assert_eq!(
-        status_step.as_mapping_get("run").and_then(Yaml::as_str),
-        Some("test \"$ANALYZER_RESULT\" = success")
-    );
-    assert_eq!(
-        status_step
-            .as_mapping_get("env")
-            .and_then(|env| env.as_mapping_get("ANALYZER_RESULT"))
-            .and_then(Yaml::as_str),
-        Some("${{ needs.unused-deps.result }}")
     );
 }
 
@@ -22395,6 +22370,66 @@ fn test_deny_job_covers_every_tracked_cargo_graph() {
         configured, expected,
         "the push/PR/daily cargo-deny job must enforce every tracked Cargo graph"
     );
+
+    let direct_cargo_deny = Regex::new(r"(?m)\bcargo(?:\s+\+\S+)?\s+deny\b|\bcargo-deny\b")
+        .expect("cargo-deny invocation regex must compile");
+    let mut dispatch_audits = BTreeSet::new();
+    for entry in collect_workflow_files(&root.join(".github/workflows")) {
+        if entry.file_name().to_str() == Some("ci.yml") {
+            continue;
+        }
+        let path = entry.path();
+        let content = read_live_file(&path);
+        let documents = Yaml::load_from_str(&content)
+            .unwrap_or_else(|error| panic!("{} must parse: {error}", path.display()));
+        let jobs = documents
+            .first()
+            .and_then(|document| document.as_mapping_get("jobs"))
+            .and_then(Yaml::as_mapping)
+            .unwrap_or_else(|| panic!("{} must define jobs", path.display()));
+        for (job_key, job) in jobs {
+            let invokes_cargo_deny = job
+                .as_mapping_get("steps")
+                .and_then(Yaml::as_sequence)
+                .is_some_and(|steps| {
+                    steps.iter().any(|step| {
+                        step.as_mapping_get("uses")
+                            .and_then(Yaml::as_str)
+                            .is_some_and(|uses| {
+                                uses.starts_with("EmbarkStudios/cargo-deny-action@")
+                            })
+                            || step
+                                .as_mapping_get("run")
+                                .and_then(Yaml::as_str)
+                                .is_some_and(|run| direct_cargo_deny.is_match(run))
+                    })
+                });
+            if !invokes_cargo_deny {
+                continue;
+            }
+            assert_eq!(
+                job.as_mapping_get("if").and_then(Yaml::as_str),
+                Some("github.event_name == 'workflow_dispatch'"),
+                "cargo-deny outside central CI must be dispatch-only: {} / {}",
+                path.display(),
+                job_key.as_str().unwrap_or("<job>")
+            );
+            dispatch_audits.insert(format!(
+                "{}:{}",
+                entry.file_name().to_string_lossy(),
+                job_key.as_str().unwrap_or("<job>")
+            ));
+        }
+    }
+    let expected_dispatch_audits = BTreeSet::from([
+        "fortress-interop.yml:client-deny".to_owned(),
+        "fortress-wasm-interop.yml:dependency-audit".to_owned(),
+        "webrtc-interop.yml:client-deny".to_owned(),
+    ]);
+    assert_eq!(
+        dispatch_audits, expected_dispatch_audits,
+        "manual interop runs must retain dependency audits without duplicating push/PR runners"
+    );
 }
 
 #[test]
@@ -24715,6 +24750,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             "src/server/session_policy.rs",
             "src/server/signaling.rs",
             "src/server/room_service.rs",
+            "src/reconnection.rs",
             "src/server/reconnection_service.rs",
             "src/database/mod.rs",
             "src/protocol/room_state.rs",
@@ -25865,9 +25901,9 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "GODOT_TEMPLATES_SHA512:",
         "sha512sum --check",
         "cargo +\"$RUST_NIGHTLY\" clippy",
-        "rust-version: 1.94.0",
         "actions/upload-artifact@v7.0.1",
         "if: failure()",
+        "rust-version: 1.94.0",
         "schedule:",
         "browser: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[\"firefox\"]' || '[\"chromium\"]') }}",
         "FORTRESS_WASM_BROWSER: ${{ matrix.browser }}",

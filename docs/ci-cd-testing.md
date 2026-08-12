@@ -195,8 +195,10 @@ Key design decisions:
 - **Complements cargo-deny**: Two independent scanners reduce the chance
   of a missed advisory. cargo-deny and cargo-audit use the same RustSec
   database but different detection logic and update schedules.
-- **Required check (hard gate)**: Unlike the staged safety jobs, cargo-audit
-  is stable and reliable enough to block merges via `continue-on-error: false`.
+- **Gating workflow job**: Unlike the staged safety jobs, cargo-audit is stable
+  and reliable enough to fail its CI workflow via `continue-on-error: false`.
+  Its check name is part of the repository-owned stable naming contract;
+  external branch policy is configured separately.
 - **Runs on schedule**: Like cargo-deny, the audit job runs on the daily
   cron schedule to catch newly published advisories.
 - **Simple and focused**: The job runs only `cargo audit` with no extra flags,
@@ -210,11 +212,12 @@ Key design decisions:
 The CI workflow runs the production-seam relay allocation harness on Linux for
 every push and pull request. The job checks allocation operations,
 reallocations, and allocated bytes for JSON, direct MessagePack, and mixed
-relay projections at room sizes 2, 8, and 16. It is a required branch
-protection check named `CI / Relay Allocation Ceilings`; changes to the
-serializer, allocator accounting, or its ceilings therefore cannot merge while
-the deterministic gate is failing or incomplete. The daily security schedule
-excludes this job because it does not inspect newly published advisories.
+relay projections at room sizes 2, 8, and 16. The gating job has the stable
+repository-owned name `CI / Relay Allocation Ceilings`; serializer, allocator
+accounting, or ceiling changes therefore make the CI workflow fail when the
+deterministic gate fails. External branch policy is configured separately. The
+daily security schedule excludes this job because it does not inspect newly
+published advisories.
 
 **Tests that enforce this:** `test_ci_enforces_relay_allocation_ceilings`,
 `test_ci_workflow_has_required_jobs`, `test_required_check_names_are_consistent`,
@@ -226,7 +229,7 @@ Tests that ensure the doc-validation workflow stays aligned with the naming cont
 
 | Test | Purpose | What It Catches |
 |------|---------|-----------------|
-| `test_doc_validation_workflow_has_required_jobs` | Validates required job keys and display names | Job renames that break branch protection |
+| `test_doc_validation_workflow_has_required_jobs` | Validates stable job keys and display names | Job renames that drift from repository policy |
 | `test_doc_validation_path_filters_cover_critical_paths` | Ensures path filters include all doc-related files | Workflow skipping important file changes |
 | `test_doc_validation_strict_rustdocflags` | Validates strict rustdoc flags are set | Silent documentation quality regression |
 | `test_doc_validation_job_timeout_budgets` | Checks timeout-minutes are within budget | Hung jobs consuming CI minutes |

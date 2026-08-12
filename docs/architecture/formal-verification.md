@@ -141,7 +141,7 @@ cargo-fuzz here).
 | e2e / golden     | Real end-to-end wire conformance; frozen-v2 byte drift              | Exhaustive interleavings; rare input shapes                          |
 
 The boundary TLC intentionally does not model (rate limits, opaque-payload relay,
-reconnection tokens, TURN minting, multi-room, storage-error wedges) is enumerated
+reconnect payload restoration, TURN minting, multi-room, storage-error wedges) is enumerated
 in
 [`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md),
 each with the suite that covers
@@ -204,17 +204,39 @@ passes only when TLC emits the exact expected
 `ReconnectExposureBounded` violation (`7 > 6`). A clean run or a different
 error fails CI, keeping the non-vacuity oracle live.
 
+## Atomic reconnection claims
+
+[`ReconnectionClaimLifecycle.tla`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/tla/ReconnectionClaimLifecycle.tla)
+checks the retryable single-use credential boundary that precedes room and route
+restoration. Two valid duplicate sockets and one invalid-identity socket race one
+record. Claim epochs abstract production UUID claim IDs, and callers retain old
+handles so TLC can try them after a later retry owns the record.
+
+The exhaustive positive configuration proves one active claimant, rejection of
+invalid credentials, matching-handle-only release/completion, protection from
+expiry cleanup while claimed, non-consumption after restore failure, and
+at-most-once successful completion. Four expected-failure configurations independently
+remove those guards. CI accepts each negative only after its exact invariant
+violation appears, so no property can pass merely because the dangerous state
+is unreachable.
+
+The model maps directly to `claim_reconnection_with_identity`,
+`release_reconnection_claim`, `complete_claimed_reconnection`, the reconnect
+restore guard, and the expired-record cleanup guards in `src/reconnection.rs`.
+The formal workflow therefore triggers on that file as well as
+`src/server/reconnection_service.rs`.
+
 ## Correspondence-maintenance rule
 
-The TLA+ spec mirrors `src/server/session_policy.rs`, `src/server/signaling.rs`,
-and `src/server/room_service.rs`. **A PR that changes the behavior of those files
-must consider the spec**: either the invariants still hold (re-run TLC) or the
-contract moved and the spec/invariants are updated deliberately. This is enforced
-mechanically — `.github/workflows/formal-verification.yml` triggers on changes to
-those source files (and to `formal/**` and the runner script), so the model check
-runs on every such PR. When a property test or TLC invariant fails, treat it as a
-real finding: determine whether it is a spec bug or an implementation bug before
-weakening either.
+The TLA+ suite mirrors the source files named in the correspondence table,
+including session policy, room mutation/publication, queue delivery, and
+reconnection claims. **A PR that changes those behaviors must consider the
+spec**: either the invariants still hold (re-run TLC) or the contract moved and
+the spec/invariants are updated deliberately. This is enforced mechanically —
+`.github/workflows/formal-verification.yml` triggers on every modeled source
+path (plus `formal/**` and the runner script). When a property test or TLC
+invariant fails, treat it as a real finding: determine whether it is a spec bug
+or an implementation bug before weakening either.
 
 ## See also
 
