@@ -98,6 +98,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Breaking for token-binding clients:** Replace client-chosen token-binding
+  keys with a server-fresh v2 challenge,
+  HKDF-SHA-256 connection keys, one monotonic proof sequence across JSON and
+  binary frames, and RFC 8785 canonical JSON. Token-bound MessagePack now uses
+  an authenticated versioned envelope, and certificate-bound reconnect tokens
+  can be claimed only by the rustls-authenticated identity that received them;
+  a mismatch is checked atomically without consuming the valid token (issue
+  #347).
+
 - **Breaking:** Fail startup and `--validate-config` when TLS is enabled in
   configuration but the server binary was compiled without the `tls` Cargo
   feature, instead of silently serving plaintext HTTP. Newly prepared official
@@ -113,9 +122,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Missing certificates and subprotocol opt-outs are rejected, conflicting
   request headers cannot override transport identity, and rotated certificates
   invalidate proofs bound to the previous fingerprint. Fingerprint-bound
-  connections advertise JSON game data only and reject unsigned binary frames;
-  replay-resistant channel keys and certificate-bound reconnect tokens remain
-  explicitly out of scope and are tracked in issue #347 (issue #344).
+  connections initially advertised JSON game data only and rejected unsigned
+  binary frames. Replay-resistant channel keys and certificate-bound reconnect
+  tokens were intentionally out of scope for issue #344 and are addressed by
+  the issue #347 entry above.
 - Enforce `security.cors_origins` on browser WebSocket upgrades at both
   `/v2/ws` and `/v3/ws`, using the same parsed policy as HTTP CORS responses.
   Disallowed origins now receive HTTP 403 and malformed allowlists fail

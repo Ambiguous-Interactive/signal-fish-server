@@ -172,14 +172,13 @@ simply fall back to relay (the server warns but still starts).
 
 ## Token binding
 
-Token binding requires each JSON client message to carry an HMAC keyed by the
-WebSocket handshake's `Sec-WebSocket-Key`; fingerprint mode additionally checks
-that the proof names the authenticated mTLS leaf certificate. It is **off by
-default** and is also summarized in the configuration reference and feature
-matrix. Because the client chooses `Sec-WebSocket-Key`, this protocol version
-is not replay-resistant against an active client that reuses captured key and
-message material. It also does not turn application bearer credentials such as
-reconnect tokens into certificate-bound credentials; protect those separately.
+Token binding v2 requires every JSON or binary client message to carry an HMAC
+under a connection key derived from both the WebSocket handshake key and a
+server-fresh challenge. One sequence covers both frame formats, so a proof
+cannot be replayed, reordered, or moved to another connection. Fingerprint mode
+additionally binds proofs and reconnect credentials to the authenticated mTLS
+leaf certificate. It is **off by default** and is also summarized in the
+configuration reference and feature matrix.
 
 ```json
 {
@@ -189,8 +188,8 @@ reconnect tokens into certificate-bound credentials; protect those separately.
         "enabled": true,
         "required": false,
         "require_client_fingerprint": false,
-        "subprotocol": "signalfish.tokenbinding.v1",
-        "scheme": "sec_websocket_key_sha256"
+        "subprotocol": "signalfish.tokenbinding.v2",
+        "scheme": "server_nonce_hkdf_sha256"
       }
     }
   }
@@ -208,9 +207,9 @@ export SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__REQUIRE_CLIENT_FINGERPRI
 What it does and how to enable it:
 
 - `enabled` turns on negotiation of the token-binding WebSocket subprotocol
-  (`subprotocol`, default `signalfish.tokenbinding.v1`). With `enabled=true` and
+  (`subprotocol`, default `signalfish.tokenbinding.v2`). With `enabled=true` and
   `required=false`, clients that advertise the subprotocol send proofs on each
-  JSON message; clients that do not still connect normally — a safe, opt-in
+  JSON or binary message; clients that do not still connect normally — a safe, opt-in
   rollout.
 - `required=true` rejects clients that do not advertise the subprotocol and
   requires `enabled=true`. Set this only after every client in your fleet
@@ -222,38 +221,93 @@ What it does and how to enable it:
   omitting the subprotocol. Under `optional`, a WebSocket client that presents
   no certificate is rejected because it cannot satisfy this setting. Clients
   include the exact 64-character fingerprint in `token_binding.fingerprint`
-  and append those UTF-8 bytes when computing the frame HMAC. Direct
+  and append those ASCII bytes when computing the frame HMAC. Direct
   client-supplied fingerprint and forwarding headers are ignored and cannot
   override the rustls identity.
 - `scheme` selects the per-frame signing scheme (default
-  `sec_websocket_key_sha256`).
-- Fingerprint-bound connections accept signed JSON messages only. Unsigned
-  binary game-data frames are rejected because the current binary format has
-  no certificate-binding proof envelope. Non-fingerprint token binding retains
-  its existing binary-frame behavior for compatibility.
+  `server_nonce_hkdf_sha256`). The legacy `sec_websocket_key_sha256` value is
+  still parsed to produce an actionable migration error, but an enabled server
+  rejects it because it has no server freshness.
+- Every token-bound binary frame uses the signed MessagePack envelope described
+  below. A raw legacy binary frame is unauthorized whether or not fingerprint
+  binding is enabled.
 
-For `signalfish.tokenbinding.v1`, construct a proof as follows:
+### v2 wire contract
 
-1. Parse the complete client message as JSON and remove the top-level
-   `token_binding` member.
-2. Recursively sort every object's member names in ascending Unicode scalar
-   order. Preserve array order.
-3. Serialize that value as compact UTF-8 JSON with no insignificant whitespace,
-   using JSON's shortest required string escapes and finite decimal number
-   forms. Do not send duplicate object member names. Cross-language clients
-   should keep integer values in the interoperable `-(2^53-1)..=2^53-1` range.
-4. Base64-decode the 16-byte `Sec-WebSocket-Key`. Use those bytes as the key for
-   HMAC-SHA-256 over the canonical JSON bytes. When fingerprint binding is
-   enabled, append the 64 lowercase ASCII fingerprint bytes to the HMAC input.
-5. Standard-base64-encode the 32-byte MAC into `token_binding.signature` and
-   set `token_binding.scheme` to `sec_websocket_key_sha256`. Fingerprint-bound
-   clients also set `token_binding.fingerprint` to that same digest.
+The first server application message after a token-bound WebSocket upgrade is:
 
-Normative golden: with handshake key `MDEyMzQ1Njc4OWFiY2RlZg==`, the differently
-ordered payload `{"zzz":{"y":2,"x":"é"},"type":"Ping","aaa":[3,1]}`
-canonicalizes to `{"aaa":[3,1],"type":"Ping","zzz":{"x":"é","y":2}}`
-and produces signature
-`weZ0UzBCfS5Becnv8/cbGfz5V9CcKVgp2LwkRvx5Kq8=` (no fingerprint).
+```json
+{"type":"TokenBindingChallenge","data":{"version":2,"scheme":"server_nonce_hkdf_sha256","nonce":"BASE64_32_BYTES","first_sequence":1}}
+```
+
+Base64-decode the 16-byte `Sec-WebSocket-Key` and the challenge's 32-byte
+`nonce`. Derive a 32-byte connection key with HKDF-SHA-256 using the handshake
+key as input keying material, the nonce as the salt, and
+`signalfish.tokenbinding.v2/session-key` as the info value. Start at
+`first_sequence` and increment by exactly one after every accepted JSON **or**
+binary frame. The server rejects gaps, duplicates, and reordered sequences; a
+rejected proof does not advance the sequence.
+
+The nonce is generated independently for each accepted WebSocket with the
+operating system's cryptographic RNG (256 bits, making accidental reuse
+negligible), is valid only for that connection, and is discarded when the
+connection closes. A reconnect is a new WebSocket and always receives a new
+challenge; no challenge or sequence state resumes across reconnects.
+
+For a JSON message, remove its top-level `token_binding` member and encode the
+remaining value using RFC 8785 (JCS). This includes ECMAScript-compatible number
+serialization, recursive UTF-16 code-unit property ordering, no insignificant
+whitespace, and UTF-8 output. Duplicate members and non-finite numbers are not
+valid inputs. To keep the parsed application value identical across
+implementations, every integer anywhere in the envelope
+(including `sequence`) must be within
+`-9007199254740991..=9007199254740991`; the server rejects values outside that
+safe range before proof verification. Negative zero, fractional, and
+exponent-form numbers are rejected on token-bound connections because the
+server's ordinary JSON parser intentionally retains its faster
+non-`float_roundtrip` behavior; this keeps every accepted proof portable
+without changing non-token traffic. HMAC-SHA-256 covers, in order:
+
+1. the literal bytes `signalfish.tokenbinding.v2\0json\0`;
+2. the proof sequence as an unsigned 64-bit big-endian integer;
+3. the RFC 8785 payload bytes; and
+4. when fingerprint mode is active, the 64 lowercase hexadecimal certificate
+   fingerprint bytes.
+
+Insert the standard-base64 MAC as the signature:
+
+```json
+"token_binding":{"version":2,"scheme":"server_nonce_hkdf_sha256","sequence":1,"signature":"BASE64_MAC","fingerprint":null}
+```
+
+For binary data, retain the existing inner MessagePack game-data bytes exactly.
+HMAC the same fields with the domain
+`signalfish.tokenbinding.v2\0binary\0`, then send a named-field MessagePack map
+with this shape (where `payload` is a MessagePack `bin` value):
+
+```text
+{"token_binding": <the same v2 proof map>, "payload": <binary>}
+```
+
+The sequence namespace is shared: for example, JSON sequence 1 followed by
+binary sequence 2 is valid; another JSON sequence 1 is not.
+
+Normative JSON golden vector (no fingerprint):
+
+- handshake key: `MDEyMzQ1Njc4OWFiY2RlZg==`
+- challenge nonce: `AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=`
+- derived key (hex): `abb5860d3be9f16fad2763e718d0e9a038b7196fd136f24d62cb3ab6fc631da7`
+- input: `{"zzz":{"y":2,"x":"é"},"type":"Ping","aaa":[3,1]}`
+- canonical payload: `{"aaa":[3,1],"type":"Ping","zzz":{"x":"é","y":2}}`
+- sequence: `1`
+- signature: `HobFBjbmzHgNF/QoXXFpqNy5s4/InE7+tCYO56+Dqig=`
+
+Normative binary golden using the same key/nonce, sequence 2, inner payload hex
+`81a46461746101`:
+
+- signature: `7/4RSNk/Euc4JnPJqlrMVDqp1l8oLXl+A8jAqDZIt1A=`
+- complete named-field MessagePack envelope (hex):
+  `82ad746f6b656e5f62696e64696e6785a776657273696f6e02a6736368656d65b87365727665725f6e6f6e63655f686b64665f736861323536a873657175656e636502a97369676e6174757265d92c372f3452534e6b2f457563344a6e504a716c724d56447170316c386f4c586c2b41386a4171445a497431413dab66696e6765727072696e74c0a77061796c6f6164c40781a46461746101`
 
 Client impact: when `enabled` but not `required`, none — non-participating
 clients are unaffected. When `required`, clients **must** implement the
@@ -263,8 +317,12 @@ required=false`, confirm clients negotiate it, then tighten.
 Fingerprint binding is a separate tightening step: first deploy trusted client
 certificates, enable `tls.client_auth`, and verify mTLS connectivity. Then set
 `require_client_fingerprint=true` and update proof generation with the actual
-leaf-certificate fingerprint. Certificate rotation changes that value, so
-clients must bind new proofs to the newly presented certificate.
+leaf-certificate fingerprint. Reconnect tokens issued to certificate A remain
+claimable only with A. Presenting certificate B returns an invalid-token result
+without consuming A's token; after rotation to B, use the normal join flow to
+obtain a new B-bound token. Per-frame integrity, connection replay resistance,
+and reconnect-credential identity binding are distinct checks and all remain
+enforced during that transition.
 
 ```json
 {

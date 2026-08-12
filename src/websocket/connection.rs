@@ -24,7 +24,7 @@ use tokio::time::Instant;
 
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
 use super::sending::{send_immediate_server_message, write_pending_unsupported_report};
-use super::token_binding::{parse_client_message, TokenBindingHandshake};
+use super::token_binding::{parse_binary_message, parse_client_message, TokenBindingHandshake};
 use super::{complete_before_deadline, CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT};
 
 const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -39,6 +39,36 @@ fn random_ping_nonce() -> u64 {
         let nonce = rng.random::<u64>();
         if nonce != 0 {
             return nonce;
+        }
+    }
+}
+
+async fn send_token_binding_challenge(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    binding: Option<&TokenBindingHandshake>,
+    addr: SocketAddr,
+) -> bool {
+    let Some(binding) = binding else {
+        return true;
+    };
+    let challenge = serde_json::json!({
+        "type": "TokenBindingChallenge",
+        "data": binding.challenge,
+    });
+    match tokio::time::timeout(
+        CLOSE_WRITE_TIMEOUT,
+        sender.send(Message::Text(challenge.to_string().into())),
+    )
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) => {
+            tracing::debug!(client_addr = %addr, error = %err, "Failed to send token-binding challenge");
+            false
+        }
+        Err(_elapsed) => {
+            tracing::debug!(client_addr = %addr, "Timed out sending token-binding challenge");
+            false
         }
     }
 }
@@ -1038,6 +1068,9 @@ pub(super) async fn handle_socket(
             player_id
         }
         Err(RegisterClientError::IpLimitExceeded { current, limit }) => {
+            if !send_token_binding_challenge(&mut sender, token_binding.as_ref(), addr).await {
+                return;
+            }
             let error_message = ServerMessage::Error {
                 message: format!("Too many connections from your IP ({current}/{limit})"),
                 error_code: Some(ErrorCode::TooManyConnections),
@@ -1121,6 +1154,18 @@ pub(super) async fn handle_socket(
             return;
         }
     };
+    // Registration remains the admission boundary, but a token-bound client
+    // still receives the challenge before every application message or error.
+    if !send_token_binding_challenge(&mut sender, token_binding.as_ref(), addr).await {
+        server.unregister_client(&player_id).await;
+        return;
+    }
+    let reconnection_identity = token_binding
+        .as_ref()
+        .filter(|binding| binding.verifier.require_fingerprint)
+        .and_then(|binding| binding.fingerprint.as_ref())
+        .map(|fingerprint| Arc::clone(&fingerprint.fingerprint));
+    server.set_client_reconnection_identity(&player_id, reconnection_identity);
 
     // Open app-ID-policy endpoints normally use their path version immediately. A
     // deployment floor above that endpoint cannot be satisfied without lying
@@ -1144,6 +1189,7 @@ pub(super) async fn handle_socket(
         server.unregister_client(&player_id).await;
         return;
     }
+
     // Track the frozen wire handshake state; open policy starts complete.
     let mut app_handshake_complete = !server.config().app_id_allowlist_enabled;
     let mut authenticate_processed = false;
@@ -1965,16 +2011,9 @@ pub(super) async fn handle_socket(
                                     server_clone
                                         .set_client_app_context(&active_player_id, info.clone());
                                     server_clone.apply_app_bandwidth_policy(&info);
-                                    let mut supported_formats = server_clone
+                                    let supported_formats = server_clone
                                         .protocol_config()
                                         .supported_game_data_formats();
-                                    if token_binding
-                                        .as_ref()
-                                        .is_some_and(|binding| binding.verifier.require_fingerprint)
-                                    {
-                                        supported_formats
-                                            .retain(|format| *format == GameDataEncoding::Json);
-                                    }
                                     let negotiated_format = match game_data_format {
                                         Some(format) if supported_formats.contains(&format) => {
                                             format
@@ -2226,28 +2265,31 @@ pub(super) async fn handle_socket(
                     }
                 }
                 Message::Binary(payload) => {
-                    if token_binding
-                        .as_ref()
-                        .is_some_and(|binding| binding.verifier.require_fingerprint)
-                    {
-                        tracing::warn!(
-                            %active_player_id,
-                            "Received unsigned binary frame on fingerprint-bound connection"
-                        );
-                        enqueue_farewell_message(
-                            &tx_clone,
-                            &close_signal,
-                            &active_player_id,
-                            ServerMessage::Error {
-                                message:
-                                    "Certificate-bound connections require signed JSON messages"
-                                        .to_string(),
-                                error_code: Some(ErrorCode::Unauthorized),
-                            },
-                            "unsigned binary frame on fingerprint-bound connection",
-                        );
-                        break;
-                    }
+                    let payload = if let Some(binding) = token_binding.as_ref() {
+                        match parse_binary_message(&payload, binding) {
+                            Ok(payload) => bytes::Bytes::from(payload),
+                            Err(err) => {
+                                tracing::warn!(
+                                    %active_player_id,
+                                    error = %err,
+                                    "Rejected token-bound binary frame"
+                                );
+                                enqueue_farewell_message(
+                                    &tx_clone,
+                                    &close_signal,
+                                    &active_player_id,
+                                    ServerMessage::Error {
+                                        message: err.user_message().to_string(),
+                                        error_code: Some(err.error_code()),
+                                    },
+                                    "invalid token-bound binary frame",
+                                );
+                                break;
+                            }
+                        }
+                    } else {
+                        payload
+                    };
 
                     if !app_handshake_complete {
                         tracing::warn!(%active_player_id, "Received binary message before app-ID handshake");

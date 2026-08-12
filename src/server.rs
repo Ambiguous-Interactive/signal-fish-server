@@ -623,6 +623,19 @@ impl EnhancedGameServer {
         self.connection_manager.app_context(player_id)
     }
 
+    pub(crate) fn set_client_reconnection_identity(
+        &self,
+        player_id: &PlayerId,
+        identity: Option<Arc<str>>,
+    ) {
+        self.connection_manager
+            .set_reconnection_identity(player_id, identity);
+    }
+
+    pub(crate) fn client_reconnection_identity(&self, player_id: &PlayerId) -> Option<Arc<str>> {
+        self.connection_manager.reconnection_identity(player_id)
+    }
+
     /// Fetch just the application UUID for a connected client.
     pub fn client_app_id(&self, player_id: &PlayerId) -> Option<Uuid> {
         self.connection_manager.app_id(player_id)

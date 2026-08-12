@@ -6,8 +6,9 @@
 # WebSocket; every text message is a `{ "type": <Variant>, "data": <payload> }` envelope (serde
 # `#[serde(tag = "type", content = "data")]`). Variants WITHOUT a payload
 # (e.g. LeaveRoom, Ping, RoomLeft, Pong) are sent as `{ "type": <Variant> }`
-# with no `data` field. `GameDataBinary` is the one physical binary-frame
-# exception and is modeled explicitly as a MessagePack map below.
+# with no `data` field. Binary frames are modeled explicitly below: the core
+# server-to-client `GameDataBinary` delivery and the negotiated token-binding-v2
+# client envelope that carries an existing binary payload plus its proof.
 #
 # It models EVERY `ClientMessage` (send / client -> server) and `ServerMessage`
 # (receive / server -> client) variant from `src/protocol/messages.rs`, plus the
@@ -111,7 +112,10 @@ channels:
       JoinAsSpectator: { $ref: '#/components/messages/JoinAsSpectator' }
       LeaveSpectator: { $ref: '#/components/messages/LeaveSpectator' }
       TransportStatus: { $ref: '#/components/messages/TransportStatus' }
+      ClientTokenBoundJson: { $ref: '#/components/messages/ClientTokenBoundJson' }
+      ClientTokenBoundBinary: { $ref: '#/components/messages/ClientTokenBoundBinary' }
       # ----- receive: server -> client -----
+      TokenBindingChallenge: { $ref: '#/components/messages/TokenBindingChallenge' }
       Authenticated: { $ref: '#/components/messages/Authenticated' }
       ProtocolInfo: { $ref: '#/components/messages/ProtocolInfo' }
       AuthenticationError: { $ref: '#/components/messages/AuthenticationError' }
@@ -164,11 +168,14 @@ operations:
       - { $ref: '#/channels/signaling/messages/JoinAsSpectator' }
       - { $ref: '#/channels/signaling/messages/LeaveSpectator' }
       - { $ref: '#/channels/signaling/messages/TransportStatus' }
+      - { $ref: '#/channels/signaling/messages/ClientTokenBoundJson' }
+      - { $ref: '#/channels/signaling/messages/ClientTokenBoundBinary' }
   receiveFromServer:
     action: receive
     channel: { $ref: '#/channels/signaling' }
     title: Server -> Client messages (ServerMessage)
     messages:
+      - { $ref: '#/channels/signaling/messages/TokenBindingChallenge' }
       - { $ref: '#/channels/signaling/messages/Authenticated' }
       - { $ref: '#/channels/signaling/messages/ProtocolInfo' }
       - { $ref: '#/channels/signaling/messages/AuthenticationError' }
@@ -265,10 +272,32 @@ components:
       title: TransportStatus
       summary: 'v3: report this client''s data-path transport state (informational).'
       payload: { $ref: '#/components/schemas/TransportStatus' }
+    ClientTokenBoundJson:
+      title: Token-bound JSON client message
+      summary: >-
+        Token-binding-v2 extension: any ordinary client message with the proof
+        added as a top-level token_binding member.
+      x-websocket-subprotocol: signalfish.tokenbinding.v2
+      payload: { $ref: '#/components/schemas/ClientTokenBoundJson' }
+    ClientTokenBoundBinary:
+      title: Token-bound binary client frame
+      contentType: application/msgpack
+      summary: >-
+        Token-binding-v2 extension: named-field MessagePack envelope carrying a
+        proof and the exact legacy binary client payload bytes.
+      x-websocket-subprotocol: signalfish.tokenbinding.v2
+      x-websocket-binary-envelope: messagepack
+      payload: { $ref: '#/components/schemas/ClientTokenBoundBinary' }
 
     # =====================================================================
     # SERVER -> CLIENT (ServerMessage)
     # =====================================================================
+    TokenBindingChallenge:
+      title: TokenBindingChallenge
+      summary: >-
+        Token-binding-v2 extension: first application message after a
+        negotiated token-bound WebSocket upgrade.
+      payload: { $ref: '#/components/schemas/TokenBindingChallenge' }
     Authenticated:
       title: Authenticated
       payload: { $ref: '#/components/schemas/Authenticated' }
@@ -963,9 +992,97 @@ components:
             connected: { type: boolean }
       required: [type, data]
 
+    TokenBindingProof:
+      type: object
+      additionalProperties: false
+      required: [version, scheme, sequence, signature]
+      properties:
+        version: { const: 2 }
+        scheme: { const: server_nonce_hkdf_sha256 }
+        sequence:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+          description: Shared monotonically increasing frontier for text and binary frames.
+        signature:
+          type: string
+          description: Standard-base64 HMAC-SHA256 signature.
+        fingerprint:
+          type: string
+          nullable: true
+          description: >-
+            Required only when verified client-certificate fingerprint binding
+            is configured; null (or accepted as omitted) otherwise.
+    ClientMessageEnvelope:
+      oneOf:
+        - { $ref: '#/components/schemas/Authenticate' }
+        - { $ref: '#/components/schemas/JoinRoom' }
+        - { $ref: '#/components/schemas/LeaveRoom' }
+        - { $ref: '#/components/schemas/ClientGameData' }
+        - { $ref: '#/components/schemas/ClientSignal' }
+        - { $ref: '#/components/schemas/AuthorityRequest' }
+        - { $ref: '#/components/schemas/PlayerReady' }
+        - { $ref: '#/components/schemas/StartGame' }
+        - { $ref: '#/components/schemas/ProvideConnectionInfo' }
+        - { $ref: '#/components/schemas/Ping' }
+        - { $ref: '#/components/schemas/Reconnect' }
+        - { $ref: '#/components/schemas/JoinAsSpectator' }
+        - { $ref: '#/components/schemas/LeaveSpectator' }
+        - { $ref: '#/components/schemas/TransportStatus' }
+    ClientTokenBoundJson:
+      allOf:
+        - { $ref: '#/components/schemas/ClientMessageEnvelope' }
+        - type: object
+          required: [token_binding]
+          properties:
+            token_binding: { $ref: '#/components/schemas/TokenBindingProof' }
+      description: >-
+        Text frame used only after negotiating signalfish.tokenbinding.v2. The
+        HMAC covers the RFC 8785 canonical form after removing token_binding.
+        Every number must use integer syntax within the interoperable safe
+        range; negative-zero, fractional, and exponent-form numbers are
+        rejected recursively.
+      x-json-number-contract: safe-integers-only
+    ClientTokenBoundBinary:
+      type: object
+      additionalProperties: false
+      description: >-
+        Physical client-to-server MessagePack frame used only after negotiating
+        signalfish.tokenbinding.v2. Field names are encoded as strings.
+      required: [token_binding, payload]
+      properties:
+        token_binding: { $ref: '#/components/schemas/TokenBindingProof' }
+        payload:
+          type: string
+          contentEncoding: binary
+          x-messagepack-type: bin
+          description: Exact legacy binary game-data frame bytes.
+
     # ---------------------------------------------------------------------
     # ServerMessage payloads
     # ---------------------------------------------------------------------
+    TokenBindingChallenge:
+      type: object
+      additionalProperties: false
+      description: >-
+        Present only when the signalfish.tokenbinding.v2 WebSocket extension
+        was negotiated; ordinary protocol-v2 and protocol-v3 flows omit it.
+      properties:
+        type: { const: TokenBindingChallenge }
+        data:
+          type: object
+          additionalProperties: false
+          required: [version, scheme, nonce, first_sequence]
+          properties:
+            version: { const: 2 }
+            scheme: { const: server_nonce_hkdf_sha256 }
+            nonce:
+              type: string
+              description: Standard-base64 encoding of 32 server-random bytes.
+            first_sequence:
+              type: integer
+              const: 1
+      required: [type, data]
     Authenticated:
       type: object
       properties:

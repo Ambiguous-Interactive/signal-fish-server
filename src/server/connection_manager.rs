@@ -67,6 +67,9 @@ pub(crate) struct ClientConnection {
     pub client_addr: SocketAddr,
     pub game_data_format: GameDataEncoding,
     pub app_context: Option<AppContext>,
+    /// Authenticated identity that newly issued reconnect credentials must
+    /// retain. Present only for certificate-bound token-binding sessions.
+    pub reconnection_identity: Option<Arc<str>>,
     /// Protocol version + transport/topology capabilities negotiated at auth.
     pub protocol: NegotiatedProtocol,
     /// Last data-path transport state this client reported via
@@ -312,6 +315,7 @@ impl ConnectionManager {
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_context: None,
+            reconnection_identity: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
             membership_generation: Uuid::nil(),
@@ -356,6 +360,7 @@ impl ConnectionManager {
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_context: None,
+            reconnection_identity: None,
             protocol: NegotiatedProtocol::default(),
             transport_status: None,
             membership_generation: Uuid::nil(),
@@ -555,6 +560,22 @@ impl ConnectionManager {
         self.clients
             .get(player_id)
             .and_then(|conn| conn.app_context.clone())
+    }
+
+    pub(crate) fn set_reconnection_identity(
+        &self,
+        player_id: &PlayerId,
+        identity: Option<Arc<str>>,
+    ) {
+        if let Some(mut connection) = self.clients.get_mut(player_id) {
+            connection.reconnection_identity = identity;
+        }
+    }
+
+    pub(crate) fn reconnection_identity(&self, player_id: &PlayerId) -> Option<Arc<str>> {
+        self.clients
+            .get(player_id)
+            .and_then(|connection| connection.reconnection_identity.clone())
     }
 
     pub fn app_id(&self, player_id: &PlayerId) -> Option<Uuid> {
@@ -785,6 +806,7 @@ impl ConnectionManager {
                 client_addr: old_connection.client_addr,
                 game_data_format: old_connection.game_data_format,
                 app_context: old_connection.app_context,
+                reconnection_identity: old_connection.reconnection_identity,
                 protocol: old_connection.protocol,
                 // Preserve any roomless transient-socket status only as rollback
                 // state. Advancing the membership generation below makes it
@@ -855,6 +877,7 @@ impl ConnectionManager {
             client_addr: reassigned_connection.client_addr,
             game_data_format: reassigned_connection.game_data_format,
             app_context: reassigned_connection.app_context,
+            reconnection_identity: reassigned_connection.reconnection_identity,
             protocol: reassigned_connection.protocol,
             transport_status: reassigned_connection.transport_status,
             membership_generation,

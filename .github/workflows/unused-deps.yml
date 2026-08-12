@@ -15,7 +15,7 @@
 #
 # Features:
 #   - Shared checkout, nightly toolchain, and Rust dependency cache
-#   - Binary caching for cargo-machete and cargo-udeps
+#   - Checksum-verified release binaries for cargo-machete and cargo-udeps
 #   - Legacy `Check Unused Features` status retained for push/PR compatibility
 #   - Nightly toolchain pinned for reproducibility (see nightly version below)
 #   - cargo-udeps uses continue-on-error as it may have false positives
@@ -95,36 +95,20 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Cache cargo-machete binary
-        id: cache-machete
-        uses: actions/cache@v6.1.0
+      - name: Install unused-dependency analyzers
+        uses: taiki-e/install-action@v2.85.10
         with:
-          path: ~/.cargo/bin/cargo-machete
-          key: ${{ runner.os }}-cargo-machete-0.7.0
+          tool: cargo-machete@0.7.0,cargo-udeps@0.1.61
+          fallback: none
 
-      - name: Install cargo-machete
-        if: steps.cache-machete.outputs.cache-hit != 'true'
-        run: cargo install cargo-machete --version 0.7.0 --locked
+      - name: Verify analyzer versions
+        run: |
+          set -euo pipefail
+          cargo machete --version | grep -Fxq '0.7.0'
+          cargo +nightly-2026-08-01 udeps --version | grep -Fxq 'cargo-udeps 0.1.61'
 
       - name: Check for unused dependencies
         run: cargo machete
-      - name: Cache cargo-udeps binary
-        if: ${{ !cancelled() }}
-        id: cache-udeps
-        uses: actions/cache@v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-udeps
-          key: ${{ runner.os }}-cargo-udeps-0.1.61-nightly-2026-08-01
-
-      - name: Install cargo-udeps
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          if cargo +nightly-2026-08-01 udeps --version 2>/dev/null | grep -Fxq 'cargo-udeps 0.1.61'; then
-            echo "cargo-udeps 0.1.61 already restored by the Rust cache"
-          else
-            cargo +nightly-2026-08-01 install cargo-udeps --version 0.1.61 --locked --force
-          fi
 
       - name: Check for unused dependencies (udeps)
         if: ${{ !cancelled() }}
@@ -142,7 +126,7 @@ jobs:
   # avoids a permanently missing/Expected context without repeating analysis.
   unused-features-status:
     name: Check Unused Features
-    if: ${{ always() && github.event_name != 'schedule' }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     needs: unused-deps
     runs-on: ubuntu-latest
     timeout-minutes: 2

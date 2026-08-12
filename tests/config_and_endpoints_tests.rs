@@ -338,12 +338,12 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SUBPROTOCOL",
         path: "security.transport.token_binding.subprotocol",
-        default: Some("signalfish.tokenbinding.v1"),
+        default: Some("signalfish.tokenbinding.v2"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SCHEME",
         path: "security.transport.token_binding.scheme",
-        default: Some("sec_websocket_key_sha256"),
+        default: Some("server_nonce_hkdf_sha256"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__ALLOWED_APPS",
@@ -741,7 +741,7 @@ fn collect_config_enum_token_violations(
         ),
         (
             "/security/transport/token_binding/scheme",
-            &["sec_websocket_key_sha256"][..],
+            &["server_nonce_hkdf_sha256"][..],
         ),
     ] {
         let Some(value) = value.pointer(pointer) else {
@@ -1198,23 +1198,28 @@ fn test_config_enum_tokens_are_canonical_and_backward_compatible() {
     );
 
     assert_eq!(
-        serde_json::to_string(&TokenBindingScheme::SecWebsocketKeySha256).unwrap(),
-        r#""sec_websocket_key_sha256""#
+        serde_json::to_string(&TokenBindingScheme::ServerNonceHkdfSha256).unwrap(),
+        r#""server_nonce_hkdf_sha256""#
+    );
+    assert_eq!(
+        serde_json::from_str::<TokenBindingScheme>(r#""server_nonce_hkdf_sha256""#).unwrap(),
+        TokenBindingScheme::ServerNonceHkdfSha256
+    );
+    assert_eq!(
+        serde_json::from_str::<TokenBindingScheme>(r#""ServerNonceHkdfSha256""#).unwrap(),
+        TokenBindingScheme::ServerNonceHkdfSha256
     );
     assert_eq!(
         serde_json::from_str::<TokenBindingScheme>(r#""sec_websocket_key_sha256""#).unwrap(),
-        TokenBindingScheme::SecWebsocketKeySha256
-    );
-    assert_eq!(
-        serde_json::from_str::<TokenBindingScheme>(r#""SecWebsocketKeySha256""#).unwrap(),
-        TokenBindingScheme::SecWebsocketKeySha256
+        TokenBindingScheme::SecWebsocketKeySha256,
+        "legacy scheme syntax remains parseable for an actionable validation error"
     );
     assert!(
         serde_json::from_str::<TokenBindingScheme>(r#""unknown_scheme""#).is_err(),
         "unknown token binding schemes must not deserialize"
     );
     assert!(
-        serde_json::from_str::<TokenBindingScheme>(r#""sec-websocket-key-sha256""#).is_err(),
+        serde_json::from_str::<TokenBindingScheme>(r#""server-nonce-hkdf-sha256""#).is_err(),
         "punctuated token binding scheme tokens must not be normalized into valid tokens"
     );
 

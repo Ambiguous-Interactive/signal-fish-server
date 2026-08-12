@@ -436,6 +436,51 @@ fn spec_has_no_dangling_local_references() {
 }
 
 #[test]
+fn spec_models_both_negotiated_token_binding_client_envelopes() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    let signed_json = mapping_path(root, &["components", "schemas", "ClientTokenBoundJson"])
+        .expect("spec must define the signed JSON client envelope");
+    let mut json_references = Vec::new();
+    collect_local_references(signed_json, &mut json_references);
+    assert!(
+        json_references.contains(&"#/components/schemas/ClientMessageEnvelope".to_string())
+            && json_references.contains(&"#/components/schemas/TokenBindingProof".to_string()),
+        "signed JSON must compose every ordinary client message with TokenBindingProof"
+    );
+    assert_eq!(
+        signed_json
+            .as_mapping_get("x-json-number-contract")
+            .and_then(Yaml::as_str),
+        Some("safe-integers-only"),
+        "signed JSON must expose its recursive portable-number restriction to code generators"
+    );
+
+    let signed_binary = mapping_path(root, &["components", "schemas", "ClientTokenBoundBinary"])
+        .expect("spec must define the signed binary client envelope");
+    let mut binary_references = Vec::new();
+    collect_local_references(signed_binary, &mut binary_references);
+    assert!(
+        binary_references.contains(&"#/components/schemas/TokenBindingProof".to_string()),
+        "signed binary must carry TokenBindingProof"
+    );
+
+    for message in ["ClientTokenBoundJson", "ClientTokenBoundBinary"] {
+        let protocol = mapping_path(
+            root,
+            &["components", "messages", message, "x-websocket-subprotocol"],
+        )
+        .and_then(Yaml::as_str);
+        assert_eq!(protocol, Some("signalfish.tokenbinding.v2"));
+    }
+}
+
+#[test]
 fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
     use signal_fish_server::protocol::{
         DirectEndpoint, ServerMessage, SessionPlanPayload, Topology, Transport,

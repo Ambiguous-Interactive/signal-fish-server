@@ -210,6 +210,15 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     }
     if config.security.transport.token_binding.enabled {
         let binding = &config.security.transport.token_binding;
+        if binding.scheme
+            == crate::security::token_binding::TokenBindingScheme::SecWebsocketKeySha256
+        {
+            anyhow::bail!(
+                "security.transport.token_binding.scheme=sec_websocket_key_sha256 is protocol-v1 \
+                 compatibility syntax and cannot be enabled because it lacks server freshness; use \
+                 server_nonce_hkdf_sha256"
+            );
+        }
         if binding.required && !built_in_tls_active(config, cfg!(feature = "tls")) {
             anyhow::bail!(
                 "security.transport.token_binding.required=true requires active built-in TLS \

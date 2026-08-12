@@ -118,6 +118,7 @@ aes-gcm = { version = "0.11", features = ["aes"] }
 sha2 = "0.11"
 sha1 = "0.11"
 hmac = "0.13.0"
+hkdf = "0.13.0"
 getrandom = "0.4"
 subtle = "2.6"
 
