@@ -311,7 +311,7 @@ this exact mechanism.**
 
 A single helper gates all v3 emission:
 
-```rust
+```rust,ignore
 fn client_supports_v3(&self, player_id: &PlayerId) -> bool   // negotiated_version >= 3
 fn client_supports_transport(&self, player_id: &PlayerId, t: Transport) -> bool
 ```
