@@ -6,7 +6,9 @@
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
 > Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P85 is complete;
-> P86 is implemented locally and awaiting hosted validation; P53 is collecting
+> P86's repository-owned hosted checks are green on PR #350, but its
+> service-owned Copilot reviewer is quota-exhausted; P87 is implemented locally
+> and awaiting hosted validation. P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, and P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
@@ -40,8 +42,7 @@
 > of P8).
 >
 > **Open follow-ups** (tracked as issues, not phases): #204 design-system
-> assets, #205 broader safety work, #206
-> distributed-resilience research, #207 further measured optimization, #213
+> assets, #205 broader safety work, #207 further measured optimization, #213
 > additional static analyzers, #220
 > formal-verification work beyond the bounded exposure theorem, and #318's
 > remaining cross-platform developer-hook latency evidence. #345's effective-policy
@@ -139,6 +140,10 @@
 > repository audit proved that neither classic branch protection nor the active
 > ruleset requires the legacy status alias, allowing its runner allocation to be
 > removed without weakening merge policy.
+> P87 advances #220 with an exhaustive reconnect-claim lifecycle: duplicate
+> valid sockets, invalid certificate identity, retained stale handles, expiry
+> cleanup, failed-restore release, and one-time completion now share one model
+> backed by four independent expected-failure configurations.
 > P61 removes carry-forward contract drift and mock-only performance evidence
 > found by the session-103 adversarial sweep. P62 closes #300 by distinguishing
 > the server-emitted error-code contract from six legacy Rust variants retained
@@ -172,8 +177,9 @@
 > the broad #205/#207 campaigns without claiming that every future safety or
 > hosted-path optimization is exhausted. #210's scoped
 > CAP/resilience contract for #206 and one concrete #220 increment were
-> completed together in session 069; this does not close #220's open-ended
-> scope. #225's
+> completed together in session 069; session 128 audited that acceptance,
+> recorded the evidence on #206, and closed the completed broad research issue.
+> This does not close #220's open-ended scope. #225's
 > standalone-package dependency automation and reproducible fuzz graph were
 > completed in session 068. #222's
 > end-to-end relay serialization measurement and
@@ -431,6 +437,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P84 | Verified mTLS token binding + check-safe unused-deps consolidation (#344, #345) | M | P83 | Security / CI | ✅ Done (s125, PR #348) |
 | P85 | Replay-resistant token binding + fail-closed/lean CI (#347, #345) | M | P84 | Security / CI | ✅ Done (s126, PR #349) |
 | P86 | Required-check audit + redundant-runner removal (#345) | S | P84, P85 | CI | 🟡 Validating (s127) |
+| P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | 🟡 Validating (s128) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -2997,8 +3004,10 @@ default branch and contains no required-status-check rule. The historical
 - [x] Restrict three interop-local cargo-deny jobs to manual dispatch after
   proving that central CI audits every tracked Cargo graph on push, pull request,
   and the daily schedule; preserve audits for manually selected unmerged refs.
-- [ ] Record mandatory local validation, hosted PR status, review closure, and
-  the resulting before/after job allocation evidence; close #345.
+- [x] Record mandatory local validation, repository-owned hosted PR status,
+  review-thread closure, and the resulting before/after job allocation evidence.
+- [ ] Resolve the service-owned Copilot reviewer quota failure, reach a fully
+  green check rollup, merge PR #350, and close #345.
 
 PR #350 carries the phase. Issue #351 tracks the measured, cache- and
 trigger-sensitive follow-up for fuzz build reuse and the remaining documentation
@@ -3013,6 +3022,39 @@ raw runner-minutes of avoidable setup per trigger). Removing the no-op docs job
 and suppressing three interop audits outside manual dispatch saves up to four
 more Linux runner allocations on source/documentation changes while preserving
 the central audit, manual-ref coverage, and every substantive documentation gate.
+
+---
+
+### P87 — Atomic reconnect-claim lifecycle proof (#220) (Size S) — 🟡 VALIDATING
+
+Session 128 advances #220 at the retryable single-use reconnect credential
+boundary. The Rust implementation already serialized validation, reservation,
+completion, release, and expired-record cleanup under one replay-state lock,
+but the formal suite did not compose those operations or retain old claim
+handles across retries.
+
+- [x] Model two sockets racing one valid credential plus an invalid certificate
+  identity, with globally fresh abstract claim epochs corresponding to UUID
+  claim IDs.
+- [x] Exhaustively interleave reservation, release, completion, downstream
+  restore failure, window expiry, and cleanup while proving one active claimant
+  and at-most-once successful consumption.
+- [x] Add four independent expected-failure configurations that admit an
+  invalid identity, ignore the active claim ID, delete an expired claimed
+  record, or consume the token after a failed restore. Each must produce its
+  exact invariant violation rather than any generic TLC failure.
+- [x] Add a direct Rust regression proving a released stale handle can neither
+  release nor complete the later retry it no longer owns.
+- [x] Add `src/reconnection.rs` to both formal-workflow path filters and the
+  exact trigger-contract test so claim behavior cannot drift without TLC.
+- [ ] Record exact-head local and hosted validation plus review closure.
+
+**Acceptance:** invalid identity never reserves the credential; duplicate valid
+sockets cannot both own it; expiry cleanup cannot overtake an in-flight claim;
+failed restoration releases without consuming the credential, with later retry
+still bounded by the original window; stale handles cannot mutate a newer
+claim; successful restoration consumes the record once; every seeded bug is
+non-vacuous; and all mandatory local and hosted gates pass.
 
 ---
 
@@ -5207,8 +5249,9 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 ---
 
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
-hosted evidence gates; P86's redundant-runner cleanup is awaiting hosted
-validation;
+hosted evidence gates; P86's repository-owned hosted gates are green but its
+service-owned Copilot review is quota-exhausted; P87's reconnect-claim proof is
+awaiting hosted validation;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 completed session history lives in `progress/session-*.md`._

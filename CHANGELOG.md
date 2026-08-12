@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add exhaustive formal verification for the atomic reconnection-claim
+  lifecycle, including duplicate claimants, invalid identity, stale claim
+  handles, expiry cleanup, restore failure, and one-time consumption. Four
+  expected-failure models keep the individual safety properties non-vacuous,
+  with a deterministic Rust regression pinning stale-handle rejection (issue
+  #220).
 - Add formal verification and deterministic concurrency coverage for exact
   two-phase room publication transactions and the process-local room-event
   mutation handoff. Publication checks cover solo, empty-member, one-phase,

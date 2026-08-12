@@ -45,6 +45,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/DeliveryClasses.tla`     | Spec-first for v3/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
 | `tla/EndToEndGapAccountability.tla` | Flagship v3/P10.D4 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal (validates E5); exhaustive `_Small` + simulation `_Sim` |
 | `tla/ReconnectLossBound.tla` | Additional disconnect/outage exposure: queue + all client-unobserved post-queue stages + burst/rate-bounded outage traffic; exhaustive `_Small` / `_ZeroWindow` + CI-pinned `_ExpectedFailure` |
+| `tla/ReconnectionClaimLifecycle.tla` | Atomic reconnect credential reservation: duplicate valid sockets, invalid identity, stale handles, expiry cleanup, restore failure, and one-time completion; exhaustive `_Small` + four CI-pinned expected failures |
 | `traces/slow-consumer-close-flush-invalid.jsonl` | Checked-in negative proving a slow-consumer close cannot enter the healthy lifecycle close-flush path |
 | `traces/post-queue-close-live-drain-invalid.jsonl` | Checked-in negative proving a canceled live writer cannot drain after finalization closes the queue |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
@@ -846,6 +847,36 @@ no steady-rate traffic is admissible. `_ExpectedFailure` sets
 the exact expected `ReconnectExposureBounded` violation (`7 > 6`). A clean run,
 parse failure, or unrelated violation fails CI.
 
+## Atomic reconnection-claim lifecycle
+
+`ReconnectionClaimLifecycle.tla` closes the bounded state-machine seam between
+the reconnect credential and the downstream room/route restoration transaction.
+One disconnected-player record is raced by two sockets with the valid token and
+certificate identity plus one invalid-identity socket. A successful claim owns a
+globally fresh abstract claim epoch (the model counterpart of production's UUID
+`claim_id`) until the matching handle completes or releases it.
+
+The model exhaustively interleaves claim, release, completion, restore failure,
+window expiry, and cleanup. It proves:
+
+- an invalid token/identity cannot reserve or consume the record;
+- exactly one claim is active and a retained old handle cannot mutate a newer
+  retry;
+- expiry may cross while restoration is in flight, but cleanup cannot remove a
+  claimed record;
+- room, route, or baseline-publication failure releases the credential without
+  consuming it, leaving any later retry subject to the original window; and
+- successful completion consumes the record at most once.
+
+Four expected-failure configurations independently admit an invalid identity,
+ignore the claim-handle ID, clean a claimed expired record, or consume on
+restore failure. Each passes only when TLC emits its exact registered invariant
+violation. The positive configuration explores both valid claimants, the
+attacker, two successive handles, and terminal completion/cleanup. The direct
+Rust counterpart includes a stale-handle regression in `src/reconnection.rs`;
+the existing concurrency, certificate-identity, failure-release, and claimed-GC
+tests cover the other production transitions.
+
 ## Intentionally not modeled (and why)
 
 - **Rate limits / complete relay backpressure dynamics** — quantitative throttling and
@@ -880,9 +911,11 @@ parse failure, or unrelated violation fails CI.
   while reference-client tests prove stale/pre-plan signals fail closed. The
   relay gates remain direct conditionals with no state evolution and are covered
   by `signaling_tests.rs` plus the wire/fuzz property suites.
-- **Reconnection tokens / auth** — orthogonal subsystems; a reconnect is modeled as
+- **Reconnect payload restoration and host-election identity** —
+  `ReconnectionClaimLifecycle.tla` models the token/identity claim and cleanup
+  transaction, while the session model still abstracts a successful reconnect as
   depart-then-join of the same player. One real difference is deliberately not
-  captured: a reconnect restores the disconnect-time `PlayerInfo` snapshot with the
+  captured there: a reconnect restores the disconnect-time `PlayerInfo` snapshot with the
   _original_ `connected_at` (`src/server/reconnection_service.rs`), so the reconnector
   re-enters the host-election order at its original position — and can have its
   previously held authority auto-restored while unheld — whereas the modeled
