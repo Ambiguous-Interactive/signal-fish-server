@@ -209,8 +209,11 @@ What it does and how to enable it:
 - `enabled` turns on negotiation of the token-binding WebSocket subprotocol
   (`subprotocol`, default `signalfish.tokenbinding.v2`). With `enabled=true` and
   `required=false`, clients that advertise the subprotocol send proofs on each
-  JSON or binary message; clients that do not still connect normally — a safe, opt-in
-  rollout.
+  JSON or binary message; clients that do not still connect normally — a safe,
+  opt-in rollout. Custom non-reserved aliases are supported, but a name in the
+  `signalfish.tokenbinding.*` namespace must be exactly
+  `signalfish.tokenbinding.v2`; legacy or future reserved version names fail
+  startup rather than relabeling the v2 wire contract.
 - `required=true` rejects clients that do not advertise the subprotocol and
   requires `enabled=true`. Set this only after every client in your fleet
   supports token binding, or you will lock out existing clients.

@@ -299,6 +299,19 @@ pub(super) fn negotiate_token_binding(
         return Ok(None);
     }
 
+    if !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(&cfg.subprotocol)
+    {
+        tracing::error!(
+            subprotocol = %cfg.subprotocol,
+            "Reserved token-binding subprotocol does not match the v2 wire contract"
+        );
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid token binding subprotocol",
+        )
+            .into_response());
+    }
+
     if cfg.require_client_fingerprint && fingerprint.is_none() {
         tracing::warn!("Token binding requires client fingerprint but none was provided");
         return Err((
@@ -864,5 +877,18 @@ mod tests {
                 TokenBindingProtocolOffer::Unsupported
             );
         }
+    }
+
+    #[test]
+    fn negotiation_rejects_reserved_non_v2_config_when_validation_is_bypassed() {
+        let config = crate::config::TokenBindingConfig {
+            enabled: true,
+            subprotocol: "signalfish.tokenbinding.v1".to_string(),
+            ..crate::config::TokenBindingConfig::default()
+        };
+        let rejection_status = negotiate_token_binding(&config, true, &HeaderMap::new(), None)
+            .err()
+            .map(|response| response.status());
+        assert_eq!(rejection_status, Some(StatusCode::INTERNAL_SERVER_ERROR));
     }
 }

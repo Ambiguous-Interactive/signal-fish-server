@@ -9,11 +9,26 @@ use sha2::Sha256;
 use thiserror::Error;
 
 pub const TOKEN_BINDING_VERSION: u8 = 2;
+pub(crate) const TOKEN_BINDING_SUBPROTOCOL_V2: &str = "signalfish.tokenbinding.v2";
 /// Largest exact integer shared by JSON/ECMAScript implementations.
 pub const TOKEN_BINDING_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const TOKEN_BINDING_JSON_DOMAIN: &[u8] = b"signalfish.tokenbinding.v2\0json\0";
 pub const TOKEN_BINDING_BINARY_DOMAIN: &[u8] = b"signalfish.tokenbinding.v2\0binary\0";
 const TOKEN_BINDING_HKDF_INFO: &[u8] = b"signalfish.tokenbinding.v2/session-key";
+
+/// Whether a configured subprotocol name can carry the v2 wire contract.
+///
+/// Deployments may use an application-specific alias, but names in Signal
+/// Fish's reserved namespace identify a concrete protocol version and must not
+/// relabel the v2 challenge/proof exchange as v1 or a future version.
+#[must_use]
+pub(crate) fn token_binding_subprotocol_is_v2_compatible(subprotocol: &str) -> bool {
+    let token = subprotocol.trim();
+    !token
+        .to_ascii_lowercase()
+        .starts_with("signalfish.tokenbinding.")
+        || token == TOKEN_BINDING_SUBPROTOCOL_V2
+}
 
 /// Supported token-binding signature schemes.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
