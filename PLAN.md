@@ -3109,9 +3109,20 @@ run `31569040602` spent 14.01 seconds in the separate shellcheck job and 58.78
 seconds in Markdown validation; the checks themselves took about 0.37 seconds.
 Folding them projects 59.15 seconds, still one rounded minute and below the
 observed 102-second documentation critical path, versus two runner allocations
-and two rounded minutes before. PR #349 shows the same one-rounded-minute saving
-without extending that run's workflow critical path. No Lychee allocation is
-removed because doing so would weaken coverage or broaden expensive triggers.
+and two rounded minutes before. The first consolidated hosted run
+`31611351537` measured Markdown validation at 68 seconds: one allocation removed
+and about five raw seconds saved against PR #350's two-job aggregate, while both
+variants rounded to two billed minutes. PR #349's slower Markdown baseline would
+have saved one rounded minute. No Lychee allocation is removed because doing so
+would weaken coverage or broaden expensive triggers.
+
+The first consolidated fuzz run `31611351490` was a genuine cold path: its cache
+step reported `No cache found`, the all-target build took 4m54s, all four live
+targets then completed together in 2m03s, and job `94163174579` finished in
+7m29s (7.48 raw, 8 rounded minutes). The comparable cold matrix run
+`31482862177` took 24.08 raw and 26 per-job-rounded minutes, so consolidation
+saved 16.60 raw and 18 rounded Linux minutes. A warm follow-up remains before
+the phase closes.
 
 **Acceptance:** all four manifest-declared fuzz targets execute on every eligible
 run and preserve independent diagnostics and artifacts; cache miss, stale state,

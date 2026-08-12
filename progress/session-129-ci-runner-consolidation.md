@@ -114,6 +114,33 @@ consistency, tooling parity, local shellcheck of the exact extracted inputs,
 actionlint, LLM policy, and hook readiness/preflight checks pass. The first
 adversarial exact-diff review found and drove the hard-watchdog, corpus-trigger,
 executable supervisor-test, cache-language, shellcheck-tradeoff, and diagnostic
-fixes. A zero-finding follow-up review, cold and warm hosted before/after
-measurement, hosted check/review closure, and green-PR evidence remain before
-the phase is complete.
+fixes. Two follow-up rounds drove the remaining timeout and positive-path gaps
+to zero findings. Cold and warm hosted before/after measurement, hosted
+check/review closure, and green-PR evidence remain before the phase is complete.
+
+## Hosted cold measurement
+
+Draft PR #353's first consolidated fuzz run `31611351490` was a genuine cold
+path: job `94163174579` reported `No cache found`. The best-effort all-target
+build ran from 15:16:27Z through 15:21:21Z (4m54s), and all four authoritative
+targets then ran concurrently through 15:23:24Z (2m03s). The complete job was
+green in 7m29s: 7.48 raw and 8 per-job-rounded Linux minutes.
+
+For a like-for-like cold baseline, run `31482862177` also reported `No cache
+found`. Its four jobs consumed 5m54s, 7m13s, 5m32s, and 5m26s: 24.08 raw and 26
+per-job-rounded minutes. The consolidated cold path therefore saves 16.60 raw
+and 18 rounded Linux minutes plus three runner allocations. Every target's log
+ended in `DONE`, and the shared job completed successfully.
+
+Documentation run `31611351537` was also green. `Markdown Code Validation`
+finished in 68 seconds after absorbing the deleted 14.01-second shellcheck job.
+Against PR #350's 58.78-second Markdown plus 14.01-second shellcheck aggregate,
+that removes one allocation and saves about 4.79 raw seconds; both arrangements
+round to two Linux minutes on these samples. PR #349's 92.93 + 11.27-second
+baseline would instead improve from three rounded minutes to the consolidated
+job's two. The result confirms the allocation win but does not overclaim a
+rounded-minute saving on every run.
+
+The documentation-only evidence commit that records these measurements also
+provides the same-SHA-shape warm-cache follow-up. P88 remains validating until
+that warm result and the complete hosted check/review rollup are recorded.
