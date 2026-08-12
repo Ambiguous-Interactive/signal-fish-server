@@ -142,6 +142,23 @@ job's two. The result confirms the allocation win but does not overclaim a
 rounded-minute saving on every run.
 
 The follow-up commit records the cold baseline in the fuzz workflow itself,
-triggering an otherwise build-input-identical warm-cache run. P88 remains
-validating until that warm result and the complete hosted check/review rollup
-are recorded.
+triggering an otherwise build-input-identical warm-cache run.
+
+## Hosted warm measurement and review
+
+Warm run `31612245744`, job `94166377595`, restored the exact
+`v0-rust-fuzz-Linux-x64-52beb3c9-ca1f8154` cache (278 MB). Its all-target build
+ran from 15:26:55Z through 15:30:21Z (3m26s), the four target processes ran
+together through 15:32:24Z (2m03s), and the complete green job took 6m09s:
+6.15 raw and 7 rounded Linux minutes.
+
+The warm matrix baseline `31560173685` consumed 19.10 raw and 22 per-job-rounded
+minutes. The consolidated warm path therefore saves 12.95 raw and 15 rounded
+minutes plus three runner allocations. Together with the cold result, this
+satisfies issue #351's timing requirement without relying on a projection.
+
+The connected review service reported only its known account-quota exhaustion;
+it supplied no code finding or thread. Three independent adversarial passes on
+the exact implementation reached zero findings. P88 remains validating only
+until the final hosted head's repository-owned check rollup is green; then the
+draft can be marked ready and merged to close #351.

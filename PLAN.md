@@ -3100,9 +3100,10 @@ libFuzzer process for 121 seconds after repeating a 1:28–3:28 compile prefix.
 - [x] Add configuration regressions that equate the fuzz target inventory to
   every manifest bin, enforce independent process/status/artifact handling,
   and preserve exact workflow-shellcheck inputs and ordering in four jobs total.
-- [ ] Measure cold and warm consolidated hosted fuzz and documentation jobs,
-  record exact before/after raw and rounded minutes, pass all hosted checks,
-  close review, merge the green PR, and close #351.
+- [x] Measure cold and warm consolidated hosted fuzz and documentation jobs and
+  record exact before/after raw and rounded minutes.
+- [ ] Pass the final hosted check rollup, close review, merge the green PR, and
+  close #351.
 
 The documentation baseline supports the consolidation independently: PR #350
 run `31569040602` spent 14.01 seconds in the separate shellcheck job and 58.78
@@ -3121,15 +3122,18 @@ step reported `No cache found`, the all-target build took 4m54s, all four live
 targets then completed together in 2m03s, and job `94163174579` finished in
 7m29s (7.48 raw, 8 rounded minutes). The comparable cold matrix run
 `31482862177` took 24.08 raw and 26 per-job-rounded minutes, so consolidation
-saved 16.60 raw and 18 rounded Linux minutes. A warm follow-up remains before
-the phase closes.
+saved 16.60 raw and 18 rounded Linux minutes. Warm run `31612245744` then
+restored the 278 MB cache and finished in 6m09s (6.15 raw, 7 rounded minutes),
+versus 19.10 raw and 22 rounded minutes for matrix run `31560173685`: 12.95 raw
+and 15 rounded minutes plus three allocations saved. Both hosted target runs
+were green.
 
 **Acceptance:** all four manifest-declared fuzz targets execute on every eligible
 run and preserve independent diagnostics and artifacts; cache miss, stale state,
 restore failure, prewarm failure, and any target failure cannot false-green;
 stable/required status policy remains satisfied; the shellcheck input and
-fatality when reached are unchanged; measured hosted runner minutes improve; and all
-mandatory local and hosted gates pass.
+fatality when reached are unchanged; measured hosted runner minutes improve;
+and all mandatory local and hosted gates pass.
 
 ---
 
