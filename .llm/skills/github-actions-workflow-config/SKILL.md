@@ -35,8 +35,6 @@ description: >-
 - Invoke local scripts through interpreters (`bash`, `pwsh -File`, `awk -f`,
   `node`); never use direct `run: scripts/foo.sh` execution
 
----
-
 ## 1. Lychee Link Checker Configuration
 
 ### The Problem
@@ -101,16 +99,12 @@ See [testing guide](Skills/testing-core-patterns.md)
 See [testing guide](skills/testing-core-patterns.md)
 ```
 
----
-
 ## 2. Case-Sensitive Filesystem Issues
 
 Windows/macOS may ignore case locally, but Linux CI does not: `Skills/foo.md` fails if the real path is `skills/foo.md`.
 
 **Prevention:** Use consistent lowercase paths, verify Markdown links and Rust `mod`
 statements match actual file case, test on Linux before pushing.
-
----
 
 ## 3. Docker Smoke Test Patterns
 
@@ -201,7 +195,13 @@ on:
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.number ||
+      github.event_name == 'push' && github.ref ||
+      github.run_id
+    }}
   cancel-in-progress: true
 ```
 

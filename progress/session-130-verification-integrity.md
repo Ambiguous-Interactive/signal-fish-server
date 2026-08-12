@@ -52,4 +52,8 @@ workflow hygiene, Actionlint, Markdown, documentation, tooling parity, MSRV,
 LLM policy, and cross-platform hook gates pass. The first adversarial review's
 five findings and the second review's pending-publication replacement finding
 were incorporated; the third pass reported zero findings. The exact-head hosted
-rollup remains before P89 is complete.
+rollup's first Markdownlint attempt then rejected the 197-character concurrency
+example with MD013. The workflow expression itself passed Actionlint; the skill
+example now uses an equivalent folded YAML scalar, and Markdown/YAML policy was
+re-run before publishing the fix. The final hosted rollup remains before P89 is
+complete.
