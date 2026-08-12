@@ -5,13 +5,11 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P89 is complete;
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P90 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, P66 preserved and published the
-> reviewed 0.6.0 source after `main` advanced beyond the prepared commit, and
-> P90 is validating the change that keeps local session notes and repository
-> tooling out of published source artifacts. P53
+> reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
 > server core, the M2
@@ -441,7 +439,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | ✅ Done (s128, PR #350) |
 | P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | ✅ Done (s129, PR #353) |
 | P89 | CI validation and scheduling integrity | S | P88 | CI | ✅ Done (s130, PR #354) |
-| P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | 🟡 Validating (s131) |
+| P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | ✅ Done (s131, PR #356) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3175,7 +3173,7 @@ all local and hosted gates pass.
 
 ---
 
-### P90 — Minimal published crate and local-only session hygiene (#355) (Size S) — 🟡 VALIDATING
+### P90 — Minimal published crate and local-only session hygiene (#355) (Size S) — ✅ DONE
 
 Session 131 closes the gap between the repository's development surface and
 the source artifact published to crates.io. Cargo's default packaging rules
@@ -5403,7 +5401,7 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
 hosted evidence gates; P88 is complete in merged PR #353; P89's CI validation
 and scheduling integrity work is complete in PR #354; P90's published-source
-and local-session hygiene is validating;
+and local-session hygiene is complete in PR #356;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 durable evidence lives in repository artifacts and linked GitHub state, while
