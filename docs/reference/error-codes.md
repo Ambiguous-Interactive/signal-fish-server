@@ -303,7 +303,11 @@ Verify that your `app_id` is present in the configured allowlist. Send an
 enforcement is enabled. A recognized ID is still public and replayable; see
 [Application identification](../authentication.md).
 
-### Spectator join failed (`SPECTATOR_JOIN_FAILED`, `SPECTATOR_NOT_ALLOWED`)
+### Spectator join failed
+
+`SPECTATOR_JOIN_FAILED`, `SPECTATOR_NOT_ALLOWED`, `INVALID_PLAYER_NAME`,
+`INVALID_GAME_NAME`, `INVALID_ROOM_CODE`, `RATE_LIMIT_EXCEEDED`,
+`ROOM_NOT_FOUND`, `TOO_MANY_SPECTATORS`, or `STORAGE_ERROR`
 
 Spectator mode must be enabled for the room. Verify the room exists,
 supports spectators, and has not reached its spectator capacity limit.

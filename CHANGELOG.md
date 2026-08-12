@@ -68,6 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make spectator admission validate and case-normalize room codes, enforce
+  configured game/room naming rules, and share the room-admission attempt budget.
+  Also keep extreme valid idle timeouts and unrepresentably distant internal
+  deadlines later than the process can represent instead of turning overflow
+  into immediate idle, slow-consumer, batch-flush, or shutdown expiry (issue
+  #358).
 - Terminally reconcile connected players when inactive-room maintenance
   deletes their room. Cleanup now generation-fences relay routing, clears local
   assignments and reconnect state, closes the sockets with the distinct `4005

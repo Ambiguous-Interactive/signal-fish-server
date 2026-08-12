@@ -124,7 +124,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX` | `server.room_code_prefix` | `null` | Optional ASCII-alphanumeric generated-code prefix; must be shorter than `protocol.room_code_length` |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS` | `rate_limit.max_room_creations` | `5` | Max room creations per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds (must be > 0) |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Max join attempts per player per window |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Shared max room-creation, seated-join, and spectator-join attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS` | `rate_limit.max_signals` | `600` | Max validated WebRTC Signal dispatch attempts per player per window |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Detailed WebRTC rejection errors per player per window before generic rate-limit errors |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH` | `protocol.max_game_name_length` | `64` | Max characters in a game name |
@@ -193,7 +193,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch (maximum: 65,536) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Exclusive deadline for the initial app-ID/protocol handshake after connect (legacy key name) |
-| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Exclusive inbound-frame deadline after handshake completion (`0` disables) |
+| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Exclusive inbound-frame deadline after handshake completion (`0` disables; values beyond the platform `Instant` range remain later than the process can represent) |
 | `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Cadence for server-initiated RFC 6455 Ping frames (`0` disables; must be ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS` | `websocket.pong_timeout_secs` | `5` | Seconds allowed for the matching Pong before close `4003 activity_timeout` (must be > `0` and ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES` | `websocket.socket_send_buffer_bytes` | `65536` | Requested TCP send-buffer bound ahead of WebSocket control traffic (`0` keeps the platform default; must be ≤ `16777216`) |
@@ -274,7 +274,7 @@ Complete reference of all configuration options with environment variable overri
 ```
 
 - `max_room_creations` - Max room creations per player per time window
-- `max_join_attempts` - Max room join attempts per player per time window
+- `max_join_attempts` - Shared max room-creation, `JoinRoom`, and `JoinAsSpectator` attempts per player per time window
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per time window
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 - `time_window` - Rate limit window in seconds

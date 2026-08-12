@@ -269,6 +269,12 @@ mod tests {
                 expect_error_containing: "",
             },
             Case {
+                name: "extreme idle timeout remains valid",
+                mutate: |config| config.idle_timeout_secs = u64::MAX,
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
                 name: "pong timeout cannot be zero",
                 mutate: |config| config.pong_timeout_secs = 0,
                 expect_ok: false,
@@ -375,6 +381,15 @@ mod tests {
                 mutate: |config| config.max_sojourn_ms = 0,
                 expect_ok: false,
                 expect_error_containing: "max_sojourn_ms must be greater than 0",
+            },
+            Case {
+                name: "extreme sojourn ceiling remains valid without batching",
+                mutate: |config| {
+                    config.enable_batching = false;
+                    config.max_sojourn_ms = u64::MAX;
+                },
+                expect_ok: true,
+                expect_error_containing: "",
             },
             Case {
                 name: "sojourn ceiling below batching interval",

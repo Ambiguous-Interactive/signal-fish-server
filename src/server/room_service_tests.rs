@@ -133,6 +133,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         reconnection_manager.clone(),
         Arc::clone(&connection_manager),
         config.app_id_allowlist_enabled,
+        Arc::clone(&rate_limiter),
     );
 
     let (shutdown_drain_tx, _) = watch::channel(false);

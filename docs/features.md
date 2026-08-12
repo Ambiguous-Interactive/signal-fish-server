@@ -429,7 +429,7 @@ Signal dispatch attempts, and detailed rejected-signal error responses.
 
 - `max_room_creations` - Max room creations per player per time window
 - `time_window` - Window duration in seconds
-- `max_join_attempts` - Max join attempts per player per window
+- `max_join_attempts` - Shared max room-creation, seated-join, and spectator-join attempts per player per window
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per window
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 

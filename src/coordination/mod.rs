@@ -1292,7 +1292,7 @@ pub(crate) struct BackpressuredDelivery {
     handle: ClientDeliveryHandle,
     delivery: DeliveryMessage,
     room_id: Option<RoomId>,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     capacity_witness: Option<CapacityReleaseWitness>,
     timeout: std::time::Duration,
     connection_stats: Option<Arc<crate::metrics::ConnectionDeliveryStats>>,
@@ -1428,9 +1428,7 @@ pub(crate) fn start_message_delivery_in_room(
         handle: handle.clone(),
         delivery,
         room_id,
-        deadline: full_observed_at
-            .checked_add(slow_consumer_timeout)
-            .unwrap_or(full_observed_at),
+        deadline: crate::deadline::after(full_observed_at, slow_consumer_timeout),
         capacity_witness,
         timeout: slow_consumer_timeout,
         connection_stats,
@@ -1471,7 +1469,7 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
     // after expiry cannot revive the expired logical delivery.
     let wait_result = tokio::select! {
         biased;
-        _ = tokio::time::sleep_until(deadline) => {
+        deadline = crate::deadline::wait_until(deadline) => {
             match handle.sender.try_send_delivery_released_before(
                 deadline_retry,
                 room_id,

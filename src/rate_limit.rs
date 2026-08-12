@@ -11,7 +11,8 @@ pub struct RateLimitConfig {
     pub max_room_creations: u32,
     /// Time window for rate limiting
     pub time_window: Duration,
-    /// Maximum number of join attempts per time window (including existing rooms)
+    /// Shared maximum room-creation, seated-join, and spectator-join attempts
+    /// per time window.
     pub max_join_attempts: u32,
     /// Maximum number of WebRTC signaling messages per time window
     pub max_signals: u32,
@@ -205,7 +206,7 @@ impl RoomRateLimiter {
         }
     }
 
-    /// Check if a join attempt is allowed for the given player
+    /// Check if a seated or spectator join attempt is allowed for the player.
     pub async fn check_join_attempt(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.entries.write().await;
         let entry = entries

@@ -38,12 +38,35 @@ pub(super) async fn complete_before_deadline<F>(
 where
     F: Future,
 {
+    complete_before_optional_deadline(Some(deadline), operation).await
+}
+
+/// Run an operation before an optional representable deadline.
+///
+/// A configured duration can be valid while extending beyond the platform's
+/// representable `Instant` range. `None` preserves that meaning as a deadline
+/// beyond this process lifetime instead of inverting it into immediate expiry.
+pub(super) async fn complete_before_optional_deadline<F>(
+    deadline: Option<Instant>,
+    operation: F,
+) -> Result<F::Output, DeadlineElapsed>
+where
+    F: Future,
+{
+    let wait_for_deadline = crate::deadline::wait_until(deadline);
     tokio::pin!(operation);
+    tokio::pin!(wait_for_deadline);
     tokio::select! {
         biased;
-        () = tokio::time::sleep_until(deadline) => Err(DeadlineElapsed),
+        _ = &mut wait_for_deadline => Err(DeadlineElapsed),
         output = &mut operation => Ok(output),
     }
+}
+
+/// Convert a relative duration into an absolute deadline without changing an
+/// overflow into an already-expired instant.
+pub(super) fn deadline_after(start: Instant, duration: Duration) -> Option<Instant> {
+    crate::deadline::after(start, duration)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +209,20 @@ mod tests {
             bounded.await,
             Ok(Ok(())),
             "completion strictly before the deadline must remain healthy"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_deadline_does_not_expire_ready_work() {
+        let deadline = deadline_after(Instant::now(), Duration::from_secs(u64::MAX));
+        assert_eq!(
+            deadline, None,
+            "the extreme valid duration must exercise the overflow boundary"
+        );
+        assert_eq!(
+            complete_before_optional_deadline(deadline, async { 7 }).await,
+            Ok(7),
+            "deadline overflow must mean later than the process can represent"
         );
     }
 }

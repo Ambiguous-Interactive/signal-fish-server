@@ -13,12 +13,12 @@ use tokio::time::Instant;
 
 use crate::server::EnhancedGameServer;
 
-use super::complete_before_deadline;
 use super::connection::{record_outbound_probe_activity, PingProbeState};
 use super::sending::{
     preflight_binary_fallback, send_single_message, send_single_message_ref,
     write_pending_unsupported_report, BinaryFallbackPreflight, SendAccounting, SendDisposition,
 };
+use super::{complete_before_optional_deadline, deadline_after};
 
 /// Message batcher for WebSocket connections
 /// Batches multiple messages together to reduce syscall overhead
@@ -220,15 +220,15 @@ fn queued_write_deadline(
     max_sojourn: Duration,
     write_started_at: Instant,
     known_unsupported: bool,
-) -> Instant {
+) -> Option<Instant> {
     if known_unsupported {
         // The reliable payload has already reached its terminal accounted-drop
         // path. Its exact report is control progress, not unresolved reliable
         // delivery, so unrelated reliable queue age must not expire it.
-        return checked_deadline(write_started_at, max_sojourn);
+        return deadline_after(write_started_at, max_sojourn);
     }
     match queued.class() {
-        Some(crate::protocol::DeliveryClass::Reliable) => checked_deadline(
+        Some(crate::protocol::DeliveryClass::Reliable) => deadline_after(
             receiver
                 .oldest_reliable_enqueued_at()
                 .into_iter()
@@ -240,23 +240,19 @@ fn queued_write_deadline(
         ),
         // Control traffic owns its queue-age deadline. In particular, a fresh
         // DeliveryReport must not inherit the age of stale lossy data.
-        None => checked_deadline(queued.enqueued_at, max_sojourn),
+        None => deadline_after(queued.enqueued_at, max_sojourn),
         // Latest/volatile queue age is resolved by their explicit loss policy.
         // Once selected, retain a bounded write-progress budget so a peer that
         // stops reading cannot wedge the sole socket writer forever.
         Some(crate::protocol::DeliveryClass::Latest | crate::protocol::DeliveryClass::Volatile) => {
-            checked_deadline(write_started_at, max_sojourn)
+            deadline_after(write_started_at, max_sojourn)
         }
     }
 }
 
-fn checked_deadline(start: Instant, duration: Duration) -> Instant {
-    start.checked_add(duration).unwrap_or(start)
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn complete_selected_write<F>(
-    deadline: Instant,
+    deadline: Option<Instant>,
     write: F,
     player_id: &PlayerId,
     server: &EnhancedGameServer,
@@ -266,7 +262,7 @@ async fn complete_selected_write<F>(
 where
     F: Future,
 {
-    match complete_before_deadline(deadline, write).await {
+    match complete_before_optional_deadline(deadline, write).await {
         Ok(result) => Ok(result),
         Err(_) => {
             #[cfg(feature = "trace-validation")]
@@ -567,7 +563,7 @@ mod tests {
             };
             let deadline = Instant::now() + Duration::from_millis(10);
             let mut selected = Box::pin(complete_selected_write(
-                deadline,
+                Some(deadline),
                 write,
                 &player_id,
                 &server,
@@ -615,7 +611,7 @@ mod tests {
         let (release, gate) = tokio::sync::oneshot::channel();
         let deadline = Instant::now() + Duration::from_millis(10);
         let mut selected = Box::pin(complete_selected_write(
-            deadline,
+            Some(deadline),
             gate,
             &player_id,
             &server,
@@ -636,6 +632,35 @@ mod tests {
             None,
             "healthy completion must not request a close"
         );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unrepresentable_sojourn_deadline_does_not_expire_selected_write() {
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(1);
+        let (close, close_listener) = ConnectionCloseSignal::channel();
+
+        assert_eq!(
+            complete_selected_write(
+                None,
+                async { 7 },
+                &player_id,
+                &server,
+                &close,
+                Duration::MAX,
+            )
+            .await,
+            Ok(7),
+            "deadline overflow must not turn a fresh write into slow-consumer expiry"
+        );
+        assert_eq!(close_listener.requested_reason(), None);
         assert_eq!(
             server
                 .metrics()
@@ -776,8 +801,21 @@ mod tests {
                 control_started_at,
                 false,
             ),
-            control.enqueued_at + Duration::from_secs(15),
+            Some(control.enqueued_at + Duration::from_secs(15)),
             "fresh control must not inherit stale volatile age"
+        );
+
+        assert_eq!(
+            queued_write_deadline(
+                &control,
+                None,
+                &rx,
+                Duration::MAX,
+                control_started_at,
+                false,
+            ),
+            None,
+            "an unrepresentable internal duration remains beyond the process lifetime"
         );
 
         let volatile = rx.recv().await.expect("queue open").expect("volatile data");
@@ -792,7 +830,7 @@ mod tests {
                 volatile_started_at,
                 false,
             ),
-            volatile_started_at + Duration::from_secs(15),
+            Some(volatile_started_at + Duration::from_secs(15)),
             "lossy queue age must not trigger recipient eviction"
         );
 
@@ -809,7 +847,7 @@ mod tests {
                 Instant::now(),
                 false,
             ),
-            reliable.enqueued_at + Duration::from_secs(15),
+            Some(reliable.enqueued_at + Duration::from_secs(15)),
             "reliable delivery must retain its end-to-end sojourn ceiling"
         );
 
@@ -831,7 +869,7 @@ mod tests {
                 report_write_started_at,
                 true,
             ),
-            report_write_started_at + Duration::from_secs(15),
+            Some(report_write_started_at + Duration::from_secs(15)),
             "a deterministic unsupported outcome must use report write progress, not reliable queue age"
         );
     }

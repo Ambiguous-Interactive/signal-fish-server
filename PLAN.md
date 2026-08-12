@@ -5,7 +5,7 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P90 is complete;
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P91 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, P66 preserved and published the
@@ -441,6 +441,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P89 | CI validation and scheduling integrity | S | P88 | CI | ✅ Done (s130, PR #354) |
 | P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | ✅ Done (s131, PR #356) |
 | P91 | Fail-closed CI bootstrap and H14 PR isolation | S | P56, P89 | CI | ✅ Done (s132, PR #357) |
+| P92 | Spectator admission and deadline-overflow closure (#358) | S | P27, P30, P79 | Maintenance | 🚧 In progress (s133) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3239,6 +3240,35 @@ zero discovered links or a nonzero Lychee result; H14-relevant pull requests
 run one exact Linux selector with retained diagnostics rather than every
 nightly job; the existing 7/20 scheduled P56 cohort remains comparable; and
 all mandatory local and hosted gates pass.
+
+---
+
+### P92 — Spectator admission and deadline-overflow closure (#358) (Size S) — 🚧 IN PROGRESS
+
+Session 133 closes three production gaps found by a correctness-first
+exploratory sweep. Spectator admission now applies configured game/room
+validation, resolves valid room codes case-insensitively, and consumes the same
+per-player room-admission attempt budget from inside the
+lifecycle-serialized transaction. Absolute-deadline construction now preserves
+unrepresentably distant positive durations as later than the process lifetime
+instead of converting them into immediate expiry.
+
+- [x] Return role-specific `SpectatorJoinFailed` validation and rate-limit
+  errors, preserve role-before-name precedence after quota admission, normalize only the
+  validated room code, and prove seated/spectator quota sharing, reset,
+  rejection metrics, and exactly-one terminal responses.
+- [x] Preserve strict representable deadline semantics while sweeping overflow
+  handling across inbound idle reads, selected socket writes, reliable/control
+  backpressure, latest-value batching, and shutdown connection settling.
+- [ ] Document the corrected protocol, configuration, and error-code contracts;
+  complete mandatory local/hosted validation and adversarial review.
+
+**Acceptance:** valid mixed-case spectator room codes reach the canonical room;
+invalid spectator inputs and exhausted shared budgets return their exact codes;
+extreme accepted idle timeouts never disconnect healthy work
+immediately; all same-class deadline fallbacks remain pending until real
+progress, terminal queue state, or a representable deadline; and every required
+check and review is green.
 
 ---
 
