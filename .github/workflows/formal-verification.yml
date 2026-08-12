@@ -15,7 +15,7 @@
 #     room-event mutation-gate handoff (caller-cancellation immunity, isolated
 #     panic recovery, and weak-registry generation safety), and the atomic
 #     reconnection-claim lifecycle (identity validation, stale-handle rejection,
-#     expiry cleanup exclusion, and failed-restore retry) —
+#     expiry cleanup exclusion, and failed-restore release) —
 #     exploring reachable states.
 #   * Z3 discharges universally quantified SMT proofs of the pure decision
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the
