@@ -5,10 +5,9 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P85 is complete;
-> P86's repository-owned hosted checks are green on PR #350, but its
-> service-owned Copilot reviewer is quota-exhausted; P87 is complete locally
-> and hosted on the same PR. P53 is collecting
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P87 is complete;
+> P88's runner-consolidation implementation is under local and hosted
+> validation. P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, and P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
@@ -45,8 +44,9 @@
 > assets, #205 broader safety work, #207 further measured optimization, #213
 > additional static analyzers, #220
 > formal-verification work beyond the bounded exposure theorem, and #318's
-> remaining cross-platform developer-hook latency evidence. #345's effective-policy
-> required-check audit and legacy unused-features status alias removal are P86.
+> remaining cross-platform developer-hook latency evidence. #351's measured
+> fuzz and documentation runner consolidation is P88. #345's effective-policy
+> required-check audit and legacy unused-features status alias removal are complete in P86.
 > #347's replay-resistant token binding and
 > certificate-bound reconnect credentials are P85. #268's
 > intentional WebRTC 0.20 migration and coordinated Rust 1.91 MSRV raise is P46;
@@ -436,8 +436,9 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P83 | Fail-closed TLS artifacts + deterministic interop teardown | M | P31, P47, P49 | Security / CI | ✅ Done (s124) |
 | P84 | Verified mTLS token binding + check-safe unused-deps consolidation (#344, #345) | M | P83 | Security / CI | ✅ Done (s125, PR #348) |
 | P85 | Replay-resistant token binding + fail-closed/lean CI (#347, #345) | M | P84 | Security / CI | ✅ Done (s126, PR #349) |
-| P86 | Required-check audit + redundant-runner removal (#345) | S | P84, P85 | CI | 🟡 Validating (s127) |
+| P86 | Required-check audit + redundant-runner removal (#345) | S | P84, P85 | CI | ✅ Done (s127, PR #350) |
 | P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | ✅ Done (s128, PR #350) |
+| P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | 🟡 Validating (s129) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -2986,7 +2987,7 @@ main run.
 
 ---
 
-### P86 — Required-check audit + redundant-runner removal (Size S) — 🟡 VALIDATING
+### P86 — Required-check audit + redundant-runner removal (Size S) — ✅ DONE
 
 Session 127 resolves the external policy question deliberately left by P84 and
 P85. The effective GitHub repository view reports that `main` is protected
@@ -3012,8 +3013,8 @@ default branch and contains no required-status-check rule. The historical
   and the daily schedule; preserve audits for manually selected unmerged refs.
 - [x] Record mandatory local validation, repository-owned hosted PR status,
   review-thread closure, and the resulting before/after job allocation evidence.
-- [ ] Resolve the service-owned Copilot reviewer quota failure, reach a fully
-  green check rollup, merge PR #350, and close #345.
+- [x] Merge PR #350 after all repository-owned checks passed, with no required
+  status or actionable review left unresolved, and close #345.
 
 PR #350 carries the phase. Issue #351 tracks the measured, cache- and
 trigger-sensitive follow-up for fuzz build reuse and the remaining documentation
@@ -3065,6 +3066,74 @@ failed restoration releases without consuming the credential, with later retry
 still bounded by the original window; stale handles cannot mutate a newer
 claim; successful restoration consumes the record once; every seeded bug is
 non-vacuous; and all mandatory local and hosted gates pass.
+
+---
+
+### P88 — Measured fuzz and documentation runner consolidation (#351) (Size S) — 🟡 VALIDATING
+
+Session 129 follows P86's low-risk allocation removals with the measured
+cross-job work deliberately deferred to issue #351. PR #349's warm-cache fuzz
+run `31560173685` restored the same Rust cache in four target jobs but still
+spent 19.10 raw and 22 per-job-rounded Linux minutes. Every target used one
+libFuzzer process for 121 seconds after repeating a 1:28–3:28 compile prefix.
+
+- [x] Replace the four-job fuzz matrix with one all-target job: one best-effort
+  shared build prewarms Cargo, then four live target runs execute concurrently
+  and remain the authoritative compile/fuzz gates.
+- [x] Preserve target independence by waiting for every process, printing each
+  complete log, aggregating non-zero statuses only after all four terminate,
+  bounding stuck iterations with an external watchdog well below the job's
+  setup-aware timeout, and retaining one separately named artifact/log bundle
+  per target.
+- [x] Make the cache and prewarm incapable of a false green: cache misses or
+  restore warnings fall back to live compilation, while a target-specific
+  prewarm failure or timeout cannot prevent sibling runs; every target rebuilds
+  or validates its own executable through `cargo fuzz run`.
+- [x] Replace the standalone documentation shellcheck job with an identical
+  input/fatality check inside `Markdown Code Validation`, reusing its checkout
+  and one shellcheck installation without renaming any stable documentation
+  status. The folded check now shares that job's scheduling and failure fanout.
+- [x] Keep both Lychee jobs after an input/trigger/status audit proved they are
+  not equivalent: the dedicated workflow uniquely covers TOML and the scheduled
+  external audit, while the stable documentation job owns the detailed internal
+  checker and a different path scope.
+- [x] Add configuration regressions that equate the fuzz target inventory to
+  every manifest bin, enforce independent process/status/artifact handling,
+  and preserve exact workflow-shellcheck inputs and ordering in four jobs total.
+- [x] Measure cold and warm consolidated hosted fuzz and documentation jobs and
+  record exact before/after raw and rounded minutes.
+- [ ] Pass the final hosted check rollup, close review, merge the green PR, and
+  close #351.
+
+The documentation baseline supports the consolidation independently: PR #350
+run `31569040602` spent 14.01 seconds in the separate shellcheck job and 58.78
+seconds in Markdown validation; the checks themselves took about 0.37 seconds.
+Folding them projects 59.15 seconds, still one rounded minute and below the
+observed 102-second documentation critical path, versus two runner allocations
+and two rounded minutes before. The first consolidated hosted run
+`31611351537` measured Markdown validation at 68 seconds: one allocation removed
+and about five raw seconds saved against PR #350's two-job aggregate, while both
+variants rounded to two billed minutes. PR #349's slower Markdown baseline would
+have saved one rounded minute. No Lychee allocation is removed because doing so
+would weaken coverage or broaden expensive triggers.
+
+The first consolidated fuzz run `31611351490` was a genuine cold path: its cache
+step reported `No cache found`, the all-target build took 4m54s, all four live
+targets then completed together in 2m03s, and job `94163174579` finished in
+7m29s (7.48 raw, 8 rounded minutes). The comparable cold matrix run
+`31482862177` took 24.08 raw and 26 per-job-rounded minutes, so consolidation
+saved 16.60 raw and 18 rounded Linux minutes. Warm run `31612245744` then
+restored the 278 MB cache and finished in 6m09s (6.15 raw, 7 rounded minutes),
+versus 19.10 raw and 22 rounded minutes for matrix run `31560173685`: 12.95 raw
+and 15 rounded minutes plus three allocations saved. Both hosted target runs
+were green.
+
+**Acceptance:** all four manifest-declared fuzz targets execute on every eligible
+run and preserve independent diagnostics and artifacts; cache miss, stale state,
+restore failure, prewarm failure, and any target failure cannot false-green;
+stable/required status policy remains satisfied; the shellcheck input and
+fatality when reached are unchanged; measured hosted runner minutes improve;
+and all mandatory local and hosted gates pass.
 
 ---
 
@@ -5259,9 +5328,8 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 ---
 
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
-hosted evidence gates; P86's repository-owned hosted gates are green but its
-service-owned Copilot review is quota-exhausted; P87's reconnect-claim proof is
-complete locally and hosted;
+hosted evidence gates; P86 and P87 are complete in merged PR #350; P88's
+measured CI runner consolidation is under validation;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 completed session history lives in `progress/session-*.md`._
