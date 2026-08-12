@@ -141,6 +141,7 @@ baseline would instead improve from three rounded minutes to the consolidated
 job's two. The result confirms the allocation win but does not overclaim a
 rounded-minute saving on every run.
 
-The documentation-only evidence commit that records these measurements also
-provides the same-SHA-shape warm-cache follow-up. P88 remains validating until
-that warm result and the complete hosted check/review rollup are recorded.
+The follow-up commit records the cold baseline in the fuzz workflow itself,
+triggering an otherwise build-input-identical warm-cache run. P88 remains
+validating until that warm result and the complete hosted check/review rollup
+are recorded.

@@ -10,6 +10,8 @@
 #
 # Kept off the stable toolchain and out of the workspace so it never perturbs the
 # pinned-stable build (ADR-0003); see fuzz/README.md.
+# Hosted cold baseline: PR #353 run 31611351490 completed this shared job in
+# 7m29s after an explicit cache miss, versus 24m05s across the former matrix.
 
 name: Fuzzing
 
