@@ -101,3 +101,9 @@ Publication and hosted validation completed:
 
 The final PLAN/progress bookkeeping commit is documentation-only; its own
 exact-head documentation checks are recorded on PR #350.
+
+While the final PR matrix settled, scheduled Relay Timing Observations run
+`31568443167` completed successfully on `main`. Its first attempt passed every
+Linux, macOS, and Windows sample/oracle step and retained one artifact per OS,
+advancing P53 from 6/20 to 7/20 per OS. PLAN records the new count; 13 eligible
+scheduled first attempts per OS remain.

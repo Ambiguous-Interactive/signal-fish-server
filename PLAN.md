@@ -1817,11 +1817,17 @@ recorded rather than censored.
 - [ ] Use that distribution to decide, and then enforce, platform-specific PR
   timing gates or correctness-only placement; keep #274 open until this step.
 
-The first six eligible scheduled allocations span multiple implementation sources.
+The first seven eligible scheduled allocations span multiple implementation sources.
 Semantic outcomes remain eligible across that boundary, but timing thresholds
 or comparative timing claims must be stratified by exact source commit (or use
 one implementation cohort); a mixed-source distribution must not be attributed
 to a single implementation.
+
+The 2026-08-12 scheduled first attempt (run `31568443167`) advanced every OS
+cohort to 7/20. Linux, macOS, and Windows completed all five repetitions of all
+six cells with exact delivery and zero backpressure, then uploaded their raw
+observations and complete attempt manifests. Thirteen eligible scheduled first
+attempts per OS remain; reruns do not count.
 
 **Acceptance:** evidence collection is automated and reviewable now, but P53 is
 not complete until the hosted sample threshold is met and the lane-placement
