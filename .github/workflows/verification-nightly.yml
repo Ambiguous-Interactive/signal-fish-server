@@ -74,7 +74,6 @@ on:
       - "tests/webrtc_mesh_budget_e2e.rs"
       - "tests/scenario_realworld_e2e.rs"
       - "tests/sixteen_player_matrix_e2e.rs"
-      - "tests/mixed_encoding_relay_e2e.rs"
       - "tests/asymmetric_bandwidth_flap_e2e.rs"
       - "tests/split_brain_two_instances_e2e.rs"
       - "tests/websocket_test_helpers/**"
@@ -488,7 +487,7 @@ jobs:
       - name: Run mixed-encoding amplification experiment
         id: h14
         if: >-
-          ${{ always() && !cancelled() &&
+          ${{ github.event_name != 'pull_request' && always() && !cancelled() &&
               steps.checkout.outcome == 'success' &&
               steps.toolchain.outcome == 'success' &&
               steps.install-rust.outcome == 'success' &&
@@ -509,7 +508,7 @@ jobs:
           printf '%s\n' "$h14_status" > h14-exit-code.txt
           exit "$h14_status"
       - name: Write H14 attempt manifest
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         shell: bash
         env:
           H14_OUTCOME: ${{ steps.h14.outcome }}
@@ -574,7 +573,7 @@ jobs:
             printf '"passed":%s,"eligible":%s}\n' "$passed" "$eligible"
           } > h14-attempt.json
       - name: Upload H14 attempt evidence
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: h14-${{ github.run_id }}-${{ github.run_attempt }}

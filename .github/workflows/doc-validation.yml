@@ -35,6 +35,9 @@ on:
       - ".lychee.toml"
       - "scripts/read-toml-string.sh"
       - "scripts/check-internal-links.sh"
+      - "scripts/install-lychee.sh"
+      - "scripts/download-verified.sh"
+      - "scripts/run-lychee.sh"
       - ".github/workflows/doc-validation.yml"
       - ".github/scripts/**"
       - ".github/test-fixtures/**"
@@ -49,6 +52,9 @@ on:
       - ".lychee.toml"
       - "scripts/read-toml-string.sh"
       - "scripts/check-internal-links.sh"
+      - "scripts/install-lychee.sh"
+      - "scripts/download-verified.sh"
+      - "scripts/run-lychee.sh"
       - ".github/workflows/doc-validation.yml"
       - ".github/scripts/**"
       - ".github/test-fixtures/**"
@@ -627,32 +633,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Install lychee
+        run: bash scripts/install-lychee.sh
       # Required validation checks repository-owned links only. External hosts are
       # audited by the scheduled, non-gating pass in link-check.yml so their
       # availability cannot make pull-request validation flaky.
       - name: Check repository links with lychee (offline)
-        uses: lycheeverse/lychee-action@v2.9.0
-        with:
-          # Override bundled lychee version (v0.21.0) to include hidden-file matcher
-          # fixes from v0.22.0+ and keep behavior aligned with link-check.yml.
-          lycheeVersion: v0.22.0
-          # Check all markdown files.
-          # Accept HTTP status codes: 200 (OK), 204 (No Content),
-          # 301/302/307/308 (Redirects), 429 (Rate Limit).
-          # Keep CLI --exclude-path entries in sync with .lychee.toml (defense-in-depth).
-          # --remap: validate in-repo /blob/main/ self-links against THIS checkout
-          # instead of github.com/.../main (files new/moved on a branch 404 until
-          # merged, though they are correct). Kept in sync with link-check.yml — see
-          # that workflow for the full rationale and the local-dev parity invocation.
-          args: >-
-            --verbose
-            --no-progress
-            --offline
+        shell: bash
+        run: >-
+            bash scripts/run-lychee.sh --verbose --no-progress --offline
             --accept 200,204,301,302,307,308,429
             --config .lychee.toml
-            --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"
-            --remap "https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server"
-            --remap "https://img\.shields\.io/crates/v/signal-fish-server\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server"
+            --remap 'https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/$1'
+            --remap 'https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server'
+            --remap 'https://img\.shields\.io/crates/v/signal-fish-server\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server'
             --timeout 30
             --max-retries 3
             --exclude-path './target/*'
@@ -665,8 +659,6 @@ jobs:
             --exclude-path site/
             --
             '**/*.md'
-          # Fail on broken links (exit code 1 if any links are broken)
-          fail: true
         env:
           # Optional: Add GitHub token to avoid rate limiting on GitHub links
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
