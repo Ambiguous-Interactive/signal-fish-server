@@ -3000,6 +3000,10 @@ default branch and contains no required-status-check rule. The historical
 - [ ] Record mandatory local validation, hosted PR status, review closure, and
   the resulting before/after job allocation evidence; close #345.
 
+PR #350 carries the phase. Issue #351 tracks the measured, cache- and
+trigger-sensitive follow-up for fuzz build reuse and the remaining documentation
+runner consolidation candidates.
+
 **Acceptance:** repository policy proves the removed status is not required;
 the workflow retains both analyzers and their exact failure semantics in one
 hosted job; no PR remains waiting for a missing check; all mandatory local and

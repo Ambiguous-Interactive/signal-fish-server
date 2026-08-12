@@ -105,5 +105,12 @@ The exact commit candidate passes the complete mandatory local suite:
 Four adversarial review rounds found and closed stale branch-protection claims,
 manual-dispatch coverage, dependency-audit regression, timing/accounting, and
 documentation precision gaps. The final exact-diff review reported zero
-findings. Pull-request publication, review state, and hosted status evidence
-remain to be recorded.
+findings.
+
+PR #350 publishes the phase. Its first documentation link run found that
+force-adding the formerly ignored PLAN exposed 22 links to older session files
+that are not present in a clean checkout. Those historical references now use
+inline-code paths rather than false repository links; both Markdown and the
+complete 1,001-link internal checker pass. Issue #351 records the deliberately
+deferred, measurement-first fuzz-cache and documentation-runner consolidation
+work. Final review state and hosted status evidence remain to be recorded.
