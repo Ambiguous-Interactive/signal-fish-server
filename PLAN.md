@@ -8,8 +8,8 @@
 > Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P92 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
-> recurring H14 hosted control failure, and P93 is repairing reference-client
-> duration overflow. P66 preserved and published the
+> recurring H14 hosted control failure, and P93 has closed reference-client
+> duration overflow in PR #361. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -447,7 +447,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | ✅ Done (s131, PR #356) |
 | P91 | Fail-closed CI bootstrap and H14 PR isolation | S | P56, P89 | CI | ✅ Done (s132, PR #357) |
 | P92 | Spectator admission and deadline-overflow closure (#358) | S | P27, P30, P79 | Maintenance | ✅ Done (s133, PR #359) |
-| P93 | Cross-reference-client deadline integrity (#360) | S | P7, P79, P92 | Maintenance | 🟡 Implementing (s134) |
+| P93 | Cross-reference-client deadline integrity (#360) | S | P7, P79, P92 | Maintenance | ✅ Done (s134, PR #361) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3278,7 +3278,7 @@ check and review is green.
 
 ---
 
-### P93 — Cross-reference-client deadline integrity (#360) (Size S) — 🟡 IMPLEMENTING
+### P93 — Cross-reference-client deadline integrity (#360) (Size S) — ✅ DONE
 
 Session 134 extends P92's overflow contract through the two executable protocol
 references. The native client previously converted an unrepresentable absolute
@@ -3297,8 +3297,17 @@ WebRTC, handshake, or watchdog boundary into immediate failure.
 - [x] Preserve ordinary and zero-duration semantics with data-driven native and
   browser regressions; document the shared behavior and its one intentional
   numeric-representation difference.
-- [ ] Complete mandatory local and hosted validation, adversarial review, and
+- [x] Complete mandatory local and hosted validation, adversarial review, and
   exact-head CI/review rollup.
+
+PR #361 passed the complete hosted Rust, browser, native, TURN, Miri, ASan,
+cross-platform, documentation, and verification matrix. Its first hosted
+Windows live-WebRTC attempt exposed a retained-future stack overflow in the
+initial watchdog wrapper; the corrected wrapper boxes the large caller before
+constructing its state machine, preserves first-poll timeout accounting, and is
+guarded by direct future-size and paused-time regressions. Repeated independent
+review ended with zero actionable findings. The Copilot reviewer reported only
+requester quota exhaustion and produced no code finding.
 
 **Acceptance:** every accepted duration remains exact or later than the process
 can represent; no arithmetic or host-timer overflow becomes immediate expiry;
@@ -5504,7 +5513,7 @@ and scheduling integrity work is complete in PR #354; P90's published-source
 and local-session hygiene is complete in PR #356; P91's fail-closed CI
 bootstrap and H14 isolation are complete in PR #357; P92's spectator/deadline
 server sweep is complete in PR #359; P93's reference-client deadline sweep is
-in implementation under #360;
+complete in PR #361;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 durable evidence lives in repository artifacts and linked GitHub state, while
