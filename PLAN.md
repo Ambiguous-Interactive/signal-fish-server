@@ -5,10 +5,10 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P89 is complete;
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P90 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
-> recurring H14 hosted control failure, and P66 preserved and published the
+> recurring H14 hosted control failure, P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -31,9 +31,9 @@
 > spectator/room-GC lifecycle coherence, and P31 proves the production-minted
 > TURN credential path through a pinned local coturn with a relay-only positive
 > control and mismatched-secret WebSocket-fallback control. See the phase table in
-> §3 for per-phase status and `progress/session-NNN-*.md` for the per-session
-> record — that is the canonical history, and it is deliberately not duplicated
-> here.
+> §3 for per-phase status. Durable decisions and acceptance evidence live in
+> this plan, the relevant source/tests/docs, and linked GitHub issues and pull
+> requests; local `progress/` notes are deliberately not repository history.
 >
 > **Milestone work remaining out-of-repo:** the mobile/Steam platform cells of
 > the P7 matrix, and operating the self-hosted coturn infrastructure (the rest
@@ -439,6 +439,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | ✅ Done (s128, PR #350) |
 | P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | ✅ Done (s129, PR #353) |
 | P89 | CI validation and scheduling integrity | S | P88 | CI | ✅ Done (s130, PR #354) |
+| P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | ✅ Done (s131, PR #356) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3172,6 +3173,41 @@ all local and hosted gates pass.
 
 ---
 
+### P90 — Minimal published crate and local-only session hygiene (#355) (Size S) — ✅ DONE
+
+Session 131 closes the gap between the repository's development surface and
+the source artifact published to crates.io. Cargo's default packaging rules
+included 652 archive entries and 11.1 MiB of unpacked source, most of it CI, tests,
+documentation, formal models, agent guidance, and local planning history.
+
+- [x] Replace the open-ended package exclusion with an explicit allowlist for
+  server/library sources, locked dependency metadata, the complete operator
+  configuration example, license/readme material, and Cargo-generated package
+  metadata. Keep repository-only README references useful on crates.io through
+  absolute links, and reject any new package-relative link to an omitted file.
+- [x] Remove the empty build-script placeholder so the package has no ignored
+  build target or its avoidable Cargo warning.
+- [x] Add a fail-closed package inventory regression derived from tracked
+  runtime sources; newly added repository tooling cannot silently become
+  published payload. Validate that Cargo emits only its expected diagnostics
+  for intentionally omitted repository test and benchmark targets, while
+  release publication suppresses that reviewed diagnostic noise.
+- [x] Remove every tracked `progress/` session note while retaining local files
+  through the existing ignore rule, and make the local-only policy explicit in
+  central agent guidance and a regression test.
+- [x] Narrow unused-dependency analysis to root Rust-graph and workflow inputs
+  on pushes and pull requests while retaining complete weekly/manual analysis,
+  avoiding an observed roughly two rounded Linux minutes on unrelated changes.
+
+**Acceptance:** `cargo package --locked --allow-dirty --list` equals the exact
+runtime-source allowlist and the release gate builds the packaged source with
+all features; `git ls-files progress` is empty while local session paths remain ignored; a
+clean clone does not publish local planning history; unused-dependency analysis
+still triggers for every root Rust graph input and for its own workflow; all
+mandatory local and hosted gates pass.
+
+---
+
 ### P11 — Git-tagged releases + versioned GHCR containers (Size S) — ✅ DONE
 
 **Schedule this before the next crates.io publish or GitHub Release.** A public
@@ -3245,7 +3281,7 @@ and carry tagged source revision
 runtime manifest. This fresh registry evidence closes issue #122 as completed;
 the workflow and Dockerfile policy tests remain the regression guard.
 The current 0.6.0 source, crate, release, binary, and GHCR identities are
-recorded in P66 and `progress/session-108-signal-fish-060-publication.md`.
+recorded in P66 and the merged release-publication history.
 
 ---
 
@@ -3481,7 +3517,7 @@ and Copilot's exact-head request received the account quota response.
 
 ### P0 — Design lock & v2 freeze (Size S) — ✅ DONE
 
-> Completed — see historical record `progress/session-001-p0-design-lock-v2-freeze.md`.
+> Completed in session 001; the locked design and v2 freeze remain below.
 > ADR-0001 + ADR-0002 merged; 44 golden v2 wire snapshot tests (`tests/v2_wire_golden.rs`)
 > freeze the JSON + MessagePack wire format and are enforced in CI.
 
@@ -3508,7 +3544,7 @@ and Copilot's exact-head request received the account quota response.
 
 ### P1 — Version + capability negotiation (Size M) — ✅ DONE
 
-> Completed — see historical record `progress/session-001-p1-version-capability-negotiation.md`.
+> Completed in session 001; the negotiated-version contract remains below.
 > `Transport`/`Topology` enums, optional `Authenticate` fields, extended `ProtocolInfo`,
 > per-connection `NegotiatedProtocol` state, the negotiation/relay-floor logic, config
 > `min/max_protocol_version` + validation, and the `/v3/ws` alias all landed. v2 wire is
@@ -3549,7 +3585,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P2 — Targeted signal relay (Size M) — ✅ DONE
 
-> Completed — see historical record `progress/session-002-p2-targeted-signal-relay.md`.
+> Completed in session 002; the targeted-relay contract remains below.
 > `ClientMessage::Signal` / `ServerMessage::Signal` / `ServerMessage::NewPeer`, the
 > four signaling error codes, a payload-agnostic `src/server/signaling.rs` handler
 > (same-room + WebRTC-transport + self-signal + per-sender rate-limit enforcement,
@@ -3564,7 +3600,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P3 — Session plan / handoff directive + topology selection (Size M) — ✅ DONE
 
-> Completed — see historical record `progress/session-003-p3-session-plan-topology-selection.md`.
+> Completed in session 003; the session-plan contract remains below.
 > `IceServer` / `SessionPeer` / `SessionPlanPayload`, `ServerMessage::SessionPlan(Box<…>)`,
 > a new `src/config/session.rs` (`SessionConfig`) threaded through all construction
 > sites, and a new payload-agnostic `src/server/session_policy.rs` all landed.
@@ -3596,7 +3632,7 @@ per connection. No behavior change yet — pure plumbing.
 > `v3-server-messages.jsonl` `SessionPlan` sample.
 >
 > **Extended in session 007** (see
-> historical record `progress/session-007-mid-session-replanning-host-failover.md`:
+> session 007 implementation and its retained tests:
 > lobby finalization is now actually **persisted** (it previously never reached the
 > room store, leaving every `Finalized` gate dead in production); the finalize
 > non-relay decision is recorded as a sticky per-room `ActiveSessionPlan` that
@@ -3613,7 +3649,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P4 — ICE servers + ephemeral TURN credentials (Size M) — ✅ DONE
 
-> Completed — see historical record `progress/session-004-p4-ice-turn-credentials.md`.
+> Completed in session 004; the ICE/TURN contract remains below.
 > New `src/security/turn_credentials.rs` mints coturn REST credentials
 > (`username = "{expiry}:{player_id}"`, `credential = base64(HMAC-SHA1(secret,
 > username))`; `sha1` is the one added dep, vector-pinned to RFC 2202). New
@@ -3625,7 +3661,7 @@ per connection. No behavior change yet — pure plumbing.
 > enabled ⇒ distinct time-limited creds (HMAC matches the RFC-2202 vector); disabled
 > ⇒ public STUN only. The secret never leaves the server. The deferred `RoomJoined`
 > ICE pre-gather refinement landed in **session 011** (see
-> historical record `progress/session-011-ice-pregather-and-ice-url-validation.md`:
+> session 011 implementation and its retained tests:
 > `RoomJoined` / `Reconnected` carry the composed ICE list, gated by the new
 > `session.enable_ice_pregather` (default true) AND WebRTC enabled AND non-relay
 > desired topology AND non-finalized room AND a v3 WebRTC-capable recipient whose
@@ -3639,14 +3675,14 @@ per connection. No behavior change yet — pure plumbing.
 > **Session 012** removed the never-implemented `managed` (third-party-cloud)
 > TURN mode entirely — TURN is self-hosted only (the server self-mints coturn
 > credentials locally and never contacts an external cloud); see
-> `progress/session-012-self-hosted-turn-only.md`. 44 golden v2 snapshots
+> session 012's self-hosted TURN implementation. 44 golden v2 snapshots
 > byte-identical; reached 110/100 over an adversarial round.
 
 ---
 
 ### P5 — Relay-fallback contract + transport status + metrics (Size S) — ✅ DONE
 
-> Completed — see historical record `progress/session-005-p5-transport-status-metrics.md`.
+> Completed in session 005; the status/metrics contract remains below.
 > New `docs/architecture/transport-fallback.md` documents the Appendix G client
 > contract and the relay-floor-never-closes invariant. New v3-only
 > `ClientMessage::TransportStatus { transport, connected }` (per-connection state +
@@ -3665,7 +3701,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P6 — Docs, samples, `.llm` context (Size S) — ✅ DONE
 
-> Completed — see historical record `progress/session-006-p6-docs-samples-llm-context.md`.
+> Completed in session 006; the documentation contract remains below.
 > `docs/protocol.md` gains a "Protocol v3 additions" section (handshake, the four v3
 > messages, the selection ladder, the transport-qualified late-join decision table,
 > the glare rule, ICE/TURN, and mesh + host sequence diagrams) with v2 unchanged. New
@@ -3689,7 +3725,7 @@ are the small part.
 #### Tasks
 
 1. ~~**Browser reference client** (TypeScript)~~ — ✅ **DONE (session 010)**:
-   see `progress/session-010-p7-browser-reference-client.md` and
+   see session 010 and
    [ADR-0005](docs/adr/0005-browser-reference-client.md). In-repo standalone
    npm package `clients/browser/` (`signal-fish-reference-browser`) driving a
    **real headless-Chromium `RTCPeerConnection`** via `playwright-core`: full
@@ -3702,7 +3738,7 @@ are the small part.
    outlives the CLI (graceful teardown + a pid-reuse-guarded orphan reaper,
    both CI-pinned).
 2. ~~**Native reference client** (Rust)~~ — ✅ **DONE (session 009)**: see
-   `progress/session-009-p7-native-reference-client.md` and
+   session 009 and
    [ADR-0004](docs/adr/0004-native-reference-client.md). In-repo standalone crate
    `clients/native/` (`signal-fish-reference-native`) on **`webrtc-rs` 0.20
    directly** (matchbox-shaped signal payloads per ADR-0002, incl.
@@ -3715,13 +3751,13 @@ are the small part.
    `.github/workflows/webrtc-interop.yml` via `scripts/run-webrtc-interop.sh`.
 3. ~~**In-repo signaling conformance tests**~~ — ✅ **DONE (session 007, exceeded
    scope)**: see
-   historical record `progress/session-007-multipeer-multiprocess-conformance.md`.
+   session 007's retained multiprocess conformance tests.
    `tests/v3_multipeer_e2e.rs` (8 tests over real WebSockets at N=3/4: global glare
    matrix, host star, failover + cascade failover, mixed v2/v3 floor, seat-fill
    late join, wire reconnect) and `tests/v3_multiprocess_e2e.rs` (the compiled
    binary as a real child process over TCP: full mesh session; SIGKILL + same-port
    restart invalidating reconnect tokens), plus a formal layer
-   (historical record `progress/session-007-formal-verification-layer.md`):
+   (completed in session 007):
    TLA+/TLC model of the session core (4 configs, CI-wired), proptest invariant
    suites, and parser fuzz-hardening with a release-profile depth-bomb probe.
 4. **Cross-platform interop matrix** (browser↔native, native↔native, mobile, Steam
@@ -3742,7 +3778,7 @@ are the small part.
    sessions). The mobile/Steam platform cells remain (out-of-repo builds,
    Appendix H).
 5. ~~**Per-platform integration notes** (Appendix H)~~ — ✅ **DONE (session 014)**:
-   see historical record `progress/session-014-p7-platform-integration-guide.md`.
+   completed in session 014.
    New user-facing guide `docs/guides/platform-integration.md` maps every platform to
    its WebRTC stack and integration steps — Godot (built-in / `webrtc-native` =
    libdatachannel — easiest, whole matrix), Unity (native via `com.unity.webrtc` but
@@ -3767,9 +3803,9 @@ stay open until those platform builds exist (out-of-repo).
 ### P8 — TURN infra + deployment + security + scaling (Size L) — ✅ IN-REPO PORTIONS DONE
 
 > In-repo portions completed in session 008 — see
-> historical records `progress/session-008-p8-security-hardening.md`
+> session 008's security-hardening work
 > and
-> and `progress/session-008-p8-turn-deployment-scaling-docs.md`.
+> TURN deployment/scaling documentation.
 
 #### Tasks
 
@@ -3803,7 +3839,7 @@ stay open until those platform builds exist (out-of-repo).
    reconnection-token and metrics-bearer-token compares. The TURN credential
    minting and session-policy/host-election surfaces were independently confirmed
    clean. See
-   historical record `progress/session-013-p8-security-review-hardening.md`.
+   completed in session 013 and retained in the security tests.
    The `/security-review` slash command (a user-triggered, billed cloud review of
    the branch diff) remains available but the substantive review is complete.
 3. **Scaling notes** — ✅ **DONE (session 008)**: new
@@ -4146,7 +4182,7 @@ Every item red-green: the failing test lands in the same PR as the fix.
 
 > **Status (session 016):** A1–A5 landed as one PR (the code fixes, red-green
 > Rust tests, doc corrections, and metric wiring) — see
-> historical record `progress/session-016-p10a-p0-correctness-fixes.md`.
+> session 016 correctness fixes and retained regressions.
 > A1 reuses `last_activity` (refreshed on join/leave/heartbeat-relay) instead of
 > a new `emptied_at` field, with the reconnection-record veto as the
 > authoritative window guard (simpler, no emptiness bookkeeping). **D1
@@ -4217,7 +4253,7 @@ Every item red-green: the failing test lands in the same PR as the fix.
   relay grid passes at the production queue/timeout defaults, so a widened
   test-only config would weaken the evidence and add unused policy.
 - [x] **B2 — extract the real-binary harness (session 017).** Landed — see
-  historical record `progress/session-017-p10b2-real-binary-harness-dedupe.md`.
+  completed in session 017.
   `ServerProcess` (+ `Drop`/`kill_and_wait`/`captured_output`), `reserve_port`,
   the health-poll (`wait_until_healthy`), the spawn helpers (`spawn_server`,
   `spawn_server_on_fixed_port`, `try_spawn_server`), and the timeout constants
@@ -4245,7 +4281,7 @@ Every item red-green: the failing test lands in the same PR as the fix.
   baseline; subsequent frames remain strictly contiguous. Focused cases live in
   the dedicated helper-test binary so they do not multiply across the 25 suites
   that import `websocket_test_helpers`. See
-  `progress/session-030-p10b3-conformance-auditor.md`.
+  session 030's conformance-auditor work.
   — the always-on checker every subsequent e2e asserts. Wraps (does not
   replace) `DeliveryLedger`. Tracks seq per **(receiver ← sender, epoch)**
   with epoch boundaries at `PlayerJoined`/`PlayerReconnected` (note:
@@ -4280,7 +4316,7 @@ Every item red-green: the failing test lands in the same PR as the fix.
   `relay_chaos_e2e` and `scenario_realworld_e2e` retrofits landed with the
   auditor in session 030.
 - [x] **B4 — time abstraction (core).** Landed (session 017) — see
-  historical record `progress/session-017-p10b4-time-abstraction.md`.
+  session 017's time-abstraction work.
   `src/server/connection_manager.rs` now reads `tokio::time::Instant` (the
   activity reaper `collect_expired_clients` + the heartbeat throttle
   `should_update_last_seen`); production behavior is identical (outside a paused
@@ -4509,7 +4545,7 @@ build a perfect-recall proptest twin in
   new-key latest parked; no latest/volatile conservation) → fixed → SHIP.**
   Appendix O.5.
 - [x] **D6 — split-brain seeded constants (session 018).** Landed — see
-  historical record `progress/session-018-p10d6-split-brain-seeded-constants.md`.
+  session 018's split-brain model work.
   `SplitBrainStampBug` in `SequencedRelay.tla` adds a second instance
   (`SendSplit`) that stamps the same sender's stream from an independent
   `counter2`; TLC violates `GapAccountable` in a 4-action trace (duplicate/
@@ -4562,7 +4598,7 @@ live, so these ARE v3.** The §2.2 gating invariant still governs v2/v3: none of
 this is visible below negotiated v3.
 
 - [x] **E1 — `epoch`.** ✅ **DONE (session 023, PR #145 — fully green).** See
-  historical record `progress/session-023-p10e1-incarnation-epoch.md`.
+  session 023's incarnation-epoch work.
   `GameData`/`GameDataBinary` gained `epoch: Option<u32>` beside `seq`;
   `PlayerInfo` (so `RoomJoined.current_players[]` /
   `SpectatorJoined.current_players[]` / `PlayerJoined.player` / `Reconnected`
@@ -4608,7 +4644,7 @@ this is visible below negotiated v3.
   unavailable exact-report capacity fails closed with `4002 slow_consumer`.
   Unsupported-format replacement records its original class and exact range
   before attempting the supplemental error. V2 goldens remain byte-identical.
-  See historical record `progress/session-032-p10e2-delivery-accountability.md`.
+  Completed in session 032 with retained delivery-accountability tests.
 - [x] **E3 — graceful drain.** ✅ **DONE (session 028).** SIGTERM/Ctrl-C now
   starts a drain in `src/main.rs`: new WebSocket upgrades return 503, existing
   room-creating joins are rejected with `SERVER_DRAINING`, negotiated-v3 clients
@@ -4632,7 +4668,7 @@ this is visible below negotiated v3.
   shutdown unregister test, room-creation lock-order rejection test, conditional
   room/spectator/reconnect drain race tests, real-binary SIGTERM multiprocess
   test, v3 `GoingAway` wire golden/round-trip, AsyncAPI/docs/config guards. See
-  historical record `progress/session-028-p10e3-graceful-drain.md`.
+  session 028's graceful-drain work.
 - [x] **E4 — server-initiated WS protocol pings.** ✅ **DONE (session 033).**
   Sent from the socket
   layer below the queues (probe the transport, not the queue):
@@ -4648,7 +4684,7 @@ this is visible below negotiated v3.
   exports aggregate RTT histograms plus a missed-Pong counter. Real-socket tests
   cover matching Pong, stale pre-probe Pong, asymmetric client→server blackhole,
   close 4003, metrics, and the `0` disable path. See
-  `progress/session-033-p10e4-server-websocket-pings.md`.
+  session 033's server WebSocket-ping work.
 - [x] **E5 — `Reconnected` per-sender watermarks.** ✅ **DONE (session
   027).** `Reconnected` payload gained v3-only
   `sender_watermarks: [{player_id, epoch, seq}]` — the authoritative
@@ -4746,7 +4782,7 @@ this is visible below negotiated v3.
   The client checklist carries both one-way fault cases.
 - [x] **F4 — ADR** for the v3 revision (classes + epoch + drain + pings +
   watermarks; the cut list with citations; supersedes the relevant parts of
-  `progress/session-015-bulletproofing-followups.md`). ✅ **DONE (session 034):**
+  session 015 follow-up inventory). ✅ **DONE (session 034):**
   ADR-0006 records the in-place v3 revision, formal/protocol evidence, client
   obligations, and the replay/WebTransport/multi-instance/`SeqReset` cut list.
 
@@ -5364,7 +5400,9 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
 hosted evidence gates; P88 is complete in merged PR #353; P89's CI validation
-and scheduling integrity work is complete in PR #354;
+and scheduling integrity work is complete in PR #354; P90's published-source
+and local-session hygiene is complete in PR #356;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
-completed session history lives in `progress/session-*.md`._
+durable evidence lives in repository artifacts and linked GitHub state, while
+session notes under `progress/` remain local-only._

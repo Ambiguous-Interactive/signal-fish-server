@@ -13,11 +13,20 @@ categories = [
     "web-programming::websocket",
 ]
 rust-version = "1.91.0"
-# Keep the published server crate free of the reference-client tree. Cargo
-# auto-excludes NESTED PACKAGES (clients/native/ has its own Cargo.toml), but
-# plain files directly under clients/ (e.g. clients/README.md) would still be
-# packaged without this explicit exclude.
-exclude = ["clients/"]
+# Keep the published artifact to the server's runtime/library sources and the
+# metadata Cargo needs to install it. An allowlist is deliberate: development
+# benchmarks, extended operator documentation, repository tooling, planning
+# records, tests, and CI files must not silently become crates.io payload.
+# Cargo warns that the deliberately omitted test/benchmark targets are
+# unavailable in the packaged source; the package inventory regression
+# validates that exact warning class.
+include = [
+    "/src/**",
+    "/Cargo.lock",
+    "/config.example.json",
+    "/README.md",
+    "/LICENSE",
+]
 
 # Release workflows may be retried against older immutable sources. This
 # source-owned marker opts only new artifacts into the built-in TLS feature;

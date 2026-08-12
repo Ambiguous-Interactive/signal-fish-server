@@ -5280,7 +5280,7 @@ fn test_release_publication_keeps_probes_outside_the_checkout() {
         "Require crates.io token",
         "if: steps.crate.outputs.exists != 'true'",
         "CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}",
-        "cargo publish --locked --dry-run",
+        "cargo publish --locked --all-features --dry-run --quiet",
         "Verify dry-run preserved a clean checkout",
     ] {
         assert!(
@@ -5293,6 +5293,10 @@ fn test_release_publication_keeps_probes_outside_the_checkout() {
         ensure_tag.contains("needs: [resolve-release, publication-readiness]"),
         "ensure-tag must run only after credentials and the exact package pass readiness.\n\
          Job block:\n{ensure_tag}"
+    );
+    assert!(
+        publish.contains("cargo publish --locked --all-features --quiet"),
+        "crate publication must use the same all-feature, reviewed-diagnostic package policy"
     );
 
     for required in [
@@ -19072,6 +19076,39 @@ fn test_unused_deps_workflow_uses_one_shared_analyzer_job() {
             .and_then(Yaml::as_bool),
         Some(true),
         "cargo-udeps remains informational because it can report false positives"
+    );
+}
+
+#[test]
+fn test_unused_deps_workflow_only_allocates_for_root_rust_graph_changes() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/unused-deps.yml"));
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "unused-deps.yml",
+        &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "build.rs",
+            "rust-toolchain.toml",
+            ".cargo/**",
+            "src/**",
+            "tests/**",
+            "benches/**",
+            "examples/**",
+            ".github/workflows/unused-deps.yml",
+        ],
+    );
+
+    let documents = Yaml::load_from_str(&workflow).expect("unused-deps workflow must parse");
+    let document = documents.first().expect("unused-deps workflow document");
+    let triggers = document
+        .as_mapping_get("on")
+        .or_else(|| document.as_mapping_get("true"))
+        .expect("unused-deps workflow triggers");
+    assert!(
+        triggers.as_mapping_get("workflow_dispatch").is_some(),
+        "unused-deps.yml must retain a manual full-analysis trigger"
     );
 }
 

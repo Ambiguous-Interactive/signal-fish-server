@@ -327,7 +327,7 @@ jobs:
           toolchain: ${{ steps.readiness-toolchain.outputs.channel }}
 
       - name: Validate publish package
-        run: cargo publish --locked --dry-run
+        run: cargo publish --locked --all-features --dry-run --quiet
         working-directory: source
 
       - name: Verify dry-run preserved a clean checkout
@@ -491,7 +491,7 @@ jobs:
         working-directory: source
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish --locked
+        run: cargo publish --locked --all-features --quiet
 
       - name: Install cargo-sbom
         uses: taiki-e/install-action@v2.85.10
