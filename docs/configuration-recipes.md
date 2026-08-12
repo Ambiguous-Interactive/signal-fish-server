@@ -172,10 +172,14 @@ simply fall back to relay (the server warns but still starts).
 
 ## Token binding
 
-Token binding cryptographically ties each WebSocket frame to the connection that
-sent it, so a stolen session token cannot be replayed on a different connection.
-It is an optional zero-trust hardening layer, **off by default**, and is
-currently undocumented elsewhere.
+Token binding requires each JSON client message to carry an HMAC keyed by the
+WebSocket handshake's `Sec-WebSocket-Key`; fingerprint mode additionally checks
+that the proof names the authenticated mTLS leaf certificate. It is **off by
+default** and is also summarized in the configuration reference and feature
+matrix. Because the client chooses `Sec-WebSocket-Key`, this protocol version
+is not replay-resistant against an active client that reuses captured key and
+message material. It also does not turn application bearer credentials such as
+reconnect tokens into certificate-bound credentials; protect those separately.
 
 ```json
 {
@@ -205,24 +209,83 @@ What it does and how to enable it:
 
 - `enabled` turns on negotiation of the token-binding WebSocket subprotocol
   (`subprotocol`, default `signalfish.tokenbinding.v1`). With `enabled=true` and
-  `required=false`, clients that advertise the subprotocol get per-frame proofs;
-  clients that do not still connect normally — a safe, opt-in rollout.
-- `required=true` rejects clients that do not advertise the subprotocol. Set this
-  only after every client in your fleet supports token binding, or you will lock
-  out existing clients.
-- `require_client_fingerprint=true` is reserved for binding proofs to a verified
-  mTLS peer certificate. The built-in listener currently rejects this setting:
-  its authenticated rustls peer certificate is not yet exposed to the
-  WebSocket handler, and client-supplied forwarding headers are deliberately
-  not trusted as identity. Track issue #344's verified extraction work before
-  enabling this knob.
+  `required=false`, clients that advertise the subprotocol send proofs on each
+  JSON message; clients that do not still connect normally — a safe, opt-in
+  rollout.
+- `required=true` rejects clients that do not advertise the subprotocol and
+  requires `enabled=true`. Set this only after every client in your fleet
+  supports token binding, or you will lock out existing clients.
+- `require_client_fingerprint=true` binds every proof to the lowercase
+  hexadecimal SHA-256 digest of the authenticated mTLS leaf certificate's DER
+  bytes. It requires built-in TLS and `tls.client_auth` set to `optional` or
+  `require`, plus `token_binding.required=true` so a client cannot opt out by
+  omitting the subprotocol. Under `optional`, a WebSocket client that presents
+  no certificate is rejected because it cannot satisfy this setting. Clients
+  include the exact 64-character fingerprint in `token_binding.fingerprint`
+  and append those UTF-8 bytes when computing the frame HMAC. Direct
+  client-supplied fingerprint and forwarding headers are ignored and cannot
+  override the rustls identity.
 - `scheme` selects the per-frame signing scheme (default
   `sec_websocket_key_sha256`).
+- Fingerprint-bound connections accept signed JSON messages only. Unsigned
+  binary game-data frames are rejected because the current binary format has
+  no certificate-binding proof envelope. Non-fingerprint token binding retains
+  its existing binary-frame behavior for compatibility.
+
+For `signalfish.tokenbinding.v1`, construct a proof as follows:
+
+1. Parse the complete client message as JSON and remove the top-level
+   `token_binding` member.
+2. Recursively sort every object's member names in ascending Unicode scalar
+   order. Preserve array order.
+3. Serialize that value as compact UTF-8 JSON with no insignificant whitespace,
+   using JSON's shortest required string escapes and finite decimal number
+   forms. Do not send duplicate object member names. Cross-language clients
+   should keep integer values in the interoperable `-(2^53-1)..=2^53-1` range.
+4. Base64-decode the 16-byte `Sec-WebSocket-Key`. Use those bytes as the key for
+   HMAC-SHA-256 over the canonical JSON bytes. When fingerprint binding is
+   enabled, append the 64 lowercase ASCII fingerprint bytes to the HMAC input.
+5. Standard-base64-encode the 32-byte MAC into `token_binding.signature` and
+   set `token_binding.scheme` to `sec_websocket_key_sha256`. Fingerprint-bound
+   clients also set `token_binding.fingerprint` to that same digest.
+
+Normative golden: with handshake key `MDEyMzQ1Njc4OWFiY2RlZg==`, the differently
+ordered payload `{"zzz":{"y":2,"x":"é"},"type":"Ping","aaa":[3,1]}`
+canonicalizes to `{"aaa":[3,1],"type":"Ping","zzz":{"x":"é","y":2}}`
+and produces signature
+`weZ0UzBCfS5Becnv8/cbGfz5V9CcKVgp2LwkRvx5Kq8=` (no fingerprint).
 
 Client impact: when `enabled` but not `required`, none — non-participating
 clients are unaffected. When `required`, clients **must** implement the
 subprotocol, so roll that out fleet-wide first. Start with `enabled=true,
 required=false`, confirm clients negotiate it, then tighten.
+
+Fingerprint binding is a separate tightening step: first deploy trusted client
+certificates, enable `tls.client_auth`, and verify mTLS connectivity. Then set
+`require_client_fingerprint=true` and update proof generation with the actual
+leaf-certificate fingerprint. Certificate rotation changes that value, so
+clients must bind new proofs to the newly presented certificate.
+
+```json
+{
+  "security": {
+    "transport": {
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/run/secrets/server-chain.pem",
+        "private_key_path": "/run/secrets/server-key.pem",
+        "client_ca_cert_path": "/run/secrets/client-ca.pem",
+        "client_auth": "require"
+      },
+      "token_binding": {
+        "enabled": true,
+        "required": true,
+        "require_client_fingerprint": true
+      }
+    }
+  }
+}
+```
 
 ## Metrics auth
 

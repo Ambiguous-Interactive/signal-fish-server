@@ -50,7 +50,7 @@ impl fmt::Display for TokenBindingScheme {
     }
 }
 
-/// Proof object embedded in every token-bound client frame.
+/// Proof object embedded in every token-bound JSON client message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBindingProof {
     pub scheme: TokenBindingScheme,

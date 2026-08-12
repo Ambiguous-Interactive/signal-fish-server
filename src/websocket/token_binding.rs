@@ -31,6 +31,10 @@ pub(super) fn parse_client_message(
             .ok_or(TokenBindingViolation::MissingProof)?;
         let proof: TokenBindingProof =
             serde_json::from_value(proof_value).map_err(TokenBindingViolation::InvalidProof)?;
+        // Never rely on serde_json's map backend: downstream Cargo feature
+        // unification may enable `preserve_order`. Protocol v1 requires
+        // recursive lexical object ordering regardless of that feature.
+        value.sort_all_objects();
         let canonical_payload =
             serde_json::to_vec(&value).map_err(TokenBindingViolation::Canonicalization)?;
         binding
@@ -70,6 +74,18 @@ pub(super) fn negotiate_token_binding(
     headers: &HeaderMap,
     fingerprint: Option<&ClientCertificateFingerprint>,
 ) -> Result<Option<TokenBindingHandshake>, Response> {
+    if !cfg.enabled && (cfg.required || cfg.require_client_fingerprint) {
+        tracing::error!(
+            required = cfg.required,
+            require_client_fingerprint = cfg.require_client_fingerprint,
+            "Invalid token-binding configuration reached WebSocket negotiation"
+        );
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid token binding configuration",
+        )
+            .into_response());
+    }
     if !cfg.enabled {
         return Ok(None);
     }
@@ -83,7 +99,10 @@ pub(super) fn negotiate_token_binding(
             .into_response());
     }
 
-    if cfg.required && !client_offered {
+    // Fingerprint binding is meaningless if a client can omit the subprotocol.
+    // Keep this fail-closed even when a library embedder constructs an invalid
+    // config directly and bypasses the process-level validation.
+    if (cfg.required || cfg.require_client_fingerprint) && !client_offered {
         tracing::warn!("Client did not request the token binding subprotocol, rejecting");
         return Err((
             StatusCode::BAD_REQUEST,
@@ -209,6 +228,7 @@ mod tests {
         fingerprint: Option<&str>,
     ) -> String {
         let mut value = serde_json::to_value(message).expect("serialize test message");
+        value.sort_all_objects();
         let canonical = serde_json::to_vec(&value).expect("serialize canonical payload");
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(secret).expect("create mac");
@@ -255,6 +275,17 @@ mod tests {
     }
 
     #[test]
+    fn token_binding_canonicalization_matches_protocol_golden() {
+        let secret: Arc<[u8]> = Arc::from(b"0123456789abcdef".to_vec().into_boxed_slice());
+        let handshake = handshake_with_secret(secret, false, None);
+        let raw = r#"{"zzz":{"y":2,"x":"é"},"token_binding":{"scheme":"sec_websocket_key_sha256","signature":"weZ0UzBCfS5Becnv8/cbGfz5V9CcKVgp2LwkRvx5Kq8="},"type":"Ping","aaa":[3,1]}"#;
+
+        let parsed = parse_client_message(raw, Some(&handshake))
+            .expect("cross-language canonicalization golden must verify");
+        assert!(matches!(parsed, ClientMessage::Ping));
+    }
+
+    #[test]
     fn token_binding_rejects_invalid_signature() {
         let secret: Arc<[u8]> = Arc::from(b"0123456789abcdef".to_vec().into_boxed_slice());
         let handshake = handshake_with_secret(secret, false, None);
@@ -290,5 +321,46 @@ mod tests {
                 TokenBindingError::MissingClientFingerprint
             ))
         ));
+    }
+
+    #[test]
+    fn fingerprint_binding_cannot_be_bypassed_by_omitting_subprotocol() {
+        let config = crate::config::TokenBindingConfig {
+            enabled: true,
+            required: false,
+            require_client_fingerprint: true,
+            ..crate::config::TokenBindingConfig::default()
+        };
+        let fingerprint = ClientCertificateFingerprint {
+            fingerprint: Arc::from("verified-fingerprint"),
+            source_header: "rustls-peer-certificate",
+        };
+
+        let rejection_status =
+            negotiate_token_binding(&config, false, &HeaderMap::new(), Some(&fingerprint))
+                .err()
+                .map(|response| response.status());
+        assert_eq!(rejection_status, Some(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn disabled_binding_cannot_bypass_required_runtime_policy() {
+        for config in [
+            crate::config::TokenBindingConfig {
+                enabled: false,
+                required: true,
+                ..crate::config::TokenBindingConfig::default()
+            },
+            crate::config::TokenBindingConfig {
+                enabled: false,
+                require_client_fingerprint: true,
+                ..crate::config::TokenBindingConfig::default()
+            },
+        ] {
+            let rejection_status = negotiate_token_binding(&config, false, &HeaderMap::new(), None)
+                .err()
+                .map(|response| response.status());
+            assert_eq!(rejection_status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+        }
     }
 }

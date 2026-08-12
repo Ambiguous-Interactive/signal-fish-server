@@ -164,7 +164,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CLIENT_AUTH` | `security.transport.tls.client_auth` | `none` | TLS client auth mode (`none`, `optional`, `require`) |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__ENABLED` | `security.transport.token_binding.enabled` | `false` | Enable token-binding negotiation |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__REQUIRED` | `security.transport.token_binding.required` | `false` | Require token-binding subprotocol |
-| `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__REQUIRE_CLIENT_FINGERPRINT` | `security.transport.token_binding.require_client_fingerprint` | `false` | Reserved for verified mTLS binding; currently rejected by built-in listener |
+| `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__REQUIRE_CLIENT_FINGERPRINT` | `security.transport.token_binding.require_client_fingerprint` | `false` | Require each proof to carry the authenticated mTLS leaf certificate's lowercase hex SHA-256 fingerprint; requires `token_binding.required=true`, built-in TLS, and `client_auth=optional` or `require`; limits client game data to signed JSON because the binary format has no proof envelope |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SUBPROTOCOL` | `security.transport.token_binding.subprotocol` | `signalfish.tokenbinding.v1` | Token-binding WebSocket subprotocol |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SCHEME` | `security.transport.token_binding.scheme` | `sec_websocket_key_sha256` | Token-binding signing scheme |
 | `SIGNAL_FISH__SECURITY__ALLOWED_APPS` | `security.allowed_apps` | `[]` | JSON array of public app-ID registrations and accounting limits |

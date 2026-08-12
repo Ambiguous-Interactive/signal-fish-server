@@ -106,10 +106,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TURN's plaintext-signaling warning uses effective runtime TLS rather than
   trusting configuration alone.
 - **Breaking:** Stop treating client-controlled forwarding headers as verified
-  mTLS fingerprints. The built-in listener now rejects
-  `require_client_fingerprint=true` until authenticated rustls peer-certificate
-  extraction is available; ordinary token binding and TLS client-certificate
-  authentication remain available independently (issue #344).
+  mTLS fingerprints. The built-in listener now derives a lowercase hexadecimal
+  SHA-256 fingerprint from the authenticated rustls leaf certificate and
+  supports `require_client_fingerprint=true` when token binding is mandatory,
+  built-in TLS is active, and client authentication is optional or required.
+  Missing certificates and subprotocol opt-outs are rejected, conflicting
+  request headers cannot override transport identity, and rotated certificates
+  invalidate proofs bound to the previous fingerprint. Fingerprint-bound
+  connections advertise JSON game data only and reject unsigned binary frames;
+  replay-resistant channel keys and certificate-bound reconnect tokens remain
+  explicitly out of scope and are tracked in issue #347 (issue #344).
 - Enforce `security.cors_origins` on browser WebSocket upgrades at both
   `/v2/ws` and `/v3/ws`, using the same parsed policy as HTTP CORS responses.
   Disallowed origins now receive HTTP 403 and malformed allowlists fail
