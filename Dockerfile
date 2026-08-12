@@ -39,7 +39,6 @@ FROM --platform=$BUILDPLATFORM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
-COPY build.rs ./
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 3: Builder - Cross-compile to $TARGETARCH on the native build host.
@@ -94,7 +93,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --features tls --target "$(cat /tmp/rust-triple)" --recipe-path recipe.json
 
 # Copy actual source code
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
 

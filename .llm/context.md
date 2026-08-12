@@ -73,6 +73,10 @@ CRITICAL: Any test failure = bug to fix. No "flaky" tests.
 
 See [Mandatory Workflow and Checklists](skills/mandatory-workflow/SKILL.md) for full details.
 
+Session notes under `progress/` are local planning artifacts. Keep them
+gitignored and never force-add or commit them; durable decisions belong in the
+relevant source, test, documentation, issue, or pull request.
+
 ```bash
 # Rust changes (ALWAYS run in order)
 cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features

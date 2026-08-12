@@ -1,5 +1,7 @@
 <p align="center">
-  <img src="docs/assets/logo-banner.svg" alt="Signal Fish Server" width="600">
+  <img
+    src="https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/main/docs/assets/logo-banner.svg"
+    alt="Signal Fish Server" width="600">
 </p>
 
 <p align="center">
@@ -11,7 +13,7 @@
     <img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue?style=for-the-badge"
          alt="Documentation">
   </a>
-  <a href="rust-toolchain.toml">
+  <a href="https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/rust-toolchain.toml">
     <img src="https://img.shields.io/badge/MSRV-1.91.0-blue.svg?style=for-the-badge"
          alt="MSRV">
   </a>
@@ -243,7 +245,7 @@ On startup the server looks for `config.json` in the working directory. See
 Any configuration field can be overridden with an environment variable using the
 `SIGNAL_FISH__` prefix. Nested fields use double underscores (`__`) as separators.
 Values are parsed as the type expected by the corresponding config field. Common
-overrides are listed below; see [Configuration](docs/configuration.md) for the
+overrides are listed below; see [Configuration][config-docs] for the
 complete reference.
 
 | Environment Variable                             | Config Path                        | Default   | Description                                         |
@@ -320,15 +322,15 @@ floor and additive v3 capabilities. Messages are JSON objects with a `type`
 field and an optional `data` field. MessagePack encoding is also supported for
 game data when `enable_message_pack_game_data` is enabled.
 
-Building a client? See the [Platform Integration Guide](docs/guides/platform-integration.md)
+Building a client? See the [Platform Integration Guide](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/guides/platform-integration.md)
 for which WebRTC stack to use per platform (browser, native, mobile, Steam, Godot,
-Unity, Unreal), and the [Rust Client Guide](docs/guides/rust-client.md) for a complete
+Unity, Unreal), and the [Rust Client Guide][rust-client-guide] for a complete
 relay-floor client walkthrough.
 
 ### Client Messages
 
-Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](.llm/code-samples/protocol/v2-client-messages.jsonl)
-(v3 additions: [.llm/code-samples/protocol/v3-client-messages.jsonl](.llm/code-samples/protocol/v3-client-messages.jsonl))
+Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-client-messages.jsonl)
+(v3 additions: [.llm/code-samples/protocol/v3-client-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-client-messages.jsonl))
 
 | Message            | Description                                                                      |
 | ------------------ | -------------------------------------------------------------------------------- |
@@ -373,8 +375,8 @@ existing room, current members also receive `PlayerJoined`.
 
 ### Server Messages
 
-Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](.llm/code-samples/protocol/v2-server-messages.jsonl)
-(v3 additions: [.llm/code-samples/protocol/v3-server-messages.jsonl](.llm/code-samples/protocol/v3-server-messages.jsonl))
+Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-server-messages.jsonl)
+(v3 additions: [.llm/code-samples/protocol/v3-server-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl))
 
 | Message              | Description                                              |
 | -------------------- | -------------------------------------------------------- |
@@ -401,7 +403,7 @@ Operators can inspect raw JSON
 `/metrics?includeSnapshot=true`, or Prometheus
 `signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`. At
 quiescence, each class's `attempted` value equals the sum of its terminal
-outcomes. See [Delivery semantics](docs/protocol.md#delivery-semantics).
+outcomes. See [Delivery semantics](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/protocol.md#delivery-semantics).
 
 ### Typical Session Flow
 
@@ -535,7 +537,7 @@ The `GameDatabase` trait is public, so you can implement your own storage
 backend for room-record storage beyond the built-in `InMemoryDatabase`. That
 does not make live rooms restartable: connection routes, reconnect claims,
 replay buffers, relay counters, and session plans remain process-local. See the
-[consistency and durability contract](docs/architecture/consistency-and-durability.md).
+[consistency and durability contract](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/architecture/consistency-and-durability.md).
 
 ## Building from Source
 
@@ -658,7 +660,7 @@ public `app_id` against configured apps and enforces per-app rate limiting from 
 The client handshake sends and checks only a public `app_id`; no client secret
 exists. App IDs provide allowlisting, quota accounting, and
 accidental room-collision isolation, not protection from a hostile client that
-knows another app's public ID. See [Application identification](docs/authentication.md) for
+knows another app's public ID. See [Application identification][auth-docs] for
 the exact trust boundary.
 
 ## MSRV
@@ -670,3 +672,7 @@ The minimum supported Rust version is **1.91.0**.
 MIT -- [Ambiguous Interactive](https://github.com/Ambiguous-Interactive)
 
 See [LICENSE](LICENSE) for the full license text.
+
+[auth-docs]: https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/authentication.md
+[config-docs]: https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/configuration.md
+[rust-client-guide]: https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/guides/rust-client.md

@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce the published crate from 652 archive entries (11.1 MiB unpacked) to
+  92 runtime-source, operator-example, license, and Cargo-metadata entries
+  (3.1 MiB unpacked),
+  excluding development benchmarks, repository-only CI, tests, extended
+  documentation, formal models, planning records, and reference clients while
+  retaining the complete operator configuration example (issue #355).
 - Reduce GitHub Actions runner allocations by removing the obsolete unused-
   features status alias and a no-op documentation job, and by limiting three
   interop-local dependency audits to manual dispatch. Central CI continues to

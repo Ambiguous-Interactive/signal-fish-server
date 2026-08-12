@@ -7,8 +7,7 @@
 #   - cargo-udeps: Detects unused dependencies and features (requires nightly)
 #
 # Runs on:
-#   - Push to main branch
-#   - Pull requests to main
+#   - Pushes and pull requests that change the root Rust package or this workflow
 #   - Weekly schedule (Monday at 00:00 UTC) for proactive dependency cleanup
 #
 # Features:
@@ -53,10 +52,33 @@
 name: Unused Dependencies
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'examples/**'
+      - '.github/workflows/unused-deps.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'examples/**'
+      - '.github/workflows/unused-deps.yml'
   schedule:
     # Run weekly on Monday at 00:00 UTC
     - cron: '0 0 * * 1'
