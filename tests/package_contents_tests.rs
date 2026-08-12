@@ -8,6 +8,10 @@ use common::repo_root;
 fn command_output(program: &str, args: &[&str]) -> Output {
     let output = Command::new(program)
         .args(args)
+        // CI deliberately enables colored Cargo output. Keep nested command
+        // diagnostics deterministic so warning classification compares text,
+        // not terminal presentation escape sequences.
+        .env("CARGO_TERM_COLOR", "never")
         .current_dir(repo_root())
         .output()
         .unwrap_or_else(|error| panic!("failed to run {program} {args:?}: {error}"));
