@@ -1365,6 +1365,10 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
         "Deterministic repository link validation plus scheduled external audit (lychee)",
     ),
     (
+        "h14-pr.yml",
+        "Focused pull-request gate for equal-fault relay accountability",
+    ),
+    (
         "release.yml",
         "Release automation (crates.io + GitHub release)",
     ),
@@ -2576,7 +2580,8 @@ fn test_verification_nightly_retains_h14_hosted_attempt_evidence() {
         .expect("H14 condition");
     assert_eq!(
         h14_condition.split_whitespace().collect::<Vec<_>>(),
-        "${{ always() && !cancelled() && steps.checkout.outcome == 'success' && \
+        "${{ github.event_name != 'pull_request' && always() && !cancelled() && \
+         steps.checkout.outcome == 'success' && \
          steps.toolchain.outcome == 'success' && steps.install-rust.outcome == 'success' && \
          steps.install-nextest.outcome == 'success' }}"
             .split_whitespace()
@@ -2634,7 +2639,7 @@ fn test_verification_nightly_retains_h14_hosted_attempt_evidence() {
     let manifest = &steps[manifest_index];
     assert_eq!(
         manifest.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("always()")
+        Some("always() && github.event_name != 'pull_request'")
     );
     let manifest_env = manifest
         .as_mapping_get("env")
@@ -2690,7 +2695,7 @@ fn test_verification_nightly_retains_h14_hosted_attempt_evidence() {
     let upload = &steps[upload_index];
     assert_eq!(
         upload.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("always()")
+        Some("always() && github.event_name != 'pull_request'")
     );
     assert_eq!(
         upload.as_mapping_get("uses").and_then(Yaml::as_str),
@@ -2715,6 +2720,131 @@ fn test_verification_nightly_retains_h14_hosted_attempt_evidence() {
             .and_then(Yaml::as_integer),
         Some(30),
         "request the repository's effective retention maximum"
+    );
+    assert_eq!(
+        upload_with
+            .as_mapping_get("if-no-files-found")
+            .and_then(Yaml::as_str),
+        Some("error")
+    );
+}
+
+#[test]
+fn test_h14_pr_gate_is_isolated_and_covers_its_complete_input_surface() {
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/h14-pr.yml");
+    let workflow = read_live_file(&workflow_path);
+    let documents = Yaml::load_from_str(&workflow).expect("H14 PR workflow must parse");
+    let document = documents.first().expect("workflow YAML document");
+    let triggers = document
+        .as_mapping_get("on")
+        .or_else(|| document.as_mapping_get("true"))
+        .expect("H14 PR workflow triggers");
+    assert_eq!(
+        triggers.as_mapping().map(saphyr::Mapping::len),
+        Some(1),
+        "the isolated H14 gate must allocate only for pull requests"
+    );
+    let pull_request = triggers
+        .as_mapping_get("pull_request")
+        .expect("H14 gate must run for pull requests");
+    let configured = pull_request
+        .as_mapping_get("paths")
+        .and_then(Yaml::as_sequence)
+        .expect("H14 pull-request paths")
+        .iter()
+        .map(|value| value.as_str().expect("each trigger path is a string"))
+        .collect::<BTreeSet<_>>();
+    let expected = [
+        "src/**",
+        "tests/mixed_encoding_relay_e2e.rs",
+        "tests/test_helpers.rs",
+        "tests/websocket_test_helpers/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        ".config/nextest.toml",
+        "scripts/read-toml-string.sh",
+        ".github/workflows/h14-pr.yml",
+        ".github/workflows/verification-nightly.yml",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(configured, expected, "H14 trigger inputs drifted");
+
+    let nightly_workflow = read_live_file(&root.join(".github/workflows/verification-nightly.yml"));
+    let nightly_documents =
+        Yaml::load_from_str(&nightly_workflow).expect("verification nightly must parse");
+    let nightly_triggers = nightly_documents[0]
+        .as_mapping_get("on")
+        .or_else(|| nightly_documents[0].as_mapping_get("true"))
+        .expect("verification nightly triggers");
+    let broad_pr_paths = nightly_triggers
+        .as_mapping_get("pull_request")
+        .and_then(|trigger| trigger.as_mapping_get("paths"))
+        .and_then(Yaml::as_sequence)
+        .expect("verification nightly pull-request paths");
+    assert!(
+        !broad_pr_paths
+            .iter()
+            .any(|path| { path.as_str() == Some("tests/mixed_encoding_relay_e2e.rs") }),
+        "the isolated H14 test must not allocate the complete nightly workflow"
+    );
+
+    let job = document
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("h14"))
+        .expect("isolated H14 job");
+    assert_eq!(
+        job.as_mapping_get("timeout-minutes")
+            .and_then(Yaml::as_integer),
+        Some(20)
+    );
+    let steps = job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("H14 PR steps");
+    let h14_run = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Run mixed-encoding amplification experiment")
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("H14 PR command");
+    let cargo_commands = shell_logical_lines(h14_run)
+        .into_iter()
+        .filter(|line| line.contains("cargo nextest"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cargo_commands,
+        vec![
+            "cargo nextest run --profile ci --locked --all-features --test \
+             mixed_encoding_relay_e2e --run-ignored ignored-only -E \
+             'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
+             --no-tests fail --success-output final 2>&1 | tee mixed-encoding-output.txt"
+        ],
+        "the isolated PR gate must retain the exact hosted H14 selector and context"
+    );
+    let upload = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Upload H14 diagnostics")
+        })
+        .expect("H14 PR diagnostic upload");
+    assert_eq!(
+        upload.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert_eq!(
+        upload.as_mapping_get("uses").and_then(Yaml::as_str),
+        Some("actions/upload-artifact@v7.0.1")
+    );
+    let upload_with = upload.as_mapping_get("with").expect("upload settings");
+    assert_eq!(
+        upload_with.as_mapping_get("path").and_then(Yaml::as_str),
+        Some("mixed-encoding-output.txt")
     );
     assert_eq!(
         upload_with
@@ -9537,15 +9667,16 @@ fn test_link_check_workflow_exists_and_is_configured() {
         workflow.exists(),
         "link-check.yml workflow is missing.\n\
          Link checking is critical for documentation quality.\n\
-         Create .github/workflows/link-check.yml with lychee-action"
+         Create .github/workflows/link-check.yml with the shared Lychee runner"
     );
 
     let content = read_live_file(&workflow);
 
-    // Verify workflow uses lychee-action
+    // Verify workflow uses the repository's hardened installer and runner.
     assert!(
-        content.contains("lycheeverse/lychee-action"),
-        "link-check.yml must use lycheeverse/lychee-action"
+        content.contains("bash scripts/install-lychee.sh")
+            && content.contains("bash scripts/run-lychee.sh"),
+        "link-check.yml must use the shared hardened Lychee scripts"
     );
 
     // Verify workflow uses .lychee.toml config
@@ -15937,27 +16068,25 @@ fn test_lychee_version_pinned_above_v0_22() {
     // binary version.
 
     let root = repo_root();
-    let workflows = vec![
-        root.join(".github/workflows/link-check.yml"),
-        root.join(".github/workflows/doc-validation.yml"),
-    ];
+    let workflows = vec![root.join("scripts/install-lychee.sh")];
 
     for workflow in workflows {
         let content = read_file(&workflow);
 
-        // Find the lycheeVersion setting
+        // Find the installer version setting.
         let mut found_version = false;
         let mut version_value = String::new();
         let mut version_line = 0;
 
         for (line_num, line) in content.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("lycheeVersion:") {
+            if trimmed.starts_with("readonly LYCHEE_VERSION=") {
                 found_version = true;
                 version_value = trimmed
-                    .strip_prefix("lycheeVersion:")
+                    .strip_prefix("readonly LYCHEE_VERSION=")
                     .unwrap_or("")
                     .trim()
+                    .trim_matches('"')
                     .to_string();
                 version_line = line_num + 1;
                 break;
@@ -15966,10 +16095,10 @@ fn test_lychee_version_pinned_above_v0_22() {
 
         assert!(
             found_version,
-            "{} must set lycheeVersion to override the bundled lychee binary.\n\
-             Without this, the action uses lychee v0.21.0 which has a hidden file matcher bug\n\
+            "{} must pin the installed Lychee version.\n\
+             Versions before v0.22.0 have a hidden file matcher bug\n\
              (lycheeverse/lychee#1936) that scans .lychee.toml as input.\n\n\
-             Fix: Add 'lycheeVersion: v0.22.0' (or newer) to the lychee-action step's 'with:' block.\n\
+             Fix: Pin LYCHEE_VERSION to v0.22.0 or newer.\n\
              File: {}",
             workflow
                 .file_name()
@@ -15987,7 +16116,7 @@ fn test_lychee_version_pinned_above_v0_22() {
 
         assert!(
             parts.len() >= 2,
-            "lycheeVersion must be a valid semver version (e.g., v0.22.0).\n\
+            "LYCHEE_VERSION must be a valid semver version (e.g., 0.24.2).\n\
              Found: '{}' at line {} in {}\n\
              Expected format: vMAJOR.MINOR.PATCH",
             version_value,
@@ -16023,6 +16152,251 @@ fn test_lychee_version_pinned_above_v0_22() {
 }
 
 #[test]
+fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
+    let root = repo_root();
+    let installer_path = root.join("scripts/install-lychee.sh");
+    let installer = read_live_file(&installer_path);
+    let downloader = read_live_file(&root.join("scripts/download-verified.sh"));
+    let devcontainer = read_live_file(&root.join(".devcontainer/Dockerfile"));
+
+    for required in [
+        "--retry 5",
+        "--retry-all-errors",
+        "--retry-delay 2",
+        "--connect-timeout 20",
+        "--max-time 60",
+        "--proto \"=${protocol}\"",
+        "--tlsv1.2",
+        "sha256sum --check",
+    ] {
+        assert!(
+            downloader.contains(required),
+            "verified downloader lost required hardening `{required}`"
+        );
+    }
+
+    for required in [
+        "LYCHEE_VERSION=\"0.24.2\"",
+        "download-verified.sh",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+    ] {
+        assert!(
+            installer.contains(required),
+            "Lychee installer lost required hardening `{required}`"
+        );
+    }
+
+    for workflow_name in ["link-check.yml", "doc-validation.yml"] {
+        let workflow = read_live_file(&root.join(".github/workflows").join(workflow_name));
+        assert!(
+            workflow.contains("run: bash scripts/install-lychee.sh"),
+            "{workflow_name} must use the shared retrying Lychee installer"
+        );
+        assert!(
+            !workflow.contains("lycheeverse/lychee-action"),
+            "{workflow_name} must not retain lychee-action's single-attempt release download"
+        );
+    }
+
+    for shared_pin in [
+        "0.24.2",
+        "73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5",
+        "5d0b0e3aeab240f41920c633a6eaf97599be6eedda034b36e858ede7dba5e535",
+    ] {
+        assert!(
+            installer.contains(shared_pin) && devcontainer.contains(shared_pin),
+            "CI and devcontainer Lychee pins drifted for `{shared_pin}`"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_verified_downloader_retries_transient_http_and_rejects_corruption() {
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn serve(responses: Vec<(&'static str, &'static [u8])>) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture HTTP server");
+        listener
+            .set_nonblocking(true)
+            .expect("make fixture server nonblocking");
+        let address = listener.local_addr().expect("fixture server address");
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut served = 0;
+            for (status, body) in responses {
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "timed out waiting for downloader request"
+                            );
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("fixture server accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("set fixture request timeout");
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).expect("read downloader request");
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write fixture response headers");
+                stream.write_all(body).expect("write fixture response body");
+                served += 1;
+            }
+            served
+        });
+        (format!("http://{address}/fixture"), handle)
+    }
+
+    let root = repo_root();
+    let downloader = root.join("scripts/download-verified.sh");
+    let temp = unique_temp_dir("verified-download");
+    let expected_sha = "62d33f34d79dd4a4590a760d9f6c6926834eadc87e48b9409e029c61e8aa37dc";
+
+    let (retry_url, retry_server) = serve(vec![
+        ("503 Service Unavailable", b""),
+        ("200 OK", b"verified payload\n"),
+    ]);
+    let retry_output = temp.path().join("retried.bin");
+    let retry = Command::new("bash")
+        .arg(&downloader)
+        .args([&retry_url, expected_sha])
+        .arg(&retry_output)
+        .arg("http")
+        .output()
+        .expect("run verified downloader against transient server");
+    assert!(
+        retry.status.success(),
+        "verified download did not recover from HTTP 503: {}{}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(retry_server.join().expect("join retry fixture server"), 2);
+    assert_eq!(
+        fs::read(&retry_output).expect("read verified download"),
+        b"verified payload\n"
+    );
+
+    let (corrupt_url, corrupt_server) = serve(vec![("200 OK", b"corrupted payload\n")]);
+    let corrupt_output = temp.path().join("corrupt.bin");
+    let corrupt = Command::new("bash")
+        .arg(&downloader)
+        .args([&corrupt_url, expected_sha])
+        .arg(&corrupt_output)
+        .arg("http")
+        .output()
+        .expect("run verified downloader against corrupt server");
+    assert!(
+        !corrupt.status.success(),
+        "checksum mismatch must stop the download pipeline"
+    );
+    let corrupt_log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&corrupt.stdout),
+        String::from_utf8_lossy(&corrupt.stderr)
+    );
+    assert!(
+        corrupt_log.contains("FAILED"),
+        "checksum failure must remain visible: {corrupt_log}"
+    );
+    assert_eq!(
+        corrupt_server.join().expect("join corrupt fixture server"),
+        1
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_lychee_runner_fails_closed_for_empty_and_failed_checks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = repo_root();
+    let temp = unique_temp_dir("lychee-runner");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create fake binary directory");
+    let fake_lychee = bin.join("lychee");
+    write_file(
+        &fake_lychee,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+report=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--output" ]]; then
+        report="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+case "${FAKE_LYCHEE_MODE:?}" in
+    success) printf '{\n  "total": 1,\n  "errors": 0\n}\n' > "$report" ;;
+    empty) printf '{\n  "total": 0,\n  "errors": 0\n}\n' > "$report" ;;
+    failure) printf '{\n  "total": 1,\n  "errors": 1\n}\n' > "$report"; exit 2 ;;
+    missing) exit 7 ;;
+esac
+"#,
+    );
+    let mut permissions = fs::metadata(&fake_lychee)
+        .expect("fake Lychee metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_lychee, permissions).expect("make fake Lychee executable");
+
+    let original_path = std::env::var("PATH").expect("PATH must exist");
+    let path = format!("{}:{original_path}", bin.display());
+    let run = |mode: &str| {
+        Command::new("bash")
+            .arg(root.join("scripts/run-lychee.sh"))
+            .arg("fixture.md")
+            .env("PATH", &path)
+            .env("FAKE_LYCHEE_MODE", mode)
+            .output()
+            .expect("run Lychee wrapper")
+    };
+
+    assert!(run("success").status.success());
+    let empty = run("empty");
+    assert!(!empty.status.success(), "zero-link input must fail closed");
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("found no links"));
+    assert_eq!(
+        run("failure").status.code(),
+        Some(2),
+        "the wrapper must propagate Lychee's exact nonzero exit status"
+    );
+    assert_eq!(
+        run("missing").status.code(),
+        Some(7),
+        "missing reports must not mask Lychee's exact failure status"
+    );
+    let failed_summary = Command::new("bash")
+        .arg(root.join("scripts/run-lychee.sh"))
+        .arg("fixture.md")
+        .env("PATH", &path)
+        .env("FAKE_LYCHEE_MODE", "failure")
+        .env("GITHUB_STEP_SUMMARY", temp.path())
+        .output()
+        .expect("run Lychee wrapper with unwritable summary target");
+    assert_eq!(
+        failed_summary.status.code(),
+        Some(2),
+        "reporting failures must not replace Lychee's exact nonzero status"
+    );
+}
+
+#[test]
 fn test_lychee_workflows_use_hardened_args_data_driven() {
     // Data-driven guard against config drift between workflows that run lychee.
     // Both workflows should use the shared .lychee.toml policy and critical
@@ -16034,8 +16408,8 @@ fn test_lychee_workflows_use_hardened_args_data_driven() {
             root.join(".github/workflows/link-check.yml"),
             vec![
                 "--config .lychee.toml",
-                "--remap \"https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server\"",
-                "--remap \"https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server\"",
+                "--remap 'https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server'",
+                "--remap 'https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server'",
                 "--exclude-path tests/",
                 "--exclude-path target/",
                 "--exclude-path third_party/",
@@ -16049,8 +16423,8 @@ fn test_lychee_workflows_use_hardened_args_data_driven() {
             root.join(".github/workflows/doc-validation.yml"),
             vec![
                 "--config .lychee.toml",
-                "--remap \"https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server\"",
-                "--remap \"https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server\"",
+                "--remap 'https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server'",
+                "--remap 'https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server'",
                 "--exclude-path './target/*'",
                 "--exclude-path './third_party/*'",
                 "--exclude-path './.github/test-fixtures/*'",
@@ -16065,8 +16439,8 @@ fn test_lychee_workflows_use_hardened_args_data_driven() {
         let content = read_live_file(&workflow);
 
         assert!(
-            content.contains("lycheeverse/lychee-action"),
-            "{} must use lycheeverse/lychee-action.\nFile: {}",
+            content.contains("bash scripts/run-lychee.sh"),
+            "{} must use the shared Lychee runner.\nFile: {}",
             workflow
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -16290,62 +16664,11 @@ fn test_lychee_args_use_double_dash_separator() {
     let link_check = root.join(".github/workflows/link-check.yml");
     let content = read_file(&link_check);
 
-    // Find the args block for the lychee action
-    let mut in_lychee_step = false;
-    let mut in_args = false;
-    let mut args_lines = Vec::new();
-    let mut args_start_line = 0;
-    let mut args_indent = 0;
-
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        let indent = line.len() - line.trim_start().len();
-
-        // Detect the lychee-action step
-        if trimmed.contains("lychee-action") {
-            in_lychee_step = true;
-        }
-
-        // Detect start of args block within the lychee step
-        if in_lychee_step && trimmed.starts_with("args:") {
-            in_args = true;
-            args_start_line = line_num + 1;
-            args_indent = indent;
-            // The args value might be on the same line (inline) or folded (>-)
-            let after_args = trimmed.strip_prefix("args:").unwrap_or("").trim();
-            if !after_args.is_empty() && after_args != ">-" && after_args != "|" {
-                args_lines.push(after_args.to_string());
-            }
-            continue;
-        }
-
-        // Collect folded args lines (indented continuation lines)
-        if in_args {
-            // Args continuation lines are more indented than the args: key itself;
-            // a line at the same or lesser indent (like `fail:`) ends the block
-            if trimmed.is_empty() || indent > args_indent {
-                args_lines.push(trimmed.to_string());
-            } else {
-                break;
-            }
-        }
-    }
-
-    assert!(
-        !args_lines.is_empty(),
-        "Could not find lychee args block in link-check.yml.\n\
-         Expected 'args:' within the lychee-action step.\n\
-         File: {}",
-        link_check.display()
-    );
-
-    // Join all args lines and check for the -- separator
-    let full_args = args_lines.join(" ");
-
+    let full_args = content.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         full_args.contains(" -- "),
         "Lychee args must use '--' separator between flags and positional arguments.\n\
-         Found args block starting at line {}: {:?}\n\n\
+         Found workflow: {:?}\n\n\
          Without '--', the argument parser may consume glob patterns as values for\n\
          --exclude-path flags instead of treating them as positional file arguments.\n\n\
          Fix: Add '--' before the positional glob patterns:\n\
@@ -16355,7 +16678,6 @@ fn test_lychee_args_use_double_dash_separator() {
              --\n\
              './**/*.md' './**/*.rs' './**/*.toml'\n\n\
          File: {}",
-        args_start_line,
         full_args,
         link_check.display()
     );

@@ -1,0 +1,90 @@
+# Exact pull-request gate for the H14 equal-fault relay contract. The complete
+# verification-nightly workflow has eight jobs and remains narrowly triggered;
+# broad production inputs route only this selector here.
+
+name: H14 Relay Integrity
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/mixed_encoding_relay_e2e.rs"
+      - "tests/test_helpers.rs"
+      - "tests/websocket_test_helpers/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".config/nextest.toml"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/h14-pr.yml"
+      - ".github/workflows/verification-nightly.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  h14:
+    name: Equal-Fault Relay Accountability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.85.10
+        with:
+          tool: cargo-nextest
+      - name: Run mixed-encoding amplification experiment
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test mixed_encoding_relay_e2e --run-ignored ignored-only \
+            -E 'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
+            --no-tests fail \
+            --success-output final 2>&1 | tee mixed-encoding-output.txt
+      - name: Upload H14 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: h14-pr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: mixed-encoding-output.txt
+          retention-days: 30
+          if-no-files-found: error
+      - name: Report H14 result
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### H14 equal-fault relay accountability"
+            echo
+            echo '```text'
+            tail -n 80 mixed-encoding-output.txt 2>/dev/null || echo "no H14 output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

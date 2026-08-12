@@ -440,6 +440,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | ✅ Done (s129, PR #353) |
 | P89 | CI validation and scheduling integrity | S | P88 | CI | ✅ Done (s130, PR #354) |
 | P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | ✅ Done (s131, PR #356) |
+| P91 | Fail-closed CI bootstrap and H14 PR isolation | S | P56, P89 | CI | ✅ Done (s132, PR #357) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3205,6 +3206,39 @@ all features; `git ls-files progress` is empty while local session paths remain 
 clean clone does not publish local planning history; unused-dependency analysis
 still triggers for every root Rust graph input and for its own workflow; all
 mandatory local and hosted gates pass.
+
+---
+
+### P91 — Fail-closed CI bootstrap and H14 PR isolation (Size S) — ✅ DONE
+
+Session 132 follows a `main` documentation-validation failure that occurred
+before link checking: `lychee-action` used a single release-download attempt,
+and a transient curl 56 transport reset failed the required job. The same audit
+found that H14's strong relay-accountability selector did not cover its full
+production input surface on pull requests; adding that surface to the shared
+nightly trigger would instead allocate every long-running nightly job.
+
+- [x] Replace all three action-owned Lychee downloads with one shared,
+  checksum-verified 0.24.2 MUSL installer per job. Retry transient transport
+  failures, preserve exact nonzero status propagation, fail when no links are
+  discovered, retain required offline checking and the scheduled non-gating
+  external audit, and emit a durable job summary.
+- [x] Add a PR-only H14 workflow over the complete server/test/toolchain input
+  surface. Run only the exact production-context selector and retain its raw
+  diagnostic artifact, instead of launching the complete multi-job nightly
+  workflow for every relevant server change.
+- [x] Leave the scheduled P56 cohort's command, job, contract identifier,
+  manifest, artifact shape, and contention context unchanged; only suppress
+  the duplicate H14 invocation on pull-request runs of the broad workflow.
+- [x] Complete mandatory local and hosted validation, adversarial review, and
+  exact-head CI/review rollup.
+
+**Acceptance:** a transient release-download failure receives bounded retries
+and a corrupted artifact fails before execution; link checks cannot pass with
+zero discovered links or a nonzero Lychee result; H14-relevant pull requests
+run one exact Linux selector with retained diagnostics rather than every
+nightly job; the existing 7/20 scheduled P56 cohort remains comparable; and
+all mandatory local and hosted gates pass.
 
 ---
 

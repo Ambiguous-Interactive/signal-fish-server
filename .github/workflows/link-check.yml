@@ -28,6 +28,9 @@ on:
       - '**/*.rs'
       - '**/*.toml'
       - '.lychee.toml'
+      - 'scripts/install-lychee.sh'
+      - 'scripts/download-verified.sh'
+      - 'scripts/run-lychee.sh'
       - '.github/workflows/link-check.yml'
   pull_request:
     branches: [main]
@@ -36,6 +39,9 @@ on:
       - '**/*.rs'
       - '**/*.toml'
       - '.lychee.toml'
+      - 'scripts/install-lychee.sh'
+      - 'scripts/download-verified.sh'
+      - 'scripts/run-lychee.sh'
       - '.github/workflows/link-check.yml'
   schedule:
     # Run weekly on Monday at 00:00 UTC to catch link rot
@@ -56,48 +62,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+      - name: Install lychee
+        run: bash scripts/install-lychee.sh
       - name: Repository Link Checker (offline)
-        uses: lycheeverse/lychee-action@v2.9.0
-        with:
-          # Override default lychee v0.21.0 (bundled with action v2.7.0) to fix
-          # hidden file matcher bug: v0.21.0 scans dotfiles like .lychee.toml
-          # despite --hidden not being set, extracting truncated URLs from regex
-          # patterns in the config. Fixed in v0.22.0 via lycheeverse/lychee#1936.
-          # TODO: Remove lycheeVersion pin once lychee-action bundles v0.22.0+
-          lycheeVersion: v0.22.0
-          # Critical: --exclude-path must be on the CLI because the TOML
-          # exclude_path does not apply to glob-expanded paths (known bug).
-          # Keep these in sync with exclude_path in .lychee.toml (defense-in-depth).
-          # The -- separator prevents --exclude-path from consuming positional args.
-          #
-          # --remap: validate in-repo /blob/main/ self-links against THIS checkout
-          # instead of github.com/.../main. Files added or moved on a branch do not
-          # exist on main until merged, so those self-URLs 404 transiently in CI even
-          # though they are correct. The remap rewrites them to file://<workspace>/<path>
-          # so they are checked against the working tree, while genuinely broken
-          # self-links (wrong path) still fail because the local file is absent.
-          # The capture strips any #anchor / ?query before mapping to a filesystem path.
-          # lychee's remap target must be an absolute URL with a scheme, hence the
-          # absolute file:// using ${{ github.workspace }} (config TOML can't interpolate
-          # env, so this lives on the CLI). NOTE: the backreference MUST be written
-          # `\$1` (escaped): lychee-action runs the args through `eval` under `set -u`,
-          # so a bare `$1` is expanded as the shell's positional param (unbound -> the
-          # job aborts; or empty -> every self-link masks to the workspace dir). The
-          # `\$1` survives the single eval pass and reaches lychee as the literal `$1`.
-          # crates.io rejects automated rendered-page requests under its data-access
-          # policy, and its shields.io badge can time out upstream. Validate both
-          # package-specific URLs through the canonical sparse-index record.
-          # Local-dev parity: run the same check with
-          #   lychee --config .lychee.toml \
-          #     --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://$PWD/\$1" \
-          #     <files...>
-          # (substitute $PWD for ${{ github.workspace }}).
-          args: >-
-            --verbose --no-progress --offline
+        # Critical: --exclude-path must be on the CLI because the TOML
+        # exclude_path does not apply to glob-expanded paths (known bug).
+        # The -- separator prevents --exclude-path from consuming positional args.
+        # Self-links are mapped to this checkout so branch-local files validate
+        # before merge. Single quotes preserve Lychee's literal `$1` capture.
+        shell: bash
+        run: >-
+            bash scripts/run-lychee.sh --verbose --no-progress --offline
             --config .lychee.toml
-            --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"
-            --remap "https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server"
-            --remap "https://img\.shields\.io/crates/v/signal-fish-server\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server"
+            --remap 'https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/$1'
+            --remap 'https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server'
+            --remap 'https://img\.shields\.io/crates/v/signal-fish-server\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server'
             --exclude-path tests/
             --exclude-path target/
             --exclude-path third_party/
@@ -108,21 +87,18 @@ jobs:
             --exclude-path site/
             --
             './**/*.md' './**/*.rs' './**/*.toml'
-          fail: true
       - name: External Link Audit (scheduled, non-gating)
         id: external-links
         if: github.event_name == 'schedule'
         continue-on-error: true
-        uses: lycheeverse/lychee-action@v2.9.0
-        with:
-          lycheeVersion: v0.22.0
-          # Cache and retry settings apply only to this network-dependent audit.
-          args: >-
-            --verbose --no-progress --cache --max-cache-age 7d
+        # Cache and retry settings apply only to this network-dependent audit.
+        shell: bash
+        run: >-
+            bash scripts/run-lychee.sh --verbose --no-progress --cache --max-cache-age 7d
             --config .lychee.toml
-            --remap "https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/\$1"
-            --remap "https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server"
-            --remap "https://img\.shields\.io/crates/v/signal-fish-server\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server"
+            --remap 'https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/([^#?]*)([#?].*)? file://${{ github.workspace }}/$1'
+            --remap 'https://crates\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server'
+            --remap 'https://img\.shields\.io/crates/v/signal-fish-server\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server'
             --exclude-path tests/
             --exclude-path target/
             --exclude-path third_party/
@@ -133,6 +109,5 @@ jobs:
             --exclude-path site/
             --
             './**/*.md' './**/*.rs' './**/*.toml'
-          fail: true
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
