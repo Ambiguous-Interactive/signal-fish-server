@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce GitHub Actions runner allocations by removing the obsolete unused-
+  features status alias and a no-op documentation job, and by limiting three
+  interop-local dependency audits to manual dispatch. Central CI continues to
+  audit every tracked Cargo graph on pushes, pull requests, and its daily
+  schedule; manually selected unmerged interop refs retain local audit coverage
+  (issue #345).
 - Reduce representative Rust pre-commit latency by overlapping worktree
   discovery with hook setup and loading the line-aware panic scanner only for
   added panic macros or removed test-context guards. Untracked Rust files and

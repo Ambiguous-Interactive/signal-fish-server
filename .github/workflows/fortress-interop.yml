@@ -74,8 +74,12 @@ jobs:
       - name: Run Fortress interoperability fixture
         run: bash scripts/run-fortress-interop.sh
 
+  # Central CI audits this graph on push, pull request, and its daily schedule.
+  # Keep this local audit only for manually dispatched unmerged refs, which do
+  # not trigger ci.yml.
   client-deny:
     name: Fortress Dependency Audit
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

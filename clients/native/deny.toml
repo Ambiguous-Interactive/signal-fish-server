@@ -9,8 +9,8 @@
 # `OpenSSL` allowance and legacy `ring` clarification produced an unmatched
 # policy warning instead of protecting anything. A live config test enforces
 # exact ban parity, strict source settings, and license-subset semantics. CI
-# enforces the graph via the client-deny job in
-# .github/workflows/webrtc-interop.yml.
+# enforces the graph via `CI / Dependency Audit` in
+# .github/workflows/ci.yml.
 
 [graph]
 # Only check workspace crates and their dependencies (not dev-dependencies in release)

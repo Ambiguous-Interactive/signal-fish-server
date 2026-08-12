@@ -16,9 +16,10 @@
 # Windows and macOS, so every supported desktop platform executes real ICE,
 # DTLS, SCTP, process, and socket behavior rather than stopping at linkage.
 #
-# The reference client is a standalone crate OUTSIDE the root package (its
-# own Cargo.lock and deny.toml), so this workflow also runs cargo-deny over
-# that independent dependency graph; the root graph is covered by ci.yml.
+# The reference client is a standalone crate outside the root package. The
+# central CI dependency-audit job covers its Cargo.lock and deny.toml alongside
+# every other tracked Cargo graph on push, pull request, and schedule. A local
+# dispatch-only audit covers manually selected unmerged refs.
 #
 # Triggers on changes to the client crate and every input the suite actually
 # depends on: all server sources (the harness spawns the binary built from the
@@ -204,13 +205,13 @@ jobs:
             cargo test --locked --test interop_e2e \
               two_peer_mesh_exchanges_over_live_webrtc -- --exact --nocapture
 
+  # Central CI does not expose workflow_dispatch, so preserve dependency-policy
+  # coverage for manually selected unmerged refs without duplicating PR/push runs.
   client-deny:
     name: Client Dependency Audit
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # The reference client has its own lockfile and dependency graph (webrtc
-    # et al.) that the root deny job never sees; audit it with the crate's
-    # own deny.toml (clients/native/deny.toml).
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -229,7 +230,4 @@ jobs:
         with:
           manifest-path: clients/native/Cargo.toml
           arguments: --all-features
-          # Ensure the Dockerized action installs and uses a concrete toolchain
-          # before executing cargo-deny. This avoids relying on preinstalled
-          # aliases like `stable` that may be absent in the container image.
           rust-version: ${{ steps.deny-msrv.outputs.version }}
