@@ -84,5 +84,20 @@ Local validation completed:
   pre-commit completed in 971 ms
 - `git diff --check`
 
-Exact-head publication, adversarial diff closure, and hosted status remain to
-be recorded.
+Publication and hosted validation completed:
+
+- commits `2a0f4fb` and `5ad313d` were pushed to the existing PR #350, keeping
+  the session in one unstacked pull request;
+- the implementation head `5ad313d5a78be6b31ce29276d92962e0a3ea8fd3`
+  completed with 51 successful checks and five intentional skips, including a
+  green TLA+ model check, all platform Nextest/lint lanes, coverage, MSRV, Miri,
+  ASan, fuzz, and native/browser/Godot interoperability;
+- final thread-aware review inspection found no unresolved thread or requested
+  change, and GitHub reports the PR mergeable with a `clean` merge state;
+- Copilot submitted another quota-exhausted COMMENTED notice. It created no
+  failing check and is not actionable code feedback; and
+- the exact-head proof evidence was recorded on issue #220, which remains open
+  for future bounded model gaps.
+
+The final PLAN/progress bookkeeping commit is documentation-only; its own
+exact-head documentation checks are recorded on PR #350.

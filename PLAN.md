@@ -7,8 +7,8 @@
 >
 > Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P85 is complete;
 > P86's repository-owned hosted checks are green on PR #350, but its
-> service-owned Copilot reviewer is quota-exhausted; P87 is implemented locally
-> and awaiting hosted validation. P53 is collecting
+> service-owned Copilot reviewer is quota-exhausted; P87 is complete locally
+> and hosted on the same PR. P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, and P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
@@ -437,7 +437,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P84 | Verified mTLS token binding + check-safe unused-deps consolidation (#344, #345) | M | P83 | Security / CI | ✅ Done (s125, PR #348) |
 | P85 | Replay-resistant token binding + fail-closed/lean CI (#347, #345) | M | P84 | Security / CI | ✅ Done (s126, PR #349) |
 | P86 | Required-check audit + redundant-runner removal (#345) | S | P84, P85 | CI | 🟡 Validating (s127) |
-| P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | 🟡 Validating (s128) |
+| P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | ✅ Done (s128, PR #350) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3025,7 +3025,7 @@ the central audit, manual-ref coverage, and every substantive documentation gate
 
 ---
 
-### P87 — Atomic reconnect-claim lifecycle proof (#220) (Size S) — 🟡 VALIDATING
+### P87 — Atomic reconnect-claim lifecycle proof (#220) (Size S) — ✅ DONE
 
 Session 128 advances #220 at the retryable single-use reconnect credential
 boundary. The Rust implementation already serialized validation, reservation,
@@ -3047,7 +3047,11 @@ handles across retries.
   release nor complete the later retry it no longer owns.
 - [x] Add `src/reconnection.rs` to both formal-workflow path filters and the
   exact trigger-contract test so claim behavior cannot drift without TLC.
-- [ ] Record exact-head local and hosted validation plus review closure.
+- [x] Record exact-head local and hosted validation plus review closure: the
+  implementation head `5ad313d` passed 51 checks with five intentional skips,
+  no failure/cancellation, no unresolved review thread, and a clean mergeable
+  PR. Copilot's quota-exhausted COMMENTED submission is not a failing check or
+  change request.
 
 **Acceptance:** invalid identity never reserves the credential; duplicate valid
 sockets cannot both own it; expiry cleanup cannot overtake an in-flight claim;
@@ -5251,7 +5255,7 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
 hosted evidence gates; P86's repository-owned hosted gates are green but its
 service-owned Copilot review is quota-exhausted; P87's reconnect-claim proof is
-awaiting hosted validation;
+complete locally and hosted;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 completed session history lives in `progress/session-*.md`._
