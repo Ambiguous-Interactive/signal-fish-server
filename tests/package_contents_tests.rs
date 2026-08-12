@@ -30,6 +30,10 @@ fn command_stdout(program: &str, args: &[&str]) -> String {
     String::from_utf8(command_output(program, args).stdout).expect("command output must be UTF-8")
 }
 
+fn normalize_package_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 fn assert_published_readme_links_resolve(package: &BTreeSet<String>) {
     let readme =
         std::fs::read_to_string(repo_root().join("README.md")).expect("README.md must be readable");
@@ -94,7 +98,9 @@ fn published_crate_contains_only_runtime_sources_and_metadata() {
     let actual = String::from_utf8(package.stdout)
         .expect("cargo package output must be UTF-8")
         .lines()
-        .map(str::to_owned)
+        // Cargo renders native separators on Windows; compare the logical
+        // archive inventory in Git's repository-relative path form.
+        .map(normalize_package_path)
         .collect::<BTreeSet<_>>();
 
     let mut expected = command_stdout("git", &["ls-files", "src"])
@@ -161,6 +167,19 @@ fn published_crate_contains_only_runtime_sources_and_metadata() {
         warnings.contains("is not included in the published package"),
         "Cargo must explain that repository-only test/benchmark targets are intentionally omitted"
     );
+}
+
+#[test]
+fn package_paths_are_normalized_across_platforms() {
+    assert_eq!(
+        normalize_package_path("src/auth/error.rs"),
+        "src/auth/error.rs"
+    );
+    assert_eq!(
+        normalize_package_path("src\\auth\\error.rs"),
+        "src/auth/error.rs"
+    );
+    assert_eq!(normalize_package_path("README.md"), "README.md");
 }
 
 #[test]
