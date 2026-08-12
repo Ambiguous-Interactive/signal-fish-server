@@ -86,10 +86,33 @@ The complete mandatory local suite is green: formatting, zero-warning all-target
 all-feature Clippy, the full locked all-feature test suite, cargo-deny, CI and
 MSRV consistency, tooling parity, workflow hygiene, documentation policy, LLM
 policy, hook readiness, and worktree pre-commit/pre-push checks all pass. The
-focused acceptance evidence includes 17 token-binding units, nine real TLS/mTLS
+focused acceptance evidence includes 20 token-binding units, nine real TLS/mTLS
 tests, 18 AsyncAPI consistency tests, 41 configuration tests, 46 frozen-v2 wire
 goldens, 11 v3 wire properties, and the public-API privacy compile test. Three
 independent adversarial review tracks closed with zero remaining findings.
 
-Publication, hosted checks, and the exact final-head evidence remain to be
-recorded before the phase is marked complete.
+PR [#349](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/349)
+is fully green at exact implementation head
+`78e14901a6da85e443a17755d98a663064479add`: all 19 indexed PR workflows
+settled without a failure (18 succeeded and the inapplicable Dependabot
+auto-merge run skipped). One Rustdoc job initially failed in `actions/checkout`
+because the hosted runner had no usable CA file; its targeted rerun passed
+without a source change. The first hosted heads found three integration gaps
+that local focused gates had not exposed: both standalone dependency graphs
+needed the new HKDF edge, a JSON-fenced documentation fragment was not a
+complete JSON value, and Panic Policy required the sequence frontier increment
+to use explicit checked arithmetic. Each was fixed at its source; the lockfile
+guard now compares dependency lists as well as versions, and the exact hosted
+Panic Policy job is green.
+
+Bugbot's one review finding identified that a configured reserved v1/v3
+subprotocol could relabel the v2 challenge/proof contract. Startup validation
+and negotiation now independently reject that mismatch while preserving custom
+non-reserved aliases and disabled legacy configuration; the thread is resolved.
+The three independent adversarial review tracks report zero remaining findings.
+Hosted cost evidence also validates the analyzer optimization: installing both
+prebuilt analyzers took 0.93 seconds and the complete `Unused Dependencies` job
+took about 110 seconds, versus the audited 526-second cold main run (about 416
+seconds saved on this head). The previously red main Pages deployment also
+passed its targeted rerun, confirming its self-signed-certificate failure was
+runner/network state rather than repository behavior.
