@@ -204,7 +204,9 @@ impl ActiveTokenBinding {
         }
 
         verify_hmac(self.secret(), domain, payload, proof)?;
-        *expected_sequence += 1;
+        *expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(TokenBindingError::SequenceExhausted)?;
         Ok(())
     }
 }
