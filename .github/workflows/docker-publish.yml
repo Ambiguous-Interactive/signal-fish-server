@@ -53,6 +53,11 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: docker-publish
+  queue: max
+  cancel-in-progress: false
+
 jobs:
   resolve:
     name: Resolve container identity

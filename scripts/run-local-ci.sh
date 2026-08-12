@@ -143,7 +143,7 @@ fi
 # Check 2: Clippy (default features)
 if [ "$FIX_MODE" = true ]; then
     run_check "clippy-default" "Running clippy with auto-fix (default features)" \
-        cargo clippy --fix --allow-dirty --allow-staged --all-targets -- -D warnings || true
+        cargo clippy --fix --allow-dirty --allow-staged --all-targets -- -D warnings
 else
     if [ "$FAST_MODE" = false ]; then
         run_check "clippy-default" "Running clippy (default features)" \
@@ -154,7 +154,7 @@ fi
 # Check 3: Clippy (all features)
 if [ "$FIX_MODE" = true ]; then
     run_check "clippy-all" "Running clippy with auto-fix (all features)" \
-        cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings || true
+        cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings
 else
     if [ "$FAST_MODE" = false ]; then
         run_check "clippy-all" "Running clippy (all features)" \

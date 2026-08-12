@@ -35,8 +35,6 @@ description: >-
 - Invoke local scripts through interpreters (`bash`, `pwsh -File`, `awk -f`,
   `node`); never use direct `run: scripts/foo.sh` execution
 
----
-
 ## 1. Lychee Link Checker Configuration
 
 ### The Problem
@@ -101,16 +99,12 @@ See [testing guide](Skills/testing-core-patterns.md)
 See [testing guide](skills/testing-core-patterns.md)
 ```
 
----
-
 ## 2. Case-Sensitive Filesystem Issues
 
 Windows/macOS may ignore case locally, but Linux CI does not: `Skills/foo.md` fails if the real path is `skills/foo.md`.
 
 **Prevention:** Use consistent lowercase paths, verify Markdown links and Rust `mod`
 statements match actual file case, test on Linux before pushing.
-
----
 
 ## 3. Docker Smoke Test Patterns
 
@@ -201,11 +195,19 @@ on:
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.number ||
+      github.event_name == 'push' && github.ref ||
+      github.run_id
+    }}
   cancel-in-progress: true
 ```
 
-Prevents duplicate runs on rapid pushes to the same branch.
+Cancels superseded PR and branch-push runs while keeping scheduled and manual
+runs independent. PR numbers avoid collisions between same-named fork branches;
+the push ref avoids the unique-run-ID fallback that defeats push cancellation.
 
 ---
 
@@ -288,8 +290,6 @@ jobs:
 
 The hook also recognizes per-job comments: `# runs-on-schedule`, `# schedule`,
 `# security`, `# audit`, `# daily`; those jobs do not need an `if:` guard.
-
----
 
 ## Related Skills
 

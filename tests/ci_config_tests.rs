@@ -5784,6 +5784,28 @@ fn test_release_path_calls_container_publication_directly() {
 fn test_container_publish_supports_release_and_backfill_entry_points() {
     let root = repo_root();
     let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+    let documents = Yaml::load_from_str(&docker).expect("docker-publish.yml must parse as YAML");
+    let document = documents.first().expect("docker-publish YAML document");
+    let concurrency = document
+        .as_mapping_get("concurrency")
+        .expect("docker publication must define workflow-level serialization");
+    assert_eq!(
+        concurrency.as_mapping_get("group").and_then(Yaml::as_str),
+        Some("docker-publish"),
+        "all Docker publication entry points must share one workflow-level lane"
+    );
+    assert_eq!(
+        concurrency.as_mapping_get("queue").and_then(Yaml::as_str),
+        Some("max"),
+        "third and later Docker publication runs must queue rather than replace a pending run"
+    );
+    assert_eq!(
+        concurrency
+            .as_mapping_get("cancel-in-progress")
+            .and_then(Yaml::as_bool),
+        Some(false),
+        "in-progress Docker publication must never be cancelled by a newer entry point"
+    );
 
     for required in [
         "workflow_call:",
@@ -6957,6 +6979,18 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
         ("Cargo.toml", "Dependency changes affect doc builds"),
         ("Cargo.lock", "Lockfile changes affect doc builds"),
         (
+            "rust-toolchain.toml",
+            "Rustdoc jobs read the pinned toolchain",
+        ),
+        (
+            ".lychee.toml",
+            "Link validation consumes the shared Lychee policy",
+        ),
+        (
+            "scripts/read-toml-string.sh",
+            "Rustdoc jobs use the shared toolchain reader",
+        ),
+        (
             "scripts/check-internal-links.sh",
             "Detailed internal link checker run by the workflow",
         ),
@@ -6973,17 +7007,14 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
 
     let mut missing_paths = Vec::new();
 
-    for (path_pattern, description) in REQUIRED_DOC_PATHS {
-        let single_quoted = format!("'{path_pattern}'");
-        let double_quoted = format!("\"{path_pattern}\"");
-        let unquoted_list_item = format!("- {path_pattern}");
-        if !content.contains(&single_quoted)
-            && !content.contains(&double_quoted)
-            && !content
-                .lines()
-                .any(|line| line.trim() == unquoted_list_item)
-        {
-            missing_paths.push(format!("  - {path_pattern} ({description})"));
+    for event in ["push", "pull_request"] {
+        let paths = extract_workflow_event_paths(&content, event)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for (path_pattern, description) in REQUIRED_DOC_PATHS {
+            if !paths.contains(*path_pattern) {
+                missing_paths.push(format!("  - {event}.paths: {path_pattern} ({description})"));
+            }
         }
     }
 
@@ -9730,6 +9761,22 @@ struct HygieneRule {
     summary: &'static str,
 }
 
+const CANCELLABLE_CONCURRENCY_GROUP: &str = "${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}";
+
+fn workflow_concurrency_settings(content: &str) -> Option<(Option<String>, Option<bool>)> {
+    let documents = Yaml::load_from_str(content).ok()?;
+    let document = documents.first()?;
+    let concurrency = document.as_mapping_get("concurrency")?;
+    let group = concurrency
+        .as_mapping_get("group")
+        .and_then(Yaml::as_str)
+        .map(ToOwned::to_owned);
+    let cancel_in_progress = concurrency
+        .as_mapping_get("cancel-in-progress")
+        .and_then(Yaml::as_bool);
+    Some((group, cancel_in_progress))
+}
+
 /// Data-driven workflow hygiene test.
 ///
 /// This single test replaces three separate tests that all followed the same
@@ -9761,18 +9808,21 @@ fn test_workflow_hygiene_requirements() {
             filter: Box::new(|_: &str| true),
             check: Box::new(|filename: &str, content: &str| {
                 let mut violations = Vec::new();
-                if !content.contains("concurrency:") {
-                    violations.push(format!(
-                        "{filename}: Missing concurrency group.\n  \
-                         Add:\n  \
-                         concurrency:\n  \
-                           group: ${{{{ github.workflow }}}}-${{{{ github.head_ref || github.run_id }}}}\n  \
-                           cancel-in-progress: true"
-                    ));
-                } else if !content.contains("cancel-in-progress:") {
-                    violations.push(format!(
+                match workflow_concurrency_settings(content) {
+                    None | Some((None, _)) => violations.push(format!(
+                        "{filename}: Missing or invalid top-level concurrency group."
+                    )),
+                    Some((_, None)) => violations.push(format!(
                         "{filename}: Has concurrency but missing 'cancel-in-progress' setting"
-                    ));
+                    )),
+                    Some((Some(group), Some(true))) if group != CANCELLABLE_CONCURRENCY_GROUP => {
+                        violations.push(format!(
+                            "{filename}: cancellable concurrency group is `{group}`; use the \n  \
+                             event-aware PR-number/push-ref/run-ID fallback so fork PRs cannot \n  \
+                             collide and superseded pushes can cancel."
+                        ));
+                    }
+                    Some(_) => {}
                 }
                 violations
             }),
@@ -9782,10 +9832,10 @@ fn test_workflow_hygiene_requirements() {
                       - Reduces queue times for other workflows\n\n\
                       Standard pattern:\n\
                       concurrency:\n\
-                        group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}\n\
+                        group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}\n\
                         cancel-in-progress: true\n\n\
-                      Exception: release.yml uses cancel-in-progress: false to prevent\n\
-                      aborting in-progress releases (which could leave crates.io half-published).",
+                      Exception: release.yml and docker-publish.yml use cancel-in-progress: false\n\
+                      to prevent aborting in-progress publication.",
         },
         // Rule 2: Job timeouts ------------------------------------------------
         HygieneRule {
@@ -17065,6 +17115,36 @@ fn test_dependabot_npm_directories_cover_every_locked_package() {
 }
 
 #[test]
+fn test_workflow_consumed_configuration_paths_trigger_validation() {
+    let root = repo_root();
+    let cases = [
+        (
+            ".github/workflows/actionlint.yml",
+            vec![".github/actionlint.yaml"],
+        ),
+        (
+            ".github/workflows/llm-file-sizes.yml",
+            vec![".github/workflows/llm-file-sizes.yml"],
+        ),
+    ];
+
+    for (workflow_path, required_paths) in cases {
+        let workflow = read_file(&root.join(workflow_path));
+        for event in ["push", "pull_request"] {
+            let paths = extract_workflow_event_paths(&workflow, event)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            for required_path in &required_paths {
+                assert!(
+                    paths.contains(*required_path),
+                    "{workflow_path} {event}.paths must include {required_path} because the workflow consumes it"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn test_fuzz_dependency_resolution_is_locked_in_ci() {
     let root = repo_root();
     let tracked = Command::new("git")
@@ -17670,26 +17750,14 @@ fn test_dependabot_auto_merge_workflow_hardening() {
              contents: read",
         workflow_path.display()
     );
-    let concurrency_block = extract_yaml_mapping_block(&normalized_content, "concurrency", 0)
-        .unwrap_or_else(|| {
-            panic!(
-                "dependabot-auto-merge.yml must define top-level `concurrency` as a block mapping.\n\
-                 File: {}",
-                workflow_path.display()
-            )
-        });
     assert!(
-        concurrency_block
-            .lines()
-            .any(|line| line.trim_start() == "cancel-in-progress: true")
-            && concurrency_block.contains("group:")
-            && concurrency_block.contains("${{ github.workflow }}")
-            && concurrency_block.contains("${{ github.head_ref || github.run_id }}"),
+        workflow_concurrency_settings(&normalized_content)
+            == Some((Some(CANCELLABLE_CONCURRENCY_GROUP.to_string()), Some(true))),
         "dependabot-auto-merge.yml must declare workflow-level concurrency with cancellation.\n\
          File: {}\n\
          Fix:\n\
            concurrency:\n\
-             group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}\n\
+             group: {CANCELLABLE_CONCURRENCY_GROUP}\n\
              cancel-in-progress: true",
         workflow_path.display()
     );
@@ -21637,6 +21705,24 @@ fn test_run_local_ci_runs_actionlint_when_available() {
             && content.contains("actionlint \"${ACTIONLINT_WORKFLOWS[@]}\""),
         "run-local-ci.sh should validate every .yml and .yaml workflow file with actionlint."
     );
+}
+
+#[test]
+fn test_run_local_ci_clippy_fix_failures_remain_fatal() {
+    let script = read_live_file(&repo_root().join("scripts/run-local-ci.sh"));
+    for command in [
+        "cargo clippy --fix --allow-dirty --allow-staged --all-targets -- -D warnings",
+        "cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings",
+    ] {
+        let line = script
+            .lines()
+            .find(|line| line.contains(command))
+            .unwrap_or_else(|| panic!("run-local-ci.sh must retain `{command}`"));
+        assert!(
+            !line.contains("|| true"),
+            "run-local-ci.sh must not erase a failed Clippy auto-fix status: {line}"
+        );
+    }
 }
 
 const LOCAL_CI_FAST_SKIPPED_CHECKS: &[(&str, &str, &str)] = &[
@@ -28161,133 +28247,40 @@ fn line_runs_full_test_suite(line: &str) -> bool {
 }
 
 #[test]
-fn test_mutation_scope_matches_workflow_path_filter() {
-    // Every mutated module must also be a PR trigger for the mutation workflow:
-    // the `examine_globs` src entries in .cargo/mutants.toml must be a subset of
-    // the `src/...rs` entries under `on.pull_request.paths` in mutation.yml.
-    // Otherwise a PR could change a mutated module without ever running mutation.
-
-    let mutants_toml = read_file(&repo_root().join(".cargo/mutants.toml"));
+fn test_mutation_workflow_is_periodic_not_per_pr() {
     let workflow = read_mutation_workflow();
+    let documents = Yaml::load_from_str(&workflow).expect("mutation workflow must parse as YAML");
+    let document = documents.first().expect("mutation workflow YAML document");
+    let triggers = document
+        .as_mapping_get("on")
+        .or_else(|| document.as_mapping_get("true"))
+        .expect("mutation workflow must define triggers");
 
-    // examine_globs src entries.
-    let examine_src: BTreeSet<String> = parse_toml_string_array(&mutants_toml, "examine_globs")
-        .into_iter()
-        .filter(|p| p.starts_with("src/") && p.ends_with(".rs"))
-        .collect();
-
-    // on.pull_request.paths src entries. The `paths:` block (under
-    // on.pull_request) is a multi-line list of `- "..."` items. mutation.yml has
-    // exactly one such list, so scanning the file for `- "src/....rs"` items
-    // captures the pull_request.paths source set authoritatively.
-    let mut workflow_src: BTreeSet<String> = BTreeSet::new();
-    for line in workflow.lines() {
-        let trimmed = line.trim_start();
-        if let Some(item) = trimmed.strip_prefix("- ") {
-            let value = strip_yaml_inline_comment(item)
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
-            if value.starts_with("src/") && value.ends_with(".rs") {
-                workflow_src.insert(value);
-            }
-        }
+    let schedule = triggers
+        .as_mapping_get("schedule")
+        .and_then(Yaml::as_sequence)
+        .expect("full mutation testing must retain its weekly evidence lane");
+    assert_eq!(
+        schedule.len(),
+        1,
+        "mutation testing must have one canonical weekly cadence"
+    );
+    assert_eq!(
+        schedule[0].as_mapping_get("cron").and_then(Yaml::as_str),
+        Some("0 6 * * 1"),
+        "full mutation testing must remain scheduled for Mondays at 06:00 UTC"
+    );
+    assert!(
+        triggers.as_mapping_get("workflow_dispatch").is_some(),
+        "full mutation testing must remain manually runnable"
+    );
+    for forbidden in ["pull_request", "pull_request_target", "push"] {
+        assert!(
+            triggers.as_mapping_get(forbidden).is_none(),
+            "full 40-shard mutation testing is a periodic/manual health check, not a {forbidden} gate; \
+             restoring this trigger spends roughly 193 modeled runner-minutes per eligible change"
+        );
     }
-
-    // Vacuous-pass guard: both sets must be non-empty.
-    assert!(
-        !examine_src.is_empty(),
-        "Parsed zero `src/*.rs` entries from `examine_globs` in .cargo/mutants.toml; a parser \
-         regression must not let the subset check pass vacuously.\n\
-         File: .cargo/mutants.toml"
-    );
-    assert!(
-        !workflow_src.is_empty(),
-        "Parsed zero `src/*.rs` entries from `on.pull_request.paths` in mutation.yml; a parser \
-         regression must not let the subset check pass vacuously.\n\
-         File: .github/workflows/mutation.yml"
-    );
-
-    // Every examined (mutated) module must be a PR trigger path.
-    let missing: Vec<&String> = examine_src.difference(&workflow_src).collect();
-
-    assert!(
-        missing.is_empty(),
-        "Mutation scope / PR-trigger drift: these mutated modules from .cargo/mutants.toml \
-         `examine_globs` are NOT listed under `on.pull_request.paths` in mutation.yml, so a PR \
-         editing them would not run mutation testing:\n  {missing:?}\n\n\
-         examine_globs src set: {examine_src:?}\n\
-         workflow paths src set: {workflow_src:?}\n\n\
-         Why this matters: the per-PR mutation gate only fires for files in the path filter; a \
-         mutated module outside it can regress test strength undetected.\n\
-         Fix: add each missing `src/...rs` path under `on.pull_request.paths` in \
-         .github/workflows/mutation.yml (keep examine_globs ⊆ paths).\n\
-         Verify: cargo test --test ci_config_tests test_mutation_scope_matches_workflow_path_filter"
-    );
-}
-
-#[test]
-fn test_mutation_jobs_skip_on_fork_prs() {
-    // Both mutation jobs MUST carry the fork-safe gate. A fork PR cannot write the
-    // shared rust-cache (the `save-if` fork gate), so without skipping, the
-    // sharded mutants would restore nothing and rebuild every dependency cold —
-    // re-triggering the >20-min cold-build blowup + cancellation this workflow was
-    // rebuilt to eliminate. Mutation is a periodic health check (schedule +
-    // workflow_dispatch + same-repo PRs), so skipping forks loses no required gate.
-    let workflow = read_mutation_workflow();
-
-    // The distinctive fragment of the fork-safe condition (same one used by the
-    // job's `save-if`): runs unless this is a PR from a different repo (a fork).
-    let fork_safe_marker = "github.event.pull_request.head.repo.full_name == github.repository";
-
-    let mut violations = Vec::new();
-    let mut checked = 0usize;
-    for job_key in ["baseline", "mutants"] {
-        let Some(block) = extract_workflow_job_block(&workflow, job_key) else {
-            violations.push(format!(
-                "mutation.yml: job `{job_key}` not found (the workflow structure changed; this \
-                 fork-gate guard must not pass vacuously)."
-            ));
-            continue;
-        };
-        checked += 1;
-        // The gate must be a job-level `if:` line carrying the fork-safe marker —
-        // NOT merely the marker appearing anywhere in the block. (The baseline job
-        // already has the same marker on its rust-cache `save-if:`; a loose
-        // `block.contains(marker)` check would pass vacuously even if the job-level
-        // `if:` were deleted. `save-if:`.starts_with("if:") is false, so keying on
-        // a line that starts with `if:` correctly excludes the `save-if:` line.)
-        let has_job_if_fork_gate = block
-            .lines()
-            .any(|line| line.trim_start().starts_with("if:") && line.contains(fork_safe_marker));
-        if !has_job_if_fork_gate {
-            violations.push(format!(
-                "mutation.yml job `{job_key}` is missing the fork-safe `if:` gate.\n  \
-                 Required: `if: ${{{{ github.event_name != 'pull_request' || \
-                 {fork_safe_marker} }}}}` so cold fork shards don't time out."
-            ));
-        }
-    }
-
-    // Vacuous-pass guard: both jobs must have been located.
-    assert!(
-        checked == 2,
-        "Parsed only {checked}/2 mutation jobs (baseline, mutants); a rename must not let this \
-         fork-gate guard pass vacuously.\nAccumulated so far:\n{}",
-        violations.join("\n")
-    );
-
-    assert!(
-        violations.is_empty(),
-        "Mutation fork-gate policy violations:\n\n{}\n\n\
-         Why this matters: fork PRs cannot write the shared `mutants` rust-cache, so an ungated \
-         fork run rebuilds all deps cold per shard and hits the timeout — the original \
-         all-cancelled symptom. Both jobs must skip on fork PRs.\n\
-         Fix: add the fork-safe `if:` to each job in .github/workflows/mutation.yml.\n\
-         Verify: cargo test --test ci_config_tests test_mutation_jobs_skip_on_fork_prs",
-        violations.join("\n")
-    );
 }
 
 /// Count the mutants `cargo mutants --list` generates for the current config, or

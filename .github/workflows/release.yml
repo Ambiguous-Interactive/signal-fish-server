@@ -119,7 +119,7 @@ jobs:
           # in doc-validation.yml and with REQUIRED_DOC_PATHS in
           # tests/ci_config_tests.rs.
           declare -A PATH_FILTERED_WORKFLOWS
-          PATH_FILTERED_WORKFLOWS["Documentation Validation"]="*.md *.rs Cargo.toml Cargo.lock scripts/check-internal-links.sh .github/workflows/doc-validation.yml .github/scripts/ .github/test-fixtures/"
+          PATH_FILTERED_WORKFLOWS["Documentation Validation"]="*.md *.rs Cargo.toml Cargo.lock rust-toolchain.toml .lychee.toml scripts/read-toml-string.sh scripts/check-internal-links.sh .github/workflows/doc-validation.yml .github/scripts/ .github/test-fixtures/"
 
           FAILED=0
           for WORKFLOW_NAME in "${REQUIRED_WORKFLOWS[@]}"; do

@@ -31,6 +31,9 @@ on:
       - "**/*.rs"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".lychee.toml"
+      - "scripts/read-toml-string.sh"
       - "scripts/check-internal-links.sh"
       - ".github/workflows/doc-validation.yml"
       - ".github/scripts/**"
@@ -42,6 +45,9 @@ on:
       - "**/*.rs"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".lychee.toml"
+      - "scripts/read-toml-string.sh"
       - "scripts/check-internal-links.sh"
       - ".github/workflows/doc-validation.yml"
       - ".github/scripts/**"
@@ -52,7 +58,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 env:
