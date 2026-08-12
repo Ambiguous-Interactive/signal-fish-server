@@ -52,13 +52,22 @@ impl Deadline {
 
 /// Await `future` with `duration`, treating overflow as no process-lifetime
 /// deadline instead of an immediate timeout or panic.
-pub async fn timeout<F>(duration: Duration, future: F) -> Result<F::Output, Elapsed>
+pub fn timeout<F>(duration: Duration, future: F) -> impl Future<Output = Result<F::Output, Elapsed>>
 where
     F: Future,
 {
-    Deadline::after(Instant::now(), duration)
-        .timeout(future)
-        .await
+    // Box before constructing the async state machine. The reference
+    // client's top-level future is large enough that retaining it inline
+    // here can exhaust Windows' smaller main-thread stack.
+    let future = Box::pin(future);
+    async move {
+        // Match `tokio::time::timeout` semantics: relative timeout accounting
+        // starts when the returned future is first polled, not when it is
+        // constructed and potentially stored for later.
+        Deadline::after(Instant::now(), duration)
+            .timeout(future)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +120,48 @@ mod tests {
     async fn unrepresentable_timeout_still_returns_ready_output() {
         let outcome = timeout(Duration::from_secs(u64::MAX), future::ready(42)).await;
         assert!(matches!(outcome, Ok(42)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relative_timeout_duration_starts_on_first_poll() {
+        let duration = Duration::from_secs(5);
+        let stored = timeout(duration, future::pending::<()>());
+        tokio::pin!(stored);
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            futures_util::poll!(stored.as_mut()).is_pending(),
+            "storing an unpolled timeout must not consume its duration"
+        );
+
+        tokio::time::advance(duration - Duration::from_millis(1)).await;
+        assert!(
+            futures_util::poll!(stored.as_mut()).is_pending(),
+            "the timeout must remain pending until one full duration after its first poll"
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            matches!(
+                futures_util::poll!(stored.as_mut()),
+                std::task::Poll::Ready(Err(_))
+            ),
+            "the timeout must expire one full duration after its first poll"
+        );
+    }
+
+    #[test]
+    fn timeout_future_boxes_large_callers_before_building_its_state_machine() {
+        let large_caller = async move {
+            let payload = std::hint::black_box([0_u8; 256 * 1024]);
+            future::pending::<()>().await;
+            std::hint::black_box(payload);
+        };
+        let wrapped = timeout(Duration::from_secs(1), large_caller);
+
+        assert!(
+            std::mem::size_of_val(&wrapped) < 1024,
+            "the timeout wrapper must not retain a large caller future inline"
+        );
     }
 }
