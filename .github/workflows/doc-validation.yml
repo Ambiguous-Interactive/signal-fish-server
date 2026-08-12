@@ -415,14 +415,18 @@ jobs:
           fi
           echo "✓ All YAML blocks valid ($total checked)"
 
+      - name: Install TOML validator
+        uses: taiki-e/install-action@v2.85.10
+        with:
+          tool: taplo-cli@${{ env.TAPLO_CLI_VERSION }}
+          fallback: none
+
       - name: Validate TOML code blocks
         run: |
           set -euo pipefail
 
           echo "Validating TOML code blocks..."
-
-          # Install taplo for TOML validation
-          cargo install taplo-cli --version "$TAPLO_CLI_VERSION" --locked
+          taplo --version
 
           # Constants - use UPPERCASE for cross-script values
           TEMP_DIR=$(mktemp -d)

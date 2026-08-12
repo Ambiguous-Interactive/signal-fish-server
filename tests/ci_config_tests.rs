@@ -45,6 +45,19 @@ fn cargo_deny_available() -> bool {
         .unwrap_or(false)
 }
 
+#[test]
+fn token_binding_canonicalization_preserves_default_serde_json_features() {
+    let manifest = read_file(&repo_root().join("Cargo.toml"));
+    assert!(
+        !manifest.contains("serde_json_canonicalizer"),
+        "serde_json_canonicalizer enables serde_json/float_roundtrip globally and changes ordinary wire parsing"
+    );
+    assert!(
+        !manifest.contains("ryu-js"),
+        "safe-integer-only canonicalization must not add a global JSON number parser/formatter"
+    );
+}
+
 /// Run `cargo deny <deny_args>` and return `(success, combined_output)`.
 /// Returns `None` (and prints a skip message) when cargo-deny is not installed.
 fn run_cargo_deny(deny_args: &[&str]) -> Option<(bool, String)> {
@@ -1869,6 +1882,11 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // it actually gate.
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci.yml jobs");
 
     assert!(
         workflow.contains("\n  quick-check:"),
@@ -1898,10 +1916,85 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         let block_end = (start + 300).min(workflow.len());
         assert!(
             workflow[start..block_end].contains("needs: quick-check"),
-            "ci.yml `{job}` job must declare `needs: quick-check` so it does not \
-             start until the fail-fast gate passes."
+            "ci.yml `{job}` job must declare `needs: quick-check` so its result \
+             is available to the fail-closed status guard."
+        );
+        let block = extract_workflow_job_block(&workflow, job)
+            .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
+        assert!(
+            block.contains("!cancelled() && github.event_name != 'schedule'"),
+            "ci.yml `{job}` must run after quick-check failure but not workflow cancellation"
+        );
+        assert!(
+            block.contains("QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}")
+                && block.contains("test \"$QUICK_CHECK_RESULT\" = success"),
+            "ci.yml `{job}` must fail closed before setup when quick-check is not successful"
+        );
+
+        let job_config = jobs
+            .as_mapping_get(job)
+            .unwrap_or_else(|| panic!("parsed ci.yml must define `{job}`"));
+        assert_eq!(
+            job_config.as_mapping_get("if").and_then(Yaml::as_str),
+            Some("${{ !cancelled() && github.event_name != 'schedule' }}"),
+            "{job} must run after prerequisite failure but not workflow cancellation"
+        );
+        let first_step = job_config
+            .as_mapping_get("steps")
+            .and_then(Yaml::as_sequence)
+            .and_then(|steps| steps.first())
+            .unwrap_or_else(|| panic!("{job} must have a first step"));
+        assert_eq!(
+            first_step.as_mapping_get("name").and_then(Yaml::as_str),
+            Some("Require fast-fail gate success")
+        );
+        assert_eq!(
+            first_step.as_mapping_get("run").and_then(Yaml::as_str),
+            Some("test \"$QUICK_CHECK_RESULT\" = success")
+        );
+        assert_eq!(
+            first_step
+                .as_mapping_get("env")
+                .and_then(|env| env.as_mapping_get("QUICK_CHECK_RESULT"))
+                .and_then(Yaml::as_str),
+            Some("${{ needs.quick-check.result }}")
+        );
+        assert_ne!(
+            first_step
+                .as_mapping_get("continue-on-error")
+                .and_then(Yaml::as_bool),
+            Some(true),
+            "{job} prerequisite guard cannot be informational"
+        );
+        if matches!(job, "lint" | "nextest") {
+            assert_eq!(
+                first_step.as_mapping_get("shell").and_then(Yaml::as_str),
+                Some("bash"),
+                "{job} matrix guard must use Bash on Windows"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_doc_validation_uses_prebuilt_taplo() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
+    for required in [
+        "uses: taiki-e/install-action@v2.85.10",
+        "tool: taplo-cli@${{ env.TAPLO_CLI_VERSION }}",
+        "fallback: none",
+        "taplo --version",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "missing Taplo contract: {required}"
         );
     }
+    assert!(
+        !workflow.contains("cargo install taplo-cli"),
+        "documentation validation must not compile Taplo from source"
+    );
 }
 
 #[test]
@@ -18417,28 +18510,26 @@ fn test_analysis_nightly_version_consistency() {
 
     let unused_deps = read_live_file(&root.join(".github/workflows/unused-deps.yml"));
     for required in [
-        "cargo-udeps-0.1.61-nightly-2026-08-01",
-        "cargo +nightly-2026-08-01 install cargo-udeps --version 0.1.61 --locked",
-        "cargo +nightly-2026-08-01 udeps --version 2>/dev/null | grep -Fxq 'cargo-udeps 0.1.61'",
-        "--locked --force",
+        "uses: taiki-e/install-action@v2.85.10",
+        "tool: cargo-machete@0.7.0,cargo-udeps@0.1.61",
+        "fallback: none",
+        "cargo machete --version | grep -Fxq '0.7.0'",
+        "cargo +nightly-2026-08-01 udeps --version | grep -Fxq 'cargo-udeps 0.1.61'",
         "cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features",
     ] {
         assert!(
             unused_deps.contains(required),
-            "unused-deps.yml must reuse an exact cached cargo-udeps 0.1.61 or force-install it \
-             with the analysis nightly, and key its binary cache by the same version; \
+            "unused-deps.yml must install exact checksum-verified analyzer binaries and \
+             verify them with the analysis nightly; \
              missing '{required}'"
         );
     }
-
-    let install_block = unused_deps
-        .split("- name: Install cargo-udeps")
-        .nth(1)
-        .and_then(|tail| tail.split("\n      - name:").next())
-        .expect("unused-deps.yml must define the cargo-udeps install step");
     assert!(
-        !install_block.contains("steps.cache-udeps.outputs.cache-hit"),
-        "the exact cargo-udeps executable probe must run even on dedicated cache hits"
+        !unused_deps.contains("cargo install cargo-machete")
+            && !unused_deps.contains("install cargo-udeps")
+            && !unused_deps.contains("Cache cargo-machete binary")
+            && !unused_deps.contains("Cache cargo-udeps binary"),
+        "unused-deps.yml must not rebuild or separately cache analyzers that have verified release binaries"
     );
 }
 
@@ -18509,26 +18600,20 @@ fn test_unused_deps_workflow_shares_setup_and_preserves_status_names() {
         Some(true),
         "cargo-machete must remain the gating analyzer"
     );
-    for name in [
-        "Cache cargo-udeps binary",
-        "Install cargo-udeps",
-        "Check for unused dependencies (udeps)",
-    ] {
-        let step = step_named(name);
-        let position = analyzer_steps
-            .iter()
-            .position(|candidate| std::ptr::eq(candidate, step))
-            .expect("step position");
-        assert!(
-            position > machete_position,
-            "{name} must follow cargo-machete"
-        );
-        assert_eq!(
-            step.as_mapping_get("if").and_then(Yaml::as_str),
-            Some("${{ !cancelled() }}"),
-            "{name} must still run after a cargo-machete failure while respecting cancellation"
-        );
-    }
+    let udeps = step_named("Check for unused dependencies (udeps)");
+    let udeps_position = analyzer_steps
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, udeps))
+        .expect("cargo-udeps step position");
+    assert!(
+        udeps_position > machete_position,
+        "cargo-udeps must follow cargo-machete"
+    );
+    assert_eq!(
+        udeps.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ !cancelled() }}"),
+        "cargo-udeps must still run after a cargo-machete failure while respecting cancellation"
+    );
     assert_eq!(
         step_named("Check for unused dependencies (udeps)")
             .as_mapping_get("continue-on-error")
@@ -18548,7 +18633,7 @@ fn test_unused_deps_workflow_shares_setup_and_preserves_status_names() {
         compatibility
             .as_mapping_get("if")
             .and_then(Yaml::as_str),
-        Some("${{ always() && github.event_name != 'schedule' }}"),
+        Some("${{ !cancelled() && github.event_name != 'schedule' }}"),
         "compatibility status must fail closed on PR/push results without wasting a scheduled runner"
     );
     assert_eq!(

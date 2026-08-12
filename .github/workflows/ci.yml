@@ -53,7 +53,7 @@ jobs:
   # expensive compile/test jobs in this workflow depend on via `needs:
   # quick-check`. A file that does not parse or type-check fails here in seconds,
   # so the nine gated lanes (lint x3, nextest x3, relay allocations, msrv,
-  # coverage) never start —
+  # coverage) allocate only a setup-free fail-closed status job —
   # collapsing what was a redundant per-lane recompile-and-fail into one fast
   # failure. This exists because an unclosed delimiter in a committed test file
   # once failed every one of those lanes independently. (Compile jobs in sibling
@@ -110,10 +110,14 @@ jobs:
   relay-allocations:
     name: Relay Allocation Ceilings
     needs: quick-check
-    if: github.event_name != 'schedule'
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Require fast-fail gate success
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
@@ -142,7 +146,7 @@ jobs:
   lint:
     name: Lint (${{ matrix.os }})
     needs: quick-check
-    if: github.event_name != 'schedule'
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -150,6 +154,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
+      - name: Require fast-fail gate success
+        shell: bash
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
@@ -219,7 +228,7 @@ jobs:
   nextest:
     name: Nextest (${{ matrix.os }})
     needs: quick-check
-    if: github.event_name != 'schedule'
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -227,6 +236,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
+      - name: Require fast-fail gate success
+        shell: bash
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
@@ -506,7 +520,7 @@ jobs:
   msrv:
     name: MSRV Verification
     needs: quick-check
-    if: github.event_name != 'schedule'
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Verify Minimum Supported Rust Version (MSRV) compliance
@@ -514,6 +528,10 @@ jobs:
     # MSRV is the single source of truth defined in Cargo.toml and must be consistent
     # across all configuration files (rust-toolchain.toml, clippy.toml, Dockerfile, etc.)
     steps:
+      - name: Require fast-fail gate success
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Extract MSRV from Cargo.toml
@@ -653,10 +671,14 @@ jobs:
   coverage:
     name: Coverage (llvm-cov)
     needs: quick-check
-    if: github.event_name != 'schedule'
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Require fast-fail gate success
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain

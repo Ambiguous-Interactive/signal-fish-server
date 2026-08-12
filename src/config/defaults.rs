@@ -250,7 +250,7 @@ pub const fn default_client_auth_mode() -> ClientAuthMode {
 }
 
 pub fn default_token_binding_subprotocol() -> String {
-    "signalfish.tokenbinding.v1".to_string()
+    crate::security::token_binding::TOKEN_BINDING_SUBPROTOCOL_V2.to_string()
 }
 
 // =============================================================================

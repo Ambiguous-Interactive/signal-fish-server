@@ -315,6 +315,34 @@ This message has no data payload.
 
 ## Server Messages
 
+### TokenBindingChallenge
+
+On a connection that negotiated `signalfish.tokenbinding.v2`, this is the first
+server application message after the WebSocket upgrade. Its 256-bit random
+nonce contributes server freshness to the per-connection proof key; the
+sequence applies to every subsequent client JSON and binary frame.
+
+```json
+
+{
+  "type": "TokenBindingChallenge",
+  "data": {
+    "version": 2,
+    "scheme": "server_nonce_hkdf_sha256",
+    "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "first_sequence": 1
+  }
+}
+
+```
+
+The nonce and sequence state expire with this WebSocket and are never resumed
+on reconnect. The sequence and every integer in a signed JSON message are
+limited to the interoperable JSON range
+`-9007199254740991..=9007199254740991`. See the [token-binding configuration
+recipe](configuration-recipes.md#token-binding) for the normative HKDF, RFC
+8785, HMAC, binary-envelope, and certificate-rotation contract.
+
 ### Authenticated
 
 The public app ID was accepted. Includes its configured context and rate limits;

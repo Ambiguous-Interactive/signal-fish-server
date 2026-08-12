@@ -1,8 +1,8 @@
 //! Workspace lockfile consistency guard.
 //!
 //! Every **git-tracked** `Cargo.lock` that references the workspace crate
-//! `signal-fish-server` MUST record the same version as the root `Cargo.toml`
-//! `[package].version`.
+//! `signal-fish-server` MUST record the same version and default dependency set
+//! as the root `Cargo.toml` package.
 //!
 //! ## Why this exists (the class of bug it prevents)
 //!
@@ -23,10 +23,9 @@
 //! in a path-filtered workflow that does not even run on most PRs.
 //!
 //! This guard turns that whole class into an instant, actionable failure in the
-//! always-on main test suite. It is offline (pure file parsing — no registry, no
-//! network), sub-millisecond, deterministic across platforms, and **discovers
-//! lockfiles from git** so any future committed nested crate is covered
-//! automatically with no list to keep in sync.
+//! always-on main test suite. It uses no registry or network, is deterministic
+//! across platforms, and **discovers lockfiles from git** so any future
+//! committed nested crate is covered automatically with no list to keep in sync.
 //!
 //! ## Scope: only *committed* lockfiles
 //!
@@ -59,6 +58,7 @@ const REQUIRED_NESTED_LOCKS: &[&str] = &["clients/native/Cargo.lock", "fuzz/Carg
 fn every_tracked_cargo_lock_pins_current_root_crate_version() {
     let root = repo_root();
     let expected = root_crate_version(&root);
+    let expected_dependencies = root_default_dependency_names(&root);
     let locks = tracked_cargo_locks(&root);
 
     let mut checked: Vec<String> = Vec::new();
@@ -72,6 +72,17 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
         let text = read_file(lock);
         let versions = locked_root_crate_versions(&text);
         record_lockfile_check(&rel, &expected, &versions, &mut checked, &mut problems);
+        if !versions.is_empty() && rel.replace('\\', "/") != "Cargo.lock" {
+            let locked_dependencies = locked_root_crate_dependency_names(&text);
+            if locked_dependencies != expected_dependencies {
+                problems.push(format!(
+                    "  - {rel} has a stale {ROOT_CRATE} dependency list\n    expected: \
+                     {expected_dependencies:?}\n    found:    {locked_dependencies:?}\n    fix: run \
+                     `cargo metadata --manifest-path {:?} --format-version 1 >/dev/null`",
+                    manifest_for_lockfile(&rel)
+                ));
+            }
+        }
     }
 
     assert!(
@@ -95,6 +106,60 @@ fn every_tracked_cargo_lock_pins_current_root_crate_version() {
              REQUIRED_NESTED_LOCKS in tests/workspace_lockfile_consistency.rs)"
         );
     }
+}
+
+/// Resolve the root package's dependency names without traversing or fetching
+/// its graph. Nested path dependants use the root crate's empty default feature
+/// set, so their lockfile package entry must contain exactly the non-optional,
+/// non-dev dependencies reported here.
+fn root_default_dependency_names(root: &Path) -> Vec<String> {
+    let output = Command::new("cargo")
+        .args([
+            "metadata",
+            "--locked",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+        ])
+        .arg(root.join("Cargo.toml"))
+        .current_dir(root)
+        .output()
+        .expect("run cargo metadata for the root manifest");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed for the root manifest:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("cargo metadata must be valid JSON");
+    let package = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata packages must be an array")
+        .iter()
+        .find(|package| package["name"] == ROOT_CRATE)
+        .expect("cargo metadata must contain the root package");
+    assert_eq!(
+        package["features"]["default"],
+        serde_json::json!([]),
+        "lockfile dependency comparison assumes the root default feature set is empty"
+    );
+
+    let mut dependencies: Vec<String> = package["dependencies"]
+        .as_array()
+        .expect("cargo metadata dependencies must be an array")
+        .iter()
+        .filter(|dependency| dependency["kind"] != "dev" && dependency["optional"] == false)
+        .map(|dependency| {
+            dependency["name"]
+                .as_str()
+                .expect("dependency name must be a string")
+                .to_string()
+        })
+        .collect();
+    dependencies.sort();
+    dependencies
 }
 
 fn record_lockfile_check(
@@ -234,6 +299,49 @@ fn locked_root_crate_versions(lock_text: &str) -> Vec<Result<String, &'static st
         .collect()
 }
 
+fn locked_root_crate_dependency_names(lock_text: &str) -> Vec<String> {
+    let mut dependencies = Vec::new();
+    for block in lock_text.split("[[package]]").skip(1) {
+        let mut is_root = false;
+        let mut has_source = false;
+        let mut in_dependencies = false;
+        for line in block.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("[[") {
+                break;
+            }
+            is_root |= parse_string_assignment(trimmed, "name").as_deref() == Some(ROOT_CRATE);
+            has_source |= parse_string_assignment(trimmed, "source").is_some();
+            if trimmed == "dependencies = [" {
+                in_dependencies = true;
+                continue;
+            }
+            if in_dependencies {
+                if trimmed == "]" {
+                    in_dependencies = false;
+                } else if let Some(entry) = trimmed
+                    .strip_prefix('"')
+                    .and_then(|entry| entry.strip_suffix("\","))
+                {
+                    dependencies.push(
+                        entry
+                            .split_once(' ')
+                            .map_or(entry, |(name, _version)| name)
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        if is_root && !has_source {
+            dependencies.sort();
+            dependencies.dedup();
+            return dependencies;
+        }
+        dependencies.clear();
+    }
+    dependencies
+}
+
 #[test]
 fn lockfile_parser_distinguishes_path_and_registry_packages() {
     let path = "[[package]] # local table\nname = \"signal-fish-server\" # local package\nversion = \"1.2.3\" # local version\n";
@@ -278,6 +386,26 @@ fn lockfile_parser_distinguishes_path_and_registry_packages() {
             "{description}"
         );
     }
+}
+
+#[test]
+fn lockfile_dependency_parser_normalizes_version_qualified_names() {
+    let lock = "\
+[[package]]\n\
+name = \"unrelated\"\n\
+version = \"1.0.0\"\n\
+dependencies = [\n\
+ \"ignored\",\n\
+]\n\
+\n\
+[[package]]\n\
+name = \"signal-fish-server\"\n\
+version = \"0.6.0\"\n\
+dependencies = [\n\
+ \"hkdf 0.13.0\",\n\
+ \"serde\",\n\
+]\n";
+    assert_eq!(locked_root_crate_dependency_names(lock), ["hkdf", "serde"]);
 }
 
 #[test]

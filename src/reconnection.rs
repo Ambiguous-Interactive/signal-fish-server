@@ -264,6 +264,7 @@ pub struct DisconnectedPlayer {
 struct PreservedPending {
     token: String,
     token_created_at: DateTime<Utc>,
+    identity: Option<Arc<str>>,
     last_sequence: u64,
     last_epoch: u32,
     was_authority: bool,
@@ -286,7 +287,14 @@ impl DisconnectedPlayer {
 #[derive(Debug, Clone)]
 struct ReconnectionRecord {
     disconnected: DisconnectedPlayer,
+    identity: Option<Arc<str>>,
     claim: Option<ReconnectionClaimState>,
+}
+
+#[derive(Debug, Clone)]
+struct PreIssuedCredential {
+    token: ReconnectionToken,
+    identity: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -378,7 +386,7 @@ pub struct ReconnectionManager {
     /// entry per currently-joined player; consumed by
     /// [`Self::register_disconnection`], discarded on voluntary leave /
     /// roomless teardown, and overwritten (rotated) by the next join.
-    pre_issued: RwLock<HashMap<PlayerId, ReconnectionToken>>,
+    pre_issued: RwLock<HashMap<PlayerId, PreIssuedCredential>>,
     /// Reconnection window in seconds
     reconnection_window: u64,
     /// Event buffer size per room
@@ -442,13 +450,26 @@ impl ReconnectionManager {
     /// the disconnect", exactly as before — the client just finally KNOWS the
     /// token it will need.
     pub async fn pre_issue_token(&self, player_id: PlayerId, room_id: RoomId) -> String {
+        self.pre_issue_token_with_identity(player_id, room_id, None)
+            .await
+    }
+
+    pub(crate) async fn pre_issue_token_with_identity(
+        &self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        identity: Option<Arc<str>>,
+    ) -> String {
         let token = ReconnectionToken::new_with_unsigned_window(
             player_id,
             room_id,
             self.reconnection_window,
         );
         let token_string = token.token.clone();
-        self.pre_issued.write().await.insert(player_id, token);
+        self.pre_issued
+            .write()
+            .await
+            .insert(player_id, PreIssuedCredential { token, identity });
         self.metrics.increment_reconnection_tokens_issued();
         token_string
     }
@@ -503,6 +524,26 @@ impl ReconnectionManager {
         player_info: Option<PlayerInfo>,
         last_epoch: u32,
     ) -> String {
+        self.register_disconnection_with_identity(
+            player_id,
+            room_id,
+            was_authority,
+            player_info,
+            last_epoch,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn register_disconnection_with_identity(
+        &self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        was_authority: bool,
+        player_info: Option<PlayerInfo>,
+        last_epoch: u32,
+        identity: Option<Arc<str>>,
+    ) -> String {
         // Reuse the token STRING pre-issued at join (the client already holds
         // it — issue #136, F4), re-stamping its expiry so the reconnect gate
         // stays "window seconds from THIS disconnect". A missing or
@@ -528,6 +569,7 @@ impl ReconnectionManager {
             .map(|existing| PreservedPending {
                 token: existing.disconnected.token.token.clone(),
                 token_created_at: existing.disconnected.token.created_at,
+                identity: existing.identity.clone(),
                 last_sequence: existing.disconnected.last_sequence,
                 last_epoch: existing.disconnected.last_epoch,
                 was_authority: existing.disconnected.was_authority,
@@ -542,7 +584,7 @@ impl ReconnectionManager {
         // holds the join-time token); (2) the pre-issued join token; (3) a fresh
         // fallback mint (embedders that never pre-issue). Only (3) is a NEW
         // token, so only it counts toward the issued-token metric.
-        let (token, minted_fresh) = match &existing_same_room {
+        let (token, credential_identity, minted_fresh) = match &existing_same_room {
             Some(existing) => (
                 ReconnectionToken {
                     token: existing.token.clone(),
@@ -551,25 +593,31 @@ impl ReconnectionManager {
                     created_at: existing.token_created_at,
                     expires_at: expiration_from_unsigned(now, self.reconnection_window),
                 },
+                existing.identity.clone(),
                 false,
             ),
             None => match pre_issued {
-                Some(pre_issued) if pre_issued.room_id == room_id => (
-                    ReconnectionToken {
-                        token: pre_issued.token,
-                        player_id,
-                        room_id,
-                        created_at: pre_issued.created_at,
-                        expires_at: expiration_from_unsigned(now, self.reconnection_window),
-                    },
-                    false,
-                ),
+                Some(pre_issued) if pre_issued.token.room_id == room_id => {
+                    let credential_identity = pre_issued.identity;
+                    (
+                        ReconnectionToken {
+                            token: pre_issued.token.token,
+                            player_id,
+                            room_id,
+                            created_at: pre_issued.token.created_at,
+                            expires_at: expiration_from_unsigned(now, self.reconnection_window),
+                        },
+                        credential_identity,
+                        false,
+                    )
+                }
                 _ => (
                     ReconnectionToken::new_with_unsigned_window(
                         player_id,
                         room_id,
                         self.reconnection_window,
                     ),
+                    identity,
                     true,
                 ),
             },
@@ -623,6 +671,7 @@ impl ReconnectionManager {
                 player_info,
                 last_epoch,
             },
+            identity: credential_identity,
             claim: None,
         };
         let previous = state.disconnected_players.insert(player_id, record);
@@ -688,6 +737,17 @@ impl ReconnectionManager {
         room_id: &RoomId,
         token: &str,
     ) -> Result<DisconnectedPlayer, ReconnectionError> {
+        self.validate_reconnection_with_identity(player_id, room_id, token, None)
+            .await
+    }
+
+    async fn validate_reconnection_with_identity(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        token: &str,
+        identity: Option<&str>,
+    ) -> Result<DisconnectedPlayer, ReconnectionError> {
         let state = self.replay_state.read().await;
 
         let Some(record) = state.disconnected_players.get(player_id) else {
@@ -711,6 +771,11 @@ impl ReconnectionManager {
             return Err(ReconnectionError::WindowExpired);
         }
 
+        if !reconnection_identity_matches(record.identity.as_deref(), identity) {
+            self.metrics.increment_reconnection_validation_failure();
+            return Err(ReconnectionError::TokenMismatch);
+        }
+
         Ok(player.clone())
     }
 
@@ -726,6 +791,18 @@ impl ReconnectionManager {
         player_id: &PlayerId,
         room_id: &RoomId,
         token: &str,
+    ) -> Result<ClaimedReconnection, ReconnectionError> {
+        self.claim_reconnection_with_identity(claimed_by, player_id, room_id, token, None)
+            .await
+    }
+
+    pub(crate) async fn claim_reconnection_with_identity(
+        &self,
+        claimed_by: &PlayerId,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        token: &str,
+        identity: Option<&str>,
     ) -> Result<ClaimedReconnection, ReconnectionError> {
         let mut state = self.replay_state.write().await;
 
@@ -761,6 +838,12 @@ impl ReconnectionManager {
         if player.is_expired_with_unsigned_window(self.reconnection_window) {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::WindowExpired);
+        }
+
+        if !reconnection_identity_matches(record.identity.as_deref(), identity) {
+            self.metrics.increment_reconnection_validation_failure();
+            tracing::warn!(%player_id, "Reconnection credential identity mismatch");
+            return Err(ReconnectionError::TokenMismatch);
         }
 
         let claim = ReconnectionClaimState::new(*claimed_by);
@@ -1146,6 +1229,14 @@ impl ReconnectionManager {
     }
 }
 
+fn reconnection_identity_matches(expected: Option<&str>, provided: Option<&str>) -> bool {
+    match (expected, provided) {
+        (None, None) => true,
+        (Some(expected), Some(provided)) => crate::security::constant_time_eq(expected, provided),
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1305,7 +1396,7 @@ mod tests {
     #[tokio::test]
     async fn test_reconnection_manager_flow() {
         let metrics = Arc::new(ServerMetrics::new());
-        let manager = ReconnectionManager::new(300, 100, metrics);
+        let manager = Arc::new(ReconnectionManager::new(300, 100, metrics));
         let player_id = Uuid::new_v4();
         let room_id = Uuid::new_v4();
 
@@ -1852,6 +1943,88 @@ mod tests {
             claim.is_ok(),
             "the join-time token must stay claimable after re-registration: {claim:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn certificate_bound_claim_is_atomic_and_identity_preserving() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = Arc::new(ReconnectionManager::new(300, 100, metrics));
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+        let identity_a: Arc<str> = Arc::from("aa".repeat(32));
+        let identity_b: Arc<str> = Arc::from("bb".repeat(32));
+
+        let token = manager
+            .pre_issue_token_with_identity(player, room, Some(Arc::clone(&identity_a)))
+            .await;
+        manager
+            .register_disconnection_with_identity(
+                player,
+                room,
+                false,
+                None,
+                0,
+                Some(Arc::clone(&identity_a)),
+            )
+            .await;
+        // A duplicate teardown cannot strip or rotate the original issuance
+        // identity, even when its transient connection metadata differs.
+        manager
+            .register_disconnection_with_identity(
+                player,
+                room,
+                false,
+                None,
+                0,
+                Some(Arc::clone(&identity_b)),
+            )
+            .await;
+
+        for rejected in [None, Some(identity_b.as_ref())] {
+            let result = manager
+                .claim_reconnection_with_identity(&Uuid::new_v4(), &player, &room, &token, rejected)
+                .await;
+            assert!(matches!(result, Err(ReconnectionError::TokenMismatch)));
+        }
+
+        assert!(matches!(
+            manager.validate_reconnection(&player, &room, &token).await,
+            Err(ReconnectionError::TokenMismatch)
+        ));
+
+        // Race a valid A claim with B. B can either lose to A's reservation or
+        // check its identity first, but it can never reserve the credential;
+        // A must still win exactly once.
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn_claim = |identity: Arc<str>| {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            let token = token.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                manager
+                    .claim_reconnection_with_identity(
+                        &Uuid::new_v4(),
+                        &player,
+                        &room,
+                        &token,
+                        Some(identity.as_ref()),
+                    )
+                    .await
+            })
+        };
+        let claim_a = spawn_claim(Arc::clone(&identity_a));
+        let claim_b = spawn_claim(Arc::clone(&identity_b));
+        barrier.wait().await;
+        let (claim_a, claim_b) = tokio::join!(claim_a, claim_b);
+        let claim = claim_a
+            .expect("A claim task")
+            .expect("matching certificate identity claims the original token");
+        assert!(matches!(
+            claim_b.expect("B claim task"),
+            Err(ReconnectionError::TokenMismatch | ReconnectionError::AlreadyInProgress)
+        ));
+        assert_eq!(claim.disconnected.player_id, player);
     }
 
     /// Regression: a same-room re-registration must NOT clobber the disconnect

@@ -13,7 +13,9 @@ pub mod turn_credentials;
 pub use crypto::EnvelopeEncryptor;
 pub use origin::{OriginPolicy, OriginPolicyError};
 pub use token_binding::{
-    derive_session_secret, ActiveTokenBinding, TokenBindingError, TokenBindingProof,
+    derive_server_nonce_secret, derive_session_secret, ActiveTokenBinding, TokenBindingChallenge,
+    TokenBindingError, TokenBindingProof, TokenBoundBinaryFrame, TOKEN_BINDING_BINARY_DOMAIN,
+    TOKEN_BINDING_JSON_DOMAIN, TOKEN_BINDING_MAX_SAFE_INTEGER, TOKEN_BINDING_VERSION,
 };
 pub use turn_credentials::{
     build_ice_servers, mint_turn_credentials, turn_expiry_unix, TurnCredentials,

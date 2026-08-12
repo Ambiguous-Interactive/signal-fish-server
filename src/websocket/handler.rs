@@ -10,7 +10,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use super::connection::handle_socket;
-use super::token_binding::{client_requested_subprotocol, negotiate_token_binding};
+use super::token_binding::{
+    client_token_binding_offer, negotiate_token_binding, TokenBindingProtocolOffer,
+};
 
 /// WebSocket handler for the `/v2/ws` endpoint.
 ///
@@ -137,8 +139,16 @@ async fn websocket_handler_with_default(
     }
 
     let token_binding_cfg = server.token_binding_config().clone();
-    let client_offered_binding =
-        client_requested_subprotocol(&headers, &token_binding_cfg.subprotocol);
+    let binding_offer = client_token_binding_offer(&headers, &token_binding_cfg.subprotocol);
+    if rejects_unsupported_token_binding_offer(&token_binding_cfg, binding_offer) {
+        tracing::warn!(client_ip = %addr.ip(), "Unsupported reserved token-binding subprotocol");
+        return (
+            StatusCode::BAD_REQUEST,
+            "unsupported token binding subprotocol",
+        )
+            .into_response();
+    }
+    let client_offered_binding = binding_offer == TokenBindingProtocolOffer::Supported;
     let client_fingerprint = fingerprint.map(|Extension(fp)| fp);
     #[cfg(feature = "tls")]
     let client_fingerprint = match verified_certificate {
@@ -185,4 +195,39 @@ async fn websocket_handler_with_default(
             default_protocol_version,
         )
     })
+}
+
+fn rejects_unsupported_token_binding_offer(
+    config: &crate::config::TokenBindingConfig,
+    offer: TokenBindingProtocolOffer,
+) -> bool {
+    config.enabled && offer == TokenBindingProtocolOffer::Unsupported
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_token_binding_versions_only_fail_closed_when_binding_is_enabled() {
+        let disabled = crate::config::TokenBindingConfig::default();
+        assert!(!disabled.enabled);
+        assert!(!rejects_unsupported_token_binding_offer(
+            &disabled,
+            TokenBindingProtocolOffer::Unsupported
+        ));
+
+        let enabled = crate::config::TokenBindingConfig {
+            enabled: true,
+            ..disabled
+        };
+        assert!(rejects_unsupported_token_binding_offer(
+            &enabled,
+            TokenBindingProtocolOffer::Unsupported
+        ));
+        assert!(!rejects_unsupported_token_binding_offer(
+            &enabled,
+            TokenBindingProtocolOffer::Supported
+        ));
+    }
 }

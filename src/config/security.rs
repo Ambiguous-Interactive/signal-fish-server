@@ -150,7 +150,7 @@ impl Default for TokenBindingConfig {
             required: false,
             require_client_fingerprint: false,
             subprotocol: default_token_binding_subprotocol(),
-            scheme: TokenBindingScheme::SecWebsocketKeySha256,
+            scheme: TokenBindingScheme::ServerNonceHkdfSha256,
         }
     }
 }

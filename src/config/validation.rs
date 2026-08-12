@@ -210,6 +210,15 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     }
     if config.security.transport.token_binding.enabled {
         let binding = &config.security.transport.token_binding;
+        if binding.scheme
+            == crate::security::token_binding::TokenBindingScheme::SecWebsocketKeySha256
+        {
+            anyhow::bail!(
+                "security.transport.token_binding.scheme=sec_websocket_key_sha256 is protocol-v1 \
+                 compatibility syntax and cannot be enabled because it lacks server freshness; use \
+                 server_nonce_hkdf_sha256"
+            );
+        }
         if binding.required && !built_in_tls_active(config, cfg!(feature = "tls")) {
             anyhow::bail!(
                 "security.transport.token_binding.required=true requires active built-in TLS \
@@ -218,6 +227,17 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
         if binding.subprotocol.trim().is_empty() {
             anyhow::bail!("security.transport.token_binding.subprotocol must not be empty");
+        }
+        if !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(
+            &binding.subprotocol,
+        ) {
+            anyhow::bail!(
+                "security.transport.token_binding.subprotocol={} uses Signal Fish's reserved \
+                 protocol namespace but does not name the v2 wire contract; use {} or a custom \
+                 non-reserved alias",
+                binding.subprotocol,
+                crate::security::token_binding::TOKEN_BINDING_SUBPROTOCOL_V2
+            );
         }
         if binding.require_client_fingerprint {
             if !binding.required {
@@ -452,6 +472,42 @@ mod tests {
         assert!(error
             .to_string()
             .contains("requires security.transport.token_binding.enabled=true"));
+    }
+
+    #[test]
+    fn enabled_token_binding_rejects_reserved_non_v2_subprotocols() {
+        for subprotocol in [
+            "signalfish.tokenbinding.v1",
+            "Signalfish.TokenBinding.V2",
+            "signalfish.tokenbinding.v3",
+        ] {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.transport.token_binding.enabled = true;
+            config.security.transport.token_binding.subprotocol = subprotocol.to_string();
+
+            let error = validate_config_security(&config)
+                .expect_err("reserved protocol versions must match the v2 wire contract");
+            assert!(error.to_string().contains("reserved protocol namespace"));
+            assert!(error.to_string().contains("signalfish.tokenbinding.v2"));
+        }
+    }
+
+    #[test]
+    fn token_binding_subprotocol_alias_and_disabled_legacy_value_remain_compatible() {
+        for (enabled, subprotocol) in [
+            (true, "example.game.token-binding"),
+            (false, "signalfish.tokenbinding.v1"),
+        ] {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.transport.token_binding.enabled = enabled;
+            config.security.transport.token_binding.subprotocol = subprotocol.to_string();
+            assert!(
+                validate_config_security(&config).is_ok(),
+                "enabled={enabled}, subprotocol={subprotocol}"
+            );
+        }
     }
 
     #[cfg(feature = "tls")]

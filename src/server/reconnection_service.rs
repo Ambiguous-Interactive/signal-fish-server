@@ -213,7 +213,11 @@ impl EnhancedGameServer {
         }
         Some(
             reconnection_manager
-                .pre_issue_token(*player_id, room_id)
+                .pre_issue_token_with_identity(
+                    *player_id,
+                    room_id,
+                    self.client_reconnection_identity(player_id),
+                )
                 .await,
         )
     }
@@ -271,12 +275,13 @@ impl EnhancedGameServer {
             .unwrap_or(0);
 
         let token = reconnection_manager
-            .register_disconnection(
+            .register_disconnection_with_identity(
                 *player_id,
                 room_id,
                 was_authority,
                 Some(player_info),
                 last_epoch,
+                self.client_reconnection_identity(player_id),
             )
             .await;
 
@@ -542,8 +547,15 @@ impl EnhancedGameServer {
         // Validate and atomically reserve the reconnection token before any
         // room or connection side effects. The record is only removed after
         // the restore succeeds; post-claim failures release it for retry.
+        let reconnect_identity = self.client_reconnection_identity(current_player_id);
         let claim = match reconnection_manager
-            .claim_reconnection(current_player_id, reconnect_player_id, room_id, auth_token)
+            .claim_reconnection_with_identity(
+                current_player_id,
+                reconnect_player_id,
+                room_id,
+                auth_token,
+                reconnect_identity.as_deref(),
+            )
             .await
         {
             Ok(claim) => claim,
