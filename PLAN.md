@@ -3321,7 +3321,7 @@ and Copilot's exact-head request received the account quota response.
 
 ### P0 — Design lock & v2 freeze (Size S) — ✅ DONE
 
-> Completed — see [`progress/session-001-p0-design-lock-v2-freeze.md`](progress/session-001-p0-design-lock-v2-freeze.md).
+> Completed — see historical record `progress/session-001-p0-design-lock-v2-freeze.md`.
 > ADR-0001 + ADR-0002 merged; 44 golden v2 wire snapshot tests (`tests/v2_wire_golden.rs`)
 > freeze the JSON + MessagePack wire format and are enforced in CI.
 
@@ -3348,7 +3348,7 @@ and Copilot's exact-head request received the account quota response.
 
 ### P1 — Version + capability negotiation (Size M) — ✅ DONE
 
-> Completed — see [`progress/session-001-p1-version-capability-negotiation.md`](progress/session-001-p1-version-capability-negotiation.md).
+> Completed — see historical record `progress/session-001-p1-version-capability-negotiation.md`.
 > `Transport`/`Topology` enums, optional `Authenticate` fields, extended `ProtocolInfo`,
 > per-connection `NegotiatedProtocol` state, the negotiation/relay-floor logic, config
 > `min/max_protocol_version` + validation, and the `/v3/ws` alias all landed. v2 wire is
@@ -3389,7 +3389,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P2 — Targeted signal relay (Size M) — ✅ DONE
 
-> Completed — see the [P2 signal-relay progress notes](progress/session-002-p2-targeted-signal-relay.md).
+> Completed — see historical record `progress/session-002-p2-targeted-signal-relay.md`.
 > `ClientMessage::Signal` / `ServerMessage::Signal` / `ServerMessage::NewPeer`, the
 > four signaling error codes, a payload-agnostic `src/server/signaling.rs` handler
 > (same-room + WebRTC-transport + self-signal + per-sender rate-limit enforcement,
@@ -3404,7 +3404,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P3 — Session plan / handoff directive + topology selection (Size M) — ✅ DONE
 
-> Completed — see [`progress/session-003-p3-session-plan-topology-selection.md`](progress/session-003-p3-session-plan-topology-selection.md).
+> Completed — see historical record `progress/session-003-p3-session-plan-topology-selection.md`.
 > `IceServer` / `SessionPeer` / `SessionPlanPayload`, `ServerMessage::SessionPlan(Box<…>)`,
 > a new `src/config/session.rs` (`SessionConfig`) threaded through all construction
 > sites, and a new payload-agnostic `src/server/session_policy.rs` all landed.
@@ -3436,7 +3436,7 @@ per connection. No behavior change yet — pure plumbing.
 > `v3-server-messages.jsonl` `SessionPlan` sample.
 >
 > **Extended in session 007** (see
-> [`progress/session-007-mid-session-replanning-host-failover.md`](progress/session-007-mid-session-replanning-host-failover.md)):
+> historical record `progress/session-007-mid-session-replanning-host-failover.md`:
 > lobby finalization is now actually **persisted** (it previously never reached the
 > room store, leaving every `Finalized` gate dead in production); the finalize
 > non-relay decision is recorded as a sticky per-room `ActiveSessionPlan` that
@@ -3453,7 +3453,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P4 — ICE servers + ephemeral TURN credentials (Size M) — ✅ DONE
 
-> Completed — see [`progress/session-004-p4-ice-turn-credentials.md`](progress/session-004-p4-ice-turn-credentials.md).
+> Completed — see historical record `progress/session-004-p4-ice-turn-credentials.md`.
 > New `src/security/turn_credentials.rs` mints coturn REST credentials
 > (`username = "{expiry}:{player_id}"`, `credential = base64(HMAC-SHA1(secret,
 > username))`; `sha1` is the one added dep, vector-pinned to RFC 2202). New
@@ -3465,7 +3465,7 @@ per connection. No behavior change yet — pure plumbing.
 > enabled ⇒ distinct time-limited creds (HMAC matches the RFC-2202 vector); disabled
 > ⇒ public STUN only. The secret never leaves the server. The deferred `RoomJoined`
 > ICE pre-gather refinement landed in **session 011** (see
-> [`progress/session-011-ice-pregather-and-ice-url-validation.md`](progress/session-011-ice-pregather-and-ice-url-validation.md)):
+> historical record `progress/session-011-ice-pregather-and-ice-url-validation.md`:
 > `RoomJoined` / `Reconnected` carry the composed ICE list, gated by the new
 > `session.enable_ice_pregather` (default true) AND WebRTC enabled AND non-relay
 > desired topology AND non-finalized room AND a v3 WebRTC-capable recipient whose
@@ -3486,7 +3486,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P5 — Relay-fallback contract + transport status + metrics (Size S) — ✅ DONE
 
-> Completed — see [`progress/session-005-p5-transport-status-metrics.md`](progress/session-005-p5-transport-status-metrics.md).
+> Completed — see historical record `progress/session-005-p5-transport-status-metrics.md`.
 > New `docs/architecture/transport-fallback.md` documents the Appendix G client
 > contract and the relay-floor-never-closes invariant. New v3-only
 > `ClientMessage::TransportStatus { transport, connected }` (per-connection state +
@@ -3505,7 +3505,7 @@ per connection. No behavior change yet — pure plumbing.
 
 ### P6 — Docs, samples, `.llm` context (Size S) — ✅ DONE
 
-> Completed — see [`progress/session-006-p6-docs-samples-llm-context.md`](progress/session-006-p6-docs-samples-llm-context.md).
+> Completed — see historical record `progress/session-006-p6-docs-samples-llm-context.md`.
 > `docs/protocol.md` gains a "Protocol v3 additions" section (handshake, the four v3
 > messages, the selection ladder, the transport-qualified late-join decision table,
 > the glare rule, ICE/TURN, and mesh + host sequence diagrams) with v2 unchanged. New
@@ -3555,13 +3555,13 @@ are the small part.
    `.github/workflows/webrtc-interop.yml` via `scripts/run-webrtc-interop.sh`.
 3. ~~**In-repo signaling conformance tests**~~ — ✅ **DONE (session 007, exceeded
    scope)**: see
-   [`progress/session-007-multipeer-multiprocess-conformance.md`](progress/session-007-multipeer-multiprocess-conformance.md).
+   historical record `progress/session-007-multipeer-multiprocess-conformance.md`.
    `tests/v3_multipeer_e2e.rs` (8 tests over real WebSockets at N=3/4: global glare
    matrix, host star, failover + cascade failover, mixed v2/v3 floor, seat-fill
    late join, wire reconnect) and `tests/v3_multiprocess_e2e.rs` (the compiled
    binary as a real child process over TCP: full mesh session; SIGKILL + same-port
    restart invalidating reconnect tokens), plus a formal layer
-   ([`progress/session-007-formal-verification-layer.md`](progress/session-007-formal-verification-layer.md)):
+   (historical record `progress/session-007-formal-verification-layer.md`):
    TLA+/TLC model of the session core (4 configs, CI-wired), proptest invariant
    suites, and parser fuzz-hardening with a release-profile depth-bomb probe.
 4. **Cross-platform interop matrix** (browser↔native, native↔native, mobile, Steam
@@ -3582,7 +3582,7 @@ are the small part.
    sessions). The mobile/Steam platform cells remain (out-of-repo builds,
    Appendix H).
 5. ~~**Per-platform integration notes** (Appendix H)~~ — ✅ **DONE (session 014)**:
-   see [`progress/session-014-p7-platform-integration-guide.md`](progress/session-014-p7-platform-integration-guide.md).
+   see historical record `progress/session-014-p7-platform-integration-guide.md`.
    New user-facing guide `docs/guides/platform-integration.md` maps every platform to
    its WebRTC stack and integration steps — Godot (built-in / `webrtc-native` =
    libdatachannel — easiest, whole matrix), Unity (native via `com.unity.webrtc` but
@@ -3607,9 +3607,9 @@ stay open until those platform builds exist (out-of-repo).
 ### P8 — TURN infra + deployment + security + scaling (Size L) — ✅ IN-REPO PORTIONS DONE
 
 > In-repo portions completed in session 008 — see
-> [`progress/session-008-p8-security-hardening.md`](progress/session-008-p8-security-hardening.md)
+> historical records `progress/session-008-p8-security-hardening.md`
 > and
-> [`progress/session-008-p8-turn-deployment-scaling-docs.md`](progress/session-008-p8-turn-deployment-scaling-docs.md).
+> and `progress/session-008-p8-turn-deployment-scaling-docs.md`.
 
 #### Tasks
 
@@ -3643,7 +3643,7 @@ stay open until those platform builds exist (out-of-repo).
    reconnection-token and metrics-bearer-token compares. The TURN credential
    minting and session-policy/host-election surfaces were independently confirmed
    clean. See
-   [`progress/session-013-p8-security-review-hardening.md`](progress/session-013-p8-security-review-hardening.md).
+   historical record `progress/session-013-p8-security-review-hardening.md`.
    The `/security-review` slash command (a user-triggered, billed cloud review of
    the branch diff) remains available but the substantive review is complete.
 3. **Scaling notes** — ✅ **DONE (session 008)**: new
@@ -3986,7 +3986,7 @@ Every item red-green: the failing test lands in the same PR as the fix.
 
 > **Status (session 016):** A1–A5 landed as one PR (the code fixes, red-green
 > Rust tests, doc corrections, and metric wiring) — see
-> [`progress/session-016-p10a-p0-correctness-fixes.md`](progress/session-016-p10a-p0-correctness-fixes.md).
+> historical record `progress/session-016-p10a-p0-correctness-fixes.md`.
 > A1 reuses `last_activity` (refreshed on join/leave/heartbeat-relay) instead of
 > a new `emptied_at` field, with the reconnection-record veto as the
 > authoritative window guard (simpler, no emptiness bookkeeping). **D1
@@ -4057,7 +4057,7 @@ Every item red-green: the failing test lands in the same PR as the fix.
   relay grid passes at the production queue/timeout defaults, so a widened
   test-only config would weaken the evidence and add unused policy.
 - [x] **B2 — extract the real-binary harness (session 017).** Landed — see
-  [`progress/session-017-p10b2-real-binary-harness-dedupe.md`](progress/session-017-p10b2-real-binary-harness-dedupe.md).
+  historical record `progress/session-017-p10b2-real-binary-harness-dedupe.md`.
   `ServerProcess` (+ `Drop`/`kill_and_wait`/`captured_output`), `reserve_port`,
   the health-poll (`wait_until_healthy`), the spawn helpers (`spawn_server`,
   `spawn_server_on_fixed_port`, `try_spawn_server`), and the timeout constants
@@ -4120,7 +4120,7 @@ Every item red-green: the failing test lands in the same PR as the fix.
   `relay_chaos_e2e` and `scenario_realworld_e2e` retrofits landed with the
   auditor in session 030.
 - [x] **B4 — time abstraction (core).** Landed (session 017) — see
-  [`progress/session-017-p10b4-time-abstraction.md`](progress/session-017-p10b4-time-abstraction.md).
+  historical record `progress/session-017-p10b4-time-abstraction.md`.
   `src/server/connection_manager.rs` now reads `tokio::time::Instant` (the
   activity reaper `collect_expired_clients` + the heartbeat throttle
   `should_update_last_seen`); production behavior is identical (outside a paused
@@ -4349,7 +4349,7 @@ build a perfect-recall proptest twin in
   new-key latest parked; no latest/volatile conservation) → fixed → SHIP.**
   Appendix O.5.
 - [x] **D6 — split-brain seeded constants (session 018).** Landed — see
-  [`progress/session-018-p10d6-split-brain-seeded-constants.md`](progress/session-018-p10d6-split-brain-seeded-constants.md).
+  historical record `progress/session-018-p10d6-split-brain-seeded-constants.md`.
   `SplitBrainStampBug` in `SequencedRelay.tla` adds a second instance
   (`SendSplit`) that stamps the same sender's stream from an independent
   `counter2`; TLC violates `GapAccountable` in a 4-action trace (duplicate/
@@ -4402,7 +4402,7 @@ live, so these ARE v3.** The §2.2 gating invariant still governs v2/v3: none of
 this is visible below negotiated v3.
 
 - [x] **E1 — `epoch`.** ✅ **DONE (session 023, PR #145 — fully green).** See
-  [`progress/session-023-p10e1-incarnation-epoch.md`](progress/session-023-p10e1-incarnation-epoch.md).
+  historical record `progress/session-023-p10e1-incarnation-epoch.md`.
   `GameData`/`GameDataBinary` gained `epoch: Option<u32>` beside `seq`;
   `PlayerInfo` (so `RoomJoined.current_players[]` /
   `SpectatorJoined.current_players[]` / `PlayerJoined.player` / `Reconnected`
@@ -4448,7 +4448,7 @@ this is visible below negotiated v3.
   unavailable exact-report capacity fails closed with `4002 slow_consumer`.
   Unsupported-format replacement records its original class and exact range
   before attempting the supplemental error. V2 goldens remain byte-identical.
-  See [`progress/session-032-p10e2-delivery-accountability.md`](progress/session-032-p10e2-delivery-accountability.md).
+  See historical record `progress/session-032-p10e2-delivery-accountability.md`.
 - [x] **E3 — graceful drain.** ✅ **DONE (session 028).** SIGTERM/Ctrl-C now
   starts a drain in `src/main.rs`: new WebSocket upgrades return 503, existing
   room-creating joins are rejected with `SERVER_DRAINING`, negotiated-v3 clients
@@ -4472,7 +4472,7 @@ this is visible below negotiated v3.
   shutdown unregister test, room-creation lock-order rejection test, conditional
   room/spectator/reconnect drain race tests, real-binary SIGTERM multiprocess
   test, v3 `GoingAway` wire golden/round-trip, AsyncAPI/docs/config guards. See
-  [`progress/session-028-p10e3-graceful-drain.md`](progress/session-028-p10e3-graceful-drain.md).
+  historical record `progress/session-028-p10e3-graceful-drain.md`.
 - [x] **E4 — server-initiated WS protocol pings.** ✅ **DONE (session 033).**
   Sent from the socket
   layer below the queues (probe the transport, not the queue):
