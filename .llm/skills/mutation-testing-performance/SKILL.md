@@ -161,7 +161,7 @@ occasional cache miss.
 | budget `{count, N, timeout, per-mutant}` is feasible | `test_mutation_shard_budget_is_feasible_vs_timeout` |
 | oracle never uses `--all-features` | `test_mutation_oracle_does_not_use_all_features` |
 | full-suite caching jobs drop trybuild artifacts | `test_full_suite_caching_jobs_drop_trybuild_artifacts` |
-| mutation scope matches the workflow path filter | `test_mutation_scope_matches_workflow_path_filter` |
+| full suite remains weekly/manual, never a PR/push gate | `test_mutation_workflow_is_periodic_not_per_pr` |
 | script flag/mode invariants (`run-mutants.sh`) | `tests/run_mutants_script_tests.rs` |
 
 Two pre-existing **free guards** also cover this workflow without new code:

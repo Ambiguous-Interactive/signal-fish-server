@@ -32,22 +32,8 @@ on:
     # Mondays 06:00 UTC.
     - cron: "0 6 * * 1"
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - ".cargo/mutants.toml"
-      - ".github/workflows/mutation.yml"
-      - "scripts/run-mutants.sh"
-      - "src/server/session_policy.rs"
-      - "src/server/signaling.rs"
-      - "src/server/relay_policy.rs"
-      - "src/protocol/validation.rs"
-      - "src/protocol/room_codes.rs"
-      - "src/protocol/error_codes.rs"
-      - "src/coordination/mod.rs"
-
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -62,14 +48,6 @@ jobs:
   baseline:
     name: baseline (warm shared cache + green-gate)
     runs-on: ubuntu-latest
-    # Skip on fork PRs: a fork cannot write the shared rust-cache (the save-if
-    # gate below), so the sharded mutants would restore NOTHING and rebuild all
-    # deps cold — the exact >20-min cold-build blowup this workflow was rebuilt to
-    # eliminate. Mutation is a periodic health check (schedule + workflow_dispatch
-    # + same-repo PRs), so skipping forks loses no required gate. The mutants job
-    # carries the identical gate. Enforced by
-    # tests/ci_config_tests.rs::test_mutation_jobs_skip_on_fork_prs.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -103,9 +81,6 @@ jobs:
         with:
           # Shared with the mutants shards below so they restore THIS warm target/.
           shared-key: "mutants"
-          # Skip cache writes on untrusted fork PRs (restore still works), so a
-          # fork cannot poison the shared cache. Same gate as webrtc-interop.yml.
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2.85.10
@@ -129,11 +104,6 @@ jobs:
     name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/40
     needs: baseline
     runs-on: ubuntu-latest
-    # Same fork gate as the baseline job: a fork cannot restore the warm shared
-    # cache, so a cold fork shard would time out. Skip rather than blow up. (Even
-    # without this, a skipped `baseline` would cascade-skip via `needs`, but the
-    # explicit gate keeps the intent obvious and is what the policy test checks.)
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     # Per-shard timeout. With the warm shared cache + --in-place there is no cold
     # dependency build, so a shard is well under 5 min; 10 min is generous
     # headroom for a loaded runner / occasional cache miss. (Was 20 min, when

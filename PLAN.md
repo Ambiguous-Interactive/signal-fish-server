@@ -5,13 +5,12 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P87 is complete;
-> P88's runner-consolidation implementation is under local and hosted
-> validation. P53 is collecting
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P88 is complete;
+> P89's CI validation and scheduling work is under local and hosted validation. P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, and P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
-> has six of 20 eligible scheduled
+> has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
 > server core, the M2
 > production-P2P server work, the M3 protocol documentation, both reference
@@ -45,7 +44,7 @@
 > additional static analyzers, #220
 > formal-verification work beyond the bounded exposure theorem, and #318's
 > remaining cross-platform developer-hook latency evidence. #351's measured
-> fuzz and documentation runner consolidation is P88. #345's effective-policy
+> fuzz and documentation runner consolidation is complete in P88. #345's effective-policy
 > required-check audit and legacy unused-features status alias removal are complete in P86.
 > #347's replay-resistant token binding and
 > certificate-bound reconnect credentials are P85. #268's
@@ -438,7 +437,8 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P85 | Replay-resistant token binding + fail-closed/lean CI (#347, #345) | M | P84 | Security / CI | ✅ Done (s126, PR #349) |
 | P86 | Required-check audit + redundant-runner removal (#345) | S | P84, P85 | CI | ✅ Done (s127, PR #350) |
 | P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | ✅ Done (s128, PR #350) |
-| P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | 🟡 Validating (s129) |
+| P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | ✅ Done (s129, PR #353) |
+| P89 | CI validation and scheduling integrity | S | P88 | CI | 🟡 Validating (s130) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3069,7 +3069,7 @@ non-vacuous; and all mandatory local and hosted gates pass.
 
 ---
 
-### P88 — Measured fuzz and documentation runner consolidation (#351) (Size S) — 🟡 VALIDATING
+### P88 — Measured fuzz and documentation runner consolidation (#351) (Size S) — ✅ DONE
 
 Session 129 follows P86's low-risk allocation removals with the measured
 cross-job work deliberately deferred to issue #351. PR #349's warm-cache fuzz
@@ -3102,7 +3102,7 @@ libFuzzer process for 121 seconds after repeating a 1:28–3:28 compile prefix.
   and preserve exact workflow-shellcheck inputs and ordering in four jobs total.
 - [x] Measure cold and warm consolidated hosted fuzz and documentation jobs and
   record exact before/after raw and rounded minutes.
-- [ ] Pass the final hosted check rollup, close review, merge the green PR, and
+- [x] Pass the final hosted check rollup, close review, merge the green PR, and
   close #351.
 
 The documentation baseline supports the consolidation independently: PR #350
@@ -3134,6 +3134,41 @@ restore failure, prewarm failure, and any target failure cannot false-green;
 stable/required status policy remains satisfied; the shellcheck input and
 fatality when reached are unchanged; measured hosted runner minutes improve;
 and all mandatory local and hosted gates pass.
+
+---
+
+### P89 — CI validation and scheduling integrity (Size S) — 🟡 VALIDATING
+
+Session 130 follows the merged P88 runner consolidation with a complete CI
+surface audit. The highest-confidence findings were false-green local failure
+handling, validation trigger omissions, ineffective push cancellation, and a
+full mutation lane whose PR trigger contradicted its documented policy.
+
+- [x] Make local Clippy auto-fix fail closed instead of erasing either command's
+  non-zero status with `|| true`.
+- [x] Repair validation trigger blind spots for actionlint configuration,
+  documentation toolchain/link policy, and the LLM workflow's own definition;
+  keep release preflight path parity exact and guard every consumed path under
+  both push and pull-request triggers.
+- [x] Give cancellable workflows event-scoped PR-number and branch-push keys
+  while retaining independent schedule/manual runs. PR numbers avoid
+  same-named fork-branch collisions; stable push refs let superseded main runs
+  cancel instead of falling through to unique run IDs. Serialize Docker
+  publication under a non-cancellable group so overlapping entry points queue
+  rather than race or abort.
+- [x] Align full mutation testing with its documented weekly/manual health-check
+  role. The latest successful PR run (`31519240825`) allocated 41 jobs and
+  consumed 206.30 raw / 228 per-job-rounded Linux minutes; removing the PR
+  trigger retains the full weekly and manual evidence without that repeated
+  cost.
+- [ ] Complete mandatory local validation, adversarial review, and the exact-head
+  hosted check/review rollup before merging one green PR.
+
+**Acceptance:** local fix mode cannot false-green; every identified consumed
+workflow configuration triggers its validator; rapid pushes cancel obsolete
+quality runs without cross-cancelling fork PRs, evidence, or publication work;
+the complete mutation suite remains exactly weekly and manually runnable; and
+all local and hosted gates pass.
 
 ---
 
@@ -3977,7 +4012,7 @@ Audited every `thread::sleep` / `tokio::time::sleep` / `Instant::elapsed` in
   `test_mutation_shard_budget_is_feasible_vs_timeout`,
   `test_mutation_oracle_does_not_use_all_features`,
   `test_full_suite_caching_jobs_drop_trybuild_artifacts`,
-  `test_mutation_scope_matches_workflow_path_filter` (all in
+  `test_mutation_workflow_is_periodic_not_per_pr` (all in
   `tests/ci_config_tests.rs`) plus `tests/run_mutants_script_tests.rs`. Full
   rationale: [`.llm/skills/mutation-testing-performance/SKILL.md`](.llm/skills/mutation-testing-performance/SKILL.md).
 - **Status: closed** — PR #153's 32-shard run caught every mutant. Across the
@@ -5328,8 +5363,8 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 ---
 
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
-hosted evidence gates; P86 and P87 are complete in merged PR #350; P88's
-measured CI runner consolidation is under validation;
+hosted evidence gates; P88 is complete in merged PR #353; P89's CI validation
+and scheduling integrity work is under validation;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 completed session history lives in `progress/session-*.md`._

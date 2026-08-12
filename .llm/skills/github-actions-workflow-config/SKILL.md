@@ -201,11 +201,13 @@ on:
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
   cancel-in-progress: true
 ```
 
-Prevents duplicate runs on rapid pushes to the same branch.
+Cancels superseded PR and branch-push runs while keeping scheduled and manual
+runs independent. PR numbers avoid collisions between same-named fork branches;
+the push ref avoids the unique-run-ID fallback that defeats push cancellation.
 
 ---
 
@@ -288,8 +290,6 @@ jobs:
 
 The hook also recognizes per-job comments: `# runs-on-schedule`, `# schedule`,
 `# security`, `# audit`, `# daily`; those jobs do not need an `if:` guard.
-
----
 
 ## Related Skills
 

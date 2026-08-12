@@ -159,6 +159,6 @@ satisfies issue #351's timing requirement without relying on a projection.
 
 The connected review service reported only its known account-quota exhaustion;
 it supplied no code finding or thread. Three independent adversarial passes on
-the exact implementation reached zero findings. P88 remains validating only
-until the final hosted head's repository-owned check rollup is green; then the
-draft can be marked ready and merged to close #351.
+the exact implementation reached zero findings. The final hosted head's
+repository-owned check rollup completed green; PR #353 was marked ready and
+merged as `426b3d3`, closing #351 and P88.
