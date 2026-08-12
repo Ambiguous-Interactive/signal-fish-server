@@ -5,8 +5,8 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P88 is complete;
-> P89's CI validation and scheduling work is under local and hosted validation. P53 is collecting
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P89 is complete;
+> P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, and P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
@@ -438,7 +438,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P86 | Required-check audit + redundant-runner removal (#345) | S | P84, P85 | CI | ✅ Done (s127, PR #350) |
 | P87 | Atomic reconnect-claim lifecycle proof (#220) | S | P59, P85 | Maintenance | ✅ Done (s128, PR #350) |
 | P88 | Measured fuzz and documentation runner consolidation (#351) | S | P86 | CI | ✅ Done (s129, PR #353) |
-| P89 | CI validation and scheduling integrity | S | P88 | CI | 🟡 Validating (s130) |
+| P89 | CI validation and scheduling integrity | S | P88 | CI | ✅ Done (s130, PR #354) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3137,7 +3137,7 @@ and all mandatory local and hosted gates pass.
 
 ---
 
-### P89 — CI validation and scheduling integrity (Size S) — 🟡 VALIDATING
+### P89 — CI validation and scheduling integrity (Size S) — ✅ DONE
 
 Session 130 follows the merged P88 runner consolidation with a complete CI
 surface audit. The highest-confidence findings were false-green local failure
@@ -3161,7 +3161,7 @@ full mutation lane whose PR trigger contradicted its documented policy.
   consumed 206.30 raw / 228 per-job-rounded Linux minutes; removing the PR
   trigger retains the full weekly and manual evidence without that repeated
   cost.
-- [ ] Complete mandatory local validation, adversarial review, and the exact-head
+- [x] Complete mandatory local validation, adversarial review, and the exact-head
   hosted check/review rollup before merging one green PR.
 
 **Acceptance:** local fix mode cannot false-green; every identified consumed
@@ -5364,7 +5364,7 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
 hosted evidence gates; P88 is complete in merged PR #353; P89's CI validation
-and scheduling integrity work is under validation;
+and scheduling integrity work is complete in PR #354;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 completed session history lives in `progress/session-*.md`._

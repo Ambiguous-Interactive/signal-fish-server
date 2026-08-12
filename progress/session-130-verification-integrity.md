@@ -55,5 +55,13 @@ were incorporated; the third pass reported zero findings. The exact-head hosted
 rollup's first Markdownlint attempt then rejected the 197-character concurrency
 example with MD013. The workflow expression itself passed Actionlint; the skill
 example now uses an equivalent folded YAML scalar, and Markdown/YAML policy was
-re-run before publishing the fix. The final hosted rollup remains before P89 is
-complete.
+re-run before publishing the fix. The exact implementation head (`f28205d`)
+then passed every repository-owned hosted workflow, including the complete
+cross-platform CI matrix, Advanced Safety, fuzzing, nightly verification,
+formal verification, documentation, and all interop lanes. Documentation
+Validation's first Markdown Code Validation attempt ended before parsing any
+sample when the pinned `yq` download returned `wget` status 8; rerunning that
+job without a code change passed. GitHub review contained no inline thread or
+requested change, only the connected Copilot reviewer's account-quota notices.
+With the hosted rollup green and three adversarial passes closed, P89 is
+complete; the final PLAN/progress commit is bookkeeping only.
