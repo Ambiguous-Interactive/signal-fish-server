@@ -1,0 +1,74 @@
+# Public WebSocket Upgrade Probe
+#
+# An HTTP health route can stay green while TLS termination or WebSocket proxy
+# admission fails. This independent probe therefore opens repeated pairs of
+# simultaneous upgrades through the deployed public path and requires the
+# Signal Fish correlation/outcome headers on every HTTP 101 response.
+#
+# all-jobs-run-on-schedule
+
+name: Public WebSocket Upgrade Probe
+
+on:
+  schedule:
+    # Four runs daily meet the repository's public-path monitoring cadence.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      endpoint_url:
+        description: Public ws:// or wss:// endpoint to probe
+        required: false
+        default: wss://atom.sharkdad.io/signalfish/v2/ws
+        type: string
+      bursts:
+        description: Number of simultaneous two-client bursts
+        required: false
+        default: "20"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  simultaneous-upgrades:
+    name: Simultaneous public upgrades
+    runs-on: ubuntu-latest
+    # The probe's 20 sequential bursts bound curl waiting to 200 seconds,
+    # leaving the rest of the five-minute job for setup and evidence upload.
+    timeout-minutes: 5
+    # One current run per endpoint is useful evidence; a superseded probe only
+    # measures an older instant and should not delay the latest run.
+    concurrency:
+      group: >-
+        public-upgrade-${{ inputs.endpoint_url ||
+            vars.SIGNAL_FISH_PUBLIC_WS_URL ||
+            'wss://atom.sharkdad.io/signalfish/v2/ws' }}
+      cancel-in-progress: true
+    env:
+      PROBE_URL: >-
+        ${{ inputs.endpoint_url || vars.SIGNAL_FISH_PUBLIC_WS_URL ||
+            'wss://atom.sharkdad.io/signalfish/v2/ws' }}
+      PROBE_BURSTS: ${{ inputs.bursts || '20' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Probe simultaneous WebSocket upgrades
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/probe-websocket-upgrades.sh "${PROBE_URL}" "${PROBE_BURSTS}" \
+            2>&1 | tee public-upgrade-probe.log
+
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: public-upgrade-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: public-upgrade-probe.log
+          retention-days: 30
+          if-no-files-found: error

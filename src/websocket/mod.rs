@@ -126,7 +126,10 @@ pub mod allocation_benchmark {
 }
 
 // Re-export public API to maintain backward compatibility
-pub use handler::{websocket_handler, websocket_handler_v3};
+pub use handler::{
+    websocket_handler, websocket_handler_v3, WEBSOCKET_REQUEST_ID_HEADER,
+    WEBSOCKET_UPGRADE_OUTCOME_HEADER,
+};
 pub use metrics::{metrics_handler, prometheus_metrics_handler, MetricsQuery};
 #[cfg(feature = "tls")]
 pub use routes::ConfiguredAcceptor;

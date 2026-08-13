@@ -13,7 +13,9 @@
 > capability-downgrading disconnect/reconnect composition in PR #362, and P95
 > proved the fresh-generation v3-to-v2 reconnect refinement in PR #363. P96
 > made the rate-limit unit suite independent of host execution speed in PR #365
-> under #364. P66 preserved and published the
+> under #364. P97 is validating correlated WebSocket-upgrade diagnostics and a
+> repeated simultaneous-client probe through the deployed public proxy path
+> under #367. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -464,6 +466,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P94 | Capability-downgrading reconnect refinement (#220) | S | P41, P58, P87 | Maintenance | ✅ Done (s135, PR #362) |
 | P95 | Connection-generation-aware v3-to-v2 reconnect refinement (#220) | S | P41, P58, P94 | Maintenance | ✅ Done (s136, PR #363) |
 | P96 | Deterministic rate-limit window tests (#364) | S | P27, P33 | Maintenance / CI | ✅ Done (s137, PR #365) |
+| P97 | Public WebSocket upgrade observability and proxy-path probe (#367) | S | P25, P91 | Reliability / Operations | 🟡 Validating (s138) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3462,6 +3465,53 @@ limit; the rate-limit suite's assertion sequences cannot change outcome with
 interpreter or runner speed; expiry semantics remain covered by explicit virtual
 time; no production behavior changes; and all mandatory local, hosted, and
 review gates pass.
+
+---
+
+### P97 — Public WebSocket upgrade observability and proxy-path probe (#367) (Size S) — 🟡 VALIDATING
+
+Two Crablox CI attempts opened two clients within one millisecond through
+`wss://atom.sharkdad.io/signalfish/v2/ws`; both clients closed before observing
+HTTP 101. The identical client and endpoint succeeded between those runs, and
+the isolated current container remained reliable. A live process snapshot after
+the second failure retained the successful game's 3,390 reliable deliveries and
+reported 23 accepted connections, numerically matching that game's two clients
+plus 21 later manual HTTP-101 probes. Aggregate counters cannot causally assign
+individual attempts or independently prove that no reset occurred, so this is
+supporting evidence—not proof—that the failed pair never reached connection
+registration. Combined with the pre-101 symptoms, nginx/TLS/proxy admission is
+the leading boundary hypothesis, while the old application metrics cannot
+distinguish a request that reached the handler and was deliberately rejected
+before 101.
+
+- [x] Return a unique `x-signal-fish-request-id` and exact
+  `x-signal-fish-upgrade-outcome` on every application-handled HTTP 101 or
+  deliberate Origin, drain, or token-binding rejection; log the same ID,
+  outcome, transport peer IP, and status. Behind a reverse proxy this is the
+  proxy peer, not an inferred end-client address.
+- [x] Export one attempt counter and complete outcome counters in both JSON and
+  Prometheus, with the quiescent conservation law `attempts = sum(outcomes)`.
+- [x] Prove 20 consecutive two-client bursts through real sockets: both peers
+  receive HTTP 101 concurrently, carry distinct valid request IDs, report
+  `accepted`, and conserve all 40 application outcomes.
+- [x] Add a fail-closed operator probe with fresh per-peer RFC 6455 keys,
+  client-generated proxy correlation IDs, and deterministic tests for complete
+  handshake success, wrong/missing accepts, exact peer/status failure, missing
+  application diagnostics, concurrency, duplicate application IDs, and a total
+  request timeout that preserves response time after the connection budget.
+- [x] Add a scheduled public-path workflow that runs 20 two-client bursts four
+  times daily and retains the raw evidence; keep the target overrideable for
+  other deployments.
+- [x] Document nginx correlation logging and explicitly separate ordinary HTTP
+  health from full WebSocket upgrade health.
+- [ ] Deploy the correlated build, collect a complete scheduled public-path
+  attempt, and use its application/proxy IDs to close or further refine #367.
+
+**Acceptance:** the application admits repeated simultaneous v2 upgrades; every
+application decision is correlatable and outcome-conserving; a missing
+application ID fails the proxy-path probe rather than being confused with a
+server rejection; the deployed scheduled probe passes on its first complete
+attempt; mandatory local, hosted, and independent-review gates pass.
 
 ---
 

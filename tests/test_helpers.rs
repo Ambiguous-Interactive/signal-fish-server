@@ -129,11 +129,27 @@ pub async fn create_test_server_with_config(
     server_config: ServerConfig,
     protocol_config: ProtocolConfig,
 ) -> Arc<EnhancedGameServer> {
+    create_test_server_with_transport_security(
+        server_config,
+        protocol_config,
+        signal_fish_server::config::TransportSecurityConfig::default(),
+    )
+    .await
+}
+
+/// Create a test server with custom application and transport-security configuration.
+#[allow(dead_code)]
+pub async fn create_test_server_with_transport_security(
+    server_config: ServerConfig,
+    protocol_config: ProtocolConfig,
+    transport_security: signal_fish_server::config::TransportSecurityConfig,
+) -> Arc<EnhancedGameServer> {
     build_test_server(
         server_config,
         protocol_config,
         RelayTypeConfig::default(),
         DatabaseConfig::InMemory,
+        transport_security,
     )
     .await
 }
@@ -143,6 +159,7 @@ async fn build_test_server(
     protocol_config: ProtocolConfig,
     relay_type_config: RelayTypeConfig,
     database_config: DatabaseConfig,
+    transport_security: signal_fish_server::config::TransportSecurityConfig,
 ) -> Arc<EnhancedGameServer> {
     EnhancedGameServer::new(
         server_config,
@@ -153,7 +170,7 @@ async fn build_test_server(
         database_config,
         signal_fish_server::config::MetricsConfig::default(),
         signal_fish_server::config::CoordinationConfig::default(),
-        signal_fish_server::config::TransportSecurityConfig::default(),
+        transport_security,
         vec![],
     )
     .await

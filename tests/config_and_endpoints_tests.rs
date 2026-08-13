@@ -10,18 +10,23 @@ mod test_helpers;
 
 use regex::Regex;
 use signal_fish_server::config::{
-    AppRegistrationEntry, ClientAuthMode, Config, DashboardHistoryField, LogFormat,
+    AppRegistrationEntry, ClientAuthMode, Config, DashboardHistoryField, LogFormat, ProtocolConfig,
+    TokenBindingConfig, TransportSecurityConfig,
 };
 use signal_fish_server::security::token_binding::TokenBindingScheme;
 use signal_fish_server::websocket::{
     create_router, create_router_with_origin_policy, create_standalone_router, websocket_handler,
     websocket_handler_v3, websocket_route_v3, websocket_route_v3_with_origin_policy,
+    WEBSOCKET_REQUEST_ID_HEADER, WEBSOCKET_UPGRADE_OUTCOME_HEADER,
 };
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use test_helpers::{create_test_server, test_server_config, RunningTestServer};
+use test_helpers::{
+    create_test_server, create_test_server_with_transport_security, test_server_config,
+    RunningTestServer,
+};
 
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
@@ -1814,6 +1819,24 @@ async fn connect_with_origin(
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::Error,
 > {
+    connect_with_origin_and_response(addr, path, origin)
+        .await
+        .map(|(socket, _response)| socket)
+}
+
+async fn connect_with_origin_and_response(
+    addr: std::net::SocketAddr,
+    path: &str,
+    origin: Option<&'static str>,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let mut request = format!("ws://{addr}{path}")
@@ -1825,9 +1848,70 @@ async fn connect_with_origin(
             axum::http::HeaderValue::from_static(origin),
         );
     }
+    tokio_tungstenite::connect_async(request).await
+}
+
+async fn connect_with_subprotocol(
+    addr: std::net::SocketAddr,
+    path: &str,
+    subprotocol: &'static str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::Error,
+> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut request = format!("ws://{addr}{path}")
+        .into_client_request()
+        .expect("build WebSocket request");
+    request.headers_mut().insert(
+        axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+        axum::http::HeaderValue::from_static(subprotocol),
+    );
     tokio_tungstenite::connect_async(request)
         .await
         .map(|(socket, _response)| socket)
+}
+
+async fn create_token_binding_test_server(
+    required: bool,
+) -> std::sync::Arc<signal_fish_server::server::EnhancedGameServer> {
+    create_test_server_with_transport_security(
+        test_server_config(),
+        ProtocolConfig::default(),
+        TransportSecurityConfig {
+            token_binding: TokenBindingConfig {
+                enabled: true,
+                required,
+                ..TokenBindingConfig::default()
+            },
+            ..TransportSecurityConfig::default()
+        },
+    )
+    .await
+}
+
+fn assert_upgrade_diagnostics(
+    headers: &axum::http::HeaderMap,
+    expected_outcome: &str,
+) -> uuid::Uuid {
+    let request_id = headers
+        .get(WEBSOCKET_REQUEST_ID_HEADER)
+        .unwrap_or_else(|| panic!("missing {WEBSOCKET_REQUEST_ID_HEADER} response header"))
+        .to_str()
+        .expect("request ID response header must be ASCII");
+    let parsed = uuid::Uuid::parse_str(request_id)
+        .unwrap_or_else(|error| panic!("invalid upgrade request ID {request_id:?}: {error}"));
+    assert_eq!(
+        headers
+            .get(WEBSOCKET_UPGRADE_OUTCOME_HEADER)
+            .unwrap_or_else(|| panic!(
+                "missing {WEBSOCKET_UPGRADE_OUTCOME_HEADER} response header"
+            )),
+        expected_outcome,
+        "upgrade outcome for request {request_id}"
+    );
+    parsed
 }
 
 #[tokio::test]
@@ -1848,6 +1932,7 @@ async fn regression_319_websocket_upgrades_enforce_explicit_origin_policy() {
             axum::http::StatusCode::FORBIDDEN,
             "{path}"
         );
+        assert_upgrade_diagnostics(response.headers(), "rejected_origin");
 
         for origin in [Some("https://allowed.example"), None] {
             let mut socket = connect_with_origin(addr, path, origin)
@@ -1859,6 +1944,178 @@ async fn regression_319_websocket_upgrades_enforce_explicit_origin_policy() {
                 .unwrap_or_else(|error| panic!("{path}: close test WebSocket: {error}"));
         }
     }
+    running.shutdown().await;
+}
+
+/// Regression: issue #367 — simultaneous clients must both complete the HTTP
+/// upgrade, and each response must carry enough application evidence to
+/// distinguish an accepted Signal Fish request from a proxy/TLS failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn regression_367_simultaneous_v2_upgrades_are_accepted_and_correlatable() {
+    use std::collections::HashSet;
+
+    const BURSTS: usize = 20;
+    let server = create_test_server().await;
+    let app = create_router("*").with_state(server.clone());
+    let running = start_router_test_server(server.clone(), app).await;
+    let addr = running.addr();
+    let mut request_ids = HashSet::with_capacity(BURSTS * 2);
+
+    for burst in 1..=BURSTS {
+        let (left, right) = tokio::join!(
+            connect_with_origin_and_response(addr, "/ws", None),
+            connect_with_origin_and_response(addr, "/ws", None),
+        );
+        let (mut left_socket, left_response) =
+            left.unwrap_or_else(|error| panic!("burst {burst}, left upgrade failed: {error}"));
+        let (mut right_socket, right_response) =
+            right.unwrap_or_else(|error| panic!("burst {burst}, right upgrade failed: {error}"));
+
+        for (peer, response) in [("left", &left_response), ("right", &right_response)] {
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::SWITCHING_PROTOCOLS,
+                "burst {burst}, {peer} status"
+            );
+            let request_id = assert_upgrade_diagnostics(response.headers(), "accepted");
+            assert!(
+                request_ids.insert(request_id),
+                "burst {burst}, {peer} reused request ID {request_id}"
+            );
+        }
+
+        let (left_close, right_close) =
+            tokio::join!(left_socket.close(None), right_socket.close(None),);
+        left_close.unwrap_or_else(|error| panic!("burst {burst}, close left socket: {error}"));
+        right_close.unwrap_or_else(|error| panic!("burst {burst}, close right socket: {error}"));
+    }
+
+    let upgrades = server
+        .metrics()
+        .snapshot()
+        .await
+        .connections
+        .websocket_upgrades;
+    assert_eq!(
+        upgrades.attempts,
+        u64::try_from(BURSTS * 2).expect("burst count fits u64")
+    );
+    assert_eq!(upgrades.accepted, upgrades.attempts);
+    assert_eq!(
+        upgrades,
+        signal_fish_server::metrics::WebSocketUpgradeMetrics {
+            attempts: upgrades.attempts,
+            accepted: upgrades.attempts,
+            ..Default::default()
+        },
+        "every application-handled upgrade attempt must have one exact outcome"
+    );
+
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn draining_upgrade_rejection_is_correlatable_and_accounted() {
+    use tokio_tungstenite::tungstenite::Error;
+
+    let server = create_test_server().await;
+    let app = create_router("*").with_state(server.clone());
+    let running = start_router_test_server(server.clone(), app).await;
+    server.begin_shutdown_drain();
+
+    let error = connect_with_origin(running.addr(), "/ws", None)
+        .await
+        .expect_err("draining server must reject a new WebSocket upgrade");
+    let Error::Http(response) = error else {
+        panic!("expected draining HTTP rejection, got {error}");
+    };
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_upgrade_diagnostics(response.headers(), "rejected_draining");
+
+    let upgrades = server
+        .metrics()
+        .snapshot()
+        .await
+        .connections
+        .websocket_upgrades;
+    assert_eq!(
+        upgrades,
+        signal_fish_server::metrics::WebSocketUpgradeMetrics {
+            attempts: 1,
+            rejected_draining: 1,
+            ..Default::default()
+        }
+    );
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsupported_token_binding_offer_rejection_is_correlatable_and_accounted() {
+    use tokio_tungstenite::tungstenite::Error;
+
+    let server = create_token_binding_test_server(false).await;
+    let app = create_router("*").with_state(server.clone());
+    let running = start_router_test_server(server.clone(), app).await;
+
+    let error =
+        connect_with_subprotocol(running.addr(), "/ws", "signalfish.tokenbinding.unsupported")
+            .await
+            .expect_err("a reserved unsupported token-binding offer must be rejected");
+    let Error::Http(response) = error else {
+        panic!("expected token-binding offer HTTP rejection, got {error}");
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert_upgrade_diagnostics(response.headers(), "rejected_token_binding_offer");
+
+    assert_eq!(
+        server
+            .metrics()
+            .snapshot()
+            .await
+            .connections
+            .websocket_upgrades,
+        signal_fish_server::metrics::WebSocketUpgradeMetrics {
+            attempts: 1,
+            rejected_token_binding_offer: 1,
+            ..Default::default()
+        }
+    );
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn token_binding_negotiation_rejection_is_correlatable_and_accounted() {
+    use tokio_tungstenite::tungstenite::Error;
+
+    let server = create_token_binding_test_server(true).await;
+    let app = create_router("*").with_state(server.clone());
+    let running = start_router_test_server(server.clone(), app).await;
+
+    let error = connect_with_origin(running.addr(), "/ws", None)
+        .await
+        .expect_err("required token binding must reject a client that omits the subprotocol");
+    let Error::Http(response) = error else {
+        panic!("expected token-binding negotiation HTTP rejection, got {error}");
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert_upgrade_diagnostics(response.headers(), "rejected_token_binding_negotiation");
+
+    assert_eq!(
+        server
+            .metrics()
+            .snapshot()
+            .await
+            .connections
+            .websocket_upgrades,
+        signal_fish_server::metrics::WebSocketUpgradeMetrics {
+            attempts: 1,
+            rejected_token_binding_negotiation: 1,
+            ..Default::default()
+        }
+    );
     running.shutdown().await;
 }
 

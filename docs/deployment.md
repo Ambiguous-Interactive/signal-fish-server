@@ -156,7 +156,22 @@ self-hosted only.
 
 ### nginx
 
+Define a structured access log in nginx's `http` context so one failed client
+attempt can be joined to both proxy and Signal Fish logs. The client-generated
+probe attempt ID remains available even when no application response arrives.
+The two `$upstream_http_*` values come from the application's upgrade response;
+empty values mean nginx did not observe those diagnostics, which may indicate
+an earlier failure, framework rejection, or response-header stripping.
+
 ```nginx
+
+log_format signal_fish_upgrade escape=json
+    '{"time":"$time_iso8601",'
+    '"nginx_request_id":"$request_id",'
+    '"probe_attempt_id":"$http_x_signal_fish_probe_attempt_id",'
+    '"status":$status,"upstream_status":"$upstream_status",'
+    '"signal_fish_request_id":"$upstream_http_x_signal_fish_request_id",'
+    '"signal_fish_upgrade_outcome":"$upstream_http_x_signal_fish_upgrade_outcome"}';
 
 upstream signal_fish {
     server 127.0.0.1:3536;
@@ -169,6 +184,8 @@ server {
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
 
+    access_log /var/log/nginx/signal-fish-access.log signal_fish_upgrade;
+
     location ~ ^/(v2|v3)/ws$ {
         proxy_pass http://signal_fish;
         proxy_http_version 1.1;
@@ -178,6 +195,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Signal-Fish-Probe-Attempt-Id $http_x_signal_fish_probe_attempt_id;
 
         # WebSocket timeouts
         proxy_read_timeout 86400s;
@@ -370,6 +388,53 @@ curl http://localhost:3536/v2/health
 ```
 
 Returns `200 OK` when healthy.
+
+That HTTP route proves ordinary request forwarding only; it does not exercise a
+TLS terminator's WebSocket admission or nginx's upgrade path. Probe the complete
+public route separately with repeated simultaneous clients:
+
+```bash
+
+bash scripts/probe-websocket-upgrades.sh \
+  wss://signal.yourgame.com/v2/ws 20
+
+```
+
+The probe requires `curl` and OpenSSL. It generates a fresh random
+`Sec-WebSocket-Key` for every peer and verifies the complete RFC 6455 response:
+HTTP 101, `Upgrade`, `Connection`, and the key-derived
+`Sec-WebSocket-Accept`. Each request also sends and prints a non-secret random
+`X-Signal-Fish-Probe-Attempt-Id`; the nginx log field above joins a client-side
+failure to the proxy request even when application response headers are absent.
+Failure output is limited to the HTTP status line and non-sensitive RFC 6455 or
+Signal Fish correlation/outcome fields. The probe does not replay cookies,
+authorization or vendor response headers, or raw `curl` stderr into scheduled
+logs and retained artifacts. Each request allows five seconds to connect within
+a ten-second total request budget, so DNS/TCP/TLS setup cannot consume the
+entire window before the server has a chance to return HTTP 101.
+
+Every application-handled response carries a unique
+`x-signal-fish-request-id` and a machine-readable
+`x-signal-fish-upgrade-outcome`. Accepted upgrades use `accepted`; deliberate
+HTTP rejections identify `rejected_origin`, `rejected_draining`,
+`rejected_token_binding_offer`, or `rejected_token_binding_negotiation`. The
+server logs the same fields with the transport peer IP and status. Behind a
+reverse proxy, `peer_ip` is normally the proxy's address; Signal Fish does not
+infer an end-client address from untrusted forwarding headers. Missing headers
+mean the probe cannot confirm that the handler completed; possible causes
+include DNS, TLS, listener or reverse-proxy failure, framework rejection, and
+an intermediary stripping response headers. Correlate the printed probe
+attempt ID and nginx request ID before assigning the boundary.
+
+The JSON snapshot exposes the same conservation boundary at
+`metricsSnapshot.connections.websocket_upgrades`. Prometheus exports
+`signal_fish_websocket_upgrade_attempts_total` and
+`signal_fish_websocket_upgrade_outcomes_total{outcome=...}`; after in-flight
+handlers settle, attempts equal the sum of all outcomes. The repository's
+scheduled Public WebSocket Upgrade Probe runs this check against the configured
+public endpoint four times daily and retains its per-request evidence for 30
+days. If runs for the same endpoint overlap, the newer scheduled or manual run
+cancels the stale one so the retained result describes the latest probe window.
 
 ### Metrics
 
