@@ -380,7 +380,7 @@ fn simultaneous_upgrade_probe_reports_empty_artifacts_when_curl_never_starts() {
         .arg(repo_path("scripts/probe-websocket-upgrades.sh"))
         .arg("wss://signal.example/v2/ws")
         .arg("1")
-        .env("SIGNAL_FISH_CURL_BIN", "/bin/false")
+        .env("SIGNAL_FISH_CURL_BIN", "false")
         .output()
         .expect("run probe with failing curl executable");
 
