@@ -82,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent slow or contended Miri safety runs from spuriously failing rate-limit
+  preflight accounting when the 100-millisecond unit fixture expires between
+  assertions. Asynchronous rate-limit assertion sequences now use paused virtual
+  time, while explicit expiry coverage and production behavior remain unchanged
+  (issue #364).
 - Keep accepted native and browser reference-client run, WebRTC, handshake,
   and watchdog durations from expiring immediately when their absolute
   deadline exceeds the platform clock or timer range. Browser numeric flags
