@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium, type BrowserServer, type Page } from 'playwright-core';
 
+import { deadlineAfterSeconds, scheduleDeadline } from '../shared/deadline.js';
 import { EXIT_HARD_TIMEOUT, EXIT_PROTOCOL_ERROR, type RunConfig } from '../shared/types.js';
 import { parseArgs, UsageError, USAGE, type CliOptions } from './args.js';
 
@@ -261,13 +262,16 @@ async function main(): Promise<void> {
 
   // The watchdog is the binary's no-hang guarantee: it bounds EVERYTHING,
   // Chromium launch included, and expiry is a hard abort with exit code 4.
-  const watchdog = setTimeout(() => {
-    emitEvent({
-      event: 'error',
-      message: `--max-runtime-secs (${options.maxRuntimeSecs}) watchdog fired; hard abort`,
-    });
-    void exitWith(EXIT_HARD_TIMEOUT);
-  }, options.maxRuntimeSecs * 1000);
+  const watchdog = scheduleDeadline(
+    deadlineAfterSeconds(Date.now(), options.maxRuntimeSecs),
+    () => {
+      emitEvent({
+        event: 'error',
+        message: `--max-runtime-secs (${options.maxRuntimeSecs}) watchdog fired; hard abort`,
+      });
+      void exitWith(EXIT_HARD_TIMEOUT);
+    },
+  );
 
   let code: number;
   try {
@@ -296,7 +300,7 @@ async function main(): Promise<void> {
     emitEvent({ event: 'error', message: `browser run failed: ${String(error)}` });
     code = EXIT_HARD_TIMEOUT;
   }
-  clearTimeout(watchdog);
+  watchdog.cancel();
   await exitWith(code);
 }
 

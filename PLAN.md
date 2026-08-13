@@ -8,7 +8,8 @@
 > Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P92 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
-> recurring H14 hosted control failure, P66 preserved and published the
+> recurring H14 hosted control failure, and P93 has closed reference-client
+> duration overflow in PR #361. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -143,6 +144,10 @@
 > valid sockets, invalid certificate identity, retained stale handles, expiry
 > cleanup, failed-restore release, and one-time completion now share one model
 > backed by four independent expected-failure configurations.
+> P93 closes #360 by carrying P92's deadline-overflow invariant through both
+> protocol reference clients: native unrepresentable deadlines remain beyond
+> the process lifetime, browser numeric flags stay exact, and long JavaScript
+> timers advance in bounded host-safe chunks instead of firing immediately.
 > P61 removes carry-forward contract drift and mock-only performance evidence
 > found by the session-103 adversarial sweep. P62 closes #300 by distinguishing
 > the server-emitted error-code contract from six legacy Rust variants retained
@@ -363,7 +368,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P11 | Git-tagged releases + versioned GHCR containers | S | Release workflows | Release | ✅ Done |
 | P12 | Fortress Rollback relay interoperability regression | S | P7, protocol v3 relay | M3 | ✅ Done (s049) |
 | P13 | Fortress + Rust-client single-threaded WASM interoperability | M | P12, browser interop harness | M3 | ✅ Done (s056; Chromium cell) |
-| P14 | Dependency hygiene and WebSocket stack coherence | S | Current release graph | Maintenance | Done (s060) |
+| P14 | Dependency hygiene and WebSocket stack coherence | S | Current release graph | Maintenance | ✅ Done (s060) |
 | P15 | Portable Agent Skills library | S | — | Maintenance | ✅ Done (s061) |
 | P16 | Measurement integrity and enforced no-unsafe | S | — | Maintenance | ✅ Done (s062); #212 resolved by P17 |
 | P17 | Unsupported-format accountability amplification (#212) | S | P5, P7 | Maintenance | ✅ Done (s063); client release → `client-rust#81` |
@@ -387,8 +392,8 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P35 | Strict retry delay cap (#205) | S | P10 | Maintenance | ✅ Done (s078) |
 | P36 | Historical GitHub Release retry integrity | S | P11 | Release | ✅ Done (s079) |
 | P37 | Allocation-free relay builder handoff (#207) | S | P20, P24, P34 | Maintenance | ✅ Done (s080) |
-| P38 | Allocation-free routed-recipient traversal (#207) | S | P24, P37 | Maintenance | Done (s081) |
-| P39 | Atomic application room ownership and quotas (#249) | M | P23 | Maintenance | Done (s082) |
+| P38 | Allocation-free routed-recipient traversal (#207) | S | P24, P37 | Maintenance | ✅ Done (s081) |
+| P39 | Atomic application room ownership and quotas (#249) | M | P23 | Maintenance | ✅ Done (s082) |
 | P40 | Executable Host + Direct plans (#251) | M | P3, P7 | Maintenance | ✅ Done (s083) |
 | P41 | Protocol-v3 edge and specification hardening (#257) | M | P1, P3, P5, P7 | Maintenance | ✅ Done (s084) |
 | P42 | Wire-fenced retained WebRTC pair generations (#258) | M | P3, P7, P41 | Maintenance | ✅ Done (s085) |
@@ -442,6 +447,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P90 | Minimal published crate and local-only session hygiene (#355) | S | P89 | Release / CI | ✅ Done (s131, PR #356) |
 | P91 | Fail-closed CI bootstrap and H14 PR isolation | S | P56, P89 | CI | ✅ Done (s132, PR #357) |
 | P92 | Spectator admission and deadline-overflow closure (#358) | S | P27, P30, P79 | Maintenance | ✅ Done (s133, PR #359) |
+| P93 | Cross-reference-client deadline integrity (#360) | S | P7, P79, P92 | Maintenance | ✅ Done (s134, PR #361) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3272,6 +3278,45 @@ check and review is green.
 
 ---
 
+### P93 — Cross-reference-client deadline integrity (#360) (Size S) — ✅ DONE
+
+Session 134 extends P92's overflow contract through the two executable protocol
+references. The native client previously converted an unrepresentable absolute
+Tokio deadline back to its start instant, while the browser passed arbitrarily
+large millisecond delays directly to a host timer that clamps them to roughly
+one millisecond. Both paths could therefore turn a deliberately distant run,
+WebRTC, handshake, or watchdog boundary into immediate failure.
+
+- [x] Represent native caller-supplied deadlines as finite or beyond the
+  process lifetime, preserving one absolute handshake frontier across
+  transparent control frames and distinguishing an armed, unrepresentable P2P
+  window from an unarmed one.
+- [x] Require exact non-negative browser integers, saturate unrepresentable
+  absolute millisecond deadlines in the distant future, and reschedule waits
+  above the host timer ceiling in bounded chunks with idempotent cancellation.
+- [x] Preserve ordinary and zero-duration semantics with data-driven native and
+  browser regressions; document the shared behavior and its one intentional
+  numeric-representation difference.
+- [x] Complete mandatory local and hosted validation, adversarial review, and
+  exact-head CI/review rollup.
+
+PR #361 passed the complete hosted Rust, browser, native, TURN, Miri, ASan,
+cross-platform, documentation, and verification matrix. Its first hosted
+Windows live-WebRTC attempt exposed a retained-future stack overflow in the
+initial watchdog wrapper; the corrected wrapper boxes the large caller before
+constructing its state machine, preserves first-poll timeout accounting, and is
+guarded by direct future-size and paused-time regressions. Repeated independent
+review ended with zero actionable findings. The Copilot reviewer reported only
+requester quota exhaustion and produced no code finding.
+
+**Acceptance:** every accepted duration remains exact or later than the process
+can represent; no arithmetic or host-timer overflow becomes immediate expiry;
+imprecise browser integers fail as CLI usage errors; zero-duration boundaries
+remain immediate; both reference-client unit, type, formatting, build, and live
+interop gates pass; and every required review and CI check is green.
+
+---
+
 ### P11 — Git-tagged releases + versioned GHCR containers (Size S) — ✅ DONE
 
 **Schedule this before the next crates.io publish or GitHub Release.** A public
@@ -5465,7 +5510,10 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
 hosted evidence gates; P88 is complete in merged PR #353; P89's CI validation
 and scheduling integrity work is complete in PR #354; P90's published-source
-and local-session hygiene is complete in PR #356;
+and local-session hygiene is complete in PR #356; P91's fail-closed CI
+bootstrap and H14 isolation are complete in PR #357; P92's spectator/deadline
+server sweep is complete in PR #359; P93's reference-client deadline sweep is
+complete in PR #361;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 durable evidence lives in repository artifacts and linked GitHub state, while

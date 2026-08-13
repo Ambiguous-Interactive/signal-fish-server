@@ -35,6 +35,11 @@ import {
   isV3,
   type RunConfig,
 } from '../shared/types.js';
+import {
+  deadlineAfterSeconds,
+  scheduleDeadline,
+  type ScheduledDeadline,
+} from '../shared/deadline.js';
 import { classifySignal, emit, type SignalKind } from './events.js';
 import { Engine, RELIABLE_LABEL, UNRELIABLE_LABEL, type PlanIceServer } from './engine.js';
 import { DeliveryAccountability, DeliveryAccountabilityViolation } from './accountability.js';
@@ -520,7 +525,7 @@ class Orchestrator {
    * current deadline (the second expiry is fatal).
    */
   private pongGraceApplied = false;
-  private wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private wakeTimer: ScheduledDeadline | null = null;
 
   constructor(config: RunConfig) {
     this.config = config;
@@ -589,9 +594,10 @@ class Orchestrator {
     // The soft run window starts at PROCESS start: the CLI reports the time
     // already spent launching Chromium so the window matches the native
     // client's process-start semantics.
-    this.runDeadline =
-      Date.now() + this.config.runForSecs * 1000 - this.config.elapsedBeforeStartMs;
-    this.nextPingAt = Date.now() + PING_INTERVAL_MS;
+    const now = Date.now();
+    const processStartedAtMs = now - this.config.elapsedBeforeStartMs;
+    this.runDeadline = deadlineAfterSeconds(processStartedAtMs, this.config.runForSecs);
+    this.nextPingAt = now + PING_INTERVAL_MS;
 
     let ws: WebSocket;
     try {
@@ -913,7 +919,7 @@ class Orchestrator {
     }
     this.finished = true;
     if (this.wakeTimer !== null) {
-      clearTimeout(this.wakeTimer);
+      this.wakeTimer.cancel();
       this.wakeTimer = null;
     }
     this.finishResolve?.(code);
@@ -952,14 +958,13 @@ class Orchestrator {
       return;
     }
     if (this.wakeTimer !== null) {
-      clearTimeout(this.wakeTimer);
+      this.wakeTimer.cancel();
     }
-    const delay = Math.max(0, this.nextWake() - Date.now());
-    this.wakeTimer = setTimeout(() => {
+    this.wakeTimer = scheduleDeadline(this.nextWake(), () => {
       this.wakeTimer = null;
       // Through the chain so a wake never interleaves with a live handler.
       this.enqueue(async () => {});
-    }, delay);
+    });
   }
 
   /** Fire due timers; finishes the run when it is over. */
@@ -1453,7 +1458,7 @@ class Orchestrator {
     const needsConnection = !this.engine.isPaired(peer);
     this.expectedPeers.add(peer);
     if ((newlyExpected || needsConnection) && !this.connectedPairs.has(peer)) {
-      this.p2pDeadline = Date.now() + this.config.p2pTimeoutSecs * 1000;
+      this.p2pDeadline = deadlineAfterSeconds(Date.now(), this.config.p2pTimeoutSecs);
     }
     try {
       const offerSdp = await this.engine.pairWith(peer, initiate, this.lastIceServers);

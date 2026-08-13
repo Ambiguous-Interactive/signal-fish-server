@@ -91,11 +91,14 @@ The shared flag surface mirrors the native client's ([canonical reference](../na
 `--server-url`, `--create-room`/`--join-code`, `--peers`, `--expect-total-peers`, `--leave-on-game-start`,
 `--game-name`, `--player-name`, `--app-id`, `--platform`, `--exchange`, `--relay-payload`, `--cripple-ice`,
 `--p2p-timeout-secs`, `--run-for-secs`, `--max-runtime-secs`, `--success-release-file`, `--protocol-version`,
-`--supported-topologies`, `--supported-transports` — identical semantics and defaults, except the
-identity defaults are browser-flavored (`--game-name reference-browser`, `--player-name RefBrowser`,
-`--app-id reference-browser-app`, `--platform reference-browser`). As with clap, a known flag token never
-doubles as a flag's value (`--relay-payload --exchange` is a usage error, exit `2`); values that merely
-start with `-` but are not known flags are accepted as-is.
+`--supported-topologies`, `--supported-transports` — matching semantics and defaults except for the numeric
+representation limit described below and browser-flavored identity defaults (`--game-name reference-browser`,
+`--player-name RefBrowser`, `--app-id reference-browser-app`, `--platform reference-browser`). As with clap,
+a known flag token never doubles as a flag's value (`--relay-payload --exchange` is a usage error, exit `2`);
+values that merely start with `-` but are not known flags are accepted as-is. Numeric values must be
+non-negative decimal integers no larger than JavaScript's largest safe integer. Accepted durations beyond
+the host timer ceiling are scheduled in bounded chunks, so they remain distant deadlines rather than
+expiring immediately.
 
 Browser-specific additions and deviations:
 

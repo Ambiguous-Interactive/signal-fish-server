@@ -35,8 +35,9 @@
 //! The orchestrator is a single task: WebSocket frames, engine callbacks
 //! (via the [`EngineEvent`] channel), and timers are multiplexed with
 //! `tokio::select!`, so all bookkeeping is lock-free and every stdout event is
-//! emitted in causal order. The binary-wide `--max-runtime-secs` watchdog in
-//! `main` bounds every await in this module.
+//! emitted in causal order. When its absolute deadline is representable, the
+//! binary-wide `--max-runtime-secs` watchdog in `main` bounds every await in
+//! this module; larger accepted values remain beyond the process lifetime.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
@@ -53,6 +54,7 @@ use webrtc::peer_connection::RTCPeerConnectionState;
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
+use crate::deadline::Deadline;
 use crate::engine::{
     Engine, EngineEvent, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
 };
@@ -210,19 +212,23 @@ fn apply_selected_pair_probes_before_run_deadline(
     ready: Vec<SelectedPairProbeResult>,
     mut apply: impl FnMut(SelectedPairProbeResult),
     now: Instant,
-    run_deadline: Instant,
+    run_deadline: impl Into<Deadline>,
 ) -> bool {
+    let run_deadline = run_deadline.into();
     for result in ready {
         apply(result);
     }
-    now >= run_deadline
+    run_deadline.is_due(now)
 }
 
 fn selected_pair_evidence_deadline(
-    run_deadline: Instant,
+    run_deadline: impl Into<Deadline>,
     success_criteria_reported: bool,
 ) -> Option<Instant> {
-    (!success_criteria_reported).then_some(run_deadline)
+    let run_deadline = run_deadline.into();
+    (!success_criteria_reported)
+        .then(|| run_deadline.finite())
+        .flatten()
 }
 
 fn retryable_missing_peers(
@@ -342,7 +348,7 @@ impl PairGeneration {
 }
 
 fn arm_pair_window(
-    deadline: &mut Option<Instant>,
+    deadline: &mut Option<Deadline>,
     retry_at: &mut Option<Instant>,
     generation: PairGeneration,
     retry_count: u8,
@@ -352,11 +358,15 @@ fn arm_pair_window(
     if !generation.arms_p2p_window() {
         return;
     }
-    let fresh_deadline = checked_deadline(now, timeout);
+    let fresh_deadline = Deadline::after(now, timeout);
     *deadline = Some(fresh_deadline);
     *retry_at = (retry_count > 0)
         .then(|| checked_deadline(now, p2p_retry_delay(timeout.as_secs())))
-        .filter(|candidate| *candidate < fresh_deadline);
+        .filter(|candidate| {
+            fresh_deadline
+                .finite()
+                .is_none_or(|deadline| *candidate < deadline)
+        });
 }
 
 /// Keepalive cadence. `docs/guides/building-a-client.md` makes a periodic
@@ -439,7 +449,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         .map_err(|error| FatalError::protocol(format!("webrtc engine init failed: {error:#}")))?;
 
     // The soft run window starts at process start, handshake included.
-    let run_deadline = checked_deadline(Instant::now(), Duration::from_secs(cli.run_for_secs));
+    let run_deadline = Deadline::after(Instant::now(), Duration::from_secs(cli.run_for_secs));
 
     let mut ws = wire::connect(&cli.server_url)
         .await
@@ -972,7 +982,7 @@ struct Orchestrator<'a> {
     /// Last reported overall WebRTC state, retained to suppress duplicates.
     transport_status: Option<bool>,
     /// When the P2P establishment window expires (set at first pairing).
-    p2p_deadline: Option<Instant>,
+    p2p_deadline: Option<Deadline>,
     /// When to rebuild any still-incomplete planned pair.
     p2p_retry_at: Option<Instant>,
     /// Harness-only gate that keeps WebSocket traffic live before any peer
@@ -1015,7 +1025,7 @@ struct Orchestrator<'a> {
     /// when an authoritative plan supplies its `cNN` peer name.
     drop_ice_from: Option<PlayerId>,
     /// `--run-for-secs` soft cap.
-    run_deadline: Instant,
+    run_deadline: Deadline,
     /// Set once all criteria are met; exit 0 when it elapses.
     linger_until: Option<Instant>,
     /// Whether the stable machine event announcing complete criteria was sent.
@@ -1138,21 +1148,25 @@ impl Orchestrator<'_> {
     /// loop always wakes for due work even on a silent wire.
     fn next_wake(&self) -> Instant {
         // Once a harness-held client has reported success, the soft run
-        // deadline no longer applies: the release path or the binary-wide
-        // hard watchdog is authoritative. Starting from the release poll or
-        // post-release linger avoids a busy loop after `run_deadline` passes.
-        let mut wake = harness_aware_base_wake(
+        // deadline no longer applies: the release path or the configured
+        // binary-wide watchdog frontier is authoritative. Starting from the
+        // release poll or post-release linger avoids a busy loop after
+        // `run_deadline` passes.
+        let mut wake = keepalive_wake(self.next_ping_at, self.pong_deadline);
+        if let Some(base) = harness_aware_base_wake(
             self.run_deadline,
             self.success_release_poll_at,
             self.linger_until,
             self.success_criteria_reported,
-        );
+        ) {
+            wake = wake.min(base);
+        }
         if !self.relay_sent {
             if let Some(at) = self.relay_send_at {
                 wake = wake.min(at);
             }
         }
-        if let Some(at) = self.p2p_deadline {
+        if let Some(at) = self.p2p_deadline.and_then(Deadline::finite) {
             wake = wake.min(at);
         }
         if let Some(at) = self.p2p_retry_at {
@@ -1179,7 +1193,6 @@ impl Orchestrator<'_> {
         if let Some(at) = self.unreliable_exchange_release_poll_at {
             wake = wake.min(at);
         }
-        wake = wake.min(keepalive_wake(self.next_ping_at, self.pong_deadline));
         wake
     }
 
@@ -1227,7 +1240,10 @@ impl Orchestrator<'_> {
             self.retry_incomplete_pairs(now).await?;
         }
 
-        if self.p2p_deadline.is_some_and(|at| now >= at) {
+        if self
+            .p2p_deadline
+            .is_some_and(|deadline| deadline.is_due(now))
+        {
             // The current P2P window expired: report any real state change.
             self.resolve_transport_status().await?;
             self.p2p_deadline = None;
@@ -1367,7 +1383,7 @@ impl Orchestrator<'_> {
         // The coordinated generation owns a fresh bounded P2P window even if
         // the lossy formation consumed the original one. Its reserved final
         // attempt is never scheduled by the automatic retry timer.
-        self.p2p_deadline = Some(checked_deadline(
+        self.p2p_deadline = Some(Deadline::after(
             now,
             Duration::from_secs(self.cli.p2p_timeout_secs),
         ));
@@ -2755,15 +2771,14 @@ fn resolve_drop_ice_from(
 }
 
 fn harness_aware_base_wake(
-    run_deadline: Instant,
+    run_deadline: impl Into<Deadline>,
     success_release_poll_at: Option<Instant>,
     linger_until: Option<Instant>,
     success_criteria_reported: bool,
-) -> Instant {
+) -> Option<Instant> {
+    let run_deadline = run_deadline.into().finite();
     if success_criteria_reported {
-        success_release_poll_at
-            .or(linger_until)
-            .unwrap_or(run_deadline)
+        success_release_poll_at.or(linger_until).or(run_deadline)
     } else {
         run_deadline
     }
@@ -2788,6 +2803,7 @@ mod tests {
 
     use crate::accountability::DeliveryAccountability;
     use crate::cli::Cli;
+    use crate::deadline::Deadline;
     use crate::wire;
 
     use super::{
@@ -3177,11 +3193,11 @@ mod tests {
         let linger_until = now + super::EXIT_LINGER;
         assert_eq!(
             harness_aware_base_wake(elapsed_run_deadline, None, Some(linger_until), true),
-            linger_until
+            Some(linger_until)
         );
         assert_eq!(
             harness_aware_base_wake(elapsed_run_deadline, None, Some(linger_until), false),
-            elapsed_run_deadline,
+            Some(elapsed_run_deadline),
             "ordinary clients retain the soft-deadline behavior"
         );
     }
@@ -3497,7 +3513,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         let original_deadline = started + Duration::from_secs(30);
         let original_retry = started + Duration::from_secs(15);
-        let mut deadline = Some(original_deadline);
+        let mut deadline = Some(Deadline::from(original_deadline));
         let mut retry_at = Some(original_retry);
         arm_pair_window(
             &mut deadline,
@@ -3507,7 +3523,7 @@ mod tests {
             Duration::from_secs(30),
             started + Duration::from_secs(10),
         );
-        assert_eq!(deadline, Some(original_deadline));
+        assert_eq!(deadline, Some(Deadline::from(original_deadline)));
         assert_eq!(retry_at, Some(original_retry));
 
         arm_pair_window(
@@ -3518,8 +3534,32 @@ mod tests {
             Duration::from_secs(30),
             started + Duration::from_secs(20),
         );
-        assert_eq!(deadline, Some(started + Duration::from_secs(50)));
+        assert_eq!(
+            deadline,
+            Some(Deadline::from(started + Duration::from_secs(50)))
+        );
         assert_eq!(retry_at, Some(started + Duration::from_secs(35)));
+    }
+
+    #[test]
+    fn unrepresentable_p2p_window_remains_armed_and_non_due() {
+        let started = tokio::time::Instant::now();
+        let mut deadline = None;
+        let mut retry_at = None;
+
+        arm_pair_window(
+            &mut deadline,
+            &mut retry_at,
+            PairGeneration::Initial,
+            1,
+            Duration::from_secs(u64::MAX),
+            started,
+        );
+
+        let deadline = deadline.expect("initial pairing arms a P2P window");
+        assert!(deadline.finite().is_none());
+        assert!(!deadline.is_due(started));
+        assert_eq!(retry_at, Some(started + Duration::from_secs(15)));
     }
 
     #[test]

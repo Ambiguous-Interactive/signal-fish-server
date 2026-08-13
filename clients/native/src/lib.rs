@@ -27,6 +27,7 @@
 pub mod accountability;
 pub mod cli;
 pub mod client;
+pub mod deadline;
 pub mod engine;
 pub mod events;
 pub mod wire;

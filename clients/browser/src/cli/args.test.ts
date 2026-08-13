@@ -1,4 +1,4 @@
-import { parseArgs } from './args.js';
+import { parseArgs, UsageError } from './args.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -31,4 +31,58 @@ assert(
   'the page must hold success when the CLI barrier is configured',
 );
 
-console.error('ok - browser CLI success-release barrier parses and defaults off');
+const durationFlags = [
+  [
+    '--p2p-timeout-secs',
+    (options: NonNullable<ReturnType<typeof parseArgs>>) => options.config.p2pTimeoutSecs,
+  ],
+  [
+    '--run-for-secs',
+    (options: NonNullable<ReturnType<typeof parseArgs>>) => options.config.runForSecs,
+  ],
+  [
+    '--max-runtime-secs',
+    (options: NonNullable<ReturnType<typeof parseArgs>>) => options.maxRuntimeSecs,
+  ],
+] as const;
+
+for (const [flag, read] of durationFlags) {
+  for (const [value, expected, description] of [
+    ['0', 0, 'zero'],
+    ['30', 30, 'ordinary'],
+    [String(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER, 'largest precise integer'],
+  ] as const) {
+    const options = parseArgs([
+      '--server-url',
+      'ws://127.0.0.1/v3/ws',
+      '--create-room',
+      flag,
+      value,
+    ]);
+    if (options === null) {
+      throw new Error(`${flag} ${description} value must parse`);
+    }
+    assert(read(options) === expected, `${flag} ${description} value must remain exact`);
+  }
+}
+
+const impreciseValues = [
+  ['9007199254740992', 'larger than Number.MAX_SAFE_INTEGER'],
+  ['9007199254740991.1', 'fraction rounded down to Number.MAX_SAFE_INTEGER'],
+  ['1.0000000000000001', 'fraction rounded down to one'],
+  ['1e-999', 'positive value underflowed to zero'],
+] as const;
+
+for (const [flag] of durationFlags) {
+  for (const [value, description] of impreciseValues) {
+    let rejected = false;
+    try {
+      parseArgs(['--server-url', 'ws://127.0.0.1/v3/ws', '--create-room', flag, value]);
+    } catch (error) {
+      rejected = error instanceof UsageError;
+    }
+    assert(rejected, `${flag} must reject ${description}: ${value}`);
+  }
+}
+
+console.error('ok - browser CLI arguments preserve exact numeric values');

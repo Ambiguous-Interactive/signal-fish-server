@@ -209,7 +209,7 @@ static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
 /// - A failed stdout write (typically `BrokenPipe` after the consumer hung
 ///   up) is reported on stderr once and latches [`STDOUT_CLOSED`]: event
 ///   emission shuts down gracefully while the client continues toward its
-///   normal bounded exit (`--run-for-secs` / `--max-runtime-secs`).
+///   configured exit frontier (`--run-for-secs` / `--max-runtime-secs`).
 pub fn emit(event: &Event) {
     if STDOUT_CLOSED.load(Ordering::Relaxed) {
         return;
