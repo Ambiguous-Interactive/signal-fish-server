@@ -17,8 +17,8 @@
 > repeated simultaneous-client probe through the deployed public proxy path
 > under #367. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
-> has seven of 20 eligible scheduled
-> allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
+> has eight of 20 eligible scheduled
+> allocations per OS; P56 has eight of 20 eligible scheduled H14 attempts.** The M1
 > server core, the M2
 > production-P2P server work, the M3 protocol documentation, both reference
 > clients, the full P10 bulletproofing campaign, the P11 release-integrity gate,
@@ -1846,16 +1846,16 @@ recorded rather than censored.
 - [ ] Use that distribution to decide, and then enforce, platform-specific PR
   timing gates or correctness-only placement; keep #274 open until this step.
 
-The first seven eligible scheduled allocations span multiple implementation sources.
+The first eight eligible scheduled allocations span multiple implementation sources.
 Semantic outcomes remain eligible across that boundary, but timing thresholds
 or comparative timing claims must be stratified by exact source commit (or use
 one implementation cohort); a mixed-source distribution must not be attributed
 to a single implementation.
 
-The 2026-08-12 scheduled first attempt (run `31568443167`) advanced every OS
-cohort to 7/20. Linux, macOS, and Windows completed all five repetitions of all
+The 2026-08-13 scheduled first attempt (run `31672291497`) advanced every OS
+cohort to 8/20. Linux, macOS, and Windows completed all five repetitions of all
 six cells with exact delivery and zero backpressure, then uploaded their raw
-observations and complete attempt manifests. Thirteen eligible scheduled first
+observations and complete attempt manifests. Twelve eligible scheduled first
 attempts per OS remain; reruns do not count.
 
 **Acceptance:** evidence collection is automated and reviewable now, but P53 is
@@ -1966,11 +1966,11 @@ deliveries. The identical-SHA retry passed.
   unchanged strong equal-fault oracle over at least 20 eligible scheduled H14
   attempts; buffered proxy throughput alone remains insufficient attribution.
 
-The 2026-08-12 scheduled first attempt (run `31561156680`) advanced the cohort
-to 7/20. Its retained manifest is eligible and complete: compatible delivery
+The 2026-08-13 scheduled first attempt (run `31665061805`) advanced the cohort
+to 8/20. Its retained manifest is eligible and complete: compatible delivery
 reached 5,000/5,000, fallback accounting was exact at 0.01x amplification,
-compatible throughput was approximately 32,739 B/s, and no slow-consumer
-eviction occurred. Thirteen eligible scheduled first attempts remain; reruns do
+compatible throughput was approximately 32,717 B/s, and no slow-consumer
+eviction occurred. Twelve eligible scheduled first attempts remain; reruns do
 not count.
 
 **Acceptance:** H14 passes on the first attempt across the hosted evidence
@@ -3482,7 +3482,12 @@ supporting evidence—not proof—that the failed pair never reached connection
 registration. Combined with the pre-101 symptoms, nginx/TLS/proxy admission is
 the leading boundary hypothesis, while the old application metrics cannot
 distinguish a request that reached the handler and was deliberately rejected
-before 101.
+before 101. The reviewed correlated image is published as
+`ghcr.io/ambiguous-interactive/signal-fish-server:sha-3a2d0b9` at digest
+`sha256:917a9260be4f35ceff3e31d72bfa4b4f8c288c12463d33bf3beeeea9291cc579`;
+its immutable cloud-manifest update, proxy configuration, deployment, and
+acceptance probe are tracked in
+[signal-fish-cloud#595](https://github.com/Ambiguous-Interactive/signal-fish-cloud/issues/595).
 
 - [x] Return a unique `x-signal-fish-request-id` and exact
   `x-signal-fish-upgrade-outcome` on every application-handled HTTP 101 or
