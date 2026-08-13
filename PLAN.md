@@ -5,13 +5,13 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P94 is complete;
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P95 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, P93 has closed reference-client
 > duration overflow in PR #361, and P94 proved the ordinary
-> capability-downgrading disconnect/reconnect composition in PR #362. P95 is
-> validating the fresh-generation v3-to-v2 reconnect refinement. P66 preserved and published the
+> capability-downgrading disconnect/reconnect composition in PR #362, and P95
+> proved the fresh-generation v3-to-v2 reconnect refinement in PR #363. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -455,7 +455,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P92 | Spectator admission and deadline-overflow closure (#358) | S | P27, P30, P79 | Maintenance | ✅ Done (s133, PR #359) |
 | P93 | Cross-reference-client deadline integrity (#360) | S | P7, P79, P92 | Maintenance | ✅ Done (s134, PR #361) |
 | P94 | Capability-downgrading reconnect refinement (#220) | S | P41, P58, P87 | Maintenance | ✅ Done (s135, PR #362) |
-| P95 | Connection-generation-aware v3-to-v2 reconnect refinement (#220) | S | P41, P58, P94 | Maintenance | 🟡 Validating (s136) |
+| P95 | Connection-generation-aware v3-to-v2 reconnect refinement (#220) | S | P41, P58, P94 | Maintenance | ✅ Done (s136, PR #363) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3372,7 +3372,7 @@ hosted, and review gates pass.
 
 ---
 
-### P95 — Connection-generation-aware v3-to-v2 reconnect refinement (#220) (Size S) — 🟡 VALIDATING
+### P95 — Connection-generation-aware v3-to-v2 reconnect refinement (#220) (Size S) — ✅ DONE
 
 Session 136 advances #220 at the cross-version socket boundary left explicit by
 P94. A member may receive a `mesh + webrtc` plan on one v3 connection, disconnect,
@@ -3395,16 +3395,21 @@ wire contracts and pairing capabilities.
 - [x] Exercise the production WebSocket path: raw frozen-v2 `Reconnected` field
   absence, strict plan silence, exact incumbent mesh peers, and bidirectional
   relay `GameData`.
-- [ ] Complete the exact-head hosted matrix and independent adversarial review
+- [x] Complete the exact-head hosted matrix and independent adversarial review
   with no actionable findings.
 
 The positive refinement checks 20,442 generated / 8,814 distinct states to
 graph depth 9. The three negative configurations emit their exact registered
 `ReconnectV2WireGating`, `ReconnectV2ExcludesActorFromPeers`, and
 `ReconnectV2PublishesIncumbents` violations. P94's 8,317 distinct states and all
-four prior expected-failure diagnostics remain unchanged. The focused
-real-socket regression is green locally; complete local validation, hosted CI,
-and the final review rollup remain the phase's validation gate.
+four prior expected-failure diagnostics remain unchanged. The complete locked
+all-features suite, formal and Z3 proofs, supply-chain and policy gates, and all
+repository-owned exact-head checks are green in PR #363 (29 successes and two
+expected skips). Two repeated independent adversarial reviews ended with zero
+findings. The external Copilot reviewer produced no review because its monthly
+quota was exhausted; Cursor Bugbot completed successfully with no threads. The
+unrelated Miri wall-clock flake discovered during validation is tracked in #364,
+and its isolated exact-head rerun passed without a code change.
 
 **Acceptance:** a historical v3 delivery is never reclassified as traffic sent
 to a fresh v2 socket; the new v2 generation receives no v3-only session message;
