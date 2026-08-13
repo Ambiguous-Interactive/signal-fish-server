@@ -29,7 +29,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 
 | Path                          | Purpose                                                                            |
 | ----------------------------- | --------------------------------------------------------------------------------- |
-| `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late join, and capability-downgrading reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor` / `_ReconnectDowngrade` plus four reconnect expected failures) |
+| `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late join, capability downgrade, and fresh-generation v3-to-v2 reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor` / two reconnect positives plus seven reconnect expected failures) |
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
 | `tla/CapacityDeadlineArbitration.tla` | P56's classified queue deadline: continuous pre-deadline capacity, refill invalidation, and lock-atomic late admission |
 | `tla/CapacityPermitLifecycle.tla` | P73's classified control-permit lifecycle: exact reservation accounting, producer liveness, terminal release, and commit-time scope validation |
@@ -207,6 +207,7 @@ this table and may drift a few lines.
 | `GrantAuthority`                         | `request_room_authority` — `src/database/mod.rs:477` (no version gate; only while unheld)      |
 | `BeginCapabilityDisconnect`              | disconnect snapshot + `leave_room` departure transaction — `src/server/reconnection_service.rs`, `src/server/room_service.rs` |
 | `CapabilityReconnect`                    | saved-member restore, conditional authority restore, fresh-profile transfer, and finalized publication — `src/server/reconnection_service.rs`, `src/server/connection_manager.rs`, `src/server/signaling.rs` |
+| `connectionGeneration`                   | fresh socket ownership transferred to the restored player ID by `reassign_connection` — `src/server/connection_manager.rs` |
 | `Finalize` membership precondition (`members # <<>>`) | `Room::should_enter_lobby` — `src/protocol/room_state.rs:350` (lobby is now entered by any **non-empty** `Waiting` room; `max_players` is a **ceiling**, not a required count — the old fullness gate is gone, so finalize may fire below `max_players`) |
 | `r < q` (glare rule, election tie-break) | `local_initiates` — `src/server/signaling.rs:60`; UUID order via integer player ids            |
 
@@ -234,6 +235,10 @@ this table and may drift a few lines.
 | `CapabilityReconnectUsesFreshProfile` | The publication is resolved against the fresh relay-only profile, excluding the reconnector from incompatible peer lists |
 | `CapabilityReconnectPreservesJoinPriority` | Reconnect retains the snapshot's original `connected_at` order instead of appending a new join |
 | `CapabilityReconnectPreservesSuccessorAuthority` | A stale disconnect snapshot cannot overwrite authority claimed by a live successor |
+| `ReconnectV2PublishesIncumbents` | A v2 reconnect into finalized mesh publishes one complete refresh to every current v3 incumbent |
+| `ReconnectV2WireGating` | The fresh v2 connection generation receives no v3-only `SessionPlan` |
+| `ReconnectV2ExcludesActorFromPeers` | Fresh incumbent plans do not name the member whose replacement socket negotiated v2 |
+| `ReconnectV2PreservesHistoricalV3Delivery` | A plan delivered to the old v3 socket remains tagged to that historical generation instead of being misclassified as a v2 delivery |
 
 ## Model configurations
 
@@ -252,6 +257,7 @@ live sessions, up to that same ceiling.
 | `HostDirect`  | `V3HostDirect`, 2 × `V3Full`, `V3RelayOnly`; `enable_webrtc = false`      | host+direct rung via the transport config gate; complete non-WebRTC `SessionPlan` refreshes                     |
 | `Floor`       | same players as `Mesh`; `enable_webrtc = false`, `enable_direct = false`  | enabled-gate denial end-to-end: nothing stored; explicit relay plans delivered to every current v3 member (`RelayFloorOnly`) |
 | `ReconnectDowngrade` | 3 × `V3Full`; one stored host disconnects, then reconnects as `V3RelayOnly` | same-step departure failover; fresh-profile publication; original join priority; vacant-role restore or successor authority retention |
+| `ReconnectV2Mesh` | 3 × `V3Full`; any mesh member disconnects, then reconnects as `V2` | physical connection-generation advance; frozen-v2 plan silence; exact incumbent refresh; actor exclusion from WebRTC peers |
 
 The five required capability profiles (`V2`, `V3RelayOnly`, `V3MeshWebRtc`,
 `V3HostWebRtcOnly`, `V3Full`) are all covered across the `Mesh`, `Host`, and
@@ -273,18 +279,22 @@ gate) is additionally covered by the randomized-config proptests
 | `Host`        | 79,948           | 22,710          | 12          | ~2 s      |
 | `HostDirect`  | 111,630          | 32,751          | 12          | ~3 s      |
 | `Floor`       | 66,463           | 16,676          | 12          | ~2 s      |
-| `ReconnectDowngrade` (`CHURN_BUDGET = 7`) | 19,037 | 8,317 | 9 | ~2 s |
+| `ReconnectDowngrade` (`CHURN_BUDGET = 7`) | 19,037 | 8,317 | 9 | ~3 s |
+| `ReconnectV2Mesh` (`CHURN_BUDGET = 7`) | 20,442 | 8,814 | 9 | ~2 s |
 
 The reachable state space includes finalization at every non-empty membership below
 `MAX_PLAYERS`, plus an explicit relay delivery for each v3 recipient and complete
 membership refreshes after finalized joins. Those observable publications make the
 floor configuration non-vacuous. The reconnect refinement additionally reaches a
 sticky host disconnect, departure failover, optional successor claim, and a
-fresh relay-only reconnect. While that snapshot is pending, it also explores
+fresh relay-only reconnect. The v2 reconnect refinement separately advances
+the returning member's physical connection generation and preserves the old
+v3 delivery as historical state while publishing only to the current v3
+incumbents. While either snapshot is pending, the models also explore
 unrelated joins, departures, and a departed predecessor rejoining with a new
 membership generation; the predecessor set removes the old generation so the
 restored timestamp orders only against surviving snapshot members. Every listed
-invariant and action property holds across all five positive models.
+invariant and action property holds across all six positive models.
 
 Reachability of the interesting states was confirmed with temporary negated "sanity"
 invariants during development (each must be _violated_): mesh and host plans stored, the
@@ -927,6 +937,40 @@ fresh-profile reconnect publication; the direct `host_invalid` unit matrix in
 and
 `reconnect_does_not_restore_authority_taken_by_a_successor` in
 `src/server/signaling_tests.rs`.
+
+## Connection-generation-aware v3-to-v2 reconnect refinement
+
+`SignalFishSession_ReconnectV2Mesh.cfg` extends the ordinary reconnect history
+across the frozen-v2 boundary. Any member of a finalized `mesh + webrtc` room
+may disconnect after receiving a v3 plan and return on a fresh socket that
+negotiated v2. The model advances a per-player physical connection generation
+and tags every persistent delivery observation with the generation and protocol
+version that actually received it. The old v3 plan therefore remains honest
+historical state without being reinterpreted as traffic sent to the new v2
+socket.
+
+The positive configuration exhaustively checks 8,814 distinct states. It
+includes solo mesh reconnects and histories where every incumbent departs
+before restoration. It proves that the new v2 generation receives no
+`SessionPlan`; when current v3 incumbents remain, each receives exactly one
+authoritative refresh; the returning v2 member is absent from every fresh
+WebRTC peer list; and the historical observation is older than the live
+connection generation. Three expected-failure
+configurations keep those obligations independent and non-vacuous:
+
+- bypassing the final pre-v3 recipient gate violates
+  `ReconnectV2WireGating`;
+- resolving peer lists against the disconnected socket's stale v3 profile
+  violates `ReconnectV2ExcludesActorFromPeers`; and
+- skipping the finalized reconnect publication violates
+  `ReconnectV2PublishesIncumbents`.
+
+The real-WebSocket counterpart,
+`mesh_member_reconnects_as_v2_without_plan_or_peer_leakage` in
+`tests/v3_interop_downgrade_e2e.rs`, reconnects with a token minted for the
+member's earlier v3 incarnation. It checks the raw frozen-v2 `Reconnected`
+shape, strict absence of any following v3 plan, exact incumbent mesh plans, and
+bidirectional relay `GameData` between the v2 replacement and a v3 incumbent.
 
 ## Intentionally not modeled (and why)
 

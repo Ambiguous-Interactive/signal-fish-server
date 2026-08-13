@@ -73,6 +73,7 @@ CONSTANTS
     UseStaleReconnectCapabilitiesBug,
     ReorderReconnectBug,
     OverwriteSuccessorAuthorityBug,
+    BypassReconnectV2GateBug,
     \* Absence markers, assigned MODEL VALUES in the .cfg files (model values
     \* compare unequal to every ordinary value, mirroring Rust's Option::None
     \* and map-entry absence without untyped string/int comparisons):
@@ -104,12 +105,16 @@ VARIABLES
     \* The room's sticky ActiveSessionPlan ([topology, transport, host]) or
     \* NoPlan (relay-floor rooms store nothing).
     storedPlan,
-    \* Per player, the LAST SessionPlan view delivered to it, or NoDelivery.
-    \* Deliberately never cleared: real clients keep their last plan after the
-    \* server drops the room's entry after a departure (the relay floor carries
-    \* them), so stale client-held plans are honest model state. A later
-    \* membership publication replaces them with an explicit relay plan.
+    \* Per player, the LAST SessionPlan delivery observation, or NoDelivery.
+    \* Each observation retains the physical connection generation and protocol
+    \* version that received it. It is deliberately never cleared: a disconnected
+    \* v3 generation may retain a historical plan while a fresh v2 generation of
+    \* the same player id correctly receives no v3-only SessionPlan.
     delivered,
+    \* Physical socket generation for each logical player id. Ordinary joins use
+    \* generation zero; a successful reconnect transfers a fresh socket to the
+    \* restored id and advances exactly that player's generation.
+    connectionGeneration,
     \* What the LAST action emitted: NoEmission, or a record
     \* [kind : {"finalize","replan","latejoin"},
     \*  plans : per-recipient plan views (a function)].
@@ -133,6 +138,7 @@ VARIABLES
     expectedReconnectAuthority
 
 vars == <<members, caps, lobbyState, authority, storedPlan, delivered,
+          connectionGeneration,
           lastEmission, churn, pendingReconnect, pendingReconnectPredecessors,
           pendingReconnectWasAuthority, lastCapabilityReconnect,
           lastReconnectPlayer, expectedReconnectOrder,
@@ -157,6 +163,11 @@ PlanViews ==
      transport : TransportSet,
      host      : PLAYERS \cup {NoPlayer},
      peers     : SUBSET PeerEntries]
+
+DeliveryObservations ==
+    [plan       : PlanViews,
+     generation : Nat,
+     version    : Nat]
 
 \* The stored room-wide decision (session_policy.rs ActiveSessionPlan).
 StoredPlans ==
@@ -207,8 +218,9 @@ HostScenarioCaps ==
 HostDirectScenarioCaps ==
     (1 :> ProfileV3HostDirect) @@ (2 :> ProfileV3Full) @@
     (3 :> ProfileV3Full) @@ (4 :> ProfileV3RelayOnly)
-\* Focused reconnect refinement: every member can finalize host+webrtc. The
-\* elected host may then disconnect and reconnect as v3 relay-only.
+\* Focused reconnect refinements: every member begins fully capable. The host
+\* scenario returns its elected host as v3 relay-only; the mesh scenario returns
+\* any member on a fresh v2 connection generation.
 ReconnectScenarioCaps ==
     (1 :> ProfileV3Full) @@ (2 :> ProfileV3Full) @@ (3 :> ProfileV3Full)
 
@@ -352,23 +364,46 @@ PlansForAll(capMap, plan, mseq) ==
         PlanFor(capMap, plan, mseq, p)]
 
 \* Fold an emission's plans into the persistent per-player delivery state.
-MergeDelivered(old, plans) ==
-    [p \in PLAYERS |-> IF p \in DOMAIN plans THEN plans[p] ELSE old[p]]
+MergeDelivered(old, plans, capMap, generations) ==
+    [p \in PLAYERS |->
+        IF p \in DOMAIN plans
+        THEN [plan       |-> plans[p],
+              generation |-> generations[p],
+              version    |-> Version(capMap, p)]
+        ELSE old[p]]
 
 \* Build one authoritative plan publication. A room with no v3 recipients has
 \* no v3 session effect, so its observation remains NoEmission.
-PlanPublication(capMap, retained, plan, mseq, oldDelivered, kind) ==
+PlanPublication(capMap, generations, retained, plan, mseq, oldDelivered, kind) ==
     LET plans == PlansForAll(capMap, plan, mseq)
     IN [stored    |-> retained,
-        delivered |-> MergeDelivered(oldDelivered, plans),
+        delivered |-> MergeDelivered(oldDelivered, plans, capMap, generations),
         emission  |-> IF DOMAIN plans = {} THEN NoEmission
                      ELSE [kind |-> kind, plans |-> plans]]
+
+\* Apply the recipient's CURRENT negotiated-version gate independently of the
+\* capability snapshot used to resolve peer construction. Production builds a
+\* SessionPlan from the membership decision, then build_session_plan_message
+\* separately rejects a recipient whose live connection is not v3. Keeping
+\* those inputs distinct makes the stale-capability and wire-gate bug seeds
+\* independent: stale resolution can fabricate a v2 actor as a peer without
+\* also delivering the v3-only frame to that actor.
+GatePublication(result, gateCaps, generations, mseq, oldDelivered) ==
+    IF result.emission = NoEmission THEN result
+    ELSE
+        LET recipients == V3Members(gateCaps, SeqMembers(mseq))
+            plans == [p \in DOMAIN result.emission.plans \cap recipients |->
+                         result.emission.plans[p]]
+        IN [stored    |-> result.stored,
+            delivered |-> MergeDelivered(oldDelivered, plans, gateCaps, generations),
+            emission  |-> IF DOMAIN plans = {} THEN NoEmission
+                         ELSE [kind |-> result.emission.kind, plans |-> plans]]
 
 \* replan_host_session: capability-filtered re-election (the authority
 \* preference passes the SAME capability gate), entry drop + silence when no
 \* member qualifies, else stored-host rewrite + a fresh full emission.
 \* Returns [stored, delivered, emission] for the caller to assign.
-ReplanResult(capMap, stored, mseq, auth, oldDelivered) ==
+ReplanResult(capMap, generations, stored, mseq, auth, oldDelivered) ==
     LET electableSeq  == SelectSeq(mseq, LAMBDA q : Pairable(capMap, stored, q))
         electableSet  == SeqMembers(electableSeq)
         electableAuth == IF auth \in electableSet THEN auth ELSE NoPlayer
@@ -379,7 +414,7 @@ ReplanResult(capMap, stored, mseq, auth, oldDelivered) ==
            LET updated == [stored EXCEPT !.host = ElectHost(electableAuth, electableSeq)]
                plans   == PlansForAll(capMap, updated, mseq)
            IN [stored    |-> updated,
-               delivered |-> MergeDelivered(oldDelivered, plans),
+               delivered |-> MergeDelivered(oldDelivered, plans, capMap, generations),
                emission  |-> [kind |-> "replan", plans |-> plans]]
 
 \* signaling.rs publish_finalized_join_membership, with the POST-join
@@ -390,18 +425,18 @@ ReplanResult(capMap, stored, mseq, auth, oldDelivered) ==
 \* Ordinary serialized departures repair the host in their own step. This
 \* defensive heal arm remains reachable from a finalized join if the model is
 \* initialized or extended with legacy/stale stored state; see formal/README.md.
-LateJoinResult(capMap, mseq, auth) ==
+LateJoinResult(capMap, generations, mseq, auth) ==
     IF lobbyState # "finalized" THEN
         [stored |-> storedPlan, delivered |-> delivered, emission |-> NoEmission]
     ELSE IF storedPlan = NoPlan THEN
-        PlanPublication(capMap, NoPlan, RelayPlan, mseq, delivered, "latejoin")
+        PlanPublication(capMap, generations, NoPlan, RelayPlan, mseq, delivered, "latejoin")
     ELSE IF HostInvalid(capMap, storedPlan, SeqMembers(mseq)) THEN
-        LET result == ReplanResult(capMap, storedPlan, mseq, auth, delivered)
+        LET result == ReplanResult(capMap, generations, storedPlan, mseq, auth, delivered)
         IN IF result.stored = NoPlan
-           THEN PlanPublication(capMap, NoPlan, RelayPlan, mseq, delivered, "latejoin")
+           THEN PlanPublication(capMap, generations, NoPlan, RelayPlan, mseq, delivered, "latejoin")
            ELSE result
     ELSE
-        PlanPublication(capMap, storedPlan, storedPlan, mseq, delivered, "latejoin")
+        PlanPublication(capMap, generations, storedPlan, storedPlan, mseq, delivered, "latejoin")
 
 \* handle_session_member_departure with the POST-removal membership mseq and
 \* post-removal authority: stored-plan gate -> Finalized gate -> last-member
@@ -415,7 +450,7 @@ DepartureResult(capMap, mseq, auth) ==
     ELSE IF ~HostInvalid(capMap, storedPlan, SeqMembers(mseq)) THEN
         [stored |-> storedPlan, delivered |-> delivered, emission |-> NoEmission]
     ELSE
-        ReplanResult(capMap, storedPlan, mseq, auth, delivered)
+        ReplanResult(capMap, connectionGeneration, storedPlan, mseq, auth, delivered)
 
 ---------------------------------------------------------------------------------------
 (* Actions. *)
@@ -427,6 +462,7 @@ Init ==
     /\ authority = NoPlayer
     /\ storedPlan = NoPlan
     /\ delivered = [p \in PLAYERS |-> NoDelivery]
+    /\ connectionGeneration = [p \in PLAYERS |-> 0]
     /\ lastEmission = NoEmission
     /\ churn = CHURN_BUDGET
     /\ pendingReconnect = NoPlayer
@@ -449,12 +485,13 @@ Join(p) ==
     /\ p \notin MemberSet
     /\ Len(members) < MAX_PLAYERS
     /\ members' = Append(members, p)
-    /\ LET result == LateJoinResult(caps, Append(members, p), authority)
+    /\ LET result == LateJoinResult(caps, connectionGeneration,
+                                    Append(members, p), authority)
        IN /\ storedPlan' = result.stored
           /\ delivered' = result.delivered
           /\ lastEmission' = result.emission
     /\ lastCapabilityReconnect' = FALSE
-    /\ UNCHANGED <<caps, lobbyState, authority, pendingReconnect,
+    /\ UNCHANGED <<caps, connectionGeneration, lobbyState, authority, pendingReconnect,
                    pendingReconnectPredecessors, pendingReconnectWasAuthority,
                    lastReconnectPlayer, expectedReconnectOrder,
                    expectedReconnectAuthority>>
@@ -477,7 +514,7 @@ Depart(p) ==
           /\ lastEmission' = result.emission
     /\ pendingReconnectPredecessors' = pendingReconnectPredecessors \ {p}
     /\ lastCapabilityReconnect' = FALSE
-    /\ UNCHANGED <<caps, lobbyState, pendingReconnect,
+    /\ UNCHANGED <<caps, connectionGeneration, lobbyState, pendingReconnect,
                    pendingReconnectWasAuthority,
                    lastReconnectPlayer, expectedReconnectOrder,
                    expectedReconnectAuthority>>
@@ -495,26 +532,27 @@ GrantAuthority(p) ==
     /\ authority' = p
     /\ lastEmission' = NoEmission
     /\ lastCapabilityReconnect' = FALSE
-    /\ UNCHANGED <<members, caps, lobbyState, storedPlan, delivered,
+    /\ UNCHANGED <<members, caps, connectionGeneration, lobbyState, storedPlan, delivered,
                    pendingReconnect, pendingReconnectPredecessors,
                    pendingReconnectWasAuthority, lastReconnectPlayer,
                    expectedReconnectOrder, expectedReconnectAuthority>>
     /\ churn' = churn - 1
 
-\* Begin the ordinary production reconnect history by disconnecting the sticky
-\* host. The departure transaction removes it, clears its authority if held,
-\* and repairs the stored host before any reconnect occurs. The snapshot keeps
-\* the original PlayerInfo.connected_at order and whether authority restoration
-\* may later be attempted. Other members may join or depart while the snapshot
-\* is pending, and a live successor may win the vacant authority before reconnect.
+\* Begin an ordinary production reconnect history. P94's host scenario selects
+\* the sticky host and composes departure failover. P95's mesh scenario permits
+\* any capable member: mesh has no host parameter to repair, so PlayerLeft is
+\* sufficient until reconnect publishes the fresh exact-membership snapshot.
+\* Both retain the saved connected_at order and authority-restoration intent.
 BeginCapabilityDisconnect(p) ==
     /\ CAPABILITY_RECONNECT_ENABLED
     /\ churn > 0
     /\ pendingReconnect = NoPlayer
     /\ lobbyState = "finalized"
     /\ storedPlan # NoPlan
-    /\ storedPlan.topology = "host"
-    /\ storedPlan.host = p
+    /\ (IF DESIRED = "mesh"
+        THEN storedPlan.topology = "mesh"
+        ELSE /\ storedPlan.topology = "host"
+             /\ storedPlan.host = p)
     /\ p \in MemberSet
     /\ Pairable(caps, storedPlan, p)
     /\ LET mseq == SelectSeq(members, LAMBDA q : q # p)
@@ -530,12 +568,14 @@ BeginCapabilityDisconnect(p) ==
           /\ pendingReconnectPredecessors' = MembersBefore(members, p)
           /\ pendingReconnectWasAuthority' = wasAuthority
     /\ lastCapabilityReconnect' = FALSE
-    /\ UNCHANGED <<caps, lobbyState, lastReconnectPlayer,
+    /\ UNCHANGED <<caps, connectionGeneration, lobbyState, lastReconnectPlayer,
                    expectedReconnectOrder, expectedReconnectAuthority>>
     /\ churn' = churn - 1
 
-\* A fresh authenticated reconnect socket advertises relay-only capabilities.
-\* Production restores the saved PlayerInfo in its original order, attempts
+\* A fresh authenticated reconnect socket advertises the scenario's smaller
+\* profile: v3 relay-only for P94 host, v2 relay-only for P95 mesh. Production
+\* advances the physical connection generation, restores the saved PlayerInfo
+\* in its original order, attempts
 \* authority restoration only when the disconnected player formerly held it
 \* AND the role is still vacant, transfers the fresh NegotiatedProtocol, and
 \* publishes the finalized membership against that fresh profile.
@@ -546,7 +586,9 @@ CapabilityReconnect(p) ==
     /\ pendingReconnect = p
     /\ p \notin MemberSet
     /\ Len(members) < MAX_PLAYERS
-    /\ LET caps2 == [caps EXCEPT ![p] = ProfileV3RelayOnly]
+    /\ LET freshProfile == IF DESIRED = "mesh" THEN ProfileV2 ELSE ProfileV3RelayOnly
+           caps2 == [caps EXCEPT ![p] = freshProfile]
+           generations2 == [connectionGeneration EXCEPT ![p] = @ + 1]
            expectedOrder ==
                RestoreReconnectOrder(members, pendingReconnectPredecessors, p)
            members2 == IF ReorderReconnectBug
@@ -562,12 +604,39 @@ CapabilityReconnect(p) ==
                ELSE expectedAuthority
            publicationCaps ==
                IF UseStaleReconnectCapabilitiesBug THEN caps ELSE caps2
-           result == IF SkipCapabilityPublicationBug
-                     THEN [stored |-> storedPlan,
-                           delivered |-> delivered,
-                           emission |-> NoEmission]
-                     ELSE LateJoinResult(publicationCaps, members2, authority2)
+           publicationResult ==
+               LateJoinResult(publicationCaps, generations2, members2, authority2)
+           baseResult == IF SkipCapabilityPublicationBug
+                         THEN [stored |-> storedPlan,
+                               delivered |-> delivered,
+                               emission |-> NoEmission]
+                         ELSE GatePublication(publicationResult, caps2, generations2,
+                                              members2, delivered)
+           \* Independent P95 seed: the membership decision uses fresh v2
+           \* capabilities, but the final per-recipient Appendix-K gate is
+           \* bypassed for the actor's new physical generation.
+           bugPlans ==
+               IF baseResult.emission = NoEmission
+               THEN [q \in {} |-> q]
+               ELSE [q \in DOMAIN baseResult.emission.plans \cup {p} |->
+                         IF q = p
+                         THEN PlanFor(caps2,
+                                      IF baseResult.stored = NoPlan
+                                      THEN RelayPlan
+                                      ELSE baseResult.stored,
+                                      members2, p)
+                         ELSE baseResult.emission.plans[q]]
+           result ==
+               IF BypassReconnectV2GateBug /\ DESIRED = "mesh" /\
+                  baseResult.emission # NoEmission
+               THEN [stored |-> baseResult.stored,
+                     delivered |-> MergeDelivered(baseResult.delivered, bugPlans,
+                                                   caps2, generations2),
+                     emission |-> [kind |-> baseResult.emission.kind,
+                                    plans |-> bugPlans]]
+               ELSE baseResult
        IN /\ caps' = caps2
+          /\ connectionGeneration' = generations2
           /\ members' = members2
           /\ authority' = authority2
           /\ storedPlan' = result.stored
@@ -618,12 +687,13 @@ Finalize ==
                     transport |-> pair.transport,
                     host |-> host]
            retained == IF pair = RelayPair THEN NoPlan ELSE plan
-           result == PlanPublication(caps, retained, plan, members, delivered, "finalize")
+           result == PlanPublication(caps, connectionGeneration, retained, plan,
+                                     members, delivered, "finalize")
        IN /\ storedPlan' = result.stored
           /\ delivered' = result.delivered
           /\ lastEmission' = result.emission
     /\ lastCapabilityReconnect' = FALSE
-    /\ UNCHANGED <<members, caps, authority, churn, pendingReconnect,
+    /\ UNCHANGED <<members, caps, connectionGeneration, authority, churn, pendingReconnect,
                    pendingReconnectPredecessors, pendingReconnectWasAuthority,
                    lastReconnectPlayer, expectedReconnectOrder,
                    expectedReconnectAuthority>>
@@ -658,7 +728,11 @@ TypeOK ==
     /\ lobbyState \in {"waiting", "finalized"}
     /\ authority \in PLAYERS \cup {NoPlayer}
     /\ storedPlan = NoPlan \/ storedPlan \in StoredPlans
-    /\ \A p \in PLAYERS : delivered[p] = NoDelivery \/ delivered[p] \in PlanViews
+    /\ connectionGeneration \in [PLAYERS -> Nat]
+    /\ \A p \in PLAYERS :
+           delivered[p] = NoDelivery \/
+               /\ delivered[p] \in DeliveryObservations
+               /\ delivered[p].generation <= connectionGeneration[p]
     /\ churn \in 0..CHURN_BUDGET
     /\ pendingReconnect \in PLAYERS \cup {NoPlayer}
     /\ pendingReconnectPredecessors \subseteq PLAYERS
@@ -689,11 +763,13 @@ PlanLegality ==
         /\ IsValidPair(storedPlan.topology, storedPlan.transport)
         /\ storedPlan.topology # "relay"
 
-\* I4. V2Gating (Appendix K): no SessionPlan is ever delivered to a sub-v3
-\* player (send_session_plan_to's gate). Quantified over the PERSISTENT
-\* delivery state, so it covers all of history, not just the last action.
+\* I4. V2Gating (Appendix K): every persistent observation records the protocol
+\* version and physical connection generation that actually received it. A
+\* historical v3 delivery therefore remains valid after that logical player id
+\* reconnects on v2; the fresh-generation postcondition below separately proves
+\* that the new v2 socket receives no SessionPlan.
 V2Gating ==
-    \A p \in PLAYERS : delivered[p] # NoDelivery => Version(caps, p) >= 3
+    \A p \in PLAYERS : delivered[p] # NoDelivery => delivered[p].version >= 3
 
 \* I5. HostValid: a stored host-topology plan always names a CURRENT member
 \* capable of the session pair. In the model, healing (replan_host_session)
@@ -718,17 +794,19 @@ CeilingRespected ==
 \* refresh — ever names the recipient itself or a player
 \* that cannot run that plan's pair (plan_for's two-sided filter). Ordinary
 \* immutable-capability scenarios keep this quantified across stale departed
-\* clients too. The reconnect refinement checks current members: an offline
-\* client's retained historical view is inert, while every current member is
-\* refreshed atomically against the new capabilities.
+\* clients too. Reconnect refinements check only observations delivered to the
+\* current physical generation: an old generation's retained historical view
+\* is inert, while every current v3 generation is refreshed atomically.
 PeerCapability ==
     \A p \in PLAYERS :
         (delivered[p] # NoDelivery /\
-         (~CAPABILITY_RECONNECT_ENABLED \/ p \in MemberSet)) =>
-            \A e \in delivered[p].peers :
+         (~CAPABILITY_RECONNECT_ENABLED \/
+          (p \in MemberSet /\
+           delivered[p].generation = connectionGeneration[p]))) =>
+            \A e \in delivered[p].plan.peers :
                 /\ e.peer # p
-                /\ SupportsSession(caps, e.peer, delivered[p].topology,
-                                   delivered[p].transport)
+                /\ SupportsSession(caps, e.peer, delivered[p].plan.topology,
+                                   delivered[p].plan.transport)
 
 \* I8. MeshPlanExactness: a FRESHLY emitted mesh plan (members are current at
 \* emission time — the action is atomic) lists EXACTLY the other
@@ -830,11 +908,11 @@ RelayFloorOnly ==
             /\ lastEmission.plans[r].peers = {}
     /\ \A p \in PLAYERS :
         delivered[p] = NoDelivery \/
-            /\ Version(caps, p) >= 3
-            /\ delivered[p].topology = "relay"
-            /\ delivered[p].transport = "relay"
-            /\ delivered[p].host = NoPlayer
-            /\ delivered[p].peers = {}
+            /\ delivered[p].version >= 3
+            /\ delivered[p].plan.topology = "relay"
+            /\ delivered[p].plan.transport = "relay"
+            /\ delivered[p].plan.host = NoPlayer
+            /\ delivered[p].plan.peers = {}
 
 \* I15-I18. Semantic postconditions of the most recent capability reconnect.
 \* The expected order and authority are captured from the disconnect snapshot
@@ -854,7 +932,7 @@ CapabilityReconnectUsesFreshProfile ==
            /\ caps[p] = ProfileV3RelayOnly
            /\ lastEmission # NoEmission
            /\ lastEmission.kind = "latejoin"
-           /\ delivered[p].peers = {}
+           /\ delivered[p].plan.peers = {}
            /\ \A r \in DOMAIN lastEmission.plans :
                   \A e \in lastEmission.plans[r].peers : e.peer # p
 
@@ -863,6 +941,40 @@ CapabilityReconnectPreservesJoinPriority ==
 
 CapabilityReconnectPreservesSuccessorAuthority ==
     lastCapabilityReconnect => authority = expectedReconnectAuthority
+
+\* P95. A member that finalized mesh+webrtc on generation zero may reconnect
+\* through a fresh v2 socket. The old v3 observation remains historical, while
+\* the new generation receives no v3-only plan and every v3 incumbent receives
+\* one exact refresh that excludes the actor from its WebRTC peer set.
+ReconnectV2PublishesIncumbents ==
+    (lastCapabilityReconnect /\ DESIRED = "mesh") =>
+        LET incumbents == V3Members(caps, MemberSet)
+        IN IF incumbents = {}
+           THEN lastEmission = NoEmission
+           ELSE /\ lastEmission # NoEmission
+                /\ lastEmission.kind = "latejoin"
+                /\ DOMAIN lastEmission.plans = incumbents
+
+ReconnectV2WireGating ==
+    (lastCapabilityReconnect /\ DESIRED = "mesh") =>
+        LET p == lastReconnectPlayer
+        IN /\ caps[p] = ProfileV2
+           /\ \/ lastEmission = NoEmission
+              \/ p \notin DOMAIN lastEmission.plans
+
+ReconnectV2ExcludesActorFromPeers ==
+    (lastCapabilityReconnect /\ DESIRED = "mesh") =>
+        LET p == lastReconnectPlayer
+        IN \/ lastEmission = NoEmission
+           \/ \A r \in DOMAIN lastEmission.plans :
+                  \A e \in lastEmission.plans[r].peers : e.peer # p
+
+ReconnectV2PreservesHistoricalV3Delivery ==
+    (lastCapabilityReconnect /\ DESIRED = "mesh") =>
+        LET p == lastReconnectPlayer
+        IN /\ delivered[p] # NoDelivery
+           /\ delivered[p].version >= 3
+           /\ delivered[p].generation < connectionGeneration[p]
 
 ---------------------------------------------------------------------------------------
 (* TEMPORAL (action) PROPERTIES.                                              *)

@@ -24,10 +24,14 @@
 //!    host is no longer session-capable, re-elects among the remaining capable
 //!    members, emits fresh `SessionPlan`s, and the downgraded client receives a
 //!    plan with an EMPTY peers list.
-//! 4. `v2_member_leaves_relay_floored_session_no_replan` — a v2 member leaves a
+//! 4. `mesh_member_reconnects_as_v2_without_plan_or_peer_leakage` — a member of
+//!    a finalized `mesh + webrtc` session reconnects on a fresh v2 socket: its
+//!    frozen v2 reconnect wire receives no `SessionPlan`, capable incumbents'
+//!    refreshed plans exclude it, and relay `GameData` remains available.
+//! 5. `v2_member_leaves_relay_floored_session_no_replan` — a v2 member leaves a
 //!    mixed (relay-floored) finalized session: no departure replan is emitted
 //!    and the remaining members keep relaying.
-//! 5. `non_mesh_v3_member_floors_room_to_relay` — a v3 member that negotiated
+//! 6. `non_mesh_v3_member_floors_room_to_relay` — a v3 member that negotiated
 //!    `webrtc` but only `topologies: ["relay"]` is in a mesh-preferring room:
 //!    the ladder requires ALL members to support the rung, so the room floors to
 //!    relay (an explicit no-peer plan for every v3 member), which is the TRUE
@@ -37,8 +41,9 @@ mod test_helpers;
 mod v3_conformance_helpers;
 mod websocket_test_helpers;
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
+use futures_util::StreamExt;
 use serde_json::json;
 use signal_fish_server::config::{AppRegistrationEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
@@ -48,10 +53,10 @@ use signal_fish_server::protocol::{
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use v3_conformance_helpers::{await_ready_count, expect_session_plan_strict, ready, send};
 use websocket_test_helpers::{
-    expect_no_server_message_within, next_matching_server_message_within, WsStream,
+    deadline_after, expect_no_server_message_within, next_matching_server_message_within, WsStream,
 };
 
 const APP_ID: &str = "v3-interop-downgrade-app";
@@ -377,6 +382,39 @@ async fn next_matching_v2_only<T>(
     .await
 }
 
+/// Assert the exact next protocol frame type while preserving raw JSON so v2
+/// field absence can be checked before deserialization fills defaults.
+async fn next_raw_server_message_of_type(
+    ws: &mut WsStream,
+    expected_type: &str,
+    context: &str,
+) -> String {
+    let deadline = deadline_after(SERVER_MESSAGE_TIMEOUT);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{context}: timed out waiting for a {expected_type} text frame")
+            })
+            .unwrap_or_else(|| panic!("{context}: websocket stream closed"))
+            .unwrap_or_else(|error| panic!("{context}: websocket error: {error}"));
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{context}: invalid JSON frame: {error}; {text:?}"));
+        let actual_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{context}: text frame lacks a type tag: {text:?}"));
+        assert_eq!(
+            actual_type, expected_type,
+            "{context}: expected {expected_type}, got {actual_type}: {text}"
+        );
+        return text.to_string();
+    }
+}
+
 /// Send one `GameData` payload and assert byte-identical relay delivery with the
 /// correct `from_player`.
 async fn relay_one_game_data(from: &mut WsStream, to: &mut WsStream, from_id: PlayerId, who: &str) {
@@ -405,7 +443,7 @@ async fn relay_one_game_data(from: &mut WsStream, to: &mut WsStream, from_id: Pl
                 );
                 Some(())
             }
-            _ => None,
+            other => panic!("{who} expected GameData as the next message, got {other:?}"),
         },
     )
     .await;
@@ -896,7 +934,213 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
 }
 
 // ===========================================================================
-// 4. v2 member leaves a mixed (relay-floored) session mid-session: no replan,
+// 4. A finalized mesh member reconnects on a fresh v2 socket: the replacement
+//    receives frozen v2 state and no plan; incumbents exclude it from WebRTC.
+// ===========================================================================
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_member_reconnects_as_v2_without_plan_or_peer_leakage() {
+    let (running_server, server) = start_server_with_session(mesh_session_config()).await;
+    let addr = running_server.addr();
+    let game = "interop-mesh-reconnect-v2";
+    let legacy_who = "v2 reconnector";
+
+    let mut peer_a = connect(addr).await;
+    authenticate_v3_full(&mut peer_a).await;
+    let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
+    let (room_code, id_a, room_id) = (joined_a.room_code, joined_a.player_id, joined_a.room_id);
+
+    let mut peer_b = connect(addr).await;
+    authenticate_v3_full(&mut peer_b).await;
+    let id_b = join_room(&mut peer_b, game, Some(room_code.clone()), "PeerB", 3)
+        .await
+        .player_id;
+
+    let mut departing = connect(addr).await;
+    authenticate_v3_full(&mut departing).await;
+    let departing_id = join_room(&mut departing, game, Some(room_code), "Departing", 3)
+        .await
+        .player_id;
+
+    {
+        let mut sockets = [peer_a, peer_b, departing];
+        finalize_room(&mut sockets).await;
+        for (socket, who) in sockets.iter_mut().zip(["peer_a", "peer_b", "departing"]) {
+            let plan = expect_finalize_plan(socket, who).await;
+            assert_eq!(plan.topology, Topology::Mesh, "{who} topology");
+            assert_eq!(plan.transport, Transport::WebRtc, "{who} transport");
+            assert_eq!(plan.host, None, "{who} mesh plan has no host");
+            assert_eq!(plan.peers.len(), 2, "{who} sees both v3 peers");
+        }
+        [peer_a, peer_b, departing] = sockets;
+    }
+
+    let room = server
+        .database()
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    let departing_info = room
+        .players
+        .get(&departing_id)
+        .cloned()
+        .expect("departing member exists before disconnect");
+
+    server.disconnect_client(&departing_id).await;
+    departing.close(None).await.expect("close departing socket");
+    for (socket, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
+        expect_player_left(socket, departing_id, who).await;
+        expect_no_server_message_within(
+            socket,
+            SILENCE_WINDOW,
+            &format!("{who} after mesh-member departure"),
+        )
+        .await;
+    }
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(departing_id, room_id, false, Some(departing_info), 0)
+        .await;
+
+    let mut reconnector = connect(addr).await;
+    authenticate_v2(&mut reconnector).await;
+    send(
+        &mut reconnector,
+        &ClientMessage::Reconnect {
+            player_id: departing_id,
+            room_id,
+            auth_token: token,
+        },
+    )
+    .await;
+
+    let raw = next_raw_server_message_of_type(
+        &mut reconnector,
+        "Reconnected",
+        "raw v2 finalized-room reconnect",
+    )
+    .await;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).expect("Reconnected frame is valid JSON");
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("expected a JSON object at /data: {raw}"));
+    assert_eq!(
+        data.get("player_id").and_then(serde_json::Value::as_str),
+        Some(departing_id.to_string().as_str()),
+        "the fresh v2 connection restores the original identity: {raw}"
+    );
+    assert_eq!(
+        data.get("lobby_state").and_then(serde_json::Value::as_str),
+        Some("finalized"),
+        "the reconnect baseline preserves the finalized room: {raw}"
+    );
+    let data_keys: BTreeSet<_> = data.keys().map(String::as_str).collect();
+    assert_eq!(
+        data_keys,
+        BTreeSet::from([
+            "room_id",
+            "room_code",
+            "player_id",
+            "game_name",
+            "max_players",
+            "supports_authority",
+            "current_players",
+            "is_authority",
+            "lobby_state",
+            "ready_players",
+            "relay_type",
+            "current_spectators",
+            "missed_events",
+        ]),
+        "v2 Reconnected must use the exact frozen /data key set: {raw}"
+    );
+    let current_players = data
+        .get("current_players")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("expected /data/current_players array: {raw}"));
+    assert_eq!(
+        current_players.len(),
+        3,
+        "complete membership snapshot: {raw}"
+    );
+    let expected_player_keys =
+        BTreeSet::from(["id", "name", "is_authority", "is_ready", "connected_at"]);
+    for player in current_players {
+        let player = player
+            .as_object()
+            .unwrap_or_else(|| panic!("expected PlayerInfo object: {raw}"));
+        let player_keys: BTreeSet<_> = player.keys().map(String::as_str).collect();
+        assert_eq!(
+            player_keys, expected_player_keys,
+            "v2 PlayerInfo must use the exact frozen key set: {raw}"
+        );
+    }
+
+    for (socket, member_id, other_id, who) in [
+        (&mut peer_a, id_a, id_b, "peer_a"),
+        (&mut peer_b, id_b, id_a, "peer_b"),
+    ] {
+        next_matching_server_message_within(
+            socket,
+            SERVER_MESSAGE_TIMEOUT,
+            "PlayerReconnected",
+            |message| match message {
+                ServerMessage::PlayerReconnected { player_id, .. } => {
+                    assert_eq!(player_id, departing_id, "{who} saw the wrong reconnector");
+                    Some(())
+                }
+                other => panic!("{who} expected PlayerReconnected, got {other:?}"),
+            },
+        )
+        .await;
+        let plan = expect_session_plan_strict(socket, who).await;
+        assert_eq!(plan.topology, Topology::Mesh, "{who} sticky topology");
+        assert_eq!(plan.transport, Transport::WebRtc, "{who} sticky transport");
+        assert_eq!(plan.host, None, "{who} mesh plan has no host");
+        assert_eq!(plan.peers.len(), 1, "{who} sees only the capable peer");
+        assert_eq!(plan.peers[0].player_id, other_id, "{who} peer identity");
+        assert_eq!(
+            plan.peers[0].initiate,
+            member_id < other_id,
+            "{who} retains the deterministic mesh glare rule"
+        );
+        assert!(
+            plan.peers.iter().all(|peer| peer.player_id != departing_id),
+            "{who} must not attempt WebRTC with the v2 reconnector"
+        );
+    }
+
+    // Observing both incumbent refreshes establishes that reconnect publication
+    // has completed. Every socket must be quiet at that exact phase boundary:
+    // incumbents receive one refresh each, and the fresh v2 generation remains
+    // plan-free. The exact-next relay assertions below independently reject any
+    // later duplicate or leaked message queued ahead of GameData.
+    for (socket, who) in [(&mut peer_a, "peer_a"), (&mut peer_b, "peer_b")] {
+        expect_no_server_message_within(
+            socket,
+            SILENCE_WINDOW,
+            &format!("{who} after its single reconnect refresh"),
+        )
+        .await;
+    }
+    expect_no_server_message_within(
+        &mut reconnector,
+        SILENCE_WINDOW,
+        "v2 reconnector after incumbent reconnect refreshes",
+    )
+    .await;
+
+    relay_one_game_data(&mut reconnector, &mut peer_a, departing_id, "peer_a").await;
+    relay_one_game_data(&mut peer_a, &mut reconnector, id_a, legacy_who).await;
+    running_server.shutdown().await;
+}
+
+// ===========================================================================
+// 5. v2 member leaves a mixed (relay-floored) session mid-session: no replan,
 //    remaining members keep relaying.
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
@@ -1041,7 +1285,7 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
 }
 
 // ===========================================================================
-// 5. Session-incapable v3 member (webrtc transport but topologies=["relay"]) in
+// 6. Session-incapable v3 member (webrtc transport but topologies=["relay"]) in
 //    a mesh-preferring room: the ladder requires ALL members to support the
 //    rung, so the room floors to relay (verified from `all_support`).
 // ===========================================================================

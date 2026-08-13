@@ -5,12 +5,13 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P94 is complete;
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P95 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
 > recurring H14 hosted control failure, P93 has closed reference-client
 > duration overflow in PR #361, and P94 proved the ordinary
-> capability-downgrading disconnect/reconnect composition in PR #362. P66 preserved and published the
+> capability-downgrading disconnect/reconnect composition in PR #362, and P95
+> proved the fresh-generation v3-to-v2 reconnect refinement in PR #363. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -149,6 +150,10 @@
 > protocol reference clients: native unrepresentable deadlines remain beyond
 > the process lifetime, browser numeric flags stay exact, and long JavaScript
 > timers advance in bounded host-safe chunks instead of firing immediately.
+> P95 advances #220 across the frozen-v2 reconnect seam: a plan received by an
+> old v3 socket remains historical generation-tagged state, the fresh v2 socket
+> receives no v3-only plan, and every current v3 incumbent receives an exact
+> mesh refresh that excludes the v2 member while relay gameplay remains live.
 > P61 removes carry-forward contract drift and mock-only performance evidence
 > found by the session-103 adversarial sweep. P62 closes #300 by distinguishing
 > the server-emitted error-code contract from six legacy Rust variants retained
@@ -450,6 +455,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P92 | Spectator admission and deadline-overflow closure (#358) | S | P27, P30, P79 | Maintenance | ✅ Done (s133, PR #359) |
 | P93 | Cross-reference-client deadline integrity (#360) | S | P7, P79, P92 | Maintenance | ✅ Done (s134, PR #361) |
 | P94 | Capability-downgrading reconnect refinement (#220) | S | P41, P58, P87 | Maintenance | ✅ Done (s135, PR #362) |
+| P95 | Connection-generation-aware v3-to-v2 reconnect refinement (#220) | S | P41, P58, P94 | Maintenance | ✅ Done (s136, PR #363) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3363,6 +3369,54 @@ retained host plan or explicit relay reset; original join priority survives;
 former authority is restored only while vacant, never over a successor; every
 seeded bug is detected by a semantic postcondition; and all mandatory local,
 hosted, and review gates pass.
+
+---
+
+### P95 — Connection-generation-aware v3-to-v2 reconnect refinement (#220) (Size S) — ✅ DONE
+
+Session 136 advances #220 at the cross-version socket boundary left explicit by
+P94. A member may receive a `mesh + webrtc` plan on one v3 connection, disconnect,
+and use that incarnation's token from a fresh socket that negotiates v2. The
+logical player ID is unchanged, but the two physical generations have different
+wire contracts and pairing capabilities.
+
+- [x] Tag persistent model delivery observations with the physical connection
+  generation and protocol version that received them, so an old v3 plan remains
+  honest historical state after the player returns on v2.
+- [x] Model any capable finalized mesh member disconnecting and reconnecting on
+  v2 while preserving restored join order and successor-authority semantics.
+- [x] Prove the fresh v2 generation receives no `SessionPlan`; every current v3
+  incumbent receives the complete authoritative refresh when any remain; and
+  no fresh peer list names the v2 member, including solo and all-incumbents-left
+  reconnect histories.
+- [x] Add three independently seeded expected failures for bypassing the pre-v3
+  delivery gate, reusing stale v3 capabilities for peer construction, and
+  skipping incumbent publication; require each exact invariant diagnostic.
+- [x] Exercise the production WebSocket path: raw frozen-v2 `Reconnected` field
+  absence, strict plan silence, exact incumbent mesh peers, and bidirectional
+  relay `GameData`.
+- [x] Complete the exact-head hosted matrix and independent adversarial review
+  with no actionable findings.
+
+The positive refinement checks 20,442 generated / 8,814 distinct states to
+graph depth 9. The three negative configurations emit their exact registered
+`ReconnectV2WireGating`, `ReconnectV2ExcludesActorFromPeers`, and
+`ReconnectV2PublishesIncumbents` violations. P94's 8,317 distinct states and all
+four prior expected-failure diagnostics remain unchanged. The complete locked
+all-features suite, formal and Z3 proofs, supply-chain and policy gates, and all
+repository-owned exact-head checks are green in PR #363 (29 successes and two
+expected skips). Two repeated independent adversarial reviews ended with zero
+findings. The external Copilot reviewer produced no review because its monthly
+quota was exhausted; Cursor Bugbot completed successfully with no threads. The
+unrelated Miri wall-clock flake discovered during validation is tracked in #364,
+and its isolated exact-head rerun passed without a code change.
+
+**Acceptance:** a historical v3 delivery is never reclassified as traffic sent
+to a fresh v2 socket; the new v2 generation receives no v3-only session message;
+every capable incumbent receives one exact sticky-mesh refresh that excludes the
+v2 member; relay gameplay remains available across the capability mismatch;
+every seeded bug is detected by its semantic postcondition; and all mandatory
+local, hosted, and review gates pass.
 
 ---
 

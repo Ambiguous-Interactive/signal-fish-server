@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add exhaustive connection-generation-aware coverage for a finalized v3 mesh
+  member reconnecting on v2. The fresh v2 socket receives no v3-only session
+  plan, capable incumbents receive exact peer refreshes that exclude it, and a
+  real-WebSocket regression preserves frozen-v2 reconnect fields plus relay
+  gameplay. Three semantic expected-failure models keep wire gating, fresh
+  capability use, and complete incumbent publication independently non-vacuous
+  (issue #220).
 - Add exhaustive session-model coverage for capability-downgrading reconnects.
   The ordinary disconnect/failover/reconnect composition must publish against
   the fresh relay-only profile while restoring original join priority and
