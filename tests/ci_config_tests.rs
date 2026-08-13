@@ -23089,23 +23089,25 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
 }
 
 #[test]
-fn test_audit_job_installs_cargo_audit() {
-    // Validates that the audit job installs cargo-audit via taiki-e/install-action,
-    // consistent with how other tools (cargo-nextest, cargo-llvm-cov, cargo-sbom)
-    // are installed in the CI workflow.
+fn test_audit_job_installs_and_verifies_pinned_cargo_audit() {
+    // Keep the advisory scanner reproducible and fail closed if the installer
+    // ever provides a different binary than the requested release.
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
     let audit_section = extract_audit_section(&strip_comment_lines(&ci_content));
 
-    assert!(
-        audit_section.contains("tool: cargo-audit"),
-        "Audit job must install cargo-audit via taiki-e/install-action.\n\
-         Expected: tool: cargo-audit\n\
-         This is consistent with how cargo-nextest, cargo-llvm-cov, and \
-         cargo-sbom are installed."
-    );
+    for required in [
+        "tool: cargo-audit@0.22.2",
+        "fallback: none",
+        "run: cargo-audit --version | grep -Fxq 'cargo-audit 0.22.2'",
+    ] {
+        assert!(
+            audit_section.contains(required),
+            "Audit job must install and verify the exact cargo-audit release; missing `{required}`"
+        );
+    }
 }
 
 #[test]
@@ -25556,6 +25558,8 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
         &[
             "formal/**",
             "scripts/run-tla-model-check.sh",
+            "scripts/generate-sequenced-relay-trace.py",
+            "scripts/run-sequenced-relay-trace-validation.sh",
             "scripts/run-z3-proofs.sh",
             "src/server/session_policy.rs",
             "src/server/signaling.rs",
@@ -25563,14 +25567,116 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             "src/reconnection.rs",
             "src/server/reconnection_service.rs",
             "src/server/connection_manager.rs",
+            "src/server/game_data.rs",
             "src/database/mod.rs",
-            "src/protocol/room_state.rs",
+            "src/protocol/**",
             "src/server.rs",
             "src/coordination/**",
             "src/websocket/**",
+            "tests/delivery_trace_generator_tests.rs",
+            "tests/scenario_realworld_e2e.rs",
+            "tests/v3_game_data_sequencing_e2e.rs",
+            "tests/websocket_test_helpers/**",
             ".github/workflows/formal-verification.yml",
         ],
     );
+}
+
+#[test]
+fn test_sequenced_relay_trace_refinement_has_gating_and_production_replays() {
+    let root = repo_root();
+    let formal = read_live_file(&root.join(".github/workflows/formal-verification.yml"));
+    let formal_documents =
+        Yaml::load_from_str(&formal).expect("formal verification workflow must parse");
+    let formal_steps = formal_documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("tlc"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("formal TLC steps");
+    let gating_run = formal_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Replay sequenced-relay refinement and seeded divergences")
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("gating sequenced-relay replay command");
+    for required in [
+        "scripts/run-sequenced-relay-trace-validation.sh",
+        "formal/traces/sequenced-relay-replay.jsonl",
+    ] {
+        assert!(
+            gating_run.contains(required),
+            "gating sequenced-relay replay lost `{required}`"
+        );
+    }
+
+    let nightly = read_live_file(&root.join(".github/workflows/verification-nightly.yml"));
+    let nightly_documents =
+        Yaml::load_from_str(&nightly).expect("verification nightly workflow must parse");
+    let trace_job = nightly_documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("trace-validation"))
+        .expect("nightly trace-validation job");
+    let steps = trace_job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("nightly trace-validation steps");
+    let named_run = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+            .and_then(|step| step.as_mapping_get("run"))
+            .and_then(Yaml::as_str)
+            .unwrap_or_else(|| panic!("missing trace-validation step `{name}`"))
+    };
+    let classified = named_run("Capture and replay classified sequenced-relay observations");
+    for required in [
+        "v3_game_data_sequencing_e2e",
+        "latest_coalescing_reports_exact_gap_before_successor",
+        "generate-sequenced-relay-trace.py",
+        "run-tla-model-check.sh",
+    ] {
+        assert!(
+            classified.contains(required),
+            "classified production replay lost `{required}`"
+        );
+    }
+    let reconnect = named_run("Capture and replay reconnect sequenced-relay observations");
+    for required in [
+        "scenario_realworld_e2e",
+        "reconnect_under_fire",
+        "run-sequenced-relay-trace-validation.sh",
+    ] {
+        assert!(
+            reconnect.contains(required),
+            "reconnect production replay lost `{required}`"
+        );
+    }
+
+    let upload_paths = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Upload trace-validation evidence")
+        })
+        .and_then(|step| step.as_mapping_get("with"))
+        .and_then(|settings| settings.as_mapping_get("path"))
+        .and_then(Yaml::as_str)
+        .expect("trace-validation artifact paths");
+    for required in [
+        "sequenced-classified.jsonl",
+        "sequenced-classified-replay",
+        "sequenced-reconnect.jsonl",
+        "sequenced-reconnect-replay",
+    ] {
+        assert!(
+            upload_paths.contains(required),
+            "trace-validation artifacts lost `{required}`"
+        );
+    }
 }
 
 /// Assert both the `push` and `pull_request` events trigger on exactly
@@ -26427,6 +26533,11 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
             "P13 production dependencies must resolve from crates.io without path/Git overrides: {package}"
         );
     }
+    assert_eq!(
+        lockfile.matches("name = \"godot\"\n").count(),
+        1,
+        "the WASM fixture must resolve exactly one godot-rust release so the adapter and fixture cannot link incompatible engine bindings"
+    );
     let fortress_package = cargo_lock_package(&lockfile, "fortress-rollback", "0.12.0");
     let fixture_package =
         cargo_lock_package(&lockfile, "signal-fish-fortress-wasm-interop", "0.1.0");

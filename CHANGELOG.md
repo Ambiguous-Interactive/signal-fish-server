@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a strict, payload-free protocol-v3 sequencing trace for production-shaped
+  receiver observations. Focused real-socket scenarios record anonymous
+  watermarks, exact classified gaps, lifecycle epochs, and reconnect snapshots;
+  a bounded fail-closed compiler replays them against a TLA+ receiver-view
+  refinement and proves four independently seeded divergences non-vacuous
+  (issue #220).
 - Add end-to-end WebSocket upgrade diagnostics for operators. Every
   application-handled acceptance or deliberate HTTP rejection now returns and
   logs one correlation ID, exact outcome, status, and transport peer address
@@ -54,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh compatible dependencies across every tracked Rust lockfile, remove
+  the unused direct `once_cell` development dependency, and pin plus verify the
+  CI `cargo-audit` version. The no-thread Godot fixture remains unified on its
+  exact 0.4.5 binding stack.
 - Reduce the published crate from 652 archive entries (11.1 MiB unpacked) to
   92 runtime-source, operator-example, license, and Cargo-metadata entries
   (3.1 MiB unpacked),

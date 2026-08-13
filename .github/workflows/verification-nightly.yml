@@ -44,15 +44,17 @@
 #     server processes pin the unsupported multi-instance failure catalog used
 #     by the deployment doctrine.
 #   - trace-validation: P10.D7 captures deterministic paused-clock producer
-#     traces plus a real-socket writer/finalizer trace, compiles them into TLA+,
-#     replays them with TLC, and proves three negative oracles. Informational
-#     initially.
+#     traces plus a real-socket writer/finalizer trace. P98 also captures
+#     protocol-v3 classified-omission and reconnect/lifecycle observations.
+#     Both contracts compile to TLA+, replay with TLC, and exercise seeded
+#     negative oracles. Informational initially.
 #
-# All targeted tests are `#[ignore]`d in-tree (a scheduling decision, not a
-# flakiness mask) and activated here with `--run-ignored all`. Job timeouts
-# are generous floors over the measured wall times (build + run), per the
-# zero-flakiness policy: a too-tight timeout-minutes cancels a
-# healthy-but-loaded run and is itself a flake source.
+# Long-running targeted tests are `#[ignore]`d in-tree (a scheduling decision,
+# not a flakiness mask) and activated here with `--run-ignored all`; the focused
+# P98 socket captures are ordinary exact tests. Job timeouts are generous floors
+# over measured wall times (build + run), per the zero-flakiness policy: a
+# too-tight timeout-minutes cancels a healthy-but-loaded run and is itself a
+# flake source.
 
 name: Verification Nightly
 
@@ -73,10 +75,14 @@ on:
       - "tests/multiprocess_delivery_e2e.rs"
       - "tests/webrtc_mesh_budget_e2e.rs"
       - "tests/scenario_realworld_e2e.rs"
+      - "tests/v3_game_data_sequencing_e2e.rs"
       - "tests/sixteen_player_matrix_e2e.rs"
       - "tests/asymmetric_bandwidth_flap_e2e.rs"
       - "tests/split_brain_two_instances_e2e.rs"
       - "tests/websocket_test_helpers/**"
+      - "formal/tla/SequencedRelayTrace.tla"
+      - "scripts/generate-sequenced-relay-trace.py"
+      - "scripts/run-sequenced-relay-trace-validation.sh"
       - "clients/native/**"
       - ".github/workflows/verification-nightly.yml"
 
@@ -655,7 +661,7 @@ jobs:
             --test split_brain_two_instances_e2e --run-ignored all
 
   trace-validation:
-    name: Delivery Contract Trace Replay (informational)
+    name: Delivery Trace Replays (informational)
     if: github.event_name != 'pull_request'
     continue-on-error: true
     runs-on: ubuntu-latest
@@ -711,13 +717,41 @@ jobs:
           bash scripts/run-delivery-trace-validation.sh \
             "${{ runner.temp }}/delivery-contract.jsonl" \
             "${{ runner.temp }}/delivery-trace-validation"
+      - name: Capture and replay classified sequenced-relay observations
+        shell: bash
+        env:
+          SIGNAL_FISH_SEQUENCED_TRACE_PATH: ${{ runner.temp }}/sequenced-classified.jsonl
+        run: |
+          cargo test --locked --features trace-validation \
+            --test v3_game_data_sequencing_e2e \
+            latest_coalescing_reports_exact_gap_before_successor -- --exact
+          mkdir -p "${{ runner.temp }}/sequenced-classified-replay"
+          python3 scripts/generate-sequenced-relay-trace.py \
+            --input "${SIGNAL_FISH_SEQUENCED_TRACE_PATH}" \
+            --output-dir "${{ runner.temp }}/sequenced-classified-replay"
+          bash scripts/run-tla-model-check.sh \
+            --tla-dir "${{ runner.temp }}/sequenced-classified-replay"
+      - name: Capture and replay reconnect sequenced-relay observations
+        shell: bash
+        env:
+          SIGNAL_FISH_SEQUENCED_TRACE_PATH: ${{ runner.temp }}/sequenced-reconnect.jsonl
+        run: |
+          cargo test --locked --features trace-validation \
+            --test scenario_realworld_e2e reconnect_under_fire -- --exact
+          bash scripts/run-sequenced-relay-trace-validation.sh \
+            "${SIGNAL_FISH_SEQUENCED_TRACE_PATH}" \
+            "${{ runner.temp }}/sequenced-reconnect-replay"
       - name: Upload trace-validation evidence
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: delivery-contract-trace-validation
+          name: delivery-trace-validation
           path: |
             ${{ runner.temp }}/delivery-contract.jsonl
             ${{ runner.temp }}/delivery-trace-validation
+            ${{ runner.temp }}/sequenced-classified.jsonl
+            ${{ runner.temp }}/sequenced-classified-replay
+            ${{ runner.temp }}/sequenced-reconnect.jsonl
+            ${{ runner.temp }}/sequenced-reconnect-replay
           if-no-files-found: warn
           retention-days: 14

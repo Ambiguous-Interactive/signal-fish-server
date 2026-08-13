@@ -1,0 +1,15 @@
+{"kind":"header","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","protocol_version":3}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":1,"action":"ReceiverSnapshot","receiver":"r1","sender_count":1}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":2,"action":"ReceiverBaseline","receiver":"r1","sender":"s1","epoch":1,"baseline_seq":0}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":3,"action":"Data","receiver":"r1","sender":"s1","epoch":1,"data_seq":1}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":4,"action":"Data","receiver":"r1","sender":"s1","epoch":1,"data_seq":2}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":5,"action":"PlayerLeft","receiver":"r1","sender":"s1","epoch":1,"final_seq":2}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":6,"action":"PlayerJoined","receiver":"r1","sender":"s1","epoch":2,"baseline_seq":0}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":7,"action":"Data","receiver":"r1","sender":"s1","epoch":2,"data_seq":1}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":8,"action":"ReceiverReconnect","receiver":"r1","sender_count":1}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":9,"action":"ReceiverBaseline","receiver":"r1","sender":"s1","epoch":2,"baseline_seq":1}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":10,"action":"PlayerLeft","receiver":"r1","sender":"s1","epoch":2,"final_seq":1}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":11,"action":"PlayerReconnected","receiver":"r1","sender":"s1","epoch":3,"baseline_seq":0}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":12,"action":"DeliveryGap","receiver":"r1","sender":"s1","epoch":3,"from_seq":1,"to_seq":1,"reason":"latest_superseded"}
+{"kind":"event","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","seq":13,"action":"Data","receiver":"r1","sender":"s1","epoch":3,"data_seq":2}
+{"kind":"footer","schema":"signal-fish.sequenced-relay/v1","trace_id":"relay-1","event_count":13}

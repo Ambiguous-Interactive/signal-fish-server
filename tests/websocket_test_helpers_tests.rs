@@ -3,6 +3,7 @@ mod websocket_test_helpers;
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
+use std::process::Command;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -2427,4 +2428,166 @@ fn conformance_delivery_class_metrics_conserve_per_class() {
             "case {name}"
         );
     }
+}
+
+#[test]
+fn sequenced_relay_trace_is_payload_free_and_covers_accountability_boundaries() {
+    let temp = tempfile::tempdir().expect("temporary trace directory");
+    let trace_path = temp.path().join("sequenced-relay.jsonl");
+    let sender = id(240);
+    {
+        let auditor =
+            ConformanceAuditor::with_sequenced_trace(ReceiverProtocolMode::V3, trace_path.clone());
+        auditor.record_message("before", &room_joined(sender, 1));
+        auditor.record_message("before", &game_data(sender, Some(1), Some(1)));
+
+        let mut counters = DeliveryCountersByClass::default();
+        counters.latest.superseded = 1;
+        auditor.record_message(
+            "before",
+            &delivery_report(
+                counters,
+                [DeliveryGap {
+                    from_player: sender,
+                    epoch: 1,
+                    from_seq: 2,
+                    to_seq: 2,
+                    reason: DeliveryGapReason::LatestSuperseded,
+                }],
+            ),
+        );
+        auditor.record_message("before", &game_data(sender, Some(3), Some(1)));
+        auditor.record_message("before", &player_left(sender, 1, 4));
+        auditor.record_message("before", &player_left(sender, 1, 4));
+        let mut counters = DeliveryCountersByClass::default();
+        counters.latest.superseded = 2;
+        auditor.record_message(
+            "before",
+            &delivery_report(
+                counters,
+                [DeliveryGap {
+                    from_player: sender,
+                    epoch: 1,
+                    from_seq: 4,
+                    to_seq: 4,
+                    reason: DeliveryGapReason::LatestSuperseded,
+                }],
+            ),
+        );
+        auditor.record_message("before", &player_joined(sender, 2));
+        auditor.record_message("before", &game_data(sender, Some(1), Some(2)));
+        auditor.note_injected_fault("before", "trace reconnect cut");
+        auditor.record_reconnect("before", "after", &reconnected_payload(sender, 2, 1));
+        auditor.record_message("after", &ServerMessage::RoomLeft);
+        auditor.record_message("after", &room_joined(sender, 3));
+        auditor.record_message("after", &game_data(sender, Some(1), Some(3)));
+    }
+
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&trace_path)
+        .expect("read sequenced trace")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("valid trace JSONL record"))
+        .collect();
+    assert_eq!(
+        records.first().and_then(|record| record["kind"].as_str()),
+        Some("header")
+    );
+    assert_eq!(
+        records.last().and_then(|record| record["kind"].as_str()),
+        Some("footer")
+    );
+    let actions: Vec<_> = records
+        .iter()
+        .filter_map(|record| record["action"].as_str())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "ReceiverSnapshot",
+            "ReceiverBaseline",
+            "Data",
+            "DeliveryGap",
+            "Data",
+            "PlayerLeft",
+            "DeliveryGap",
+            "PlayerJoined",
+            "Data",
+            "ReceiverReconnect",
+            "ReceiverBaseline",
+            "ReceiverReset",
+            "ReceiverSnapshot",
+            "ReceiverBaseline",
+            "Data",
+        ]
+    );
+    let text = std::fs::read_to_string(&trace_path).expect("reread sequenced trace");
+    assert!(
+        !text.contains(&sender.to_string()),
+        "trace leaked sender UUID"
+    );
+    assert!(
+        !text.contains("trace reconnect cut"),
+        "trace leaked fault detail"
+    );
+    assert!(!text.contains("payload"), "trace leaked a payload field");
+    assert!(text.contains("\"receiver\":\"r1\""));
+    assert!(!text.contains("\"receiver\":\"r2\""));
+    assert!(text.contains("\"sender\":\"s1\""));
+
+    let output_dir = temp.path().join("sequenced-relay-bundle");
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/generate-sequenced-relay-trace.py"
+        ))
+        .arg("--input")
+        .arg(&trace_path)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .output()
+        .expect("run sequenced-relay trace compiler");
+    assert!(
+        output.status.success(),
+        "recorder output failed strict compilation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_dir
+        .join("GeneratedSequencedRelayTrace.tla")
+        .is_file());
+}
+
+#[test]
+#[should_panic(expected = "sequenced relay traces require a protocol-v3 conformance auditor")]
+fn sequenced_relay_trace_rejects_a_v2_projection() {
+    let temp = tempfile::tempdir().expect("temporary trace directory");
+    let _auditor = ConformanceAuditor::with_sequenced_trace(
+        ReceiverProtocolMode::V2,
+        temp.path().join("invalid-v2-trace.jsonl"),
+    );
+}
+
+#[test]
+fn sequenced_relay_trace_path_has_one_exclusive_writer() {
+    let temp = tempfile::tempdir().expect("temporary trace directory");
+    let trace_path = temp.path().join("exclusive.jsonl");
+    let _owner =
+        ConformanceAuditor::with_sequenced_trace(ReceiverProtocolMode::V3, trace_path.clone());
+    assert!(panics(|| {
+        let _duplicate =
+            ConformanceAuditor::with_sequenced_trace(ReceiverProtocolMode::V3, trace_path);
+    }));
+}
+
+#[test]
+fn sequenced_relay_trace_io_failure_does_not_double_panic_on_drop() {
+    let temp = tempfile::tempdir().expect("temporary trace directory");
+    let trace_path = temp.path().join("blocked.jsonl");
+    let auditor =
+        ConformanceAuditor::with_sequenced_trace(ReceiverProtocolMode::V3, trace_path.clone());
+    std::fs::remove_file(&trace_path).expect("remove trace behind active writer");
+    std::fs::create_dir(&trace_path).expect("replace trace file with blocking directory");
+    assert!(panics(|| {
+        auditor.record_message("receiver", &room_joined(id(241), 1));
+    }));
+    drop(auditor);
 }

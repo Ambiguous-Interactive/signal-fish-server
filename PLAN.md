@@ -15,7 +15,9 @@
 > made the rate-limit unit suite independent of host execution speed in PR #365
 > under #364. P97 is validating correlated WebSocket-upgrade diagnostics and a
 > repeated simultaneous-client probe through the deployed public proxy path
-> under #367. P66 preserved and published the
+> under #367. P98 implements the deferred production-shaped sequenced-relay
+> trace refinement under #220 and incorporates the current dependency-maintenance
+> set. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has eight of 20 eligible scheduled
 > allocations per OS; P56 has eight of 20 eligible scheduled H14 attempts.** The M1
@@ -467,6 +469,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P95 | Connection-generation-aware v3-to-v2 reconnect refinement (#220) | S | P41, P58, P94 | Maintenance | ✅ Done (s136, PR #363) |
 | P96 | Deterministic rate-limit window tests (#364) | S | P27, P33 | Maintenance / CI | ✅ Done (s137, PR #365) |
 | P97 | Public WebSocket upgrade observability and proxy-path probe (#367) | S | P25, P91 | Reliability / Operations | 🟡 Validating (s138) |
+| P98 | Production-shaped sequenced-relay trace refinement (#220) | M | P10, P17, P59 | Maintenance / CI | 🟡 Validating (s140) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3520,6 +3523,44 @@ attempt; mandatory local, hosted, and independent-review gates pass.
 
 ---
 
+### P98 — Production-shaped sequenced-relay trace refinement (#220) (Size M) — 🟡 VALIDATING
+
+P10.D7 deliberately stopped at the legacy reliable-FIFO writer boundary and
+left the v3 chaos/conformance observation stream as its second target. P98
+closes that loop: already-validated wire observations can now be recorded as a
+strict, anonymous JSONL projection and replayed against an executable
+receiver-view refinement of `SequencedRelay.tla`.
+
+- [x] Add opt-in, payload-free v3 tracing to `ConformanceAuditor`, with stable
+  receiver/sender aliases, counted exact initial snapshots/watermarks, stamped
+  data, classified gap ranges, lifecycle epochs, and reconnect re-baselines.
+- [x] Compile only the declared `signal-fish.sequenced-relay/v1` schema with
+  exact fields, bounded values, contiguous event order, declared gap reasons,
+  and counted complete post-reconnect watermark blocks; reject every unknown or
+  incomplete observation instead of weakening it into the model.
+- [x] Replay the receiver projection through TLC and fail at the first event
+  whose sequencing, accountability, epoch, terminal, or reconnect guard is
+  false. Prove non-vacuity with independent duplicate/regression, silent-gap,
+  backward-epoch, and late-lifecycle corruptions.
+- [x] Keep a fast checked-corpus replay in the gating formal workflow and add
+  real-socket nightly captures for exact latest-value omission plus the
+  ordinary lifecycle/reconnect-under-fire scenario. Retain raw JSONL and
+  generated proof bundles for diagnosis.
+- [x] Incorporate all compatible Rust lockfile refreshes across the five
+  repository graphs, remove the unused direct `once_cell` declaration, and pin
+  plus runtime-verify `cargo-audit 0.22.2` in CI. Fresh audit and deny scans
+  remain green for every graph.
+
+**Acceptance:** production-shaped v3 observations contain no player UUIDs or
+application payloads; ordinary delivery, causally prior exact omissions,
+sender epoch transitions, and receiver reconnect re-baselining replay without
+divergence; all four deliberately corrupted contracts fail closed; relevant
+formal/recorder/source changes trigger the gating replay; the production socket
+captures remain retained nightly; every dependency graph and mandatory local,
+hosted, and independent-review gate passes.
+
+---
+
 ### P11 — Git-tagged releases + versioned GHCR containers (Size S) — ✅ DONE
 
 **Schedule this before the next crates.io publish or GitHub Release.** A public
@@ -4885,8 +4926,9 @@ build a perfect-recall proptest twin in
   Existing fixed-seed model-based cases emit the corpus, focused paused-clock
   tests cover parked enqueue/channel-close arms, and a seeded bad first drain
   proves the failure path. The daily verification workflow runs the pilot
-  non-gating and uploads evidence. The chaos-suite `DeliveryLedger` refinement
-  against `SequencedRelay` remains the explicitly separate second target.
+  non-gating and uploads evidence. P98 now closes the explicitly separate
+  second target by replaying production-shaped `ConformanceAuditor`
+  observations against a receiver-view refinement of `SequencedRelay`.
 - [x] **D8 — tooling decisions (recorded)** (session 019/020). The recorded
   decisions now live in `formal/README.md` → "Tooling decisions (P10.D8)":
   TLC-first (explicit-state; small finite models, concrete counterexamples);
@@ -5650,8 +5692,8 @@ O.6  Trace validation pilot (P10.D7): feature-gated JSONL sink at
      DeliveryContractTrace.tla replays with i-indexed TNext; an emitted event
      whose action guard is FALSE deadlocks TLC at step i = pinpointed
      divergence. Drive from the model-based proptest cases (paused clock ⇒
-     deterministic). Nightly, non-gating; second target: chaos-suite
-     DeliveryLedger traces vs SequencedRelay.
+     deterministic). Nightly, non-gating. P98 closes the second target with
+     payload-free v3 conformance traces and `SequencedRelayTrace.tla`.
 ```
 
 ## Appendix P — P10 references (sourced facts behind the campaign)
@@ -5711,16 +5753,10 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 ---
 
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
-hosted evidence gates; P88 is complete in merged PR #353; P89's CI validation
-and scheduling integrity work is complete in PR #354; P90's published-source
-and local-session hygiene is complete in PR #356; P91's fail-closed CI
-bootstrap and H14 isolation are complete in PR #357; P92's spectator/deadline
-server sweep is complete in PR #359; P93's reference-client deadline sweep is
-complete in PR #361; P94's capability-downgrading reconnect refinement is
-complete in PR #362; P95's fresh-generation v3-to-v2 reconnect refinement is
-complete in PR #363; P96's deterministic rate-limit test closure is complete in
-PR #365;
-P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
+hosted evidence gates. P97's in-repo upgrade diagnostics and probe are complete;
+deployment and public-path acceptance are owned by signal-fish-cloud#595. P98's
+production-shaped sequenced-relay trace refinement is validating. P7's
+mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 durable evidence lives in repository artifacts and linked GitHub state, while
 session notes under `progress/` remain local-only._

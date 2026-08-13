@@ -203,3 +203,329 @@ fn malformed_or_out_of_domain_traces_fail_closed() {
         );
     }
 }
+
+const SEQUENCED_TRACE: &str = include_str!("../formal/traces/sequenced-relay-replay.jsonl");
+
+const RECONNECT_MEMBERSHIP_TRACE: &str = concat!(
+    "{\"kind\":\"header\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"protocol_version\":3}\n",
+    "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"seq\":1,\"action\":\"ReceiverSnapshot\",",
+    "\"receiver\":\"r1\",\"sender_count\":2}\n",
+    "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"seq\":2,\"action\":\"ReceiverBaseline\",",
+    "\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":1,\"baseline_seq\":0}\n",
+    "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"seq\":3,\"action\":\"ReceiverBaseline\",",
+    "\"receiver\":\"r1\",\"sender\":\"s2\",\"epoch\":1,\"baseline_seq\":0}\n",
+    "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"seq\":4,\"action\":\"PlayerLeft\",",
+    "\"receiver\":\"r1\",\"sender\":\"s2\",\"epoch\":1,\"final_seq\":0}\n",
+    "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"seq\":5,\"action\":\"ReceiverReconnect\",",
+    "\"receiver\":\"r1\",\"sender_count\":1}\n",
+    "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"seq\":6,\"action\":\"ReceiverBaseline\",",
+    "\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":1,\"baseline_seq\":0}\n",
+    "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"seq\":7,\"action\":\"Data\",",
+    "\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":1,\"data_seq\":1}\n",
+    "{\"kind\":\"footer\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+    "\"trace_id\":\"membership-1\",\"event_count\":7}\n",
+);
+
+fn run_sequenced_generator(input: &Path, output_dir: &Path, seeded_bug: Option<&str>) -> Output {
+    let mut command = Command::new("python3");
+    command
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/generate-sequenced-relay-trace.py"
+        ))
+        .arg("--input")
+        .arg(input)
+        .arg("--output-dir")
+        .arg(output_dir);
+    if let Some(bug) = seeded_bug {
+        command.arg("--seeded-bug").arg(bug);
+    }
+    command.output().expect("run sequenced-relay generator")
+}
+
+#[test]
+fn sequenced_relay_trace_generates_a_self_contained_replay_bundle() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let input = temp.path().join("trace.jsonl");
+    let output_dir = temp.path().join("bundle");
+    fs::write(&input, SEQUENCED_TRACE).expect("write input trace");
+
+    let output = run_sequenced_generator(&input, &output_dir, None);
+    assert!(
+        output.status.success(),
+        "generator failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated = fs::read_to_string(output_dir.join("GeneratedSequencedRelayTrace.tla"))
+        .expect("read generated TLA input");
+    assert!(generated.contains("TraceIds == {\"relay-1\"}"));
+    assert!(generated.contains("action |-> \"DeliveryGap\""));
+    assert!(generated.contains("receiver |-> \"r1\", sender |-> \"s1\""));
+    assert!(output_dir.join("SequencedRelayTrace.tla").is_file());
+    assert!(output_dir
+        .join("SequencedRelayTrace_Generated.cfg")
+        .is_file());
+}
+
+#[test]
+fn sequenced_relay_seed_modes_emit_independent_negative_bundles() {
+    for bug in [
+        "duplicate-data",
+        "silent-gap",
+        "backward-epoch",
+        "late-lifecycle",
+    ] {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let input = temp.path().join("trace.jsonl");
+        let output_dir = temp.path().join("bundle");
+        fs::write(&input, SEQUENCED_TRACE).expect("write input trace");
+        let output = run_sequenced_generator(&input, &output_dir, Some(bug));
+        assert!(
+            output.status.success(),
+            "{bug}: generator failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(bug),
+            "{bug}: generator did not identify the seeded mode"
+        );
+        if bug == "duplicate-data" {
+            let generated = fs::read_to_string(output_dir.join("GeneratedSequencedRelayTrace.tla"))
+                .expect("read duplicate-data TLA input");
+            let repeated_positive_data = concat!(
+                "[action |-> \"Data\", receiver |-> \"r1\", sender |-> \"s1\", ",
+                "epoch |-> 1, value1 |-> 1,"
+            );
+            assert_eq!(
+                generated.matches(repeated_positive_data).count(),
+                2,
+                "duplicate-data must repeat a prior positive Data sequence"
+            );
+        }
+    }
+}
+
+#[test]
+fn reconnect_baselines_authoritatively_replace_offline_membership() {
+    for (description, trace) in [
+        (
+            "departed sender omitted",
+            RECONNECT_MEMBERSHIP_TRACE.to_string(),
+        ),
+        (
+            "offline membership replaced",
+            RECONNECT_MEMBERSHIP_TRACE.replacen(
+                "\"seq\":6,\"action\":\"ReceiverBaseline\",\"receiver\":\"r1\",\"sender\":\"s1\"",
+                "\"seq\":6,\"action\":\"ReceiverBaseline\",\"receiver\":\"r1\",\"sender\":\"s2\"",
+                1,
+            ),
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let input = temp.path().join("trace.jsonl");
+        let output_dir = temp.path().join("bundle");
+        fs::write(&input, trace).expect("write reconnect trace");
+        let output = run_sequenced_generator(&input, &output_dir, None);
+        assert!(
+            output.status.success(),
+            "{description}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn counted_empty_receiver_snapshot_is_representable() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let input = temp.path().join("trace.jsonl");
+    let output_dir = temp.path().join("bundle");
+    fs::write(
+        &input,
+        concat!(
+            "{\"kind\":\"header\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+            "\"trace_id\":\"empty-1\",\"protocol_version\":3}\n",
+            "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+            "\"trace_id\":\"empty-1\",\"seq\":1,\"action\":\"ReceiverSnapshot\",",
+            "\"receiver\":\"r1\",\"sender_count\":0}\n",
+            "{\"kind\":\"footer\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+            "\"trace_id\":\"empty-1\",\"event_count\":1}\n",
+        ),
+    )
+    .expect("write empty snapshot trace");
+
+    let output = run_sequenced_generator(&input, &output_dir, None);
+    assert!(
+        output.status.success(),
+        "empty snapshot failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn aggregate_formal_domain_complexity_fails_closed() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let input = temp.path().join("trace.jsonl");
+    let output_dir = temp.path().join("bundle");
+    let mut trace = concat!(
+        "{\"kind\":\"header\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+        "\"trace_id\":\"dense-1\",\"protocol_version\":3}\n",
+        "{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+        "\"trace_id\":\"dense-1\",\"seq\":1,\"action\":\"ReceiverSnapshot\",",
+        "\"receiver\":\"r1\",\"sender_count\":17}\n",
+    )
+    .to_string();
+    for sender in 1..=17 {
+        trace.push_str(&format!(
+            "{{\"kind\":\"event\",\"schema\":\"signal-fish.sequenced-relay/v1\",\"trace_id\":\"dense-1\",\"seq\":{},\"action\":\"ReceiverBaseline\",\"receiver\":\"r1\",\"sender\":\"s{sender}\",\"epoch\":4096,\"baseline_seq\":0}}\n",
+            sender + 1
+        ));
+    }
+    trace.push_str(concat!(
+        "{\"kind\":\"footer\",\"schema\":\"signal-fish.sequenced-relay/v1\",",
+        "\"trace_id\":\"dense-1\",\"event_count\":18}\n",
+    ));
+    fs::write(&input, trace).expect("write dense-domain trace");
+
+    let output = run_sequenced_generator(&input, &output_dir, None);
+    assert!(
+        !output.status.success(),
+        "dense replay unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "17 sender/receiver pair(s) x max epoch 4096 = 69632 dense cells; limit is 65536"
+        ),
+        "unexpected dense-domain diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn reconnect_requires_a_continuing_logical_receiver_view() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let input = temp.path().join("trace.jsonl");
+    let output_dir = temp.path().join("bundle");
+    fs::write(
+        &input,
+        SEQUENCED_TRACE
+            .replace("\"receiver\":\"r1\"", "\"receiver\":\"r2\"")
+            .replacen(
+                "\"action\":\"ReceiverReconnect\",\"receiver\":\"r2\"",
+                "\"action\":\"ReceiverReconnect\",\"receiver\":\"r1\"",
+                1,
+            ),
+    )
+    .expect("write disconnected logical receiver trace");
+
+    let output = run_sequenced_generator(&input, &output_dir, None);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("active receiver view"),
+        "unexpected diagnostic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn malformed_sequenced_relay_traces_fail_closed() {
+    let cases = [
+        (
+            "identity leakage",
+            SEQUENCED_TRACE.replacen("\"receiver\":\"r1\"", "\"receiver\":\"alice\"", 1),
+            "receiver must match",
+        ),
+        (
+            "unknown field",
+            SEQUENCED_TRACE.replacen(
+                "\"baseline_seq\":0",
+                "\"baseline_seq\":0,\"payload\":\"secret\"",
+                1,
+            ),
+            "unknown field(s): payload",
+        ),
+        (
+            "invalid gap reason",
+            SEQUENCED_TRACE.replace("latest_superseded", "unclassified"),
+            "reason must be one of",
+        ),
+        (
+            "incomplete reconnect baseline",
+            SEQUENCED_TRACE.replace(
+                "\"seq\":9,\"action\":\"ReceiverBaseline\",\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":2,\"baseline_seq\":1",
+                "\"seq\":9,\"action\":\"Data\",\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":2,\"data_seq\":1",
+            ),
+            "declares sender_count 1 but is followed by 0",
+        ),
+        (
+            "mid-view baseline",
+            SEQUENCED_TRACE.replacen(
+                "\"seq\":5,\"action\":\"PlayerLeft\",\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":1,\"final_seq\":2",
+                "\"seq\":5,\"action\":\"ReceiverBaseline\",\"receiver\":\"r1\",\"sender\":\"s2\",\"epoch\":1,\"baseline_seq\":0",
+                1,
+            ),
+            "ReceiverBaseline is legal only inside",
+        ),
+        (
+            "oversized sequence",
+            SEQUENCED_TRACE.replacen("\"data_seq\":1", "\"data_seq\":4097", 1),
+            "data_seq must be a positive integer no greater than 4096",
+        ),
+        (
+            "oversized epoch",
+            SEQUENCED_TRACE.replacen("\"epoch\":1", "\"epoch\":4097", 1),
+            "epoch must be a positive integer no greater than 4096",
+        ),
+        (
+            "oversized sender count",
+            SEQUENCED_TRACE.replacen("\"sender_count\":1", "\"sender_count\":4097", 1),
+            "sender_count must be a nonnegative integer no greater than 4096",
+        ),
+        (
+            "backward reconnect baseline",
+            SEQUENCED_TRACE.replace(
+                "\"seq\":9,\"action\":\"ReceiverBaseline\",\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":2,\"baseline_seq\":1",
+                "\"seq\":9,\"action\":\"ReceiverBaseline\",\"receiver\":\"r1\",\"sender\":\"s1\",\"epoch\":1,\"baseline_seq\":1",
+            ),
+            "moved backward from epoch/seq 2/1 to 1/1",
+        ),
+        (
+            "sequence gap",
+            SEQUENCED_TRACE.replacen("\"seq\":2", "\"seq\":99", 1),
+            "seq must be contiguous",
+        ),
+        (
+            "duplicate JSON field",
+            SEQUENCED_TRACE.replacen(
+                "\"protocol_version\":3",
+                "\"protocol_version\":3,\"protocol_version\":3",
+                1,
+            ),
+            "duplicate JSON field",
+        ),
+    ];
+
+    for (description, trace, expected_error) in cases {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let input = temp.path().join("trace.jsonl");
+        let output_dir = temp.path().join("bundle");
+        fs::write(&input, trace).expect("write malformed trace");
+        let output = run_sequenced_generator(&input, &output_dir, None);
+        assert!(
+            !output.status.success(),
+            "{description} unexpectedly succeeded"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(expected_error),
+            "{description}: expected {expected_error:?}, got {stderr:?}"
+        );
+    }
+}
