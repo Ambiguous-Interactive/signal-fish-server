@@ -11,7 +11,9 @@
 > recurring H14 hosted control failure, P93 has closed reference-client
 > duration overflow in PR #361, and P94 proved the ordinary
 > capability-downgrading disconnect/reconnect composition in PR #362, and P95
-> proved the fresh-generation v3-to-v2 reconnect refinement in PR #363. P66 preserved and published the
+> proved the fresh-generation v3-to-v2 reconnect refinement in PR #363. P96 is
+> making the rate-limit unit suite independent of host execution speed under
+> #364. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -154,6 +156,11 @@
 > old v3 socket remains historical generation-tagged state, the fresh v2 socket
 > receives no v3-only plan, and every current v3 incumbent receives an exact
 > mesh refresh that excludes the v2 member while relay gameplay remains live.
+> P96 closes #364 by running the complete asynchronous rate-limit unit-test
+> group against Tokio's paused test clock. This preserves explicit virtual-time
+> reset tests while preventing a slow interpreter or contended host from expiring the
+> 100-millisecond test fixture during one logical assertion sequence; production
+> time and limiter behavior are unchanged.
 > P61 removes carry-forward contract drift and mock-only performance evidence
 > found by the session-103 adversarial sweep. P62 closes #300 by distinguishing
 > the server-emitted error-code contract from six legacy Rust variants retained
@@ -456,6 +463,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P93 | Cross-reference-client deadline integrity (#360) | S | P7, P79, P92 | Maintenance | ✅ Done (s134, PR #361) |
 | P94 | Capability-downgrading reconnect refinement (#220) | S | P41, P58, P87 | Maintenance | ✅ Done (s135, PR #362) |
 | P95 | Connection-generation-aware v3-to-v2 reconnect refinement (#220) | S | P41, P58, P94 | Maintenance | ✅ Done (s136, PR #363) |
+| P96 | Deterministic rate-limit window tests (#364) | S | P27, P33 | Maintenance / CI | 🟡 Active (s137) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3420,6 +3428,36 @@ local, hosted, and review gates pass.
 
 ---
 
+### P96 — Deterministic rate-limit window tests (#364) (Size S) — 🟡 ACTIVE
+
+PR #363's Miri safety run exposed a host-time dependency in
+`test_signal_available_preflight_does_not_consume_signal_budget`: the
+interpreter crossed the unit fixture's 100-millisecond window between logically
+adjacent assertions, reset the entry, and observed zero consumed signals. The
+production limiter's default window is one minute, but that production value was
+not involved in the failure.
+
+- [x] Preserve the below-limit proof that a signal-availability preflight leaves
+  the consumed count at zero and the above-limit proof that rejection leaves the
+  consumed count at two.
+- [x] Sweep every asynchronous `RoomRateLimiter` unit test that shares the short
+  window fixture onto Tokio's paused test clock rather than repairing only the
+  observed test.
+- [x] Retain explicit virtual-time advances for window-reset and cleanup behavior,
+  so freezing incidental host time cannot make expiry coverage vacuous.
+- [x] Keep the clock control entirely inside test attributes; production time,
+  configuration, public APIs, and limiter behavior remain unchanged.
+- [ ] Pass the exact pinned Miri library lane, the complete locked all-features
+  suite, mandatory policy gates, exact-head hosted CI, and independent review.
+
+**Acceptance:** signal preflight remains non-consuming both below and above the
+limit; the rate-limit suite's assertion sequences cannot change outcome with
+interpreter or runner speed; expiry semantics remain covered by explicit virtual
+time; no production behavior changes; and all mandatory local, hosted, and
+review gates pass.
+
+---
+
 ### P11 — Git-tagged releases + versioned GHCR containers (Size S) — ✅ DONE
 
 **Schedule this before the next crates.io publish or GitHub Release.** A public
@@ -5617,7 +5655,8 @@ and local-session hygiene is complete in PR #356; P91's fail-closed CI
 bootstrap and H14 isolation are complete in PR #357; P92's spectator/deadline
 server sweep is complete in PR #359; P93's reference-client deadline sweep is
 complete in PR #361; P94's capability-downgrading reconnect refinement is
-complete in PR #362;
+complete in PR #362; P95's fresh-generation v3-to-v2 reconnect refinement is
+complete in PR #363; P96's deterministic rate-limit test closure is active;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 durable evidence lives in repository artifacts and linked GitHub state, while

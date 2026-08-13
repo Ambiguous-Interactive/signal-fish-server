@@ -442,7 +442,7 @@ mod tests {
         assert!(limiter.check_room_creation(&player_id).await.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_join_attempt_rate_limit() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player_id = Uuid::new_v4();
@@ -473,7 +473,7 @@ mod tests {
         assert!(limiter.check_signal(&player_id).await.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_signal_available_preflight_does_not_consume_signal_budget() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player_id = Uuid::new_v4();
@@ -503,7 +503,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_signal_limit_independent_per_player() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player1 = Uuid::new_v4();
@@ -519,7 +519,7 @@ mod tests {
         assert!(limiter.check_signal(&player2).await.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_signal_limit_independent_of_join_budget() {
         // Signals do not consume the join/creation budget and vice versa.
         let limiter = RoomRateLimiter::new(create_test_config());
@@ -533,7 +533,7 @@ mod tests {
         assert!(limiter.check_join_attempt(&player_id).await.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_signal_error_limit_is_separate_from_valid_signal_budget() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player_id = Uuid::new_v4();
@@ -547,7 +547,7 @@ mod tests {
         assert!(limiter.check_signal(&player_id).await.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_different_players_independent_limits() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player1 = Uuid::new_v4();
@@ -563,7 +563,7 @@ mod tests {
         assert!(limiter.check_room_creation(&player2).await.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_room_creation_counts_as_join_attempt() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player_id = Uuid::new_v4();
@@ -579,7 +579,7 @@ mod tests {
         assert!(limiter.check_join_attempt(&player_id).await.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn room_creation_respects_creation_and_join_budgets_atomically() {
         let limiter = RoomRateLimiter::new(RateLimitConfig {
             max_room_creations: 3,
@@ -605,7 +605,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn room_creation_cannot_overflow_an_exhausted_join_counter() {
         let limiter = RoomRateLimiter::new(RateLimitConfig {
             max_room_creations: u32::MAX,
@@ -638,7 +638,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn zero_window_does_not_disable_enforcement_for_library_callers() {
         let limiter = RoomRateLimiter::new(RateLimitConfig {
             max_room_creations: 1,
@@ -655,7 +655,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn rejected_budgets_are_reported_by_actual_source() {
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
         let player_id = Uuid::new_v4();
@@ -730,7 +730,7 @@ mod tests {
         assert!(limiter.get_player_stats(&player_id).await.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cleanup_threshold_saturates_for_maximum_window() {
         let limiter = RoomRateLimiter::new(RateLimitConfig {
             time_window: Duration::MAX,
@@ -770,7 +770,7 @@ mod tests {
         assert!(result.ok().is_some_and(|task| task.is_err()));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_player_stats() {
         let limiter = RoomRateLimiter::new(create_test_config());
         let player_id = Uuid::new_v4();
