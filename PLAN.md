@@ -3482,9 +3482,12 @@ supporting evidence—not proof—that the failed pair never reached connection
 registration. Combined with the pre-101 symptoms, nginx/TLS/proxy admission is
 the leading boundary hypothesis, while the old application metrics cannot
 distinguish a request that reached the handler and was deliberately rejected
-before 101. The reviewed correlated image is published, and its immutable
-cloud-manifest update, proxy configuration, deployment, and acceptance probe
-are tracked in [signal-fish-cloud#595](https://github.com/Ambiguous-Interactive/signal-fish-cloud/issues/595).
+before 101. The reviewed correlated image is published as
+`ghcr.io/ambiguous-interactive/signal-fish-server:sha-3a2d0b9` at digest
+`sha256:917a9260be4f35ceff3e31d72bfa4b4f8c288c12463d33bf3beeeea9291cc579`;
+its immutable cloud-manifest update, proxy configuration, deployment, and
+acceptance probe are tracked in
+[signal-fish-cloud#595](https://github.com/Ambiguous-Interactive/signal-fish-cloud/issues/595).
 
 - [x] Return a unique `x-signal-fish-request-id` and exact
   `x-signal-fish-upgrade-outcome` on every application-handled HTTP 101 or
