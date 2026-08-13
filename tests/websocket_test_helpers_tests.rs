@@ -2481,6 +2481,28 @@ fn sequenced_relay_trace_is_payload_free_and_covers_accountability_boundaries() 
         auditor.record_message("after", &ServerMessage::RoomLeft);
         auditor.record_message("after", &room_joined(sender, 3));
         auditor.record_message("after", &game_data(sender, Some(1), Some(3)));
+
+        // A protocol-v3 auditor can also observe explicitly registered v2
+        // sockets. Their lifecycle remains audited, but must not leak an
+        // unpaired reset into the v3-only replay projection.
+        let v2_sender = id(242);
+        auditor.register_receiver_mode("v2-player", ReceiverProtocolMode::V2);
+        auditor.record_message("v2-player", &room_joined_with_epoch(v2_sender, None));
+        auditor.record_message("v2-player", &ServerMessage::RoomLeft);
+        auditor.register_receiver_mode("v2-spectator", ReceiverProtocolMode::V2);
+        auditor.record_message(
+            "v2-spectator",
+            &spectator_joined_with_epoch(v2_sender, None),
+        );
+        auditor.record_message(
+            "v2-spectator",
+            &ServerMessage::SpectatorLeft {
+                room_id: None,
+                room_code: None,
+                reason: None,
+                current_spectators: Vec::new(),
+            },
+        );
     }
 
     let records: Vec<serde_json::Value> = std::fs::read_to_string(&trace_path)

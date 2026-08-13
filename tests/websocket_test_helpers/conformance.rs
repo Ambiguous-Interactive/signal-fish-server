@@ -1061,6 +1061,10 @@ impl ConformanceAuditor {
 
     fn record_room_exit(&self, receiver: &str, expected_state: ReceiverRoomState, source: &str) {
         let mut state = self.state.lock().expect("conformance auditor poisoned");
+        let mode = *state
+            .receiver_modes
+            .entry(receiver.to_string())
+            .or_insert(self.default_mode);
         let receiver_state = state.receivers.entry(receiver.to_string()).or_default();
         assert_eq!(
             receiver_state.room_state, expected_state,
@@ -1072,7 +1076,10 @@ impl ConformanceAuditor {
         receiver_state.membership_history.clear();
         receiver_state.pending_gaps.clear();
         receiver_state.unadvised_unsupported_gap = None;
-        self.trace_event(receiver, None, "ReceiverReset", serde_json::json!({}));
+        drop(state);
+        if mode == ReceiverProtocolMode::V3 {
+            self.trace_event(receiver, None, "ReceiverReset", serde_json::json!({}));
+        }
     }
 
     fn record_lifecycle_epoch(
