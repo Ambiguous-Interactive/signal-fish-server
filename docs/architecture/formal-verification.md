@@ -11,7 +11,7 @@ spec ⇄ code correspondence table lives in
 
 | Layer                      | Verifies                                                         | Artifact                                                          |
 | -------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------- |
-| TLC model checking         | The session **state machine** (protocol contract, all interleavings) | `formal/tla/SignalFishSession.tla` + five positive models and reconnect negatives |
+| TLC model checking         | The session **state machine** (protocol contract, all interleavings) | `formal/tla/SignalFishSession.tla` + six positive models and reconnect negatives |
 | Trace refinement (pilot)   | Captured reliable-queue **Rust transitions** satisfy their TLA action guards | `DeliveryContractTrace.tla` + nightly generated JSONL      |
 | proptest invariants        | **Real-code** selection / election / peer-list / TURN invariants | `src/server/session_policy_tests.rs::properties`                 |
 | proptest wire round-trips  | v3 **wire** encode/decode fidelity (JSON + MessagePack)         | `tests/v3_wire_properties.rs`                                     |
@@ -54,6 +54,9 @@ checks the named invariants and action properties in each one:
 - `CapabilityReconnect*` — after serialized disconnect failover, a fresh
   relay-only reconnect publishes against its new profile, restores original
   join priority, and restores former authority only if no successor owns it.
+- `ReconnectV2*` — a fresh v2 connection generation receives no v3-only plan,
+  while every current v3 incumbent receives an exact mesh refresh that excludes
+  the returning v2 member from its WebRTC peers.
 
 Run it:
 
@@ -63,14 +66,18 @@ bash scripts/run-tla-model-check.sh --config Mesh --verbose
 ```
 
 The script downloads a version-pinned, SHA256-verified `tla2tools.jar` (needs a
-JRE 11+) and exits nonzero on any violation. The five positive
+JRE 11+) and exits nonzero on any violation. The six positive
 `SignalFishSession.tla` configurations cover the five capability profiles,
 both desired ceilings, the WebRTC-disabled (host+direct) path, and the
 all-transports-disabled relay floor (`RelayFloorOnly`: nothing is stored and
 every v3 publication is an explicit relay reset). The focused reconnect model
 adds mutable negotiated capabilities and checks 8,317 distinct states; four
 expected failures separately pin skipped publication, stale-profile use,
-reordered join priority, and stale authority restoration. CI runs the same script via
+reordered join priority, and stale authority restoration. The cross-version
+mesh reconnect model checks another 8,814 distinct states and tags delivery
+observations with their physical connection generation; three expected
+failures independently pin v2 plan silence, stale-capability peer exclusion,
+and complete incumbent publication. CI runs the same script via
 `.github/workflows/formal-verification.yml`.
 
 ### Trace refinement — captured Rust transitions
