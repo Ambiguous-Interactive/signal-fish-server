@@ -37,6 +37,8 @@ jobs:
   simultaneous-upgrades:
     name: Simultaneous public upgrades
     runs-on: ubuntu-latest
+    # The probe's 20 sequential bursts bound curl waiting to 200 seconds,
+    # leaving the rest of the five-minute job for setup and evidence upload.
     timeout-minutes: 5
     # One current run per endpoint is useful evidence; a superseded probe only
     # measures an older instant and should not delay the latest run.

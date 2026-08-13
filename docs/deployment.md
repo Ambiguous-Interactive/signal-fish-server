@@ -409,7 +409,9 @@ failure to the proxy request even when application response headers are absent.
 Failure output is limited to the HTTP status line and non-sensitive RFC 6455 or
 Signal Fish correlation/outcome fields. The probe does not replay cookies,
 authorization or vendor response headers, or raw `curl` stderr into scheduled
-logs and retained artifacts.
+logs and retained artifacts. Each request allows five seconds to connect within
+a ten-second total request budget, so DNS/TCP/TLS setup cannot consume the
+entire window before the server has a chance to return HTTP 101.
 
 Every application-handled response carries a unique
 `x-signal-fish-request-id` and a machine-readable

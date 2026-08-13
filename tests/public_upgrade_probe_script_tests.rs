@@ -20,9 +20,17 @@ header_file=
 request_url=
 request_key=
 probe_attempt_id=
+connect_timeout=
+max_time=
 while (($# > 0)); do
     if [[ $1 == --dump-header ]]; then
         header_file=$2
+        shift 2
+    elif [[ $1 == --connect-timeout ]]; then
+        connect_timeout=$2
+        shift 2
+    elif [[ $1 == --max-time ]]; then
+        max_time=$2
         shift 2
     elif [[ $1 == --header ]]; then
         case $2 in
@@ -45,6 +53,13 @@ peer=${SIGNAL_FISH_PROBE_PEER:?}
 if [[ -z ${request_key} || -z ${probe_attempt_id} ]]; then
     echo "probe omitted its per-request WebSocket key or attempt ID" >&2
     exit 4
+fi
+if [[ ${FAKE_CURL_MODE:-accepted} == timeout-contract ]] &&
+    { [[ ! ${connect_timeout} =~ ^[1-9][0-9]*$ ]] ||
+        [[ ! ${max_time} =~ ^[1-9][0-9]*$ ]] ||
+        ((max_time <= connect_timeout)); }; then
+    echo "probe total timeout must exceed its connect timeout: connect=${connect_timeout:-none} total=${max_time:-none}" >&2
+    exit 5
 fi
 printf '%s\n' "${request_key}" >"${FAKE_CURL_STATE}/burst-${burst}-peer-${peer}.key"
 printf '%s\n' "${probe_attempt_id}" >"${FAKE_CURL_STATE}/burst-${burst}-peer-${peer}.attempt"
@@ -186,6 +201,17 @@ fn simultaneous_upgrade_probe_accepts_complete_correlated_bursts() {
             "PASS: 3 simultaneous two-client WebSocket upgrade bursts completed (3 x 2 accepted requests)"
         ),
         "{stdout}"
+    );
+}
+
+#[test]
+fn simultaneous_upgrade_probe_preserves_time_after_the_connect_budget() {
+    let output = run_probe("timeout-contract");
+    assert!(
+        output.status.success(),
+        "the total request timeout must leave time to receive HTTP 101 after connecting\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

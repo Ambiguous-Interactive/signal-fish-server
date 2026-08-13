@@ -3497,7 +3497,8 @@ before 101.
 - [x] Add a fail-closed operator probe with fresh per-peer RFC 6455 keys,
   client-generated proxy correlation IDs, and deterministic tests for complete
   handshake success, wrong/missing accepts, exact peer/status failure, missing
-  application diagnostics, concurrency, and duplicate application IDs.
+  application diagnostics, concurrency, duplicate application IDs, and a total
+  request timeout that preserves response time after the connection budget.
 - [x] Add a scheduled public-path workflow that runs 20 two-client bursts four
   times daily and retains the raw evidence; keep the target overrideable for
   other deployments.

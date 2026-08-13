@@ -13,6 +13,8 @@ usage() {
 probe_url=${1:-}
 burst_count=${2:-20}
 curl_bin=${SIGNAL_FISH_CURL_BIN:-curl}
+connect_timeout_seconds=5
+request_timeout_seconds=10
 
 if [[ ! ${probe_url} =~ ^wss?://[^[:space:]]+$ ]]; then
     usage
@@ -152,8 +154,8 @@ probe_peer() {
         --silent \
         --show-error \
         --no-buffer \
-        --connect-timeout 5 \
-        --max-time 2 \
+        --connect-timeout "${connect_timeout_seconds}" \
+        --max-time "${request_timeout_seconds}" \
         --output /dev/null \
         --dump-header "${prefix}.headers" \
         --write-out '%{http_code}' \
