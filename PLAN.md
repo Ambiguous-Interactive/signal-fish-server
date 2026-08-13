@@ -15,9 +15,9 @@
 > made the rate-limit unit suite independent of host execution speed in PR #365
 > under #364. P97 is validating correlated WebSocket-upgrade diagnostics and a
 > repeated simultaneous-client probe through the deployed public proxy path
-> under #367. P98 implements the deferred production-shaped sequenced-relay
-> trace refinement under #220 and incorporates the current dependency-maintenance
-> set. P66 preserved and published the
+> under #367. P98 completed the deferred production-shaped sequenced-relay
+> trace refinement under #220 in PR #370 and incorporated the current
+> dependency-maintenance set. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has eight of 20 eligible scheduled
 > allocations per OS; P56 has eight of 20 eligible scheduled H14 attempts.** The M1
@@ -469,7 +469,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P95 | Connection-generation-aware v3-to-v2 reconnect refinement (#220) | S | P41, P58, P94 | Maintenance | ✅ Done (s136, PR #363) |
 | P96 | Deterministic rate-limit window tests (#364) | S | P27, P33 | Maintenance / CI | ✅ Done (s137, PR #365) |
 | P97 | Public WebSocket upgrade observability and proxy-path probe (#367) | S | P25, P91 | Reliability / Operations | 🟡 Validating (s138) |
-| P98 | Production-shaped sequenced-relay trace refinement (#220) | M | P10, P17, P59 | Maintenance / CI | 🟡 Validating (s140) |
+| P98 | Production-shaped sequenced-relay trace refinement (#220) | M | P10, P17, P59 | Maintenance / CI | ✅ Done (s140, PR #370) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3523,7 +3523,7 @@ attempt; mandatory local, hosted, and independent-review gates pass.
 
 ---
 
-### P98 — Production-shaped sequenced-relay trace refinement (#220) (Size M) — 🟡 VALIDATING
+### P98 — Production-shaped sequenced-relay trace refinement (#220) (Size M) — ✅ DONE
 
 P10.D7 deliberately stopped at the legacy reliable-FIFO writer boundary and
 left the v3 chaos/conformance observation stream as its second target. P98
@@ -5755,7 +5755,7 @@ problem while up; the CP cost is paid at deploys (E3) and instance loss (F1).
 _Current frontier: P53 and P56 remain active under their unchanged 20-attempt
 hosted evidence gates. P97's in-repo upgrade diagnostics and probe are complete;
 deployment and public-path acceptance are owned by signal-fish-cloud#595. P98's
-production-shaped sequenced-relay trace refinement is validating. P7's
+production-shaped sequenced-relay trace refinement is complete in PR #370. P7's
 mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 durable evidence lives in repository artifacts and linked GitHub state, while
