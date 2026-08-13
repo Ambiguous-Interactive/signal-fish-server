@@ -2802,6 +2802,80 @@ async fn waiting_reconnect_publishes_lifecycle_without_session_plan() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_restores_original_connected_at() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+
+    let room_id = create_db_room(&server, existing).await;
+    let mut reconnecting_info = player_info(reconnecting, "reconnecting");
+    reconnecting_info.connected_at -= chrono::Duration::hours(1);
+    let original_connected_at = reconnecting_info.connected_at;
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    assert!(
+        server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await,
+        "reconnect should restore the saved membership"
+    );
+    assert!(matches!(
+        recv(&mut current_rx).await.as_ref(),
+        ServerMessage::Reconnected(_)
+    ));
+
+    let restored = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists")
+        .players
+        .get(&reconnecting)
+        .cloned()
+        .expect("reconnected player is restored");
+    assert_eq!(
+        restored.connected_at, original_connected_at,
+        "reconnect must restore the saved PlayerInfo ordering timestamp"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_room_full_failure_releases_claim_for_retry() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;

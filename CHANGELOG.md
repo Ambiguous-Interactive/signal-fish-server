@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add exhaustive session-model coverage for capability-downgrading reconnects.
+  The ordinary disconnect/failover/reconnect composition must publish against
+  the fresh relay-only profile while restoring original join priority and
+  preserving a live successor authority. Four semantic expected-failure models
+  keep complete publication, fresh-profile use, ordering, and authority
+  guarantees independently non-vacuous, with a Rust regression pinning exact
+  `connected_at` restoration (issue #220).
 - Add exhaustive formal verification for the atomic reconnection-claim
   lifecycle, including duplicate claimants, invalid identity, stale claim
   handles, expiry cleanup, restore failure, and one-time consumption. Four

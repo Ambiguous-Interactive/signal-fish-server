@@ -11,7 +11,7 @@ spec ⇄ code correspondence table lives in
 
 | Layer                      | Verifies                                                         | Artifact                                                          |
 | -------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------- |
-| TLC model checking         | The session **state machine** (protocol contract, all interleavings) | `formal/tla/SignalFishSession.tla` + four `.cfg` models     |
+| TLC model checking         | The session **state machine** (protocol contract, all interleavings) | `formal/tla/SignalFishSession.tla` + five positive models and reconnect negatives |
 | Trace refinement (pilot)   | Captured reliable-queue **Rust transitions** satisfy their TLA action guards | `DeliveryContractTrace.tla` + nightly generated JSONL      |
 | proptest invariants        | **Real-code** selection / election / peer-list / TURN invariants | `src/server/session_policy_tests.rs::properties`                 |
 | proptest wire round-trips  | v3 **wire** encode/decode fidelity (JSON + MessagePack)         | `tests/v3_wire_properties.rs`                                     |
@@ -28,12 +28,12 @@ functions; the e2e suites prove the bytes on the actual WebSocket.
 authoritative per-recipient `SessionPlan` publication, late-join / seat-fill
 membership refreshes, host-failover re-planning). Each TLA+ action models one membership-touching event **atomically**
 — the event handler plus all of its session side effects as one step. That is a
-deliberate sequential abstraction: the server runs one event's side effects on one
-task but does not serialize distinct events on the same room against each other
+deliberate sequential abstraction: the server transfers one room mutation guard
+into its owned FIFO event job, serializing distinct same-room mutations
 (see the Atomicity argument in
 [`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md)
-for what the abstraction proves and what the heal-on-next-event mechanism covers
-instead). TLC then enumerates **every** reachable state of the bounded model and
+for the process-local boundary and its exclusions). TLC then enumerates
+**every** reachable state of the bounded model and
 checks the named invariants and action properties in each one:
 
 - `V2Gating` — no `SessionPlan` ever reaches a sub-v3 member (Appendix K
@@ -43,7 +43,7 @@ checks the named invariants and action properties in each one:
   decision or explicitly resets them to the relay floor;
 - `HostValid` — a stored `host` plan always names a current, capable host, in
   _every_ reachable state of the model (a theorem of the atomic-event
-  abstraction; the running system's contract is eventually-healed validity);
+  abstraction implemented by the room mutation guard and owned FIFO lane);
 - `PlanLegality` / `CeilingRespected` — only legal ladder rungs are stored, never
   above the desired ceiling;
 - `MeshPlanExactness` / `GlareAntisymmetry` / `StarProperty` — exact peer lists
@@ -51,6 +51,9 @@ checks the named invariants and action properties in each one:
 - `StickyPairProperty` / `HostDepartureHealedSameStep` — topology/transport never
   change once stored; a departing host is re-elected or the entry dropped in the
   same step.
+- `CapabilityReconnect*` — after serialized disconnect failover, a fresh
+  relay-only reconnect publishes against its new profile, restores original
+  join priority, and restores former authority only if no successor owns it.
 
 Run it:
 
@@ -60,12 +63,14 @@ bash scripts/run-tla-model-check.sh --config Mesh --verbose
 ```
 
 The script downloads a version-pinned, SHA256-verified `tla2tools.jar` (needs a
-JRE 11+) and exits nonzero on any violation. The four
+JRE 11+) and exits nonzero on any violation. The five positive
 `SignalFishSession.tla` configurations cover the five capability profiles,
 both desired ceilings, the WebRTC-disabled (host+direct) path, and the
 all-transports-disabled relay floor (`RelayFloorOnly`: nothing is stored and
-every v3 publication is an explicit relay reset); observed state spaces are
-~17k–151k distinct states, ~2–7 s each. CI runs the same script via
+every v3 publication is an explicit relay reset). The focused reconnect model
+adds mutable negotiated capabilities and checks 8,317 distinct states; four
+expected failures separately pin skipped publication, stale-profile use,
+reordered join priority, and stale authority restoration. CI runs the same script via
 `.github/workflows/formal-verification.yml`.
 
 ### Trace refinement — captured Rust transitions

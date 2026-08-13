@@ -29,7 +29,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 
 | Path                          | Purpose                                                                            |
 | ----------------------------- | --------------------------------------------------------------------------------- |
-| `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late-join, reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor`) |
+| `tla/SignalFishSession.tla`   | Per-room session lifecycle: negotiation, finalize, replan, late join, and capability-downgrading reconnect (`_Mesh` / `_Host` / `_HostDirect` / `_Floor` / `_ReconnectDowngrade` plus four reconnect expected failures) |
 | `tla/DeliveryContract.tla`    | The #131 deliver-or-disconnect queue contract: bounded queue, backpressure, grace expiry, conservation |
 | `tla/CapacityDeadlineArbitration.tla` | P56's classified queue deadline: continuous pre-deadline capacity, refill invalidation, and lock-atomic late admission |
 | `tla/CapacityPermitLifecycle.tla` | P73's classified control-permit lifecycle: exact reservation accounting, producer liveness, terminal release, and commit-time scope validation |
@@ -205,6 +205,8 @@ this table and may drift a few lines.
 | `Join` fullness-only gate                | `add_player_to_room` — `src/database/mod.rs:398` (seat-fill into `Finalized` non-full is legal) |
 | `Depart` + authority clearing            | `leave_room` — `src/server/room_service.rs:279`; `remove_player_from_room` — `database/mod.rs:412` |
 | `GrantAuthority`                         | `request_room_authority` — `src/database/mod.rs:477` (no version gate; only while unheld)      |
+| `BeginCapabilityDisconnect`              | disconnect snapshot + `leave_room` departure transaction — `src/server/reconnection_service.rs`, `src/server/room_service.rs` |
+| `CapabilityReconnect`                    | saved-member restore, conditional authority restore, fresh-profile transfer, and finalized publication — `src/server/reconnection_service.rs`, `src/server/connection_manager.rs`, `src/server/signaling.rs` |
 | `Finalize` membership precondition (`members # <<>>`) | `Room::should_enter_lobby` — `src/protocol/room_state.rs:350` (lobby is now entered by any **non-empty** `Waiting` room; `max_players` is a **ceiling**, not a required count — the old fullness gate is gone, so finalize may fire below `max_players`) |
 | `r < q` (glare rule, election tie-break) | `local_initiates` — `src/server/signaling.rs:60`; UUID order via integer player ids            |
 
@@ -218,7 +220,7 @@ this table and may drift a few lines.
 | `V2Gating`                    | Appendix K: no `SessionPlan` ever reaches a sub-v3 connection                                  |
 | `HostValid`                   | A stored host plan always names a current, session-capable member — a theorem of the atomic-event abstraction (see [Atomicity argument](#atomicity-argument)) |
 | `CeilingRespected`            | Stored topology rank never exceeds the desired ceiling (`topology_rank` gate)                 |
-| `PeerCapability`              | No peer list (even a stale one) names the recipient or a member that cannot run the pair      |
+| `PeerCapability`              | No current recipient's plan names itself or a member that cannot run the pair; immutable-capability scenarios also retain the stronger stale-plan check |
 | `MeshPlanExactness`           | Fresh mesh plans list exactly the other capable members, glare-correct `initiate`             |
 | `GlareAntisymmetry`           | Exactly one initiator per mutually listed mesh pair — the smaller id (`local_initiates`)      |
 | `StarProperty`                | Fresh host plans form a star: host answers all capable clients; clients offer to host only    |
@@ -228,6 +230,10 @@ this table and may drift a few lines.
 | `StickyPairProperty` (action) | Topology/transport never change while stored; failover rewrites only `host`                   |
 | `HostDepartureHealedSameStep` (action) | A departing stored host is re-elected (qualifier survives) or the entry dropped — same step |
 | `RelayFloorOnly` (`Floor` model only) | With both upgrade transports disabled, no plan is stored; every v3 delivery is an explicit relay plan |
+| `CapabilityReconnectPublishesCompleteSnapshot` | The ordinary disconnect/reconnect composition ends with a complete current-v3 publication |
+| `CapabilityReconnectUsesFreshProfile` | The publication is resolved against the fresh relay-only profile, excluding the reconnector from incompatible peer lists |
+| `CapabilityReconnectPreservesJoinPriority` | Reconnect retains the snapshot's original `connected_at` order instead of appending a new join |
+| `CapabilityReconnectPreservesSuccessorAuthority` | A stale disconnect snapshot cannot overwrite authority claimed by a live successor |
 
 ## Model configurations
 
@@ -245,6 +251,7 @@ live sessions, up to that same ceiling.
 | `Host`        | 2 × `V3Full`, `V3HostWebRtcOnly`, `V2`                                    | host+webrtc star; v2 seat-fill with full v3-incumbent refresh; capability-filtered failover; v2 authority never elected; no-qualifier entry drop |
 | `HostDirect`  | `V3HostDirect`, 2 × `V3Full`, `V3RelayOnly`; `enable_webrtc = false`      | host+direct rung via the transport config gate; complete non-WebRTC `SessionPlan` refreshes                     |
 | `Floor`       | same players as `Mesh`; `enable_webrtc = false`, `enable_direct = false`  | enabled-gate denial end-to-end: nothing stored; explicit relay plans delivered to every current v3 member (`RelayFloorOnly`) |
+| `ReconnectDowngrade` | 3 × `V3Full`; one stored host disconnects, then reconnects as `V3RelayOnly` | same-step departure failover; fresh-profile publication; original join priority; vacant-role restore or successor authority retention |
 
 The five required capability profiles (`V2`, `V3RelayOnly`, `V3MeshWebRtc`,
 `V3HostWebRtcOnly`, `V3Full`) are all covered across the `Mesh`, `Host`, and
@@ -266,12 +273,18 @@ gate) is additionally covered by the randomized-config proptests
 | `Host`        | 79,948           | 22,710          | 12          | ~2 s      |
 | `HostDirect`  | 111,630          | 32,751          | 12          | ~3 s      |
 | `Floor`       | 66,463           | 16,676          | 12          | ~2 s      |
+| `ReconnectDowngrade` (`CHURN_BUDGET = 7`) | 19,037 | 8,317 | 9 | ~2 s |
 
 The reachable state space includes finalization at every non-empty membership below
 `MAX_PLAYERS`, plus an explicit relay delivery for each v3 recipient and complete
 membership refreshes after finalized joins. Those observable publications make the
-floor configuration non-vacuous. Every listed invariant and action property holds
-across all four models.
+floor configuration non-vacuous. The reconnect refinement additionally reaches a
+sticky host disconnect, departure failover, optional successor claim, and a
+fresh relay-only reconnect. While that snapshot is pending, it also explores
+unrelated joins, departures, and a departed predecessor rejoining with a new
+membership generation; the predecessor set removes the old generation so the
+restored timestamp orders only against surviving snapshot members. Every listed
+invariant and action property holds across all five positive models.
 
 Reachability of the interesting states was confirmed with temporary negated "sanity"
 invariants during development (each must be _violated_): mesh and host plans stored, the
@@ -351,8 +364,8 @@ acting (clients keep joining/departing), an assumption the server neither makes 
 controls — under churn-budget exhaustion the room legitimately stutters forever. No
 fairness conditions are therefore asserted, and `HostValid` (a state invariant) already
 expresses the strongest form of "the room is never wedged on an invalid host": it holds
-in _every_ reachable state of the model. (How that maps onto the running system's
-eventually-healed contract is the [Atomicity argument](#atomicity-argument).)
+in _every_ reachable state of the model. Its implemented process-local boundary
+and exclusions are the [Atomicity argument](#atomicity-argument).
 
 ### Deadlock checking
 
@@ -877,6 +890,44 @@ Rust counterpart includes a stale-handle regression in `src/reconnection.rs`;
 the existing concurrency, certificate-identity, failure-release, and claimed-GC
 tests cover the other production transitions.
 
+## Capability-downgrading reconnect refinement
+
+`SignalFishSession_ReconnectDowngrade.cfg` closes the session model's former
+immutable-capability boundary with the ordinary production history. A finalized
+`host + webrtc` room disconnects its sticky host; the serialized departure
+transaction re-elects a capable authority/earliest survivor or removes the
+sticky plan. While the saved reconnect snapshot is pending, a successor may
+claim the vacant authority. The fresh socket then reconnects as v3 relay-only:
+the model restores its original `PlayerInfo.connected_at` position, restores
+its former authority only when the role remains vacant, transfers the fresh
+`NegotiatedProtocol`, and publishes the exact current membership against that
+fresh profile.
+
+The positive configuration exhaustively checks 8,317 distinct states. Its
+postconditions compare actual reconnect state with order and authority values
+captured independently from the disconnect snapshot and live pre-reconnect
+room. Four expected-failure configurations each retain one semantic
+production regression and pass only on its exact diagnostic:
+
+- skipping the complete publication violates
+  `CapabilityReconnectPublishesCompleteSnapshot`;
+- resolving publication against the old socket profile violates
+  `CapabilityReconnectUsesFreshProfile`;
+- removing and appending the restored member violates
+  `CapabilityReconnectPreservesJoinPriority`; and
+- restoring the disconnect-time authority over an existing successor violates
+  `CapabilityReconnectPreservesSuccessorAuthority`.
+
+The production correspondence is deliberately compositional:
+`host_downgrade_reconnect_reelects_and_empties_downgraded_plan` in
+`tests/v3_interop_downgrade_e2e.rs` exercises disconnect failover followed by
+fresh-profile reconnect publication; the direct `host_invalid` unit matrix in
+`src/server/session_policy_tests.rs` pins the same capability-filtered election;
+`reconnect_restores_original_connected_at` pins the saved ordering timestamp;
+and
+`reconnect_does_not_restore_authority_taken_by_a_successor` in
+`src/server/signaling_tests.rs`.
+
 ## Intentionally not modeled (and why)
 
 - **Rate limits / complete relay backpressure dynamics** — quantitative throttling and
@@ -911,38 +962,26 @@ tests cover the other production transitions.
   while reference-client tests prove stale/pre-plan signals fail closed. The
   relay gates remain direct conditionals with no state evolution and are covered
   by `signaling_tests.rs` plus the wire/fuzz property suites.
-- **Reconnect payload restoration and host-election identity** —
-  `ReconnectionClaimLifecycle.tla` models the token/identity claim and cleanup
-  transaction, while the session model still abstracts a successful reconnect as
-  depart-then-join of the same player. One real difference is deliberately not
-  captured there: a reconnect restores the disconnect-time `PlayerInfo` snapshot with the
-  _original_ `connected_at` (`src/server/reconnection_service.rs`), so the reconnector
-  re-enters the host-election order at its original position — and can have its
-  previously held authority auto-restored while unheld — whereas the modeled
-  depart-then-join re-enters at the end of the join order and re-acquires authority
-  only through `GrantAuthority`. Both differences change only _which_ capable member
-  election picks, and no checked invariant or property depends on the elected identity
-  — each requires only that the elected host is a current, session-capable member — so
-  every checked claim transfers.
-- **Authority release and reconnect auto-restore** — `request_room_authority`'s release
-  arm (`src/database/mod.rs`) and the reconnect path's authority auto-restore are not
-  modeled as actions; they are coverage-equivalent because every (membership, authority)
-  input the replan logic can observe is already reachable through the timing of the
-  modeled grant-while-unheld action (releasing and re-granting is the same as granting
-  later, or to the other member, in some behavior).
+- **Reconnect membership storage and credential details** —
+  `ReconnectionClaimLifecycle.tla` composes token/identity reservation and
+  cleanup; `SignalFishSession.tla` now composes fresh capability replacement,
+  original join priority, successor-authority retention, and session
+  publication. It still abstracts storage calls, connection-ID reassignment,
+  epoch rotation, and payload replay because those do not feed session
+  selection; their direct Rust and wire tests remain authoritative.
+- **Authority release** — `request_room_authority`'s explicit release arm
+  (`src/database/mod.rs`) is not a separate action. The reconnect refinement
+  does model departure clearing, successful restoration into a still-vacant
+  role, and the non-equivalent successor-claim case that must not be overwritten.
 - **TURN minting / ICE lists** — per-recipient data that never feeds back into the state
   machine; covered by deterministic-HMAC property tests
   (`src/security/turn_credentials.rs`, `tests/v3_wire_properties.rs`).
 - **Multi-room state** — all session state is keyed per room and rooms do not interact;
   a single-room model loses nothing.
-- **Storage errors and capability-downgrading reconnects** — the code self-heals a
-  wedged host entry left by a transient storage error or a reconnect that shrank the
-  host's negotiated capabilities (`host_invalid`'s broader gate, checked on _every_
-  membership-touching event). With reliable atomic actions and constant per-player
-  capabilities, those wedge states are unreachable in the model, so the late-join heal
-  arm is modeled (it mirrors the code structure) but never fires. The defensive arms
-  remain covered by Rust unit tests (`session_policy_tests.rs`,
-  `signaling_tests.rs`).
+- **Storage errors** — the code self-heals a wedged host entry left by a
+  transient storage error through `host_invalid` on every membership-touching
+  event. Reliable model actions do not inject storage failures; the reconnect
+  refinement covers the ordinary successful disconnect/restore composition.
 - **`joined_at` ties** — model join times strictly increase (sequence order), so the
   smaller-UUID election tie-break is structurally dead in the model; it is covered by
   the `elect_host` property tests.
