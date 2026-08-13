@@ -39,31 +39,29 @@ at, all runnable on the pinned stable toolchain:
 ### 1. TLA+ / TLC for the session state machine
 
 Model the v3 session lifecycle in TLA+ (`formal/tla/SignalFishSession.tla`) and
-exhaustively model-check it with TLC across four configurations
-(`desired = mesh`, `desired = host`, `host` with WebRTC disabled, and the
-relay-floor model with both upgrade transports disabled).
+exhaustively model-check it with TLC across five positive configurations
+(`desired = mesh`, `desired = host`, `host` with WebRTC disabled, the
+relay-floor model with both upgrade transports disabled, and an ordinary
+capability-downgrading disconnect/reconnect composition).
 
 Model checking fits because the protocol core is a **small, finite,
-non-deterministic state machine**: a handful of players with fixed capability
+non-deterministic state machine**: a handful of players with bounded capability
 profiles, a bounded churn budget, and a few actions (join, depart, grant
 authority, finalize). TLC enumerates _every_ interleaving of those whole events
 and checks the named invariants in every reachable state — the exhaustive
 coverage example tests cannot give. The spec mirrors the implementation
 action-for-action, with each TLA+ action modeling one event plus all of its
 session side effects as a single atomic step. That atomicity is a deliberate
-sequential abstraction: the server runs one event's side effects on one task
-but does not serialize distinct events on the same room against each other, so
-invariants like host validity are theorems of the abstraction — the running
-system holds them between heals and repairs transient violations at the next
-membership-touching event (the widened `host_invalid` trigger exists for
-exactly this; see the Atomicity argument in
-[`formal/README.md`](../../formal/README.md)). A TLC violation is therefore a
-real contract violation, not an idealization gap — in the other direction, the
-transient inter-event windows are covered by unit tests, not by TLC. The
+sequential abstraction implemented by the shared per-room mutation guard and
+owned FIFO event lane. Invariants such as host validity are theorems of that
+process-local serialized event domain; the widened `host_invalid` trigger also
+defends legacy/stale state and recovery paths. See the Atomicity argument in
+[`formal/README.md`](../../formal/README.md). A TLC violation is therefore a
+real contract violation within that boundary, not an idealization gap. The
 spec/code correspondence and the "intentionally not modeled" boundary are
 documented in [`formal/README.md`](../../formal/README.md). CI runs TLC on any
 change to the spec or to the modeled source files (`session_policy.rs`,
-`signaling.rs`, `room_service.rs`, `reconnection_service.rs`,
+`signaling.rs`, `room_service.rs`, `reconnection_service.rs`, `connection_manager.rs`,
 `database/mod.rs`, `protocol/room_state.rs`) via path filters.
 
 ### 2. proptest for code-level invariants and wire round-trips (on stable)
@@ -156,16 +154,13 @@ routine correct over all inputs); this layer is not that.
 
 - **Loom** exhaustively explores orderings of _hand-rolled_ concurrency
   primitives (custom atomics, lock-free structures). This code deliberately uses
-  `tokio` mpsc channels and `DashMap` rather than bespoke synchronization. Each
-  event's session side effects run within one task, but distinct events on the
-  same room are not serialized against each other — the TLA+ model's atomic
-  events are a sequential abstraction, and the inter-event races it collapses
-  (concurrent departures, the reconnect-failure rollback) are by-design healed
-  at the next membership-touching event via the widened `host_invalid` trigger
-  (see the Atomicity argument in `formal/README.md`), with the heal arms covered
-  by unit tests. Loom would still add nothing here: there is no hand-rolled
-  primitive for it to explore, and it needs a model of the async runtime it does
-  not have.
+  `tokio` mpsc channels and `DashMap` rather than bespoke synchronization. The
+  process-local server transfers a shared room mutation guard into an owned FIFO
+  event job, which is the serialized boundary modeled by the atomic TLA+
+  actions; its cancellation, panic, registry, and handoff behavior is checked
+  separately by `RoomEventSequencer.tla`. Loom would still add nothing here:
+  there is no hand-rolled primitive for it to explore, and it needs a model of
+  the async runtime it does not have.
 - **Kani** is a bounded model checker for proving `unsafe`-free / arithmetic
   properties of Rust functions (absence of overflow, panics, UB on all inputs in
   a bound). It would be a reasonable future addition for a numeric or `unsafe`

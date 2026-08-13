@@ -5,11 +5,12 @@
 > peer-to-peer (WebRTC) connections across browser, native (Linux/Windows/macOS),
 > mobile, and Steam — while keeping every existing v2 client working unchanged.
 >
-> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P92 is complete;
+> Status: ACTIVE. **All in-repo work through P52, P54–P55, and P57–P94 is complete;
 > P53 is collecting
 > hosted evidence, P56 is validating the fix for a
-> recurring H14 hosted control failure, and P93 has closed reference-client
-> duration overflow in PR #361. P66 preserved and published the
+> recurring H14 hosted control failure, P93 has closed reference-client
+> duration overflow in PR #361, and P94 proved the ordinary
+> capability-downgrading disconnect/reconnect composition in PR #362. P66 preserved and published the
 > reviewed 0.6.0 source after `main` advanced beyond the prepared commit. P53
 > has seven of 20 eligible scheduled
 > allocations per OS; P56 has seven of 20 eligible scheduled H14 attempts.** The M1
@@ -448,6 +449,7 @@ Sizes: **S** ≈ 1–2 days, **M** ≈ 3–5 days, **L** ≈ 1–2 weeks, **XL**
 | P91 | Fail-closed CI bootstrap and H14 PR isolation | S | P56, P89 | CI | ✅ Done (s132, PR #357) |
 | P92 | Spectator admission and deadline-overflow closure (#358) | S | P27, P30, P79 | Maintenance | ✅ Done (s133, PR #359) |
 | P93 | Cross-reference-client deadline integrity (#360) | S | P7, P79, P92 | Maintenance | ✅ Done (s134, PR #361) |
+| P94 | Capability-downgrading reconnect refinement (#220) | S | P41, P58, P87 | Maintenance | ✅ Done (s135, PR #362) |
 | P10 | Bulletproofing campaign: falsify → formalize → v3 revision | XL | P9 | v3 | ✅ Done |
 
 ---
@@ -3317,6 +3319,53 @@ interop gates pass; and every required review and CI check is green.
 
 ---
 
+### P94 — Capability-downgrading reconnect refinement (#220) (Size S) — ✅ DONE
+
+Session 135 advances #220 at the documented gap between immutable model
+capabilities and production reconnects. The ordinary production history removes
+and replans after a sticky-host disconnect, may let a successor claim vacant
+authority, then restores the member's original join position while a fresh
+authenticated socket replaces its negotiated profile with v3 relay-only.
+
+- [x] Make negotiated capabilities model state and add focused disconnect and
+  reconnect actions that compose same-step departure failover with publication
+  against the fresh socket profile.
+- [x] Prove the departed sticky host is capability-filtered to a capable
+  authority/earliest survivor, or removed when no qualifier remains; reconnect
+  then publishes every current v3 member's view against the retained decision
+  or explicit relay floor.
+- [x] Preserve the restored `PlayerInfo.connected_at` ordering and a live
+  successor authority across that same reconnect transaction.
+- [x] Add four independently seeded semantic expected failures for skipped
+  publication, stale-profile publication, append-as-new join ordering, and
+  stale authority restoration; require each exact invariant diagnostic.
+- [x] Pin the model-to-production correspondence to the unit, integration, and
+  end-to-end regressions, including an exact saved-`connected_at` restoration
+  test.
+- [x] Complete exact-head hosted validation and adversarial review with no
+  actionable findings.
+
+The positive refinement checks 19,037 generated / 8,317 distinct states to
+graph depth 9. The complete local TLA+ suite remains green, and all four
+negative configurations reach their independently evaluated registered invariant.
+PR #362's first exact code head completed 41 successful checks and five expected
+skips across Rust, Miri, ASan, fuzz, formal, browser/native/Fortress interop,
+TURN, Docker, documentation, and policy workflows. Cursor Bugbot and two
+independent local adversarial reviewers reported zero actionable findings. The
+Copilot reviewer exhausted the requester's monthly quota before inspecting the
+diff; its external reviewer check failed with HTTP 402 and surfaced no code
+finding.
+
+**Acceptance:** departure cannot retain an absent or incapable host; a
+reconnecting ex-host's fresh capabilities are authoritative and it cannot
+appear in an incompatible peer list; every current v3 member receives the
+retained host plan or explicit relay reset; original join priority survives;
+former authority is restored only while vacant, never over a successor; every
+seeded bug is detected by a semantic postcondition; and all mandatory local,
+hosted, and review gates pass.
+
+---
+
 ### P11 — Git-tagged releases + versioned GHCR containers (Size S) — ✅ DONE
 
 **Schedule this before the next crates.io publish or GitHub Release.** A public
@@ -5513,7 +5562,8 @@ and scheduling integrity work is complete in PR #354; P90's published-source
 and local-session hygiene is complete in PR #356; P91's fail-closed CI
 bootstrap and H14 isolation are complete in PR #357; P92's spectator/deadline
 server sweep is complete in PR #359; P93's reference-client deadline sweep is
-complete in PR #361;
+complete in PR #361; P94's capability-downgrading reconnect refinement is
+complete in PR #362;
 P7's mobile/Steam matrix cells and P8's operated coturn infrastructure remain
 out-of-repo. The phase table and active phase sections are authoritative;
 durable evidence lives in repository artifacts and linked GitHub state, while

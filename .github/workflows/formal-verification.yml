@@ -5,7 +5,8 @@
 #
 #   * TLC model-checks the TLA+ specifications: the session lifecycle
 #     (formal/tla/SignalFishSession.tla, across desired=mesh, desired=host,
-#     desired=host with WebRTC disabled, and the relay-floor model) and the
+#     desired=host with WebRTC disabled, the relay-floor model, and an ordinary
+#     sticky-host disconnect/reconnect with a fresh downgraded profile) and the
 #     #131 delivery contract (formal/tla/DeliveryContract.tla — bounded queue,
 #     unfair consumer, slow-consumer eviction; message conservation and
 #     no-silent-loss), plus classified queue capacity-deadline arbitration
@@ -25,7 +26,7 @@
 # Both mirror the modeled source files action-for-action (the full
 # correspondence table in formal/README.md spans session_policy.rs,
 # signaling.rs, room_service.rs, database/mod.rs, protocol/room_state.rs,
-# reconnection.rs, reconnection_service.rs, the top-level server capacity waits,
+# reconnection.rs, reconnection_service.rs, connection_manager.rs, the top-level server capacity waits,
 # coordination, and WebSocket delivery), so this workflow triggers on those files
 # as well: a behavioral change there must keep the spec and the proofs green or
 # update them deliberately.
@@ -48,6 +49,7 @@ on:
       - "src/server/room_service.rs"
       - "src/reconnection.rs"
       - "src/server/reconnection_service.rs"
+      - "src/server/connection_manager.rs"
       - "src/database/mod.rs"
       - "src/protocol/room_state.rs"
       - "src/server.rs"
@@ -65,6 +67,7 @@ on:
       - "src/server/room_service.rs"
       - "src/reconnection.rs"
       - "src/server/reconnection_service.rs"
+      - "src/server/connection_manager.rs"
       - "src/database/mod.rs"
       - "src/protocol/room_state.rs"
       - "src/server.rs"
