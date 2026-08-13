@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add end-to-end WebSocket upgrade diagnostics for operators. Every
+  application-handled acceptance or deliberate HTTP rejection now returns and
+  logs one correlation ID, exact outcome, status, and transport peer address
+  (not an inferred forwarded client address), while JSON/Prometheus counters
+  conserve attempts across accepted, Origin, drain, and token-binding results.
+  A tested concurrent probe uses fresh RFC 6455 keys, verifies each complete
+  handshake, and emits a non-secret client attempt ID for proxy-log correlation;
+  its failure evidence excludes non-allowlisted response headers and raw
+  transport stderr, while a scheduled public-path workflow distinguishes a
+  healthy HTTP route from working TLS/proxy WebSocket admission (issue #367).
 - Add exhaustive connection-generation-aware coverage for a finalized v3 mesh
   member reconnecting on v2. The fresh v2 socket receives no v3-only session
   plan, capable incumbents receive exact peer refreshes that exclude it, and a

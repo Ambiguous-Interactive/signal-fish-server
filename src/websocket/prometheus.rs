@@ -113,6 +113,50 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
+        "signal_fish_websocket_upgrade_attempts_total",
+        "HTTP requests that reached the Signal Fish WebSocket upgrade handler",
+        snapshot.connections.websocket_upgrades.attempts,
+    );
+    let _ = writeln!(
+        buf,
+        "# HELP signal_fish_websocket_upgrade_outcomes_total Application-handled WebSocket upgrade outcomes; at quiescence their sum equals upgrade attempts"
+    );
+    let _ = writeln!(
+        buf,
+        "# TYPE signal_fish_websocket_upgrade_outcomes_total counter"
+    );
+    for (outcome, value) in [
+        ("accepted", snapshot.connections.websocket_upgrades.accepted),
+        (
+            "rejected_origin",
+            snapshot.connections.websocket_upgrades.rejected_origin,
+        ),
+        (
+            "rejected_draining",
+            snapshot.connections.websocket_upgrades.rejected_draining,
+        ),
+        (
+            "rejected_token_binding_offer",
+            snapshot
+                .connections
+                .websocket_upgrades
+                .rejected_token_binding_offer,
+        ),
+        (
+            "rejected_token_binding_negotiation",
+            snapshot
+                .connections
+                .websocket_upgrades
+                .rejected_token_binding_negotiation,
+        ),
+    ] {
+        let _ = writeln!(
+            buf,
+            "signal_fish_websocket_upgrade_outcomes_total{{outcome=\"{outcome}\"}} {value}"
+        );
+    }
+    counter(
+        &mut buf,
         "signal_fish_websocket_messages_dropped_total",
         "Server messages that could not be delivered: abandoned together with a slow-consumer or already-closing connection, or replaced by an error frame because a binary payload could not be converted for the recipient",
         snapshot.connections.websocket_messages_dropped,
@@ -741,6 +785,24 @@ mod tests {
             rendered.contains("signal_fish_websocket_messages_dropped_total 0"),
             "expected websocket drop counter line"
         );
+        assert!(
+            rendered.contains("signal_fish_websocket_upgrade_attempts_total 0"),
+            "expected websocket upgrade-attempt counter line"
+        );
+        for outcome in [
+            "accepted",
+            "rejected_origin",
+            "rejected_draining",
+            "rejected_token_binding_offer",
+            "rejected_token_binding_negotiation",
+        ] {
+            assert!(
+                rendered.contains(&format!(
+                    "signal_fish_websocket_upgrade_outcomes_total{{outcome=\"{outcome}\"}} 0"
+                )),
+                "expected zero websocket upgrade outcome for {outcome}"
+            );
+        }
 
         metrics
             .total_connections

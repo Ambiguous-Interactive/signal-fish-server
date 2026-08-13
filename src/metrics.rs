@@ -81,6 +81,15 @@ pub struct ServerMetrics {
     pub active_connections: AtomicU64,
     pub disconnections: AtomicU64,
     pub connection_errors: AtomicU64,
+    /// HTTP requests that reached the Signal Fish WebSocket upgrade handler.
+    /// At quiescence this equals the sum of all
+    /// `websocket_upgrade_*` outcome counters below.
+    pub websocket_upgrade_attempts: AtomicU64,
+    pub websocket_upgrades_accepted: AtomicU64,
+    pub websocket_upgrades_rejected_origin: AtomicU64,
+    pub websocket_upgrades_rejected_draining: AtomicU64,
+    pub websocket_upgrades_rejected_token_binding_offer: AtomicU64,
+    pub websocket_upgrades_rejected_token_binding_negotiation: AtomicU64,
     pub websocket_messages_dropped: AtomicU64,
     /// Times a full outbound queue forced delivery to wait for capacity
     /// (the send eventually succeeded; nothing was lost). A rising rate means
@@ -336,6 +345,7 @@ pub struct ConnectionMetrics {
     pub active_connections: u64,
     pub disconnections: u64,
     pub connection_errors: u64,
+    pub websocket_upgrades: WebSocketUpgradeMetrics,
     pub websocket_messages_dropped: u64,
     pub websocket_backpressure_events: u64,
     pub websocket_slow_consumer_disconnects: u64,
@@ -348,6 +358,30 @@ pub struct ConnectionMetrics {
     pub websocket_deliveries_channel_closed: u64,
     pub websocket_deliveries_canceled: u64,
     pub delivery_by_class: DeliveryMetricsByClass,
+}
+
+/// Application-level WebSocket upgrade outcomes. If a client failure has no
+/// matching attempt here and no `x-signal-fish-request-id` response header,
+/// there is no evidence that it completed the Signal Fish handler. It may have
+/// stopped earlier (for example at framework extraction, TLS, or a reverse
+/// proxy), or an intermediary may have stripped the response header.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct WebSocketUpgradeMetrics {
+    pub attempts: u64,
+    pub accepted: u64,
+    pub rejected_origin: u64,
+    pub rejected_draining: u64,
+    pub rejected_token_binding_offer: u64,
+    pub rejected_token_binding_negotiation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketUpgradeOutcome {
+    Accepted,
+    RejectedOrigin,
+    RejectedDraining,
+    RejectedTokenBindingOffer,
+    RejectedTokenBindingNegotiation,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -539,6 +573,12 @@ impl ServerMetrics {
             active_connections: AtomicU64::new(0),
             disconnections: AtomicU64::new(0),
             connection_errors: AtomicU64::new(0),
+            websocket_upgrade_attempts: AtomicU64::new(0),
+            websocket_upgrades_accepted: AtomicU64::new(0),
+            websocket_upgrades_rejected_origin: AtomicU64::new(0),
+            websocket_upgrades_rejected_draining: AtomicU64::new(0),
+            websocket_upgrades_rejected_token_binding_offer: AtomicU64::new(0),
+            websocket_upgrades_rejected_token_binding_negotiation: AtomicU64::new(0),
             websocket_messages_dropped: AtomicU64::new(0),
             websocket_backpressure_events: AtomicU64::new(0),
             websocket_slow_consumer_disconnects: AtomicU64::new(0),
@@ -647,6 +687,26 @@ impl ServerMetrics {
                     current.checked_sub(1)
                 });
         self.disconnections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_websocket_upgrade_attempts(&self) {
+        self.websocket_upgrade_attempts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_websocket_upgrade_outcome(&self, outcome: WebSocketUpgradeOutcome) {
+        let counter = match outcome {
+            WebSocketUpgradeOutcome::Accepted => &self.websocket_upgrades_accepted,
+            WebSocketUpgradeOutcome::RejectedOrigin => &self.websocket_upgrades_rejected_origin,
+            WebSocketUpgradeOutcome::RejectedDraining => &self.websocket_upgrades_rejected_draining,
+            WebSocketUpgradeOutcome::RejectedTokenBindingOffer => {
+                &self.websocket_upgrades_rejected_token_binding_offer
+            }
+            WebSocketUpgradeOutcome::RejectedTokenBindingNegotiation => {
+                &self.websocket_upgrades_rejected_token_binding_negotiation
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
@@ -1312,6 +1372,22 @@ impl ServerMetrics {
                 active_connections: self.active_connections.load(Ordering::Relaxed),
                 disconnections: self.disconnections.load(Ordering::Relaxed),
                 connection_errors: self.connection_errors.load(Ordering::Relaxed),
+                websocket_upgrades: WebSocketUpgradeMetrics {
+                    attempts: self.websocket_upgrade_attempts.load(Ordering::Relaxed),
+                    accepted: self.websocket_upgrades_accepted.load(Ordering::Relaxed),
+                    rejected_origin: self
+                        .websocket_upgrades_rejected_origin
+                        .load(Ordering::Relaxed),
+                    rejected_draining: self
+                        .websocket_upgrades_rejected_draining
+                        .load(Ordering::Relaxed),
+                    rejected_token_binding_offer: self
+                        .websocket_upgrades_rejected_token_binding_offer
+                        .load(Ordering::Relaxed),
+                    rejected_token_binding_negotiation: self
+                        .websocket_upgrades_rejected_token_binding_negotiation
+                        .load(Ordering::Relaxed),
+                },
                 websocket_messages_dropped: self.websocket_messages_dropped.load(Ordering::Relaxed),
                 websocket_backpressure_events: self
                     .websocket_backpressure_events
@@ -1961,6 +2037,44 @@ mod tests {
                 + rate_limits.join_attempt_rejections
                 + rate_limits.signal_rejections
                 + rate_limits.signal_error_rejections
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_attempts_are_conserved_across_every_outcome() {
+        let metrics = ServerMetrics::new();
+        for (outcome, count) in [
+            (WebSocketUpgradeOutcome::Accepted, 1),
+            (WebSocketUpgradeOutcome::RejectedOrigin, 2),
+            (WebSocketUpgradeOutcome::RejectedDraining, 3),
+            (WebSocketUpgradeOutcome::RejectedTokenBindingOffer, 4),
+            (WebSocketUpgradeOutcome::RejectedTokenBindingNegotiation, 5),
+        ] {
+            for _ in 0..count {
+                metrics.increment_websocket_upgrade_attempts();
+                metrics.record_websocket_upgrade_outcome(outcome);
+            }
+        }
+
+        let upgrades = metrics.snapshot().await.connections.websocket_upgrades;
+        assert_eq!(
+            upgrades,
+            WebSocketUpgradeMetrics {
+                attempts: 15,
+                accepted: 1,
+                rejected_origin: 2,
+                rejected_draining: 3,
+                rejected_token_binding_offer: 4,
+                rejected_token_binding_negotiation: 5,
+            }
+        );
+        assert_eq!(
+            upgrades.attempts,
+            upgrades.accepted
+                + upgrades.rejected_origin
+                + upgrades.rejected_draining
+                + upgrades.rejected_token_binding_offer
+                + upgrades.rejected_token_binding_negotiation
         );
     }
 
