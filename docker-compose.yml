@@ -74,7 +74,7 @@ services:
       - --fingerprint
       - --realm=${TURN_REALM:-turn.example.com}
       - --listening-port=3478
-      # REST-credential ("ephemeral credentials") scheme, PLAN Appendix F.
+      # REST-credential ("ephemeral credentials") scheme; see docs/deployment-turn.md.
       # TURN_STATIC_AUTH_SECRET must match the signaling server's
       # `[turn].static_auth_secret` exactly (see the note above). `$$` defers
       # expansion to the container (the image's docker-entrypoint.sh expands

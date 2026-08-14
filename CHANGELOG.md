@@ -104,6 +104,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep duplicate same-room disconnect registration from extending a reconnect
+  deadline, reopening an active single-use claim, or consuming the replacement
+  connection's next token (issue #372).
 - Prevent slow or contended Miri safety runs from spuriously failing rate-limit
   preflight accounting when the 100-millisecond unit fixture expires between
   assertions. Asynchronous rate-limit assertion sequences now use paused virtual

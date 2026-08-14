@@ -1,6 +1,6 @@
 //! Orchestrator: drives one full protocol-v3 client lifecycle.
 //!
-//! # Flow (PLAN P7 / docs/protocol.md "Protocol v3 additions")
+//! # Flow (`docs/protocol.md` "Protocol v3 additions")
 //!
 //! 1. **Connect + Authenticate** — `protocol_version`, `supported_transports`,
 //!    `supported_topologies` are advertised only in v3 mode (`--protocol-version 2`

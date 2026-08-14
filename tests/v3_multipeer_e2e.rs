@@ -1,5 +1,5 @@
 //! End-to-end protocol v3 multi-peer (N >= 3) signaling conformance tests
-//! through the real WebSocket stack (PLAN P7: in-repo signaling conformance,
+//! through the real WebSocket stack (the in-repo signaling conformance suite,
 //! extended past the existing two-peer suites).
 //!
 //! Each test boots an in-process axum server on `127.0.0.1:0` (the harness from

@@ -100,9 +100,9 @@
 (*                                                                         *)
 (* This is executable documentation that replay honesty is a single-node   *)
 (* CP guarantee requiring LB room-affinity (reconnects must land on the    *)
-(* instance that owns the room). See D6 in PLAN.md and the                 *)
-(* "single-instance theorems" section of formal/README.md. The checked     *)
-(* configuration pins `SplitBrainCounterBug = FALSE`.                      *)
+(* instance that owns the room). See the "single-instance theorems"        *)
+(* section of formal/README.md. The checked configuration pins             *)
+(* `SplitBrainCounterBug = FALSE`.                                         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 

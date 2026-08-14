@@ -6,7 +6,7 @@
 //! gate in
 //! `server::signaling_tests::reconnect_during_teardown_preserves_token_for_retry`.
 //!
-//! # Pre-registered prediction (PLAN.md, P10.C H6)
+//! # Reconnect-window race contract
 //!
 //! > Boundary (inside/outside window, independent of cleanup tick — prove with
 //! > cleanup interval 3600s) and duplicate-claim (exactly one winner) pass;

@@ -264,6 +264,8 @@ pub struct DisconnectedPlayer {
 struct PreservedPending {
     token: String,
     token_created_at: DateTime<Utc>,
+    token_expires_at: DateTime<Utc>,
+    disconnected_at: DateTime<Utc>,
     identity: Option<Arc<str>>,
     last_sequence: u64,
     last_epoch: u32,
@@ -544,14 +546,6 @@ impl ReconnectionManager {
         last_epoch: u32,
         identity: Option<Arc<str>>,
     ) -> String {
-        // Reuse the token STRING pre-issued at join (the client already holds
-        // it — issue #136, F4), re-stamping its expiry so the reconnect gate
-        // stays "window seconds from THIS disconnect". A missing or
-        // wrong-room entry falls back to minting fresh (embedders that never
-        // pre-issue keep the old disconnect-time semantics; such a token is
-        // unclaimable by an honest client, exactly as before).
-        let pre_issued = self.pre_issued.write().await.remove(&player_id);
-
         let mut state = self.replay_state.write().await;
         let fresh_last_sequence = state.next_sequence;
 
@@ -569,12 +563,45 @@ impl ReconnectionManager {
             .map(|existing| PreservedPending {
                 token: existing.disconnected.token.token.clone(),
                 token_created_at: existing.disconnected.token.created_at,
+                token_expires_at: existing.disconnected.token.expires_at,
+                disconnected_at: existing.disconnected.disconnected_at,
                 identity: existing.identity.clone(),
                 last_sequence: existing.disconnected.last_sequence,
                 last_epoch: existing.disconnected.last_epoch,
                 was_authority: existing.disconnected.was_authority,
                 player_info: existing.disconnected.player_info.clone(),
             });
+
+        // A late teardown from the replaced socket may overlap an in-flight
+        // reconnect. Once the credential is claimed, registration is a strict
+        // no-op: replacing the record would reopen the single-use credential,
+        // invalidate the original claim handle, and could consume the freshly
+        // pre-issued token for the replacement connection's next disconnect.
+        if let Some(existing) = existing_same_room.as_ref() {
+            if state
+                .disconnected_players
+                .get(&player_id)
+                .is_some_and(|record| record.claim.is_some())
+            {
+                return existing.token.clone();
+            }
+        }
+
+        // Reuse the token STRING pre-issued at join (the client already holds
+        // it — issue #136, F4), re-stamping its expiry so the reconnect gate
+        // stays "window seconds from THIS disconnect". A duplicate same-room
+        // registration already has an armed record and must not remove a token
+        // rotated for the replacement connection. A missing or wrong-room
+        // entry falls back to minting fresh (embedders that never pre-issue keep
+        // the old disconnect-time semantics; such a token is unclaimable by an
+        // honest client, exactly as before). The replay-state -> pre-issued
+        // lock order is unique to registration; no path holds the latter while
+        // awaiting the former.
+        let pre_issued = if existing_same_room.is_none() {
+            self.pre_issued.write().await.remove(&player_id)
+        } else {
+            None
+        };
 
         let now = Utc::now();
         // Token, in preference order: (1) the token from an existing same-room
@@ -591,7 +618,7 @@ impl ReconnectionManager {
                     player_id,
                     room_id,
                     created_at: existing.token_created_at,
-                    expires_at: expiration_from_unsigned(now, self.reconnection_window),
+                    expires_at: existing.token_expires_at,
                 },
                 existing.identity.clone(),
                 false,
@@ -664,7 +691,9 @@ impl ReconnectionManager {
             disconnected: DisconnectedPlayer {
                 player_id,
                 room_id,
-                disconnected_at: Utc::now(),
+                disconnected_at: existing_same_room
+                    .as_ref()
+                    .map_or(now, |existing| existing.disconnected_at),
                 token,
                 last_sequence,
                 was_authority,
@@ -1983,6 +2012,91 @@ mod tests {
         assert!(
             claim.is_ok(),
             "the join-time token must stay claimable after re-registration: {claim:?}"
+        );
+    }
+
+    /// A duplicate teardown is not a new disconnect and therefore cannot
+    /// extend either deadline exposed by the pending record.
+    #[tokio::test]
+    async fn same_room_reregistration_preserves_original_disconnect_deadline() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        let (original_disconnected_at, original_token_expiry) = {
+            let mut state = manager.replay_state.write().await;
+            let disconnected = &mut state
+                .disconnected_players
+                .get_mut(&player)
+                .expect("pending disconnect")
+                .disconnected;
+            disconnected.disconnected_at = Utc::now() - Duration::seconds(120);
+            disconnected.token.expires_at =
+                expiration_from_unsigned(disconnected.disconnected_at, 300);
+            (disconnected.disconnected_at, disconnected.token.expires_at)
+        };
+
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+
+        let state = manager.replay_state.read().await;
+        let disconnected = &state.disconnected_players[&player].disconnected;
+        assert_eq!(
+            disconnected.disconnected_at, original_disconnected_at,
+            "same-room re-registration must not restart the window clock"
+        );
+        assert_eq!(
+            disconnected.token.expires_at, original_token_expiry,
+            "same-room re-registration must not extend token expiry"
+        );
+    }
+
+    /// A late teardown from the replaced socket can overlap a successful
+    /// reconnect after the claim is reserved and the next token is rotated.
+    /// It must be a no-op for both pieces of state: the active claim stays
+    /// single-owner, and the fresh token remains armed for the next genuine
+    /// disconnect.
+    #[tokio::test]
+    async fn same_room_reregistration_preserves_active_claim_and_rotated_token() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+        let first_token = manager.pre_issue_token(player, room).await;
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        let claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player, &room, &first_token)
+            .await
+            .expect("first socket reserves the reconnect record");
+        let next_token = manager.pre_issue_token(player, room).await;
+
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+
+        assert!(matches!(
+            manager
+                .claim_reconnection(&Uuid::new_v4(), &player, &room, &first_token)
+                .await,
+            Err(ReconnectionError::AlreadyInProgress)
+        ));
+        assert!(
+            manager.complete_claimed_reconnection(&claim).await,
+            "duplicate teardown must not invalidate the active claim handle"
+        );
+        assert_eq!(
+            manager
+                .register_disconnection(player, room, false, None, 0)
+                .await,
+            next_token,
+            "duplicate teardown must not consume the replacement connection's token"
         );
     }
 

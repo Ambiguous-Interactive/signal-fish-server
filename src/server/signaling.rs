@@ -163,7 +163,7 @@ impl EnhancedGameServer {
             return;
         };
 
-        // 3. Same-room enforcement (PLAN invariant #6 / Appendix I).
+        // 3. Same-room enforcement: signaling never crosses a room boundary.
         if from_room != to_room {
             self.reject_signal(
                 from,

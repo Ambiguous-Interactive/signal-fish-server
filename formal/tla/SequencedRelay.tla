@@ -90,8 +90,8 @@
 (*                                                                         *)
 (* This is executable documentation that the sequencing contract does NOT  *)
 (* survive multi-instance split-brain: it is a single-node CP guarantee    *)
-(* requiring LB room-affinity (one home per room). See D6 in PLAN.md and   *)
-(* the "single-instance theorems" section of formal/README.md. The checked *)
+(* requiring LB room-affinity (one home per room). See the                 *)
+(* "single-instance theorems" section of formal/README.md. The checked     *)
 (* configuration pins `SplitBrainStampBug = FALSE`.                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets

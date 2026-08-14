@@ -2,7 +2,7 @@
 //! binary (via `SIGNAL_FISH_SERVER_BIN`) + three REAL
 //! `signal-fish-reference-native` client processes, talking over real TCP
 //! (WebSocket signaling) and real UDP (loopback WebRTC: DTLS + SCTP data
-//! channels). This is the end-to-end proof of PLAN P7: server-brokered
+//! channels). This is the end-to-end proof of the documented server-brokered
 //! offer/answer/trickle-ICE producing live data channels, with the WebSocket
 //! relay floor carrying GameData in the same session window as the live
 //! WebRTC pairs (no relay/pair ordering is asserted; post-pair WebSocket

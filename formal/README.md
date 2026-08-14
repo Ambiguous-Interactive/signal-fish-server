@@ -478,7 +478,7 @@ join-with-unknown-code **creates** the room (the `Ok(None)` create arm of
 `join_room_with_coordination` → `src/server/room_service.rs:519`), so the same
 room code presented to two instances behind a naive LB yields two independent
 live rooms — each with its own stamp counter, its own replay ring, and its own
-reconnection tokens (ARCH-10 in `PLAN.md`). The honest posture is therefore
+reconnection tokens. The honest posture is therefore
 **LB room-affinity** (one home per room; reconnects must land on that home),
 documented as doctrine — not multi-instance sharding.
 
@@ -506,7 +506,8 @@ session-lifecycle invariants in `SignalFishSession.tla` are likewise per-room an
 single-instance by the same construction. The multi-instance seams
 (`DedupCache`, the in-memory "distributed lock", `should_process_message`) are
 dead stubs today; the deliberate single-node CP stance and the LB room-affinity
-requirement are the subject of the `F1` doctrine page in `PLAN.md`.
+requirement are documented in
+[`docs/architecture/single-instance-deployment.md`](../docs/architecture/single-instance-deployment.md).
 
 ## Timing theorem (sender pacing vs the activity reaper)
 
