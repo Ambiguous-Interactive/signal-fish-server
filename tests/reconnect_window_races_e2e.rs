@@ -29,9 +29,9 @@
 //! rejected can only have been rejected by the window/token check.
 //!
 //! - Inside the window: reconnect IMMEDIATELY (no sleep) ⇒ `Reconnected`.
-//! - After the window: sleep past it ⇒ `ReconnectionFailed` with a
-//!   time-expiry code (`ReconnectionExpired` or `ReconnectionTokenInvalid`),
-//!   NOT a `NoRecord`/`RoomNotFound`.
+//! - After the window: sleep past it ⇒ `ReconnectionFailed` with exactly
+//!   `ReconnectionExpired`, NOT a `NoRecord`/`RoomNotFound` (which would mean
+//!   the record was deleted) and NOT a token rejection.
 //!
 //! # Facet 2 — duplicate claim, exactly one winner
 //!
@@ -78,10 +78,11 @@
 //!
 //! # Result
 //!
-//! CONFIRMED — all three facets pass; prediction upheld. (Observed detail: the
-//! post-window rejection surfaces as `ReconnectionTokenInvalid`, because the
-//! token's own embedded expiry — armed to `disconnect + window` — is checked a
-//! hair before the dedicated `WindowExpired` gate.)
+//! CONFIRMED — all three facets pass; prediction upheld. The post-window
+//! rejection is exactly `ReconnectionExpired`: eligibility is decided by one
+//! monotonic deadline captured at the genuine disconnect, so the token's own
+//! wall-clock expiry — armed to the same instant — can no longer mask the
+//! window gate.
 
 mod test_helpers;
 mod websocket_test_helpers;
@@ -454,13 +455,12 @@ async fn reconnect_after_window_expires_is_rejected_by_the_handler_not_cleanup()
             panic!("a reconnect after the window elapsed must be rejected")
         }
         ReconnectOutcome::Failed(error_code) => {
-            assert!(
-                matches!(
-                    error_code,
-                    ErrorCode::ReconnectionExpired | ErrorCode::ReconnectionTokenInvalid
-                ),
-                "the rejection must be a window/token time-expiry code (NOT a NoRecord or \
-                 RoomNotFound, which would mean the record was deleted), got {error_code:?}"
+            assert_eq!(
+                error_code,
+                ErrorCode::ReconnectionExpired,
+                "an elapsed window must report the dedicated expiry code (NOT a NoRecord or \
+                 RoomNotFound, which would mean the record was deleted, and NOT a token \
+                 rejection, which would hide the reason from the client)"
             );
         }
     }

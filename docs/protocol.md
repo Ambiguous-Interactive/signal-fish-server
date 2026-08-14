@@ -246,7 +246,11 @@ v3+ clients receive it on the wire in `RoomJoined.reconnection_token` at join
 time (rotated again in `Reconnected.reconnection_token` after every
 successful reconnect). The token string is stable from join through the
 disconnect, but it only becomes claimable for `server.reconnection_window`
-seconds counted from the disconnect. For pure-v2 clients the token is still
+seconds counted from the disconnect. That window is measured on a monotonic
+clock captured at the disconnect, so a host clock adjustment cannot close it
+early or keep it open late, and a reconnect attempt after it elapses is
+rejected with `RECONNECTION_EXPIRED` (a bad or mismatched token remains
+`RECONNECTION_TOKEN_INVALID`). For pure-v2 clients the token is still
 minted at disconnect time and never reaches the wire — reconnection is
 effectively a v3+ feature.
 

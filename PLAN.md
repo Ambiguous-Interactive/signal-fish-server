@@ -103,20 +103,6 @@ outside this plan's architecture scope.
 
 ## Next repository correctness work
 
-### P99 — Monotonic reconnect-window deadlines (#373)
-
-- Introduce one manager-owned monotonic deadline for each genuine disconnect
-  while retaining UTC timestamps for diagnostics and compatibility.
-- Make validation, claiming, cleanup, and room-GC protection use that single
-  deadline, with active-claim behavior preserved across expiry.
-- Add paused-clock boundary coverage for exact-before, exact-at, and
-  after-deadline behavior, including same-room duplicate registration and
-  different-room replacement.
-
-Acceptance: wall-clock jumps cannot change reconnect eligibility; cleanup and
-room protection agree at every boundary; public timestamp and wire behavior
-remain compatible; full reconnect, Miri, and hosted gates pass.
-
 ### P100 — Application-owner claim/rollback composition model (#220)
 
 - Model the unproved composition of multiple pending legacy application-owner
