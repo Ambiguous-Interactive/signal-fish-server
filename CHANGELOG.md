@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add exhaustive formal verification for legacy application-owner rollback
+  composition. The production-shaped model reaches multiple pending durable
+  detaches while proving that at most one carries owner-rollback provenance,
+  then checks cleanup, adoption, reconnect takeover and rejection, deletion,
+  and the authoritative quota-counting corollary. Five independent expected
+  failures pin stale snapshots, duplicate provenance, a skipped live-route
+  re-read, cleanup overtaking a delayed requeue, and deleted-room resurrection
+  (issue #220).
 - Add a strict, payload-free protocol-v3 sequencing trace for production-shaped
   receiver observations. Focused real-socket scenarios record anonymous
   watermarks, exact classified gaps, lifecycle epochs, and reconnect snapshots;

@@ -47,6 +47,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/EndToEndGapAccountability.tla` | Flagship v3 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal; exhaustive `_Small` + simulation `_Sim` |
 | `tla/ReconnectLossBound.tla` | Additional disconnect/outage exposure: queue + all client-unobserved post-queue stages + burst/rate-bounded outage traffic; exhaustive `_Small` / `_ZeroWindow` + CI-pinned `_ExpectedFailure` |
 | `tla/ReconnectionClaimLifecycle.tla` | Atomic reconnect credential reservation: duplicate valid sockets, invalid identity, stale handles, expiry cleanup, restore failure, and one-time completion; exhaustive `_Small` + four CI-pinned expected failures |
+| `tla/ApplicationOwnerRollback.tla` | Legacy application-owner rollback composition: reachable multi-entry provenance, cleanup/adoption ordering, reconnect takeover/requeue, and deleted-room terminality; exhaustive `_Small` + five CI-pinned expected failures |
 | `traces/slow-consumer-close-flush-invalid.jsonl` | Checked-in negative proving a slow-consumer close cannot enter the healthy lifecycle close-flush path |
 | `traces/post-queue-close-live-drain-invalid.jsonl` | Checked-in negative proving a canceled live writer cannot drain after finalization closes the queue |
 | `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
@@ -961,6 +962,61 @@ attacker, two successive handles, and terminal completion/cleanup. The direct
 Rust counterpart includes a stale-handle regression in `src/reconnection.rs`;
 the existing concurrency, certificate-identity, failure-release, and claimed-GC
 tests cover the other production transitions.
+
+## Application-owner rollback composition
+
+`ApplicationOwnerRollback.tla` closes the room-lane composition seam between
+legacy-room application ownership, unpublished-admission repair, maintenance,
+and reconnect restoration. It derives its starting state from an unowned room:
+two same-app admission failures create two pending durable detaches, but only
+the first can carry `PendingApplicationClaimRollback`. The second is
+detach-only because the first transition has already assigned the room owner.
+The positive model proves this production reachability bound instead of
+assuming multiple owner-bearing entries.
+
+The exhaustive configuration explores 389 distinct production-shaped
+states. Both tokenless failures must occur before same-app publication. Only
+that successful adopter can later register a reconnect credential; its
+durable detach either succeeds or creates a bare retry, so failed admissions
+can never become reconnect claimants.
+Cleanup may snapshot a retry key before entering the room event lane;
+publication, the adopter's failed disconnect, reconnect takeover, rejection,
+successful reconnect, and room deletion then interleave around that snapshot
+under the same serialization boundaries as the server. The checked invariants
+prove:
+
+- the global repair domains never contain more than one owner rollback; in
+  production-shaped traces only a failed admission can carry it, while the
+  published adopter's reconnect retry is necessarily bare;
+- maintenance re-reads the current route and current provenance after
+  acquiring the room lane, flattening absent and bare retries alike, so a
+  stale candidate for a now-live reconnect is discarded;
+- a rejected reconnect returns its exact bare detach before releasing the room
+  lane; a seeded delayed handoff lets ordinary cleanup overtake it and
+  demonstrates the ordering consequence;
+- every uncommitted owner remains justified by a pending or in-flight rollback,
+  while a published owner remains stable; and
+- deletion clears membership and ownership permanently; a claim
+  that was waiting outside the lane can only reject afterwards.
+
+Application quota is deliberately not modeled as independent mutable state.
+The authoritative database implementation counts live room records whose
+`application_id` matches, so the proved room-existence and owner terminality
+make the one-room quota result a direct 1-or-0 corollary rather than a second
+counter that could drift.
+
+`DeleteRoom` represents authoritative storage disappearance while a claim is
+waiting, not ordinary maintenance GC: the latter already protects active and
+claimed reconnect records. The defensive restore check must still reject if
+the backing room is absent for any external reason.
+
+Five expected-failure configurations independently duplicate owner provenance,
+consume a pre-lane provenance snapshot, skip the post-reconnect live-route
+re-read, delay rejection requeue until cleanup removes the surviving row, or
+restore into a deleted room. Each configuration passes only when TLC emits its
+registered target invariant diagnostic; continued checking may also expose
+downstream corollaries. Every path to publication and reconnect traverses the
+two-entry state that the direct single-claim tests do not compose.
 
 ## Capability-downgrading reconnect refinement
 

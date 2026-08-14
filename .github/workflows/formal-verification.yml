@@ -16,7 +16,9 @@
 #     room-event mutation-gate handoff (caller-cancellation immunity, isolated
 #     panic recovery, and weak-registry generation safety), and the atomic
 #     reconnection-claim lifecycle (identity validation, stale-handle rejection,
-#     expiry cleanup exclusion, and failed-restore release), plus the
+#     expiry cleanup exclusion, and failed-restore release), plus application-
+#     owner rollback composition (multi-entry provenance uniqueness, post-lane
+#     re-reads, reconnect requeue atomicity, and deleted-room terminality), plus the
 #     production-shaped protocol-v3 sequenced-relay observation replay
 #     (ordinary delivery, exact classified gaps, sender lifecycle, and receiver
 #     reconnect re-baselining, with four seeded negative oracles) —
@@ -54,6 +56,7 @@ on:
       - "src/server/room_service.rs"
       - "src/reconnection.rs"
       - "src/server/reconnection_service.rs"
+      - "src/server/maintenance.rs"
       - "src/server/connection_manager.rs"
       - "src/server/game_data.rs"
       - "src/database/mod.rs"
@@ -79,6 +82,7 @@ on:
       - "src/server/room_service.rs"
       - "src/reconnection.rs"
       - "src/server/reconnection_service.rs"
+      - "src/server/maintenance.rs"
       - "src/server/connection_manager.rs"
       - "src/server/game_data.rs"
       - "src/database/mod.rs"

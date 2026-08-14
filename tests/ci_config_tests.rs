@@ -25566,6 +25566,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             "src/server/room_service.rs",
             "src/reconnection.rs",
             "src/server/reconnection_service.rs",
+            "src/server/maintenance.rs",
             "src/server/connection_manager.rs",
             "src/server/game_data.rs",
             "src/database/mod.rs",
