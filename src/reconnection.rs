@@ -658,7 +658,11 @@ impl ReconnectionManager {
             None
         };
 
+        // Both clocks are read at the same moment: the UTC captures stay the
+        // human-readable record, while the monotonic instant anchors the only
+        // deadline that decides eligibility.
         let now = Utc::now();
+        let monotonic_now = Instant::now();
         // Token, in preference order: (1) the token from an existing same-room
         // pending record — the FIRST registration already consumed the
         // pre-issued entry, so minting fresh here would overwrite the record
@@ -758,7 +762,7 @@ impl ReconnectionManager {
             identity: credential_identity,
             claim: None,
             deadline: existing_same_room.as_ref().map_or_else(
-                || monotonic_deadline(Instant::now(), self.reconnection_window),
+                || monotonic_deadline(monotonic_now, self.reconnection_window),
                 |existing| existing.deadline,
             ),
         };
