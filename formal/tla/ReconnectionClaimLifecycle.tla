@@ -1,6 +1,6 @@
 ------------------ MODULE ReconnectionClaimLifecycle ------------------
 (***************************************************************************)
-(* Atomic reconnection-credential claim lifecycle (#220 / P87).            *)
+(* Atomic reconnection-credential claim lifecycle (#220).                  *)
 (*                                                                         *)
 (* A disconnected-player record is a retryable single-use credential. Two  *)
 (* fresh sockets may present the same valid credential concurrently, while  *)

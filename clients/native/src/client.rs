@@ -20,13 +20,13 @@
 //!    Relay/Relay plans with no peers).
 //! 5. **P2P** — pair per `peers[].initiate` (`NewPeer` remains accepted for
 //!    compatible servers), trickling ICE through `Signal`. The overall WebRTC
-//!    transport status resolves (Appendix G) when all expected pairs are
-//!    connected (a departure that removes the last unconnected expected pair
-//!    counts), or at `--p2p-timeout-secs`. Before that deadline, an incomplete
-//!    pair can get configured, bounded coordinated rebuilds so an
-//!    ICE-connected but stalled SCTP association cannot wedge forever. At
-//!    resolution, `connected: true`
-//!    iff at least one pair is connected at that moment; a zero-pair resolution also emits
+//!    transport status resolves under the transport-fallback contract when all
+//!    expected pairs are connected (a departure that removes the last
+//!    unconnected expected pair counts), or at `--p2p-timeout-secs`. Before that
+//!    deadline, an incomplete pair can get configured, bounded coordinated
+//!    rebuilds so an ICE-connected but stalled SCTP association cannot wedge
+//!    forever. At resolution, `connected: true` iff at least one pair is
+//!    connected at that moment; a zero-pair resolution also emits
 //!    `fallback_engaged`. Membership churn reports later real state changes;
 //!    unchanged states remain suppressed.
 //! 6. **Relay floor** — `GameData` keeps flowing over the WebSocket before,
@@ -956,7 +956,7 @@ struct Orchestrator<'a> {
     /// Latest coordinated retry attempt applied per peer.
     pair_retry_attempts: BTreeMap<PlayerId, u8>,
     /// Peers whose current generation has both channels open. Drives the
-    /// `--exchange` obligations and Appendix G resolution.
+    /// `--exchange` obligations and transport-fallback resolution.
     connected_pairs: BTreeSet<PlayerId>,
     /// Peers whose logical `p2p_pair_connected` event was emitted for the
     /// current room obligation. A coordinated rebuild clears current
@@ -1749,7 +1749,7 @@ impl Orchestrator<'_> {
                     peer_id,
                     you_initiate,
                 });
-                // Same pairing path as a plan peer (late join, Appendix E).
+                // Same pairing path as a plan peer (the late-join offerer rule).
                 self.pair_roles.insert(peer_id, you_initiate);
                 if self.p2p_released {
                     self.establish_pair(peer_id, you_initiate).await?;
@@ -2431,7 +2431,7 @@ impl Orchestrator<'_> {
         }
     }
 
-    /// Appendix G early-resolution condition: at least one expected pair, and
+    /// Transport-fallback early-resolution condition: at least one expected pair, and
     /// every CURRENTLY expected peer's pair is connected (departed peers were
     /// removed from the expectation by `PlayerLeft`).
     fn all_expected_pairs_connected(&self) -> bool {
@@ -2662,7 +2662,7 @@ impl Orchestrator<'_> {
         unmet
     }
 
-    /// A WebRTC plan with at least one pairing was issued, so the Appendix G
+    /// A WebRTC plan with at least one pairing was issued, so the transport-fallback
     /// status report is owed before this client may exit successfully.
     fn webrtc_session_expected(&self) -> bool {
         self.webrtc_plan_seen && !self.expected_peers.is_empty()

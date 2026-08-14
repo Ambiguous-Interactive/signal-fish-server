@@ -1,4 +1,4 @@
-//! P10.C directional-partition experiments over real WebSockets.
+//! Directional-partition experiments over real WebSockets.
 //!
 //! A connection being "up" is not a single fact under an asymmetric network
 //! fault. These tests pin which side can still make progress, the semantic

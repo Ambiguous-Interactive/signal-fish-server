@@ -1,4 +1,4 @@
-//! Deterministic event capture for the P10.D7 delivery-contract trace pilot.
+//! Deterministic event capture for delivery-contract trace refinement.
 //!
 //! The module exists only with the internal `trace-validation` feature. Merely
 //! enabling that feature is inert: a test or diagnostic harness must explicitly

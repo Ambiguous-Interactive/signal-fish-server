@@ -61,7 +61,7 @@ fn hmac_sha1_base64(key: &[u8], msg: &[u8]) -> Option<String> {
 }
 
 /// Mint a coturn REST TURN credential pair for `player_id`, valid until
-/// `expiry_unix` (Appendix F).
+/// `expiry_unix` (the coturn REST credential contract in `docs/deployment-turn.md`).
 ///
 /// Pure and deterministic: the same `(static_auth_secret, player_id, expiry_unix)`
 /// always yields the same pair. The time source is intentionally **not** read here
@@ -99,7 +99,7 @@ pub fn turn_expiry_unix(now_unix: i64, ttl_secs: u64) -> i64 {
 }
 
 /// Build the TURN-derived ICE entries contributed by `turn` for `player_id`
-/// (Appendix D `build_ice_servers`).
+/// (the session-selection `build_ice_servers` path).
 ///
 /// Returns **only** the entries the `[turn]` block contributes — the caller
 /// prepends the operator's static `session.ice_servers` list (preserved verbatim
@@ -114,7 +114,7 @@ pub fn turn_expiry_unix(now_unix: i64, ttl_secs: u64) -> i64 {
 /// TURN is fully self-hosted — the credential is computed locally from the
 /// operator's `static_auth_secret`; no third-party cloud is ever contacted. A
 /// disabled block, or an enabled block with no `urls`, contributes no TURN entry
-/// — yielding only public STUN, which is the Appendix-F "disabled ⇒ STUN only"
+/// — yielding only public STUN, which is the TURN contract's "disabled ⇒ STUN only"
 /// acceptance.
 ///
 /// `now_unix` is the single timestamp captured once per `emit_session_plan` call,

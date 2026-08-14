@@ -1,4 +1,4 @@
-//! P10.C relay matrix: encoding x room size x network profile over real WebSockets.
+//! Relay matrix: encoding x room size x network profile over real WebSockets.
 //!
 //! The PR lane covers these six deterministic clean cells:
 //! `{json, message_pack} x {2, 8, 16}`. Every player sends a one-second,

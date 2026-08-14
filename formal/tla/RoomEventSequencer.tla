@@ -1,6 +1,6 @@
 ------------------------ MODULE RoomEventSequencer ------------------------
 (***************************************************************************)
-(* Process-local per-room mutation/event handoff (P76).                    *)
+(* Process-local per-room mutation/event handoff.                          *)
 (*                                                                         *)
 (* The production RoomEventSequencer does not admit an ordinary backlog of  *)
 (* independently mutated jobs. A producer first owns the room's mutation    *)

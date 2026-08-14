@@ -123,7 +123,7 @@ pub enum Event {
     /// Every planned pair has sent and received its exact reliable exchange;
     /// an optional harness gate still holds the unreliable half.
     ExchangeReliableReady,
-    /// An overall `TransportStatus` state change was sent (Appendix G).
+    /// An overall `TransportStatus` state change was sent (transport-fallback contract).
     TransportStatusSent {
         transport: Transport,
         connected: bool,

@@ -1508,7 +1508,8 @@ Semantics:
   reports made while spectating have no seated-room fan-out. The next seated join starts a fresh generation, so
   roomless or spectator state cannot suppress the first report seen by new peers.
 - **v3-gated per recipient.** Like every v3-only message, it is delivered only to members that negotiated v3
-  (Appendix K); a v2 member observes nothing. Deliberately, delivery is **not** gated on the recipient's own
+  (the per-recipient v3 capability gate); a v2 member observes nothing.
+  Deliberately, delivery is **not** gated on the recipient's own
   transport capabilities (unlike `NewPeer` / plan-peer pairing, which apply the full session predicate): this is
   informational status about a _peer's_ data path — useful even to a relay-only v3 member — not an instruction
   for the recipient to use that transport.

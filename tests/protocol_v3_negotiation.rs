@@ -1,6 +1,6 @@
 //! Protocol v3 (P1) capability-negotiation wire + helper tests.
 //!
-//! Covers Transport/Topology serde tokens (Appendix A), `Authenticate`
+//! Covers protocol v3 Transport/Topology serde tokens, `Authenticate`
 //! round-tripping with and without the new optional fields, and the
 //! `ProtocolInfoPayload` version fields. The byte-for-byte v2 freeze lives in
 //! `v2_wire_golden.rs`; this file asserts the *additive* v3 surface.
@@ -13,11 +13,11 @@ use signal_fish_server::protocol::{
 };
 
 // ---------------------------------------------------------------------------
-// Transport / Topology serde tokens (Appendix A): `webrtc`, not `web_rtc`.
+// Transport / Topology serde tokens: `webrtc`, not `web_rtc`.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn transport_serializes_to_appendix_a_tokens() {
+fn transport_serializes_to_protocol_v3_tokens() {
     assert_eq!(
         serde_json::to_string(&Transport::Relay).unwrap(),
         r#""relay""#
@@ -29,12 +29,12 @@ fn transport_serializes_to_appendix_a_tokens() {
     assert_eq!(
         serde_json::to_string(&Transport::WebRtc).unwrap(),
         r#""webrtc""#,
-        "Appendix A requires `webrtc`, not the snake_case `web_rtc`"
+        "the protocol v3 wire contract requires `webrtc`, not `web_rtc`"
     );
 }
 
 #[test]
-fn topology_serializes_to_appendix_a_tokens() {
+fn topology_serializes_to_protocol_v3_tokens() {
     assert_eq!(
         serde_json::to_string(&Topology::Relay).unwrap(),
         r#""relay""#
@@ -226,7 +226,7 @@ fn protocol_info_v3_fields_present_when_some() {
 }
 
 // ---------------------------------------------------------------------------
-// P2 signal-relay wire types (Appendix A): Signal / NewPeer round-trips.
+// Signal-relay wire types: Signal / NewPeer round-trips.
 // The `signal` payload is opaque and must be byte-preserved verbatim.
 // ---------------------------------------------------------------------------
 
@@ -287,7 +287,7 @@ fn client_signal_round_trips_json_and_msgpack() {
 
 #[test]
 fn client_transport_status_round_trips_json_and_msgpack() {
-    // Exact wire form (Appendix A): {"type":"TransportStatus",
+    // Exact protocol v3 wire form: {"type":"TransportStatus",
     // "data":{"transport":"webrtc","connected":true}}. Cover all three transport
     // tokens and both `connected` values.
     let cases = [
@@ -489,7 +489,7 @@ fn server_peer_transport_status_round_trips_json_and_msgpack() {
 }
 
 // ---------------------------------------------------------------------------
-// P3 SessionPlan wire types (Appendix A/B): exact tag, field names, tokens, and
+// SessionPlan wire types: exact tag, field names, tokens, and
 // the skip_serializing_if / default omissions.
 // ---------------------------------------------------------------------------
 
@@ -520,7 +520,7 @@ fn session_plan_mesh_wire_shape_and_tokens() {
     }));
 
     let value = serde_json::to_value(&msg).unwrap();
-    // Exact envelope: {"type":"SessionPlan","data":{...}} (Appendix A).
+    // Exact protocol v3 envelope: {"type":"SessionPlan","data":{...}}.
     assert_eq!(value["type"], json!("SessionPlan"));
     let data = &value["data"];
     // Wire tokens.

@@ -178,7 +178,7 @@ leave reset deduplication, so the next accepted report is counted again, but
 reports made while spectating do not produce `PeerTransportStatus`. A later seated join starts another fresh
 generation, so prior roomless or spectator state never suppresses the first
 in-room report. Delivery is per-recipient v3-gated (a v2 member never observes it,
-Appendix K) but deliberately **not** gated on the recipient's own transport
+the per-recipient v3 capability gate) but deliberately **not** gated on the recipient's own transport
 capabilities — it is informational status about a _peer_, useful to any v3
 client, not an instruction to use that transport. Like the report it relays, it
 never changes how the server relays `GameData`. Delivery is best-effort (like

@@ -45,7 +45,7 @@ Two esbuild bundles from one strict-TypeScript source tree:
 - **`dist/page.js`** (IIFE) runs INSIDE headless Chromium: WebSocket wire + v3 protocol state machine +
   `RTCPeerConnection` engine. A faithful port of the native client's orchestrator — same ready-barrier
   gating, authoritative full-plan replacement (including Relay/Relay empty plans), server-owned initiator
-  roles, trickle-ICE buffering, Appendix G transport-state transitions, success criteria, and causal event
+  roles, trickle-ICE buffering, transport-fallback state transitions, success criteria, and causal event
   ordering (every input is serialized through one promise chain).
 - **`dist/cli.js`** (Node ESM) is the process entrypoint: parses argv, launches Chromium, injects the page
   bundle, bridges page events to stdout via `page.exposeFunction` (delivered in call order), enforces the

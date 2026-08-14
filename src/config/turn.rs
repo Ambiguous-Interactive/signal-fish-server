@@ -27,7 +27,7 @@ const fn default_credential_ttl_secs() -> u64 {
     3600
 }
 
-/// ICE / TURN configuration (Appendix C `[turn]`).
+/// ICE / TURN configuration (`[turn]` in `docs/configuration.md`).
 ///
 /// Self-hosted only: when [`enabled`](Self::enabled), the server mints coturn
 /// REST credentials for an operator-run TURN server. There is no managed /

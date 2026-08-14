@@ -5,7 +5,7 @@
 //! lobby flow to `GameStarting` + `SessionPlan`, establishes one
 //! `RTCPeerConnection` per planned peer (two data channels each: `reliable`
 //! and `unreliable`), trickles ICE through the server's opaque `Signal`
-//! relay, reports the Appendix G `TransportStatus`, and keeps exercising the
+//! relay, reports the transport-fallback `TransportStatus`, and keeps exercising the
 //! WebSocket relay floor (`GameData`) the whole time.
 //!
 //! It is intentionally a standalone package (not part of the server's cargo

@@ -2,13 +2,13 @@
 //! (Protocol v3).
 //!
 //! At lobby finalization the server picks a single room-wide plan from the
-//! intersection of every member's negotiated capabilities (Appendix D), then
-//! hands each v3 member a *per-recipient* [`SessionPlanPayload`] whose peer list
-//! and `initiate` flags are tailored to that recipient (Appendix E). A room that
-//! resolves to the relay floor stores no sticky plan but still emits an explicit
-//! Relay/Relay plan to v3 members so finalization has one authoritative pairing
-//! result. Finalized-room joins and reconnects use the same reset; v2 bytes
-//! remain frozen.
+//! intersection of every member's negotiated capabilities, then hands each v3
+//! member a *per-recipient* [`SessionPlanPayload`] whose peer list and
+//! `initiate` flags are tailored to that recipient by the deterministic offerer
+//! rule. A room that resolves to the relay floor stores no sticky plan but still
+//! emits an explicit Relay/Relay plan to v3 members so finalization has one
+//! authoritative pairing result. Finalized-room joins and reconnects use the
+//! same reset; v2 bytes remain frozen.
 //!
 //! A non-relay decision is also recorded as the room's sticky
 //! [`ActiveSessionPlan`], the single source of truth for the session the room is
@@ -28,7 +28,7 @@
 //! [`SessionPlanDecision::plan_for`]) is pure and unit-testable; the thin
 //! [`EnhancedGameServer::emit_session_plan`] method gathers per-member
 //! capabilities, runs the core, and best-effort delivers the result — gated on
-//! v3 so a v2 client never observes a `SessionPlan` (Appendix K).
+//! v3 so a v2 client never observes a `SessionPlan` (the per-recipient v3 gate).
 //!
 //! This module also hosts the **ICE pre-gather** seam (the deferred
 //! "RoomJoined ICE pre-gather" refinement): the pure [`ice_pregather_eligible`]
@@ -325,7 +325,7 @@ const fn transport_enabled(cfg: &SessionConfig, transport: Transport) -> bool {
 }
 
 /// The desired (ceiling) topology for `game_name`: the per-game override when
-/// mapped, else the configured default (Appendix D's `desired` lookup).
+/// mapped, else the configured default (the session-selection `desired` lookup).
 ///
 /// Shared by the ladder walk in [`choose_session_plan`] and the ICE pre-gather
 /// gate ([`ice_pregather_eligible`]) so "what does this game want" is one rule
@@ -347,7 +347,7 @@ pub(crate) fn desired_topology_for(game_name: &str, cfg: &SessionConfig) -> Topo
 /// - `session.enable_webrtc` (with WebRTC disabled no ladder rung can ever
 ///   select a WebRTC plan, so pre-gathered candidates could never be used), and
 /// - the game's desired topology is non-relay (a relay-desired game can never
-///   select a WebRTC plan — the Appendix D ladder caps at the desired ceiling —
+///   select a WebRTC plan — the selection ladder caps at the desired ceiling —
 ///   so minting for it would hand out TURN credentials that can never be
 ///   used), and
 /// - the room is **not** `Finalized`: a finalized room either runs a stored
@@ -356,13 +356,13 @@ pub(crate) fn desired_topology_for(game_name: &str, cfg: &SessionConfig) -> Topo
 ///   pre-gather would double-mint — or was floored to relay (sticky for the
 ///   session lifetime — WebRTC can never start, pre-gather is pointless), and
 /// - the recipient negotiated protocol v3 (`version >= 3`, exactly the
-///   [`EnhancedGameServer::client_supports_v3`] check — Appendix K: v2 wire
+///   [`EnhancedGameServer::client_supports_v3`] check: v2 wire
 ///   stays byte-identical), and
 /// - the recipient negotiated the WebRTC transport (a relay/direct-only client
 ///   never runs ICE), and
 /// - the recipient's negotiated topologies contain the game's desired topology
 ///   (the relay-desired "credentials that can never be used" argument applied
-///   per-recipient: the Appendix D ladder seats a member on a rung only when
+///   per-recipient: the selection ladder seats a member on a rung only when
 ///   that member negotiated the rung's topology, so a relay-only-topology
 ///   recipient can never appear in *any* WebRTC plan and minting for it would
 ///   hand out live TURN credentials that can never be used. A recipient that
@@ -403,7 +403,7 @@ pub(crate) fn is_valid_pair(topology: Topology, transport: Transport) -> bool {
         .any(|rung| rung == (topology, transport))
 }
 
-/// Choose the room-wide session plan from member capabilities (ADR-0001, Appendix D).
+/// Choose the room-wide session plan from member capabilities (ADR-0001).
 ///
 /// `desired` (the per-game override, else the configured default) is a *ceiling*,
 /// not an exact match: the room settles on the richest [`UPGRADE_LADDER`] rung that
@@ -547,7 +547,7 @@ impl SessionPlanDecision {
             .any(|member| member.player_id == recipient && self.pairable(member))
     }
 
-    /// Build the per-recipient [`SessionPlanPayload`] for `recipient` (Appendix E).
+    /// Build the per-recipient [`SessionPlanPayload`] for `recipient`.
     ///
     /// `ice_servers` is the recipient's already-prepared ICE list (the operator's
     /// static `session.ice_servers` plus this recipient's freshly minted
@@ -685,8 +685,9 @@ impl EnhancedGameServer {
     /// returns the v2 / relay-only default for any id absent from this node's
     /// connection manager, so a member hosted on another node fails the v3 gate
     /// and downgrades the whole room to the relay floor. That is the safe failure
-    /// direction (Appendix K — never emit a v3 message to an unconfirmed peer; the
-    /// relay floor always works) and is correct under the room-affinity model.
+    /// direction (the v3 capability gate: never emit a v3 message to an
+    /// unconfirmed peer; the relay floor always works) and is correct under the
+    /// room-affinity model.
     /// Revisit when a single room can span nodes.
     pub(crate) fn session_members_from(&self, players: &[PlayerInfo]) -> Vec<SessionMember> {
         players
@@ -1259,7 +1260,7 @@ impl EnhancedGameServer {
     /// transport is WebRTC; `now_unix` is the shared credential expiry captured
     /// once per emission event).
     ///
-    /// Defense-in-depth gate (Appendix K): a non-v3 connection is never sent a
+    /// Defense-in-depth v3 gate: a non-v3 connection is never sent a
     /// plan — at finalize all members are v3 by construction (`all_support`),
     /// but late-join/replan member lists can include weaker-capability members
     /// because `add_player_to_room` gates only on fullness. Returns `None` when

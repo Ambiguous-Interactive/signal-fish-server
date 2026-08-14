@@ -1278,7 +1278,7 @@ class Orchestrator {
         const peerId = String(data['peer_id']);
         const youInitiate = data['you_initiate'] === true;
         emit({ event: 'new_peer', peer_id: peerId, you_initiate: youInitiate });
-        // Same pairing path as a plan peer (late join, Appendix E).
+        // Same pairing path as a plan peer (the late-join offerer rule).
         await this.establishPair(peerId, youInitiate);
         break;
       }
@@ -1666,7 +1666,7 @@ class Orchestrator {
   }
 
   /**
-   * Appendix G early-resolution condition: at least one expected pair, and
+   * Transport-fallback early-resolution condition: at least one expected pair, and
    * every CURRENTLY expected peer's pair is connected.
    */
   private allExpectedPairsConnected(): boolean {
@@ -1849,7 +1849,7 @@ class Orchestrator {
   }
 
   /**
-   * A WebRTC plan with at least one pairing was issued, so the Appendix G
+   * A WebRTC plan with at least one pairing was issued, so the transport-fallback
    * status report is owed before this client may exit successfully.
    */
   private webrtcSessionExpected(): boolean {

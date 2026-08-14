@@ -44,8 +44,9 @@ tls = [
     "tokio-rustls",
     "tower",
 ]
-# Internal verification seam for P10.D7. The feature only exposes inert trace
-# hooks; a caller must explicitly attach a recorder to a connection.
+# Internal verification seam for delivery-contract trace refinement. The feature
+# only exposes inert trace hooks; a caller must explicitly attach a recorder to a
+# connection.
 trace-validation = []
 # Dev-only benchmark seam for measuring relay-path heap traffic. The
 # instrumented allocator is installed only by the dedicated benchmark binary;

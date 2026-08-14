@@ -25,7 +25,8 @@ already speak:
 All three variants carry a single `String`. matchbox's server is itself
 payload-agnostic: it forwards `Signal { receiver -> sender, data }`, emits
 `IdAssigned` / `NewPeer` / `PeerLeft`, and lets existing peers offer to
-newcomers. Our v3 routing model (Appendix E glare rule, `NewPeer`, opaque
+newcomers. Our v3 routing model (the [deterministic offerer rule][protocol-v3],
+`NewPeer`, opaque
 forwarding) is deliberately the same shape.
 
 The open decision: should the **recommended** native
@@ -115,6 +116,8 @@ costs nothing and unlocks interop.
 
 ## References
 
-- Internal protocol v3 implementation plan - Appendix A (opaque payload convention), Appendix L (item 1)
+- [Protocol v3 reference][protocol-v3] (opaque payload convention)
 - [Protocol v3 Two-Axis (ADR-0001)](0001-protocol-v3-two-axis.md) - opaque-signal invariant
 - [Matchbox](https://github.com/johanhelsing/matchbox) - `PeerSignal` shape and payload-agnostic signaling
+
+[protocol-v3]: ../protocol.md#protocol-v3-additions

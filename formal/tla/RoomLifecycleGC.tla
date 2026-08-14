@@ -1,6 +1,6 @@
 ------------------------------ MODULE RoomLifecycleGC ------------------------------
 (***************************************************************************)
-(* The room garbage-collection contract (BUG-1 / P10.A1). Models the       *)
+(* The room garbage-collection contract (BUG-1). Models the                *)
 (* maintenance sweep (`src/server/maintenance.rs cleanup_task`) against the *)
 (* room store (`src/database/mod.rs cleanup_empty_rooms /                   *)
 (* cleanup_expired_rooms`, `src/protocol/room_state.rs Room::is_expired`)   *)

@@ -461,9 +461,9 @@ pub enum ServerMessage {
     ///
     /// `you_initiate` designates exactly one side of each pair as the offerer,
     /// avoiding glare. In `mesh` topology the recipient initiates iff its id is
-    /// the lesser of the two UUIDs (Appendix E glare rule); in `host` topology
-    /// the direction is fixed — the client initiates to the host and the host
-    /// answers, regardless of UUID order.
+    /// the lesser of the two UUIDs (the deterministic offerer rule); in `host`
+    /// topology the direction is fixed — the client initiates to the host and
+    /// the host answers, regardless of UUID order.
     NewPeer {
         peer_id: PlayerId,
         you_initiate: bool,

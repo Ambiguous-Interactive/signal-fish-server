@@ -1,4 +1,4 @@
-//! P10.C **H6** — reconnect window / claim edge races (falsification experiment).
+//! **H6** — reconnect window / claim edge races (falsification experiment).
 //!
 //! Falsifies two deterministic edges of the reconnection state machine through
 //! the real WebSocket stack. H6's third edge (reconnect-during-teardown) is

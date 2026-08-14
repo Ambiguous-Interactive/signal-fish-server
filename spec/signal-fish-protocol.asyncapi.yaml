@@ -425,7 +425,7 @@ components:
 
   schemas:
     # ---------------------------------------------------------------------
-    # Shared token enums (Appendix A wire tokens)
+    # Shared token enums (protocol v3 wire tokens)
     # ---------------------------------------------------------------------
     Transport:
       type: string

@@ -53,9 +53,10 @@ placement matches the observed execution context.
   distribution rather than throughput alone, then close or refine #290.
 
 Acceptance: all 20 first attempts preserve exact fallback accounting, complete
-compatible delivery, 0.01x-class amplification, and zero unintended eviction,
-or any counterexample is retained and converted into a deterministic
-repository-local reproduction.
+compatible delivery, 0.01x-class amplification, and zero unintended eviction.
+A counterexample must be retained, converted into a deterministic
+repository-local reproduction, and used to refine #290, but does not satisfy
+this acceptance criterion.
 
 ## External acceptance
 

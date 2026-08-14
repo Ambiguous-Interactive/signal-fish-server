@@ -1,4 +1,4 @@
-//! P10.H5 documentation experiment: prove the failure modes produced when two
+//! Split-brain documentation experiment: prove the failure modes produced when two
 //! independent Signal Fish processes receive members of the same logical room.
 //!
 //! This is not a supported topology or a test expected to "pass" multi-node

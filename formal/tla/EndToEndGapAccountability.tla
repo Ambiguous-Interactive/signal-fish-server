@@ -1,6 +1,6 @@
 ------------------------ MODULE EndToEndGapAccountability ------------------------
 (***************************************************************************)
-(* The FLAGSHIP end-to-end gap-accountability contract (P10.D4): the       *)
+(* The flagship end-to-end gap-accountability contract: the                *)
 (* protocol v3 promise that a client, driven ONLY by what the server puts   *)
 (* on its socket, can classify every sequence discontinuity it ever         *)
 (* observes — and that the reconnection SNAPSHOT heals the tail the server   *)
@@ -41,7 +41,7 @@
 (*     On reconnect the server sends the client an authoritative view — the  *)
 (*     current member set (`RoomJoined.current_players`) AND each live       *)
 (*     sender's current (epoch, seq) high-water mark                         *)
-(*     (`Reconnected.sender_watermarks`, the P10.E5 field). The client must  *)
+(*     (`Reconnected.sender_watermarks`). The client must                    *)
 (*     use it two ways:                                                      *)
 (*       (a) REPLACE its membership with the snapshot's member set — an      *)
 (*           upsert, not a replay of deltas — so a PlayerReconnected that was *)

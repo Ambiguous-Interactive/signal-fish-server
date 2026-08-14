@@ -1,6 +1,6 @@
 ------------------------------ MODULE DeliveryClasses ------------------------------
 (***************************************************************************)
-(* Spec-first model for the protocol-v3 P10.E2 delivery classes and their  *)
+(* Spec-first model for the protocol-v3 delivery classes and their         *)
 (* wire-accountability contract. One implicit sender in one fixed epoch     *)
 (* relays to one recipient, so `seq` is that sender's GLOBAL monotone room  *)
 (* sequence across reliable,                                                *)

@@ -1,6 +1,6 @@
 --------------------------- MODULE ControlPriorityDelivery ---------------------------
 (***************************************************************************)
-(* Spec-FIRST for the protocol-v3 P10.E2 delivery revision (the design is   *)
+(* Spec-FIRST for the protocol-v3 delivery revision (the design is          *)
 (* not yet implemented — this module is merged BEFORE the code and pins the *)
 (* two properties the queue split must satisfy):                            *)
 (*                                                                         *)
@@ -23,7 +23,7 @@
 (* UNFAIR — the contract must hold against a peer that never reads.         *)
 (*                                                                         *)
 (* TIME is discrete and tracked as per-frame AGE (ticks since enqueue),     *)
-(* the Appendix-O house convention with sojourn as an absolute-age guard.   *)
+(* the discrete-time house rule with sojourn as an absolute-age guard.      *)
 (* There is no separate wall clock: ages are bounded by SojournBound and    *)
 (* sends by the budgets, so the state space is finite without one, and a    *)
 (* frame can always age to the bound (a wall-clock horizon would falsely    *)

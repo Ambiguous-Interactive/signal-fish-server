@@ -178,7 +178,7 @@ StoredPlans ==
 EmissionKinds == {"finalize", "replan", "latejoin"}
 
 ---------------------------------------------------------------------------------------
-(* Capability profiles (Authenticate negotiation results, Appendix D).
+(* Capability profiles (Authenticate negotiation and session-selection results).
    Referenced from the .cfg files via InitialCaps <- <Scenario>Caps. *)
 
 ProfileV2 ==
@@ -208,7 +208,7 @@ CapabilityProfiles ==
 MeshScenarioCaps ==
     (1 :> ProfileV3Full) @@ (2 :> ProfileV3Full) @@ (3 :> ProfileV3MeshWebRtc) @@
     (4 :> ProfileV3HostWebRtcOnly) @@ (5 :> ProfileV3RelayOnly)
-\* Host scenario: host+webrtc sessions with a v2 member for Appendix-K gating
+\* Host scenario: host+webrtc sessions with a v2 member for v3 capability gating
 \* (a v2 seat-filler must observe nothing) and host-failover re-election.
 HostScenarioCaps ==
     (1 :> ProfileV3Full) @@ (2 :> ProfileV3Full) @@
@@ -353,7 +353,7 @@ PlanFor(capMap, plan, mseq, r) ==
 
 ---------------------------------------------------------------------------------------
 (* Emission helpers. Delivery is v3-gated PER RECIPIENT
-   (send_session_plan_to's Appendix-K defense-in-depth gate). *)
+   (send_session_plan_to's v3 defense-in-depth gate). *)
 
 V3Members(capMap, S) == {p \in S : Version(capMap, p) >= 3}
 
@@ -538,8 +538,8 @@ GrantAuthority(p) ==
                    expectedReconnectOrder, expectedReconnectAuthority>>
     /\ churn' = churn - 1
 
-\* Begin an ordinary production reconnect history. P94's host scenario selects
-\* the sticky host and composes departure failover. P95's mesh scenario permits
+\* Begin an ordinary production reconnect history. The host scenario selects
+\* the sticky host and composes departure failover. The mesh scenario permits
 \* any capable member: mesh has no host parameter to repair, so PlayerLeft is
 \* sufficient until reconnect publishes the fresh exact-membership snapshot.
 \* Both retain the saved connected_at order and authority-restoration intent.
@@ -573,9 +573,9 @@ BeginCapabilityDisconnect(p) ==
     /\ churn' = churn - 1
 
 \* A fresh authenticated reconnect socket advertises the scenario's smaller
-\* profile: v3 relay-only for P94 host, v2 relay-only for P95 mesh. Production
-\* advances the physical connection generation, restores the saved PlayerInfo
-\* in its original order, attempts
+\* profile: v3 relay-only for the host scenario, v2 relay-only for the mesh
+\* scenario. Production advances the physical connection generation, restores
+\* the saved PlayerInfo in its original order, attempts
 \* authority restoration only when the disconnected player formerly held it
 \* AND the role is still vacant, transfers the fresh NegotiatedProtocol, and
 \* publishes the finalized membership against that fresh profile.
@@ -612,8 +612,8 @@ CapabilityReconnect(p) ==
                                emission |-> NoEmission]
                          ELSE GatePublication(publicationResult, caps2, generations2,
                                               members2, delivered)
-           \* Independent P95 seed: the membership decision uses fresh v2
-           \* capabilities, but the final per-recipient Appendix-K gate is
+           \* Independent mesh-scenario seed: the membership decision uses fresh v2
+           \* capabilities, but the final per-recipient v3 capability gate is
            \* bypassed for the actor's new physical generation.
            bugPlans ==
                IF baseResult.emission = NoEmission
@@ -763,7 +763,7 @@ PlanLegality ==
         /\ IsValidPair(storedPlan.topology, storedPlan.transport)
         /\ storedPlan.topology # "relay"
 
-\* I4. V2Gating (Appendix K): every persistent observation records the protocol
+\* I4. V2Gating: every persistent observation records the protocol
 \* version and physical connection generation that actually received it. A
 \* historical v3 delivery therefore remains valid after that logical player id
 \* reconnects on v2; the fresh-generation postcondition below separately proves
@@ -942,10 +942,11 @@ CapabilityReconnectPreservesJoinPriority ==
 CapabilityReconnectPreservesSuccessorAuthority ==
     lastCapabilityReconnect => authority = expectedReconnectAuthority
 
-\* P95. A member that finalized mesh+webrtc on generation zero may reconnect
-\* through a fresh v2 socket. The old v3 observation remains historical, while
-\* the new generation receives no v3-only plan and every v3 incumbent receives
-\* one exact refresh that excludes the actor from its WebRTC peer set.
+\* Mesh scenario. A member that finalized mesh+webrtc on generation zero may
+\* reconnect through a fresh v2 socket. The old v3 observation remains
+\* historical, while the new generation receives no v3-only plan and every v3
+\* incumbent receives one exact refresh that excludes the actor from its WebRTC
+\* peer set.
 ReconnectV2PublishesIncumbents ==
     (lastCapabilityReconnect /\ DESIRED = "mesh") =>
         LET incumbents == V3Members(caps, MemberSet)

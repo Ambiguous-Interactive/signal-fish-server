@@ -1,4 +1,4 @@
-//! P10.C H11/H12 — sixteen-player admission regression (end-to-end).
+//! H11/H12 — sixteen-player admission regression (end-to-end).
 //!
 //! GAP-3 / fix A3 (#140): the default per-IP connection cap was `10`, so the
 //! 11th concurrent connection from one IP was refused — a 16-player session

@@ -79,7 +79,7 @@ impl GameDataEncoding {
 /// `Relay` is the universal floor (WebSocket fan-out through the server) and is
 /// always available. `Direct` is a LAN / routable IP:port path and `WebRtc` is a
 /// peer-to-peer WebRTC data channel; both are opt-in upgrades negotiated in
-/// `Authenticate`. Wire tokens (Appendix A): `relay`, `direct`, `webrtc`.
+/// `Authenticate`. Protocol v3 wire tokens: `relay`, `direct`, `webrtc`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
@@ -89,7 +89,7 @@ pub enum Transport {
     Direct,
     /// Peer-to-peer WebRTC data channel.
     ///
-    /// `rename_all = "snake_case"` would emit `web_rtc`; Appendix A requires the
+    /// `rename_all = "snake_case"` would emit `web_rtc`; the wire contract requires the
     /// token `webrtc`, so the variant is renamed explicitly.
     #[serde(rename = "webrtc")]
     WebRtc,
@@ -98,8 +98,8 @@ pub enum Transport {
 /// Session topology negotiated for a room.
 ///
 /// `Relay` keeps the v2 server-relay hub. `Host` is a star topology around a
-/// single authoritative peer, and `Mesh` is everyone-to-everyone. Wire tokens
-/// (Appendix A): `relay`, `host`, `mesh`.
+/// single authoritative peer, and `Mesh` is everyone-to-everyone. Protocol v3
+/// wire tokens: `relay`, `host`, `mesh`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Topology {
@@ -113,10 +113,10 @@ pub enum Topology {
 
 /// A single ICE (STUN/TURN) server entry delivered inside a [`SessionPlanPayload`].
 ///
-/// Mirrors the browser `RTCIceServer` shape (Appendix A/B): `urls` holds one or
-/// more STUN/TURN endpoints, and `username`/`credential` carry short-lived TURN
-/// credentials when present. Both auth fields are omitted from the wire when
-/// absent (public STUN needs no credentials).
+/// Mirrors the browser `RTCIceServer` shape in the protocol v3 wire contract:
+/// `urls` holds one or more STUN/TURN endpoints, and `username`/`credential`
+/// carry short-lived TURN credentials when present. Both auth fields are
+/// omitted from the wire when absent (public STUN needs no credentials).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IceServer {
     /// STUN/TURN URLs for this server (e.g. `stun:stun.l.google.com:19302`).
@@ -131,8 +131,8 @@ pub struct IceServer {
 
 /// One peer a recipient should connect to under the chosen session topology.
 ///
-/// Part of a per-recipient [`SessionPlanPayload`] (Appendix B/E): the same room
-/// produces a different `peers` list (and `initiate` flags) for each member.
+/// Part of a per-recipient [`SessionPlanPayload`]: the same room produces a
+/// different `peers` list (and `initiate` flags) for each member.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionPeer {
     /// The other peer's id.
@@ -149,18 +149,19 @@ pub struct SessionPeer {
     /// Whether the recipient sends the WebRTC offer to this peer ("you send the
     /// offer to this peer"), so exactly one side of each pair offers.
     ///
-    /// In `mesh` topology this follows the deterministic glare rule (Appendix E:
-    /// the lesser UUID initiates); in `host` topology the direction is fixed —
+    /// In `mesh` topology this follows the deterministic offerer rule (the
+    /// lesser UUID initiates); in `host` topology the direction is fixed —
     /// each client initiates to the host and the host answers.
     pub initiate: bool,
 }
 
 /// The per-recipient session directive emitted at lobby finalization (v3 only).
 ///
-/// Sent after the unchanged `GameStarting` to each v3-capable member
-/// (Appendix A/B/D/E). It tells the recipient which topology/transport to use,
-/// who (if anyone) the host is, which peers to connect to (with per-recipient
-/// `initiate` flags), the ICE servers to gather against, and the universal
+/// Sent after the unchanged `GameStarting` to each v3-capable member. Under the
+/// protocol v3 session-selection and deterministic-offerer contracts, it tells
+/// the recipient which topology/transport to use, who (if anyone) the host is,
+/// which peers to connect to (with per-recipient `initiate` flags), the ICE
+/// servers to gather against, and the universal
 /// `fallback` transport. The relay floor is explicit: `topology: relay`,
 /// `transport: relay`, and empty host/peer/ICE fields reset any prior pairing
 /// state. Protocol-v2 recipients receive no `SessionPlan`.
