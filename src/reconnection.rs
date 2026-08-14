@@ -119,7 +119,7 @@ impl ReconnectionToken {
     /// Combines the binding with this token's own wall-clock expiry, so it is a
     /// convenience for embedders rather than the server's admission decision:
     /// the manager admits a reconnect on the binding plus its own monotonic
-    /// deadline (see [`monotonic_deadline`]).
+    /// deadline, captured at the disconnect.
     pub fn is_valid(&self, player_id: &PlayerId, room_id: &RoomId) -> bool {
         !self.is_expired() && self.player_id == *player_id && self.room_id == *room_id
     }
@@ -315,9 +315,8 @@ impl DisconnectedPlayer {
     /// disconnect instant.
     ///
     /// Diagnostic only. The manager decides real reconnect eligibility from a
-    /// monotonic deadline captured at the genuine disconnect (see
-    /// [`monotonic_deadline`]), so this answer can differ from the server's
-    /// after a wall-clock adjustment.
+    /// monotonic deadline captured at the genuine disconnect, so this answer
+    /// can differ from the server's after a wall-clock adjustment.
     pub fn is_expired(&self, window_seconds: i64) -> bool {
         let expiry = expiration_from_signed(self.disconnected_at, window_seconds);
         Utc::now() > expiry
