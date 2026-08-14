@@ -16,6 +16,12 @@ fn write_fake_curl(root: &Path) -> PathBuf {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 
+if (($# == 0)) || [[ $1 != --disable ]]; then
+    echo "probe must pass --disable as curl argument 1 to ignore default curl configuration files" >&2
+    exit 2
+fi
+shift
+
 header_file=
 request_url=
 request_key=
@@ -121,6 +127,13 @@ websocket_accept=$(
         | openssl base64 -A
 )
 {
+    if [[ ${FAKE_CURL_MODE:-accepted} == proxy-response-chain ]]; then
+        printf 'HTTP/1.1 200 Connection established\r\n'
+        printf 'Upgrade: not-websocket\r\n'
+        printf 'x-signal-fish-request-id: not-an-application-id\r\n'
+        printf 'x-signal-fish-upgrade-outcome: rejected_by_proxy\r\n'
+        printf '\r\n'
+    fi
     printf 'HTTP/1.1 101 Switching Protocols\r\n'
     printf 'Upgrade: websocket\r\n'
     if [[ ${FAKE_CURL_MODE:-accepted} == duplicate-upgrade && ${peer} == 2 ]]; then
@@ -142,7 +155,7 @@ websocket_accept=$(
             printf 'Sec-WebSocket-Accept: invalid\r\n'
         fi
     fi
-    if [[ ${FAKE_CURL_MODE:-accepted} != missing-diagnostics ]]; then
+    if [[ ${FAKE_CURL_MODE:-accepted} != missing-diagnostics && ${FAKE_CURL_MODE:-accepted} != trailer-diagnostics ]]; then
         printf 'x-signal-fish-request-id: %s\r\n' "${request_id}"
         if [[ ${FAKE_CURL_MODE:-accepted} == duplicate-request-id && ${peer} == 2 ]]; then
             printf 'x-signal-fish-request-id: 00000000-0000-4000-8000-999999999999\r\n'
@@ -153,6 +166,11 @@ websocket_accept=$(
         fi
     fi
     printf '\r\n'
+    if [[ ${FAKE_CURL_MODE:-accepted} == trailer-diagnostics ]]; then
+        printf 'x-signal-fish-request-id: %s\r\n' "${request_id}"
+        printf 'x-signal-fish-upgrade-outcome: accepted\r\n'
+        printf '\r\n'
+    fi
 } >"${header_file}"
 printf '101'
 exit 28
@@ -201,6 +219,44 @@ fn simultaneous_upgrade_probe_accepts_complete_correlated_bursts() {
             "PASS: 3 simultaneous two-client WebSocket upgrade bursts completed (3 x 2 accepted requests)"
         ),
         "{stdout}"
+    );
+}
+
+#[test]
+fn simultaneous_upgrade_probe_ignores_default_curl_configuration_files() {
+    let output = run_probe("accepted");
+    assert!(
+        output.status.success(),
+        "curl --disable must be argument 1 so default configuration files cannot alter or expose the probe\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn simultaneous_upgrade_probe_validates_only_the_final_response_header_block() {
+    let output = run_probe("proxy-response-chain");
+    assert!(
+        output.status.success(),
+        "proxy CONNECT/interim headers must not be conflated with the final WebSocket response\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn simultaneous_upgrade_probe_does_not_treat_trailers_as_response_headers() {
+    let output = run_probe("trailer-diagnostics");
+    assert!(
+        !output.status.success(),
+        "trailer fields must not satisfy required final-response headers\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("probe stderr is UTF-8");
+    assert!(
+        stderr.contains("lacked a valid x-signal-fish-request-id (got none)"),
+        "{stderr}"
     );
 }
 

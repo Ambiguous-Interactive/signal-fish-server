@@ -3507,19 +3507,34 @@ acceptance probe are tracked in
   handshake success, wrong/missing accepts, exact peer/status failure, missing
   application diagnostics, concurrency, duplicate application IDs, and a total
   request timeout that preserves response time after the connection budget.
+- [x] Isolate the probe from default curl configuration files and validate only
+  the final response header block, so proxy CONNECT/interim fields and trailers
+  cannot corrupt the verdict and local trace/output settings cannot escape the
+  evidence allowlist. Explicit curl proxy environment variables remain honored.
 - [x] Add a scheduled public-path workflow that runs 20 two-client bursts four
   times daily and retains the raw evidence; keep the target overrideable for
   other deployments.
 - [x] Document nginx correlation logging and explicitly separate ordinary HTTP
   health from full WebSocket upgrade health.
-- [ ] Deploy the correlated build, collect a complete scheduled public-path
-  attempt, and use its application/proxy IDs to close or further refine #367.
+- [ ] Deploy the correlated build and record the production platform's
+  authoritative immutable image digest, source revision, and rollout-complete
+  UTC in signal-fish-cloud#595. That external fact defines the acceptance
+  boundary: every schedule-triggered run with `github.run_attempt == 1` whose
+  start time is after it is eligible regardless of its result or which response
+  headers survive the proxy. Use the first such attempt's application/proxy IDs
+  to close or further refine #367; observed probe behavior must never redefine
+  eligibility.
+  - The 2026-08-14 00:40 UTC pre-deployment scheduled diagnostic
+    ([run 31758125506](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/31758125506))
+    received HTTP 101 for both peers but no application request IDs, matching
+    the deployment boundary tracked by signal-fish-cloud#595.
 
 **Acceptance:** the application admits repeated simultaneous v2 upgrades; every
 application decision is correlatable and outcome-conserving; a missing
 application ID fails the proxy-path probe rather than being confused with a
-server rejection; the deployed scheduled probe passes on its first complete
-attempt; mandatory local, hosted, and independent-review gates pass.
+server rejection; the deployed scheduled probe passes on its first eligible
+post-deployment schedule-triggered run at `github.run_attempt == 1`; mandatory
+local, hosted, and independent-review gates pass.
 
 ---
 

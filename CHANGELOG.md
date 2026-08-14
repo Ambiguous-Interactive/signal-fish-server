@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conserve attempts across accepted, Origin, drain, and token-binding results.
   A tested concurrent probe uses fresh RFC 6455 keys, verifies each complete
   handshake, and emits a non-secret client attempt ID for proxy-log correlation;
-  its failure evidence excludes non-allowlisted response headers and raw
-  transport stderr, and its total timeout preserves response time after the
+  it ignores default curl configuration files, validates only the final
+  response header block, excludes non-allowlisted response headers and raw
+  transport stderr from failure evidence, and preserves response time after the
   DNS/TCP/TLS connection budget. A scheduled public-path workflow distinguishes
   a healthy HTTP route from working TLS/proxy WebSocket admission (issue #367).
 - Add exhaustive connection-generation-aware coverage for a finalized v3 mesh
