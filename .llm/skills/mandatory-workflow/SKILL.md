@@ -48,10 +48,19 @@ cargo fmt
 cargo clippy --all-targets --all-features  # Zero warnings allowed
 cargo test --all-features
 
-# 3. Supply chain checks (run before pushing)
+# 3. Doc comments (clippy and cargo test never reach these lints)
+export RUSTDOCFLAGS="-D warnings -D rustdoc::broken_intra_doc_links \
+  -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
+cargo doc --locked --no-deps --all-features
+cargo doc --locked --no-deps --no-default-features
+
+# 4. Supply chain checks (run before pushing)
 cargo deny --all-features check            # Advisories, licenses, bans, sources
 
 ```
+
+A public doc comment must not link a private item: `private_intra_doc_links`
+rejects it, and only the `Rustdoc Validation` workflow catches that.
 
 ### Pre-Push Validation
 
@@ -151,6 +160,9 @@ ensure git hooks and CI will pass cleanly:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
+RUSTDOCFLAGS="-D warnings -D rustdoc::broken_intra_doc_links \
+  -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes" \
+  cargo doc --locked --no-deps --all-features
 
 # 2. Script-level policy checks
 scripts/check-doc-consistency.sh --staged   # or --changed-files <files>
@@ -190,6 +202,7 @@ are responsible for catching semantic failures before the hook is ever reached.
 - [ ] `cargo fmt` — no formatting issues
 - [ ] `cargo clippy --all-targets --all-features` — zero warnings
 - [ ] `cargo test --all-features` — all tests pass
+- [ ] `cargo doc --no-deps` under strict `RUSTDOCFLAGS` — no doc-link warnings
 - [ ] `cargo deny --all-features check` — supply chain checks pass
 - [ ] `scripts/check-ci-config.sh` — CI config validated
 - [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
