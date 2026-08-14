@@ -44,8 +44,8 @@ use std::future::Future;
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, DirectEndpoint, ErrorCode, GameDataEncoding, IceServer, LobbyState, PlayerId,
-    PlayerInfo, ServerMessage, SessionGeneration, Transport,
+    ClientMessage, DeliveryReportPayload, DirectEndpoint, ErrorCode, GameDataEncoding, IceServer,
+    LobbyState, PlayerId, PlayerInfo, ServerMessage, SessionGeneration, Transport,
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -633,8 +633,12 @@ async fn join_room(
     let mut early_left: Vec<(PlayerId, Option<u32>, Option<u64>)> = Vec::new();
     loop {
         let message = next_handshake_message(ws).await?;
-        if consume_join_accountability_preface(&mut accountability, &message)
-            .map_err(FatalError::protocol)?
+        if consume_join_accountability_preface(&mut accountability, &message, |report| {
+            emit(&Event::DeliveryReport {
+                report: report.clone(),
+            });
+        })
+        .map_err(FatalError::protocol)?
         {
             continue;
         }
@@ -706,6 +710,7 @@ async fn join_room(
 fn consume_join_accountability_preface(
     accountability: &mut DeliveryAccountability,
     message: &ServerMessage,
+    mut observe_report: impl FnMut(&DeliveryReportPayload),
 ) -> Result<bool, String> {
     let is_unsupported_format_error = matches!(
         message,
@@ -717,7 +722,7 @@ fn consume_join_accountability_preface(
     accountability.observe_server_message(is_unsupported_format_error)?;
     match message {
         ServerMessage::DeliveryReport(report) => {
-            accountability.record_report(report)?;
+            validate_and_observe_delivery_report(accountability, report, &mut observe_report)?;
             Ok(true)
         }
         ServerMessage::RelayStats {
@@ -740,6 +745,16 @@ fn consume_join_accountability_preface(
         } => Ok(true),
         _ => Ok(false),
     }
+}
+
+fn validate_and_observe_delivery_report(
+    accountability: &mut DeliveryAccountability,
+    report: &DeliveryReportPayload,
+    mut observe: impl FnMut(&DeliveryReportPayload),
+) -> Result<(), String> {
+    accountability.record_report(report)?;
+    observe(report);
+    Ok(())
 }
 
 fn restore_reconnected_member(
@@ -1611,6 +1626,7 @@ impl Orchestrator<'_> {
                 }
                 emit(&Event::PeerJoined {
                     player_id: player.id,
+                    epoch: player.epoch,
                 });
                 self.maybe_send_ready().await?;
             }
@@ -1646,7 +1662,11 @@ impl Orchestrator<'_> {
                 {
                     self.resolve_transport_status().await?;
                 }
-                emit(&Event::PlayerLeft { player_id });
+                emit(&Event::PlayerLeft {
+                    player_id,
+                    epoch,
+                    final_seq,
+                });
             }
             ServerMessage::GameStarting { peer_connections } => {
                 self.game_started = true;
@@ -1787,12 +1807,19 @@ impl Orchestrator<'_> {
                 emit(&Event::GameDataReceived {
                     from: from_player,
                     payload: data,
+                    seq,
+                    epoch,
+                    class,
+                    key,
                 });
             }
             ServerMessage::DeliveryReport(report) => {
-                self.accountability
-                    .record_report(&report)
-                    .map_err(FatalError::protocol)?;
+                validate_and_observe_delivery_report(&mut self.accountability, &report, |report| {
+                    emit(&Event::DeliveryReport {
+                        report: report.clone(),
+                    });
+                })
+                .map_err(FatalError::protocol)?;
             }
             ServerMessage::RelayStats {
                 interval_ms,
@@ -1835,7 +1862,7 @@ impl Orchestrator<'_> {
                 ) {
                     self.linger_until = None;
                 }
-                emit(&Event::PeerJoined { player_id });
+                emit(&Event::PeerJoined { player_id, epoch });
                 self.maybe_send_ready().await?;
             }
             ServerMessage::SpectatorJoined(payload) => {
@@ -3713,11 +3740,25 @@ mod tests {
                 backpressure_events: 0,
             },
         ];
+        let mut observed_reports = Vec::new();
         for frame in &frames {
-            assert!(consume_join_accountability_preface(&mut state, frame).unwrap());
+            assert!(
+                consume_join_accountability_preface(&mut state, frame, |report| {
+                    observed_reports.push(report.clone());
+                })
+                .unwrap()
+            );
         }
+        assert_eq!(
+            observed_reports,
+            vec![DeliveryReportPayload {
+                per_class: DeliveryCountersByClass::default(),
+                gaps: Vec::new(),
+            }],
+            "validated join-preface reports must reach the observable JSONL callback exactly once"
+        );
 
         let mut v2 = DeliveryAccountability::new(false);
-        assert!(consume_join_accountability_preface(&mut v2, &frames[1]).is_err());
+        assert!(consume_join_accountability_preface(&mut v2, &frames[1], |_| {}).is_err());
     }
 }

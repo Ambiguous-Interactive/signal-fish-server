@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add deterministic stalled-join and Linux process-pause delivery evidence.
+  Fresh admission now proves its exact baseline before a stalled incumbent's
+  eviction, targeted retry preserves every healthy peer, and an ignored
+  real-server `SIGSTOP`/`SIGCONT` scenario accepts only a causally complete
+  protocol-v3 stream before clean teardown. The native JSONL contract now
+  exposes validated delivery stamps and reports, semantic negative controls
+  falsify silent holes and sequence/lifecycle regressions, and nightly
+  diagnostics are retained as artifacts (issue #374).
 - Add exhaustive formal verification for legacy application-owner rollback
   composition. The production-shaped model reaches multiple pending durable
   detaches while proving that at most one carries owner-rollback provenance,

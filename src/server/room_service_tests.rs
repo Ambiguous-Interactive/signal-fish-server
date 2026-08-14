@@ -2,7 +2,7 @@ use super::connection_manager::RelayStamp;
 use super::*;
 use crate::config::{
     CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
-    TransportSecurityConfig, TurnConfig,
+    TransportSecurityConfig, TurnConfig, WebSocketConfig,
 };
 use crate::coordination::{
     ClientDeliveryHandle, MessageCoordinator, RoomEventCompletion, RoomEventJob,
@@ -1952,6 +1952,446 @@ async fn aborting_join_while_baseline_is_backpressured_still_completes_admission
             .expect("room lookup succeeds")
             .is_some_and(|room| room.players.contains_key(&player_id)),
         "owned join publishes one coherent DB and routing membership"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn stalled_incumbent_does_not_hide_fresh_join_or_evict_healthy_peers() {
+    const SLOW_CONSUMER_TIMEOUT_MS: u64 = 5_000;
+    const SLOW_CONSUMER_TIMEOUT: Duration = Duration::from_millis(SLOW_CONSUMER_TIMEOUT_MS);
+    const ROOM_CODE: &str = "STLJ01";
+    let server = create_test_server_with_config(ServerConfig {
+        enable_reconnection: false,
+        websocket_config: WebSocketConfig {
+            slow_consumer_timeout_ms: SLOW_CONSUMER_TIMEOUT_MS,
+            ..WebSocketConfig::default()
+        },
+        ..ServerConfig::default()
+    })
+    .await;
+
+    async fn register_with_close(
+        server: &EnhancedGameServer,
+        capacity: usize,
+        port: u16,
+    ) -> (
+        PlayerId,
+        mpsc::Sender<Arc<ServerMessage>>,
+        mpsc::Receiver<Arc<ServerMessage>>,
+        crate::coordination::ConnectionCloseListener,
+    ) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+        let player = server
+            .register_client_with_close(
+                sender.clone(),
+                close,
+                format!("127.0.0.1:{port}").parse().unwrap(),
+            )
+            .await
+            .expect("client registration succeeds");
+        (player, sender, receiver, listener)
+    }
+
+    async fn join(
+        server: &Arc<EnhancedGameServer>,
+        player: &PlayerId,
+        name: &str,
+        room_code: &str,
+    ) {
+        server
+            .handle_join_room(
+                player,
+                "stalled-join".to_string(),
+                Some(room_code.to_string()),
+                name.to_string(),
+                Some(8),
+                Some(false),
+                None,
+            )
+            .await;
+    }
+
+    fn assert_player_matches(actual: &PlayerInfo, expected: &PlayerInfo, context: &str) {
+        assert_eq!(actual.id, expected.id, "{context}: id");
+        assert_eq!(actual.name, expected.name, "{context}: name");
+        assert_eq!(
+            actual.is_authority, expected.is_authority,
+            "{context}: authority"
+        );
+        assert_eq!(actual.is_ready, expected.is_ready, "{context}: readiness");
+        assert_eq!(
+            serde_json::to_value(&actual.connection_info).expect("serialize actual metadata"),
+            serde_json::to_value(&expected.connection_info).expect("serialize expected metadata"),
+            "{context}: connection metadata"
+        );
+        assert_eq!(actual.region_id, expected.region_id, "{context}: region");
+    }
+
+    let (healthy_a, _healthy_a_tx, mut healthy_a_rx, healthy_a_close) =
+        register_with_close(&server, 8, 47970).await;
+    let (healthy_b, _healthy_b_tx, mut healthy_b_rx, healthy_b_close) =
+        register_with_close(&server, 8, 47971).await;
+    let (stalled, stalled_tx, mut stalled_rx, stalled_close) =
+        register_with_close(&server, 1, 47972).await;
+
+    join(&server, &healthy_a, "healthy-a", ROOM_CODE).await;
+    join(&server, &healthy_b, "healthy-b", ROOM_CODE).await;
+    join(&server, &stalled, "stalled", ROOM_CODE).await;
+    let room_id = server
+        .get_client_room(&healthy_a)
+        .await
+        .expect("creator is routed to the room");
+    drain_queued_messages(&mut healthy_a_rx);
+    drain_queued_messages(&mut healthy_b_rx);
+    drain_queued_messages(&mut stalled_rx);
+    stalled_tx
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("the held receiver's only slot is full");
+    let delivery_before = (
+        server
+            .metrics
+            .websocket_delivery_attempts
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_deliveries_enqueued
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_deliveries_channel_closed
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_messages_dropped
+            .load(Ordering::Relaxed),
+    );
+
+    let (fresh, _fresh_tx, mut fresh_rx, fresh_close) =
+        register_with_close(&server, 8, 47973).await;
+    let mut fresh_join = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { join(&server, &fresh, "fresh", ROOM_CODE).await }
+    });
+
+    for _ in 0..10_000 {
+        if server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            > 0
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed),
+        1,
+        "the fresh join must demonstrably wait on the full incumbent route"
+    );
+    assert!(
+        !fresh_join.is_finished(),
+        "the room-wide PlayerJoined publication remains gated before the deadline"
+    );
+
+    let baseline = fresh_rx
+        .try_recv()
+        .expect("fresh RoomJoined baseline commits before incumbent publication");
+    let ServerMessage::RoomJoined(payload) = baseline.as_ref() else {
+        panic!("fresh client expected RoomJoined, got {baseline:?}");
+    };
+    let authoritative_room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("read authoritative room")
+        .expect("room exists during fresh baseline");
+    assert_eq!(payload.room_id, room_id);
+    assert_eq!(payload.room_code, authoritative_room.code);
+    assert_eq!(payload.player_id, fresh);
+    assert_eq!(payload.game_name, authoritative_room.game_name);
+    assert_eq!(payload.max_players, authoritative_room.max_players);
+    assert_eq!(
+        payload.supports_authority,
+        authoritative_room.supports_authority
+    );
+    assert_eq!(
+        payload.is_authority,
+        authoritative_room.authority_player == Some(fresh)
+    );
+    assert_eq!(payload.lobby_state, authoritative_room.lobby_state);
+    let mut baseline_ready = payload.ready_players.clone();
+    baseline_ready.sort_unstable();
+    let mut authoritative_ready = authoritative_room.ready_players.clone();
+    authoritative_ready.sort_unstable();
+    assert_eq!(baseline_ready, authoritative_ready);
+    assert_eq!(payload.relay_type, authoritative_room.relay_type);
+    assert!(payload.current_spectators.is_empty());
+    assert!(payload.ice_servers.is_empty());
+    assert_eq!(payload.reconnection_token, None);
+    let mut baseline_players: Vec<PlayerId> = payload
+        .current_players
+        .iter()
+        .map(|player| player.id)
+        .collect();
+    baseline_players.sort_unstable();
+    let mut expected_players = vec![healthy_a, healthy_b, stalled, fresh];
+    expected_players.sort_unstable();
+    assert_eq!(
+        baseline_players, expected_players,
+        "fresh baseline must name the exact authoritative membership"
+    );
+    for player in &payload.current_players {
+        let stored = authoritative_room
+            .players
+            .get(&player.id)
+            .expect("baseline player exists in authoritative room");
+        assert_player_matches(player, stored, "RoomJoined current player");
+        assert_eq!(
+            player.connected_at, stored.connected_at,
+            "RoomJoined current player: connected_at"
+        );
+        assert_eq!(
+            player.epoch, stored.epoch,
+            "RoomJoined current player: epoch"
+        );
+        assert_eq!(
+            player.seq, stored.seq,
+            "RoomJoined current player: sequence"
+        );
+    }
+    assert_no_queued_message(&mut fresh_rx, "fresh client receives only its baseline");
+
+    let mut database_players: Vec<PlayerId> = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("read authoritative room membership")
+        .into_iter()
+        .map(|player| player.id)
+        .collect();
+    database_players.sort_unstable();
+    assert_eq!(database_players, expected_players);
+    let routed = server
+        .message_coordinator
+        .routed_player_ids(&room_id)
+        .await
+        .expect("read local routing membership")
+        .expect("in-memory routing returns a membership set");
+    assert_eq!(routed, expected_players);
+    assert_eq!(server.get_client_room(&fresh).await, Some(room_id));
+    assert_no_queued_message(
+        &mut healthy_a_rx,
+        "healthy-a publication is held by the all-member reservation",
+    );
+    assert_no_queued_message(
+        &mut healthy_b_rx,
+        "healthy-b publication is held by the all-member reservation",
+    );
+    assert_eq!(
+        server
+            .metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(healthy_a_close.requested_reason(), None);
+    assert_eq!(healthy_b_close.requested_reason(), None);
+    assert_eq!(stalled_close.requested_reason(), None);
+    assert_eq!(fresh_close.requested_reason(), None);
+
+    tokio::time::advance(SLOW_CONSUMER_TIMEOUT - Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        server
+            .metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0,
+        "the stalled incumbent is not evicted before the exact deadline"
+    );
+    assert!(!fresh_join.is_finished());
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..10_000 {
+        if fresh_join.is_finished()
+            && server
+                .metrics
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed)
+                == 1
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    timeout(Duration::from_secs(1), &mut fresh_join)
+        .await
+        .expect("fresh join completes after the stalled route is pruned")
+        .expect("fresh join task does not panic");
+    assert_eq!(
+        stalled_close.requested_reason(),
+        Some(crate::coordination::CloseReason::SlowConsumer)
+    );
+    assert_eq!(healthy_a_close.requested_reason(), None);
+    assert_eq!(healthy_b_close.requested_reason(), None);
+    assert_eq!(fresh_close.requested_reason(), None);
+
+    let mut published_fresh = Vec::new();
+    let expected_fresh = authoritative_room
+        .players
+        .get(&fresh)
+        .expect("fresh player exists in authoritative room");
+    for (name, receiver) in [
+        ("healthy-a", &mut healthy_a_rx),
+        ("healthy-b", &mut healthy_b_rx),
+    ] {
+        let published = receiver
+            .try_recv()
+            .unwrap_or_else(|error| panic!("{name}: expected PlayerJoined, got {error:?}"));
+        let ServerMessage::PlayerJoined { player } = published.as_ref() else {
+            panic!("{name}: expected PlayerJoined, got {published:?}");
+        };
+        assert_player_matches(player, expected_fresh, &format!("{name} PlayerJoined"));
+        assert_eq!(
+            player.connected_at, expected_fresh.connected_at,
+            "{name} PlayerJoined: connected_at"
+        );
+        let authoritative_stamp = server
+            .connection_manager
+            .current_relay_stamp_in_room(&fresh, &room_id)
+            .expect("fresh routing stamp remains authoritative");
+        assert_eq!(
+            player.epoch,
+            Some(authoritative_stamp.epoch),
+            "{name} PlayerJoined: epoch"
+        );
+        assert_eq!(
+            player.seq,
+            Some(authoritative_stamp.seq),
+            "{name} PlayerJoined: sequence"
+        );
+        published_fresh.push(player.clone());
+        assert_no_queued_message(
+            receiver,
+            &format!("{name} receives PlayerJoined exactly once"),
+        );
+    }
+    assert_player_matches(
+        published_fresh.first().expect("first healthy publication"),
+        published_fresh.get(1).expect("second healthy publication"),
+        "healthy incumbents receive identical PlayerJoined",
+    );
+    assert_eq!(
+        serde_json::to_value(published_fresh.first().expect("first healthy publication"))
+            .expect("serialize first healthy publication"),
+        serde_json::to_value(published_fresh.get(1).expect("second healthy publication"))
+            .expect("serialize second healthy publication"),
+        "healthy incumbents receive identical PlayerJoined"
+    );
+    assert_next_message_matches(
+        &mut stalled_rx,
+        "stalled queue retains its held item",
+        |message| matches!(message, ServerMessage::Pong),
+    );
+    assert_no_queued_message(
+        &mut stalled_rx,
+        "stalled incumbent never receives the committed PlayerJoined",
+    );
+    let routed_after_prune = server
+        .message_coordinator
+        .routed_player_ids(&room_id)
+        .await
+        .expect("read routing after slow-consumer prune")
+        .expect("in-memory routing returns a membership set");
+    let mut expected_survivors = vec![healthy_a, healthy_b, fresh];
+    expected_survivors.sort_unstable();
+    assert_eq!(routed_after_prune, expected_survivors);
+    let delivery_after = (
+        server
+            .metrics
+            .websocket_delivery_attempts
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_deliveries_enqueued
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_deliveries_channel_closed
+            .load(Ordering::Relaxed),
+        server
+            .metrics
+            .websocket_messages_dropped
+            .load(Ordering::Relaxed),
+    );
+    let delivery_delta = (
+        delivery_after.0 - delivery_before.0,
+        delivery_after.1 - delivery_before.1,
+        delivery_after.2 - delivery_before.2,
+        delivery_after.3 - delivery_before.3,
+        delivery_after.4 - delivery_before.4,
+    );
+    assert_eq!(
+        delivery_delta,
+        (6, 3, 2, 0, 1),
+        "baseline + canceled first reservation + survivor retry have an exact ledger"
+    );
+    assert_eq!(
+        delivery_delta.0,
+        delivery_delta.1 + delivery_delta.2 + delivery_delta.3 + delivery_delta.4,
+        "every delivery attempt has exactly one terminal outcome"
+    );
+
+    server.unregister_client(&stalled).await;
+    let mut final_database_players: Vec<PlayerId> = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("read membership after socket teardown")
+        .into_iter()
+        .map(|player| player.id)
+        .collect();
+    final_database_players.sort_unstable();
+    assert_eq!(final_database_players, expected_survivors);
+    assert_eq!(
+        server
+            .message_coordinator
+            .routed_player_ids(&room_id)
+            .await
+            .expect("read final routing membership")
+            .expect("in-memory routing returns a membership set"),
+        expected_survivors
+    );
+    assert_eq!(server.get_client_room(&stalled).await, None);
+    assert!(!server.connection_manager.has_client(&stalled));
+    assert_eq!(server.metrics.players_joined.load(Ordering::Relaxed), 4);
+    assert_eq!(server.metrics.players_left.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        server.metrics.players_joined.load(Ordering::Relaxed)
+            - server.metrics.players_left.load(Ordering::Relaxed),
+        3,
+        "joined-minus-left conserves the exact surviving membership"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        1
     );
 }
 

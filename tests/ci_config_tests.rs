@@ -2730,6 +2730,222 @@ fn test_verification_nightly_retains_h14_hosted_attempt_evidence() {
 }
 
 #[test]
+fn test_verification_nightly_retains_multiprocess_pause_resume_evidence() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/verification-nightly.yml"));
+    let documents =
+        Yaml::load_from_str(&workflow).expect("verification nightly workflow must parse");
+    let job = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("multiprocess-delivery"))
+        .expect("verification nightly must retain multiprocess-delivery");
+    assert_failure_is_not_swallowed(job, "multiprocess-delivery job");
+    assert_eq!(
+        job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some("ubuntu-latest")
+    );
+    let steps = job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("multiprocess-delivery steps");
+    let run_index = steps
+        .iter()
+        .position(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Run multi-process delivery fault tests")
+        })
+        .expect("multiprocess run step");
+    let run = &steps[run_index];
+    assert_failure_is_not_swallowed(run, "multiprocess delivery fault-test step");
+    assert_eq!(
+        run.as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("SIGNAL_FISH_CLIENT_BIN"))
+            .and_then(Yaml::as_str),
+        Some("${{ github.workspace }}/clients/native/target/debug/signal-fish-reference-native")
+    );
+    assert_eq!(
+        run.as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("SIGNAL_FISH_MULTIPROCESS_EVIDENCE_DIR"))
+            .and_then(Yaml::as_str),
+        Some("${{ runner.temp }}/multiprocess-delivery")
+    );
+    let command = run
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("multiprocess run command");
+    let logical_lines = shell_logical_lines(command);
+    assert_eq!(
+        logical_lines.first().map(String::as_str),
+        Some("set -o pipefail")
+    );
+    assert_eq!(
+        logical_lines
+            .iter()
+            .filter(|line| line.contains("cargo nextest"))
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "cargo nextest run --profile ci --locked --all-features --test \
+             multiprocess_delivery_e2e --run-ignored all --success-output final 2>&1 | tee \
+             multiprocess-output.txt"
+        ]
+    );
+    assert!(
+        !command.contains("|| true") && !command.contains("; true"),
+        "multiprocess failures must not be swallowed"
+    );
+
+    let source = read_file(&repo_root().join("tests/multiprocess_delivery_e2e.rs"));
+    let file = syn::parse_file(&source).expect("multiprocess_delivery_e2e.rs must parse as Rust");
+    let resume_tests = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function)
+                if function.sig.ident
+                    == "sigstop_then_resume_preserves_v3_delivery_accountability" =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resume_tests.len(),
+        2,
+        "multiprocess suite must define Linux and unsupported-platform pause/resume registrations"
+    );
+    let resume_test = resume_tests
+        .iter()
+        .copied()
+        .find(|function| {
+            function.attrs.iter().any(|attribute| {
+                attribute.path().is_ident("cfg")
+                    && matches!(
+                        &attribute.meta,
+                        Meta::List(list) if list.tokens.to_string() == "target_os = \"linux\""
+                    )
+            })
+        })
+        .expect("multiprocess suite must define the Linux pause/resume test");
+    assert!(
+        resume_test.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("cfg")
+                && matches!(
+                    &attribute.meta,
+                    Meta::List(list) if list.tokens.to_string() == "target_os = \"linux\""
+                )
+        }),
+        "nightly pause/resume test must be explicitly Linux-only"
+    );
+    assert!(
+        resume_test.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("ignore")
+                && matches!(
+                    &attribute.meta,
+                    Meta::NameValue(value)
+                        if matches!(
+                            &value.value,
+                            Expr::Lit(literal)
+                                if matches!(
+                                    &literal.lit,
+                                    Lit::Str(reason)
+                                        if reason.value()
+                                            == "nightly-only (verification-nightly.yml): Linux SIGSTOP/SIGCONT with the clients/native binary"
+                                )
+                        )
+                )
+        }),
+        "nightly pause/resume test must retain its exact ignored-test reason"
+    );
+    let unsupported = resume_tests
+        .iter()
+        .copied()
+        .find(|function| {
+            function.attrs.iter().any(|attribute| {
+                attribute.path().is_ident("cfg")
+                    && matches!(
+                        &attribute.meta,
+                        Meta::List(list)
+                            if list.tokens.to_string()
+                                == "not (target_os = \"linux\")"
+                    )
+            })
+        })
+        .expect("multiprocess suite must register an unsupported-platform pause/resume test");
+    assert!(
+        unsupported
+            .attrs
+            .iter()
+            .any(|attribute| attribute.path().is_ident("test")),
+        "unsupported-platform pause/resume registration must remain a test"
+    );
+    assert!(
+        unsupported.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("ignore")
+                && matches!(
+                    &attribute.meta,
+                    Meta::NameValue(value)
+                        if matches!(
+                            &value.value,
+                            Expr::Lit(literal)
+                                if matches!(
+                                    &literal.lit,
+                                    Lit::Str(reason)
+                                        if reason.value()
+                                            == "unsupported platform: requires Linux SIGSTOP/SIGCONT plus /proc process-state synchronization"
+                                )
+                        )
+                )
+        }),
+        "unsupported-platform pause/resume test must retain its exact ignored reason"
+    );
+
+    let upload = steps
+        .get(run_index + 1)
+        .expect("evidence upload immediately follows the multiprocess run");
+    assert_eq!(
+        upload.as_mapping_get("name").and_then(Yaml::as_str),
+        Some("Upload multi-process delivery evidence")
+    );
+    assert_eq!(
+        upload.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert_eq!(
+        upload.as_mapping_get("uses").and_then(Yaml::as_str),
+        Some("actions/upload-artifact@v7.0.1")
+    );
+    let with = upload.as_mapping_get("with").expect("upload settings");
+    assert_eq!(
+        with.as_mapping_get("name").and_then(Yaml::as_str),
+        Some("multiprocess-delivery-${{ github.run_id }}-${{ github.run_attempt }}")
+    );
+    let paths = with
+        .as_mapping_get("path")
+        .and_then(Yaml::as_str)
+        .expect("multiprocess artifact paths");
+    for required in [
+        "multiprocess-output.txt",
+        "${{ runner.temp }}/multiprocess-delivery/**",
+    ] {
+        assert!(
+            paths.lines().any(|line| line.trim() == required),
+            "multiprocess artifact paths lost `{required}`"
+        );
+    }
+    assert_eq!(
+        with.as_mapping_get("retention-days")
+            .and_then(Yaml::as_integer),
+        Some(30)
+    );
+    assert_eq!(
+        with.as_mapping_get("if-no-files-found")
+            .and_then(Yaml::as_str),
+        Some("error")
+    );
+}
+
+#[test]
 fn test_h14_pr_gate_is_isolated_and_covers_its_complete_input_surface() {
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/h14-pr.yml");

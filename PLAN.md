@@ -101,25 +101,6 @@ Acceptance: a maintained environment demonstrates reproducible relay-only
 sessions and operational secret rotation. Multi-node room-spanning fan-out is
 outside this plan's architecture scope.
 
-## Next repository correctness work
-
-### P101 — Stalled-join and process-pause delivery evidence (#374)
-
-- Under a deterministically gate-held stalled recipient, admit a fresh client
-  before eviction and prove its exact `RoomJoined` baseline plus every healthy
-  incumbent's `PlayerJoined`, authoritative membership, conservation, and no
-  unrelated eviction.
-- Add an ignored nightly real-binary SIGSTOP/SIGCONT scenario that accepts only
-  exact post-resume delivery or causally prior exact gap accounting, rejects
-  sequence/lifecycle regression, and finishes with healthy reconnect or
-  teardown.
-- Register semantic negative controls and avoid elapsed-duration or Pong-RTT
-  thresholds; unsupported platforms must skip explicitly.
-
-Acceptance: both scenarios are wired into the appropriate nightly lane with
-retained diagnostics, deterministic synchronization, non-vacuous oracles, and
-no weakening of the existing PR-lane suites.
-
 ## Unscheduled open-issue frontier
 
 These items remain live but are not active phases. Re-rank them whenever new
