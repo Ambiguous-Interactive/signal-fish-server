@@ -81,13 +81,33 @@ header_values() {
     ' "${header_file}"
 }
 
+extract_final_response_headers() {
+    local source_file=$1
+    local destination_file=$2
+    awk '
+        /^HTTP\/[0-9][0-9.]*[[:space:]]+[0-9][0-9][0-9]([[:space:]]|$)/ {
+            final_block = ""
+            in_headers = 1
+        }
+        in_headers {
+            final_block = final_block $0 ORS
+            if ($0 ~ /^\r?$/) {
+                in_headers = 0
+            }
+        }
+        END {
+            printf "%s", final_block
+        }
+    ' "${source_file}" >"${destination_file}"
+}
+
 lowercase() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 print_response_evidence() {
     local prefix=$1
-    if [[ -s ${prefix}.headers ]]; then
+    if [[ -s ${prefix}.final-headers ]]; then
         echo "allowlisted response evidence:" >&2
         awk '
             /^HTTP\/[0-9][0-9.]*[[:space:]]+[0-9][0-9][0-9]([[:space:]]|$)/ {
@@ -113,7 +133,7 @@ print_response_evidence() {
                     print "X-Signal-Fish-Upgrade-Outcome: " value
                 }
             }
-        ' "${prefix}.headers" >&2
+        ' "${prefix}.final-headers" >&2
     else
         echo "allowlisted response evidence: none" >&2
     fi
@@ -145,11 +165,15 @@ probe_peer() {
     # executable or TLS setup failure). Keep all diagnostic reads defined so
     # the probe still reports the exact burst, peer, status, and curl exit code.
     : >"${prefix}.headers"
+    : >"${prefix}.final-headers"
     : >"${prefix}.status"
     : >"${prefix}.stderr"
 
     set +e
-    "${curl_bin}" \
+    # curl reads its default configuration files before ordinary command-line
+    # options. --disable must therefore be argument one: proxy, redirect, trace,
+    # header, or write-out options from those files must not alter this probe.
+    "${curl_bin}" --disable \
         --http1.1 \
         --silent \
         --show-error \
@@ -168,26 +192,31 @@ probe_peer() {
     curl_exit=$?
     set -e
 
+    # A proxy CONNECT or interim response can precede the origin response in
+    # curl's dump-header file. Only the final response block is authoritative
+    # for the WebSocket handshake and application correlation fields.
+    extract_final_response_headers "${prefix}.headers" "${prefix}.final-headers"
+
     local http_status
     http_status=$(tr -d '[:space:]' <"${prefix}.status")
     local request_id
-    request_id=$(header_value "${prefix}.headers" 'x-signal-fish-request-id')
+    request_id=$(header_value "${prefix}.final-headers" 'x-signal-fish-request-id')
     local outcome
-    outcome=$(header_value "${prefix}.headers" 'x-signal-fish-upgrade-outcome')
+    outcome=$(header_value "${prefix}.final-headers" 'x-signal-fish-upgrade-outcome')
     local upgrade_header
-    upgrade_header=$(header_value "${prefix}.headers" 'upgrade')
+    upgrade_header=$(header_value "${prefix}.final-headers" 'upgrade')
     local connection_header
-    connection_header=$(header_values "${prefix}.headers" 'connection')
+    connection_header=$(header_values "${prefix}.final-headers" 'connection')
     local websocket_accept
-    websocket_accept=$(header_value "${prefix}.headers" 'sec-websocket-accept')
+    websocket_accept=$(header_value "${prefix}.final-headers" 'sec-websocket-accept')
     local upgrade_header_count
-    upgrade_header_count=$(header_count "${prefix}.headers" 'upgrade')
+    upgrade_header_count=$(header_count "${prefix}.final-headers" 'upgrade')
     local websocket_accept_count
-    websocket_accept_count=$(header_count "${prefix}.headers" 'sec-websocket-accept')
+    websocket_accept_count=$(header_count "${prefix}.final-headers" 'sec-websocket-accept')
     local request_id_count
-    request_id_count=$(header_count "${prefix}.headers" 'x-signal-fish-request-id')
+    request_id_count=$(header_count "${prefix}.final-headers" 'x-signal-fish-request-id')
     local outcome_count
-    outcome_count=$(header_count "${prefix}.headers" 'x-signal-fish-upgrade-outcome')
+    outcome_count=$(header_count "${prefix}.final-headers" 'x-signal-fish-upgrade-outcome')
     local upgrade_header_lower
     upgrade_header_lower=$(lowercase "${upgrade_header}")
     local connection_header_lower

@@ -400,13 +400,17 @@ bash scripts/probe-websocket-upgrades.sh \
 
 ```
 
-The probe requires `curl` and OpenSSL. It generates a fresh random
-`Sec-WebSocket-Key` for every peer and verifies the complete RFC 6455 response:
+The probe requires `curl` and OpenSSL. It ignores default curl configuration
+files so proxy, redirect, header, trace, TLS, and output settings cannot change
+the request or retained evidence. It generates a fresh
+random `Sec-WebSocket-Key` for every peer and verifies the complete RFC 6455 response:
 HTTP 101, `Upgrade`, `Connection`, and the key-derived
 `Sec-WebSocket-Accept`. Each request also sends and prints a non-secret random
 `X-Signal-Fish-Probe-Attempt-Id`; the nginx log field above joins a client-side
 failure to the proxy request even when application response headers are absent.
-Failure output is limited to the HTTP status line and non-sensitive RFC 6455 or
+When a proxy CONNECT or interim response precedes the origin response, only the
+final response header block is validated and reported. Failure output is
+limited to the HTTP status line and non-sensitive RFC 6455 or
 Signal Fish correlation/outcome fields. The probe does not replay cookies,
 authorization or vendor response headers, or raw `curl` stderr into scheduled
 logs and retained artifacts. Each request allows five seconds to connect within
