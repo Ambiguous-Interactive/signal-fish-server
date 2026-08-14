@@ -1,6 +1,6 @@
-//! P10.C relay matrix: encoding x room size x network profile over real WebSockets.
+//! Relay matrix: encoding x room size x network profile over real WebSockets.
 //!
-//! The PR lane covers the six deterministic clean cells from PLAN.md:
+//! The PR lane covers these six deterministic clean cells:
 //! `{json, message_pack} x {2, 8, 16}`. Every player sends a one-second,
 //! 30 msg/s stream with a 1 KiB payload while every peer drains concurrently.
 //! Each cell must preserve the complete per-sender payload ledger, satisfy the

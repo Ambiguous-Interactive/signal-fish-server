@@ -34,7 +34,7 @@
 //!   deterministic, per-player distinct, embeds `expiry = now + ttl` in the
 //!   username, and the credential equals an INDEPENDENTLY recomputed
 //!   `base64(HMAC-SHA1(secret, username))` (the coturn REST contract,
-//!   Appendix F).
+//!   the coturn REST credential contract).
 //!
 //! Equality is asserted via `serde_json::to_value` canonicalization (the
 //! payload types deliberately do not implement `PartialEq`).
@@ -336,7 +336,7 @@ proptest! {
         prop_assert_eq!(ice_object.contains_key("credential"), ice.credential.is_some());
     }
 
-    /// The two capability enums use the Appendix A lowercase wire tokens
+    /// The two capability enums use the protocol v3 lowercase wire tokens
     /// (`webrtc`, not `web_rtc`) and round-trip both encodings.
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -476,7 +476,7 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// TURN credentials (coturn REST scheme, Appendix F)
+// TURN credentials (coturn REST scheme; docs/deployment-turn.md)
 // ---------------------------------------------------------------------------
 
 /// Independent recomputation of `base64(HMAC-SHA1(secret, message))` so the

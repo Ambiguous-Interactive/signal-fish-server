@@ -43,15 +43,16 @@
 #   - split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
 #     server processes pin the unsupported multi-instance failure catalog used
 #     by the deployment doctrine.
-#   - trace-validation: P10.D7 captures deterministic paused-clock producer
-#     traces plus a real-socket writer/finalizer trace. P98 also captures
-#     protocol-v3 classified-omission and reconnect/lifecycle observations.
+#   - trace-validation: the reliable-delivery trace contract captures
+#     deterministic paused-clock producer traces plus a real-socket
+#     writer/finalizer trace. The classified-omission and reconnect-lifecycle
+#     trace contract captures the corresponding protocol-v3 observations.
 #     Both contracts compile to TLA+, replay with TLC, and exercise seeded
 #     negative oracles. Informational initially.
 #
 # Long-running targeted tests are `#[ignore]`d in-tree (a scheduling decision,
 # not a flakiness mask) and activated here with `--run-ignored all`; the focused
-# P98 socket captures are ordinary exact tests. Job timeouts are generous floors
+# sequenced-relay socket captures are ordinary exact tests. Job timeouts are generous floors
 # over measured wall times (build + run), per the zero-flakiness policy: a
 # too-tight timeout-minutes cancels a healthy-but-loaded run and is itself a
 # flake source.

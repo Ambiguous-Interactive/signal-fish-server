@@ -5,7 +5,7 @@
 //! emission tests build a real server (with a chosen `SessionConfig`), register
 //! v3 clients, hand-build a [`FinalizedRoom`], call `emit_session_plan`, and
 //! assert on each client's mpsc receiver — including an explicit no-peer relay
-//! plan for v3 members and no plan for v2 members (Appendix K).
+//! plan for v3 members and no plan for v2 members (the per-recipient v3 gate).
 
 use crate::config::{
     CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
@@ -153,7 +153,7 @@ fn host_config() -> SessionConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Selection table (Appendix D).
+// Session-selection ladder.
 //
 // The capability ladder (mesh+webrtc -> host+webrtc -> host+direct -> relay
 // floor) is a pure function of {members' capabilities, config gates, per-game
@@ -2765,9 +2765,9 @@ async fn host_departure_replan_mints_fresh_turn_credentials_per_recipient() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn host_departure_replan_skips_v2_members() {
-    // Appendix K on the re-plan path: a v2 member (possible mid-session via a
-    // seat-filling late join) never receives a SessionPlan; v3 members still
-    // get theirs.
+    // Per-recipient v3 gate on the re-plan path: a v2 member (possible
+    // mid-session via a seat-filling late join) never receives a SessionPlan;
+    // v3 members still get theirs.
     let server = create_server_with_session(host_config()).await;
     let (host, mut host_rx) = register_client(&server).await;
     let (v3_client, mut v3_client_rx) = register_client(&server).await;
@@ -3792,7 +3792,7 @@ mod properties {
         }
     }
 
-    /// Appendix D capability predicate, recomputed from raw member data.
+    /// Session-selection capability predicate, recomputed from raw member data.
     fn member_supports(member: &SessionMember, topology: Topology, transport: Transport) -> bool {
         member.version >= 3
             && member.topologies.contains(&topology)
@@ -3962,7 +3962,7 @@ mod properties {
     // -- choose_session_plan --------------------------------------------------
 
     proptest! {
-        /// Glare designation (Appendix E): antisymmetric for distinct ids,
+        /// Deterministic offerer designation: antisymmetric for distinct ids,
         /// irreflexive for any id — exactly one side of every pair offers.
         #[test]
         #[cfg_attr(miri, ignore)]

@@ -68,7 +68,7 @@ tempfile = "3.27"
 rmp = "0.8"
 rmp-serde = "1.3"
 serde_bytes = "0.11"
-# The harness compares player UUIDs for the Appendix E glare-matrix assertion
+# The harness compares player UUIDs for the deterministic offerer assertion
 # (PlayerId is a uuid::Uuid alias in the server crate; lib code never needs
 # the crate directly).
 uuid = { version = "1.23", features = ["serde"] }

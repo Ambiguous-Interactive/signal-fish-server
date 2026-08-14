@@ -1,4 +1,4 @@
-//! P10.C H14: mixed JSON/MessagePack rooms over real WebSockets.
+//! H14: mixed JSON/MessagePack rooms over real WebSockets.
 //!
 //! The pre-registered concern was that one incompatible recipient could turn
 //! every binary relay into an `UNSUPPORTED_GAME_DATA_FORMAT` error and amplify

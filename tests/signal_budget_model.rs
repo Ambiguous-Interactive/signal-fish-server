@@ -1,4 +1,4 @@
-//! P10.C H8 (model, PR lane) — a 16-player WebRTC mesh's signaling cost fits the
+//! H8 (model, PR lane) — a 16-player WebRTC mesh's signaling cost fits the
 //! default per-connection signal rate limit.
 //!
 //! Falsification experiment H8. Pre-registered prediction: at N=16 players in a
@@ -19,7 +19,7 @@ use signal_fish_server::config::defaults;
 use signal_fish_server::rate_limit::RateLimitConfig;
 
 /// `Signal` messages a single player SENDS to form a full mesh, per the
-/// protocol's signaling rules (Appendix E glare rule + trickle ICE):
+/// protocol's signaling rules (deterministic offerer rule + trickle ICE):
 ///
 /// - exactly one offer-or-answer per peer — for each unordered pair, one side
 ///   offers and the other answers (the `local_initiates` glare rule), so every

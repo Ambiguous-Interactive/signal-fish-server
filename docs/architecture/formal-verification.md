@@ -36,7 +36,7 @@ for the process-local boundary and its exclusions). TLC then enumerates
 **every** reachable state of the bounded model and
 checks the named invariants and action properties in each one:
 
-- `V2Gating` — no `SessionPlan` ever reaches a sub-v3 member (Appendix K
+- `V2Gating` — no `SessionPlan` ever reaches a sub-v3 member (the v3 capability
   back-compat);
 - `EmissionMatchesSessionState` / `PublicationCoverage` — every publication
   reaches exactly all current v3 members and either matches the stored sticky
@@ -82,7 +82,7 @@ and complete incumbent publication. CI runs the same script via
 
 ### Trace refinement — captured Rust transitions
 
-The P10.D7 pilot connects a real-code property corpus and a v2 real-socket case
+The delivery-trace pilot connects a real-code property corpus and a v2 real-socket case
 back to TLC. The feature-gated recorder captures paused-clock
 `deliver_or_disconnect` decisions plus production dequeue, write, queue-close,
 and finalization transitions as ordered, payload-free JSONL. A strict generator

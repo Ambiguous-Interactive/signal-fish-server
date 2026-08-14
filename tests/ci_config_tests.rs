@@ -18618,7 +18618,7 @@ fn test_ci_safety_workflow_has_required_jobs() {
         workflow_path.exists(),
         "ci-safety.yml must exist.\n\
          This workflow provides advanced safety analysis (Miri, AddressSanitizer).\n\
-         See PLAN.md Phase 3 / Ticket G for details."
+         See docs/ci-cd-testing.md#advanced-safety-workflow for details."
     );
 
     validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
@@ -19101,7 +19101,7 @@ fn test_ci_safety_jobs_not_in_required_check_names() {
             "Found '{check_name}' in REQUIRED_CHECK_NAMES, but ci-safety.yml \
              jobs have not completed stable-name promotion.\n\
              Remove from REQUIRED_CHECK_NAMES until promotion criteria are met.\n\
-             See PLAN.md Phase 3, Promotion Policy."
+             See docs/ci-cd-testing.md#promotion-to-required-branch-protection."
         );
     }
 }

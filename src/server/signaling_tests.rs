@@ -1119,7 +1119,7 @@ fn error_code(message: &ServerMessage) -> Option<ErrorCode> {
 }
 
 // ---------------------------------------------------------------------------
-// Glare determinism (Appendix E).
+// Deterministic offerer selection.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1389,7 +1389,7 @@ async fn signal_sender_must_be_v3_even_if_webrtc_transport_is_present() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn signal_to_v2_peer_reports_target_not_found() {
-    // Appendix K gating: a v3 sender targeting a v2 (relay-only) peer in the
+    // Per-recipient v3 gating: a v3 sender targeting a v2 (relay-only) peer in the
     // same room must NOT deliver — it is reported as target-not-found.
     let server = create_test_server().await;
     let (alice, mut alice_rx) = register_client(&server).await;
@@ -1419,11 +1419,12 @@ async fn signal_to_v2_peer_reports_target_not_found() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn signal_to_v3_relay_only_peer_reports_target_not_found() {
-    // Appendix K gating: the target must have negotiated BOTH v3 AND the WebRTC
-    // transport. A v3 peer that advertised only `relay` (a valid v3_relay_only
-    // state) must NOT be delivered a `Signal` it never opted into; the sender is
-    // told the target was not found. This locks the webrtc-transport gate that
-    // the v2-target test passes vacuously via the v3 check.
+    // Negotiated WebRTC capability gating: the target must have negotiated BOTH
+    // v3 AND the WebRTC transport. A v3 peer that advertised only `relay` (a
+    // valid v3_relay_only state) must NOT be delivered a `Signal` it never
+    // opted into; the sender is told the target was not found. This locks the
+    // webrtc-transport gate that the v2-target test passes vacuously via the v3
+    // check.
     let server = create_test_server().await;
     let (alice, mut alice_rx) = register_client(&server).await;
     let (relay_only, mut relay_only_rx) = register_client(&server).await;
@@ -3825,7 +3826,7 @@ async fn transport_status_change_fans_out_to_v3_room_peers_only() {
     // Alice (v3 + webrtc) reports a state change in a room with Bob (v3
     // RELAY-ONLY — must still receive: the fan-out is deliberately NOT gated on
     // the recipient's transport capabilities, unlike the session predicate) and
-    // Carol (v2 — must NEVER receive a v3-only message, Appendix K). The
+    // Carol (v2 — must NEVER receive a v3-only message). The
     // reporter itself hears nothing.
     let server = create_test_server().await;
     let (alice, mut alice_rx) = register_client(&server).await;

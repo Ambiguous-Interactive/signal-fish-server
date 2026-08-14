@@ -15,7 +15,7 @@ re-planning. Its correctness rests on cross-cutting invariants that example-base
 tests can demonstrate but not exhaust:
 
 - a v2 member must **never** observe a v3 control message, while a v3 member on
-  the relay floor must receive an explicit no-peer relay plan (Appendix K
+  the relay floor must receive an explicit no-peer relay plan (the v3 capability
   back-compat plus authoritative reset semantics);
 - a stored `host` plan must **always** name a current, session-capable host (the
   self-heal contract);

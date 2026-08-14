@@ -1,4 +1,4 @@
-//! P10.C H1+H13 — a slow consumer's eviction must NOT cascade to healthy peers.
+//! H1+H13 — a slow consumer's eviction must NOT cascade to healthy peers.
 //!
 //! The distinctive, deterministic PR-lane claim of H1+H13 is the NO-CASCADE
 //! guarantee: when one recipient stalls hard enough to be evicted by the

@@ -1513,6 +1513,7 @@ name = "signal-fish-server-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "chrono",
  "libfuzzer-sys",
  "rmp-serde",
  "serde_json",

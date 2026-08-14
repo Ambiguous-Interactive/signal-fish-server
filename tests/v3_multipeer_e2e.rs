@@ -1,5 +1,5 @@
 //! End-to-end protocol v3 multi-peer (N >= 3) signaling conformance tests
-//! through the real WebSocket stack (PLAN P7: in-repo signaling conformance,
+//! through the real WebSocket stack (the in-repo signaling conformance suite,
 //! extended past the existing two-peer suites).
 //!
 //! Each test boots an in-process axum server on `127.0.0.1:0` (the harness from
@@ -586,7 +586,7 @@ async fn host_n4_star_property() {
 async fn mixed_v2_v3_n3_relay_floor_is_explicit_only_for_v3() {
     // A mesh-preferring server, but one pure-v2 member floors the whole room
     // to relay: everyone receives GameStarting and NOBODY receives a
-    // SessionPlan or NewPeer (Appendix K).
+    // SessionPlan or NewPeer (the per-recipient v3 gate).
     let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
     let addr = running_server.addr();
     let game = "multipeer-mixed3";
@@ -1382,7 +1382,7 @@ async fn mesh_n3_transport_status_fan_out_and_dedup() {
 async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
     // In a mixed v2/v3 room a v3 member's TransportStatus change reaches the
     // OTHER v3 member as PeerTransportStatus, while the v2 member observes
-    // strict silence (Appendix K) and stays fully functional afterwards.
+    // strict v3-message silence and stays fully functional afterwards.
     let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
     let addr = running_server.addr();
     let game = "multipeer-tstatus-mixed3";

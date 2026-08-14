@@ -1,4 +1,4 @@
-//! 16-player room test harness (PLAN P10.B1).
+//! Shared 16-player room test harness for the relay and WebRTC matrices.
 //!
 //! Shared helpers for the sixteen-player suites: bring up N real WebSocket
 //! clients from loopback (all sharing IP `127.0.0.1`, so the per-IP admission

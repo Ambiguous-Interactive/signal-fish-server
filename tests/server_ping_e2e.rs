@@ -1,4 +1,4 @@
-//! Server-initiated RFC 6455 ping/pong liveness checks (P10.E4).
+//! Server-initiated RFC 6455 ping/pong liveness checks.
 
 mod test_helpers;
 mod websocket_test_helpers;

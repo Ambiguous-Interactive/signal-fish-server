@@ -314,7 +314,7 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // `ping_timeout > 0`: a zero deadline disables the reaper, so no inversion
     // exists to prevent.)
     //
-    // `formal/tla/SenderPacingReaper.tla` (P10.D3) derives this strict `<` as
+    // `formal/tla/SenderPacingReaper.tla` derives this strict `<` as
     // the NECESSARY floor. It models the pre-park delay `d` — the
     // `maybe_update_last_seen` throttle-boundary DB write + `rooms` write-lock
     // that runs after the activity record and before the park — and TLC shows
@@ -828,7 +828,7 @@ mod tests {
     /// strictly less than the activity-reaper deadline. Data-driven over the
     /// boundary. `ping_timeout` default is 30 s (30000 ms). This asserts the
     /// check's NECESSARY floor — it rejects `slow >= ping` (the provable
-    /// inversion region derived by `formal/tla/SenderPacingReaper.tla`, P10.D3)
+    /// inversion region derived by `formal/tla/SenderPacingReaper.tla`)
     /// and accepts `slow < ping`. Passing the floor is not a safety
     /// certificate: a thin margin can still invert under load, which is an
     /// operator sizing concern (see `validate_config_security`).

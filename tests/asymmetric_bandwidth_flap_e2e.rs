@@ -1,4 +1,4 @@
-//! P10.C H10 — asymmetric downstream bandwidth must be loud or loss-accounted.
+//! H10 — asymmetric downstream bandwidth must be loud or loss-accounted.
 //!
 //! A 256-kbps recipient is offered roughly 90 KiB/s of relayed game data while
 //! a healthy peer shares the room. The same physical link exercises both v3

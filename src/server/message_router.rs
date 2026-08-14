@@ -142,7 +142,8 @@ impl EnhancedGameServer {
     /// Purely informational and v3-only: a v2 client can never legitimately send
     /// this, and a v3 report is accepted only for a transport negotiated by that
     /// connection. Invalid reports are ignored (debug-logged) as defense-in-depth
-    /// (Appendix K). The relay floor never closes regardless of what is reported
+    /// (the reporting connection's negotiated-transport gate). The relay floor
+    /// never closes regardless of what is reported
     /// — this only drives observability and, in future, targeted relay for stuck
     /// peers.
     ///

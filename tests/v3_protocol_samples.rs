@@ -4,7 +4,7 @@
 //! into the production [`ClientMessage`] / [`ServerMessage`] enums via
 //! `serde_json::from_str` AND round-trip back to a `serde_json::Value` that is
 //! **exactly equal** to the parsed source line. This is the acceptance test for
-//! PLAN §P6 ("wire samples exactly match the actual Rust types").
+//! the protocol sample contract: wire samples exactly match the actual Rust types.
 //!
 //! The value-equality check is what makes the guarantee real for *optional*
 //! fields. `ClientMessage` / `ServerMessage` and their payloads do NOT use

@@ -45,7 +45,7 @@ Two esbuild bundles from one strict-TypeScript source tree:
 - **`dist/page.js`** (IIFE) runs INSIDE headless Chromium: WebSocket wire + v3 protocol state machine +
   `RTCPeerConnection` engine. A faithful port of the native client's orchestrator — same ready-barrier
   gating, authoritative full-plan replacement (including Relay/Relay empty plans), server-owned initiator
-  roles, trickle-ICE buffering, Appendix G transport-state transitions, success criteria, and causal event
+  roles, trickle-ICE buffering, transport-fallback state transitions, success criteria, and causal event
   ordering (every input is serialized through one promise chain).
 - **`dist/cli.js`** (Node ESM) is the process entrypoint: parses argv, launches Chromium, injects the page
   bundle, bridges page events to stdout via `page.exposeFunction` (delivered in call order), enforces the
@@ -104,7 +104,7 @@ Browser-specific additions and deviations:
 
 | Flag / behavior | Meaning |
 |-----------------|---------|
-| `--mdns-obfuscation` | Leave Chromium's DEFAULT mDNS host-candidate obfuscation ON (candidates become opaque `<uuid>.local` names — the PLAN P7 `.local` trap). Default OFF: Chromium is launched with `--disable-features=WebRtcHideLocalIpsWithMdns` for deterministic loopback host candidates |
+| `--mdns-obfuscation` | Leave Chromium's DEFAULT mDNS host-candidate obfuscation ON (candidates become opaque `<uuid>.local` names, exercising the documented cross-stack `.local` trap). Default OFF: Chromium is launched with `--disable-features=WebRtcHideLocalIpsWithMdns` for deterministic loopback host candidates |
 | `--cripple-ice` (browser flavor) | The browser cannot filter network interfaces the way the native engine does; determinism comes from dropping ALL outbound candidates AND ignoring all inbound ones (`signal_received` is still emitted). With zero remote candidates on both sides, no ICE check pair ever forms |
 | Native `--ip-family` | Not exposed by the browser client. Chromium chooses its own interfaces; pinning the ICE address family is a native-engine capability used by the IPv6 interop cell |
 | Native `--drop-ice-from` | Not exposed by the browser client. It is a native-only matrix-harness fault for isolating one webrtc-rs peer edge; shared interop and `--cripple-ice` behavior remain identical |

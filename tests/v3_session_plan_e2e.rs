@@ -368,7 +368,7 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
         );
     }
 
-    // Each plan names the other peer, with exactly one offerer (Appendix E).
+    // Each plan names the other peer, with exactly one deterministic offerer.
     assert_eq!(plan1.peers[0].player_id, peer2_id);
     assert_eq!(plan2.peers[0].player_id, peer1_id);
     assert_ne!(plan1.peers[0].initiate, plan2.peers[0].initiate);

@@ -1,6 +1,6 @@
 -------------------- MODULE CapacityPermitLifecycle --------------------
 (***************************************************************************)
-(* Classified control-permit lifecycle conservation (#220 / P73).          *)
+(* Classified control-permit lifecycle conservation (#220).                *)
 (*                                                                         *)
 (* CapacityDeadlineArbitration.tla stops when a waiter atomically claims a  *)
 (* queue slot. This model follows two independently held permits through    *)

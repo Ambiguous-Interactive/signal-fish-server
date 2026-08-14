@@ -2,7 +2,7 @@
 //! binary (via `SIGNAL_FISH_SERVER_BIN`) + three REAL
 //! `signal-fish-reference-native` client processes, talking over real TCP
 //! (WebSocket signaling) and real UDP (loopback WebRTC: DTLS + SCTP data
-//! channels). This is the end-to-end proof of PLAN P7: server-brokered
+//! channels). This is the end-to-end proof of the documented server-brokered
 //! offer/answer/trickle-ICE producing live data channels, with the WebSocket
 //! relay floor carrying GameData in the same session window as the live
 //! WebRTC pairs (no relay/pair ordering is asserted; post-pair WebSocket
@@ -13,13 +13,13 @@
 //! 1. `mesh_n3_full_webrtc_session_with_live_relay_floor` — the headline:
 //!    a 3-peer mesh room negotiates `mesh + webrtc`, the glare matrix over the
 //!    three per-recipient plans is total + antisymmetric (smaller UUID offers,
-//!    Appendix E), all 6 directed pair endpoints connect, one message per
-//!    channel crosses every ordered pair (12 receive events), every client
-//!    reports `TransportStatus{webrtc,true}` and observes both peers' reports
-//!    (`PeerTransportStatus` fan-out), and every client's `--relay-payload`
-//!    GameData reaches the other two over the WebSocket in the same session
-//!    window as the live pairs (no relay/pair ordering is asserted; the
-//!    post-pair status fan-outs prove the WebSocket outlives pairing).
+//!    the deterministic offerer rule), all 6 directed pair endpoints connect,
+//!    one message per channel crosses every ordered pair (12 receive events),
+//!    every client reports `TransportStatus{webrtc,true}` and observes both
+//!    peers' reports (`PeerTransportStatus` fan-out), and every client's
+//!    `--relay-payload` GameData reaches the other two over the WebSocket in the
+//!    same session window as the live pairs (no relay/pair ordering is asserted;
+//!    the post-pair status fan-outs prove the WebSocket outlives pairing).
 //! 2. `host_star_n3_webrtc` — a `host + webrtc` star: all plans name the same
 //!    host (the creator: earliest joiner wins the election), clients offer to
 //!    the host (host plan lists `initiate: false` peers), pairs exist ONLY
@@ -810,7 +810,7 @@ async fn mesh_n3_full_webrtc_session_with_live_relay_floor() {
 
     // Per-recipient plans + the GLOBAL glare matrix: union of
     // (recipient, peer, initiate) must be total and antisymmetric, with the
-    // lexicographically smaller UUID initiating (Appendix E).
+    // lexicographically smaller UUID initiating (the deterministic offerer rule).
     let mut matrix: BTreeMap<(String, String), bool> = BTreeMap::new();
     for (index, who) in CLIENT_NAMES.iter().enumerate() {
         let plan = session_plan(run.window(index), who, "mesh", 2);
@@ -863,7 +863,7 @@ async fn mesh_n3_full_webrtc_session_with_live_relay_floor() {
         // Channel matrix: both labels from both peers = 12 receive events total.
         assert_exchange_received_from(&run.logs[index], who, &others);
         assert_exchange_sent_to(&run.logs[index], who, &others);
-        // Appendix G status + session-008 fan-out.
+        // Transport-fallback status + session-008 fan-out.
         assert_transport_status_true(&run.logs[index], who);
         assert_peer_status_fan_out(run.window(index), who, &others_true);
         // The relay floor carried GameData in the same session window as the
@@ -885,7 +885,7 @@ async fn host_star_n3_webrtc() {
     let client_ids: BTreeSet<&str> = run.other_ids(0);
 
     // Host plan: exactly the two clients, none of which the host offers to
-    // (clients offer to the host; the host answers all — Appendix E).
+    // (clients offer to the host; the host answers all — the host offerer rule).
     let host_plan = session_plan(run.window(0), CLIENT_NAMES[0], "host", 2);
     assert_eq!(
         str_field(host_plan, "host"),
@@ -1077,7 +1077,7 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
     }
 }
 
-/// Parse a player-id string as a UUID (for Appendix E glare-rule assertions).
+/// Parse a player-id string as a UUID (for deterministic-offerer assertions).
 fn uuid_of(id: &str) -> Uuid {
     Uuid::parse_str(id).unwrap_or_else(|error| panic!("player id {id} is not a UUID: {error}"))
 }

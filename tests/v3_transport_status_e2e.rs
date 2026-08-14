@@ -1053,7 +1053,7 @@ async fn peer_transport_status_v3_gated_not_capability_gated() {
     //   - MUST reach the relay-only v3 member (delivery is not gated on the
     //     recipient's own transport caps — it is informational about a PEER's
     //     data path), AND
-    //   - MUST NOT reach the v2 member (v3-gated per recipient, Appendix K).
+    //   - MUST NOT reach the v2 member (v3-gated per recipient).
     let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
     let addr = running_server.addr();
     let game = "tstatus-gating";

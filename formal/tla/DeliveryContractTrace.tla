@@ -1,6 +1,6 @@
 ------------------------- MODULE DeliveryContractTrace -------------------------
 (***************************************************************************)
-(* P10.D7 executable trace refinement for the reliable, single-FIFO       *)
+(* Executable trace refinement for the reliable, single-FIFO              *)
 (* delivery contract. GeneratedDeliveryContractTrace.tla supplies one or  *)
 (* more JSONL-derived traces. TLC chooses a trace in Init and replays only *)
 (* its next named action. If that action's guard is false, TNext is false  *)

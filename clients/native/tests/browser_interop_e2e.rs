@@ -614,14 +614,14 @@ fn assert_live_relay_floor(run: &ScenarioRun, index: usize) {
     assert_relay_floor_traffic(run.window(index), who, &expected);
 }
 
-/// Parse a player-id string as a UUID (for Appendix E glare-rule assertions).
+/// Parse a player-id string as a UUID (for deterministic-offerer assertions).
 fn uuid_of(id: &str) -> Uuid {
     Uuid::parse_str(id).unwrap_or_else(|error| panic!("player id {id} is not a UUID: {error}"))
 }
 
 /// The full mesh-N=3 assertion pack shared by scenarios 1, 2, and 5: glare
 /// matrix (total + antisymmetric + UUID rule), all pairs, the 12-message
-/// channel matrix, Appendix G statuses + fan-outs, and the live relay floor.
+/// channel matrix, transport-fallback statuses + fan-outs, and the live relay floor.
 fn assert_full_mesh_run(run: &ScenarioRun) {
     let mut matrix: BTreeMap<(String, String), bool> = BTreeMap::new();
     for (index, who) in CLIENT_NAMES.iter().enumerate() {
@@ -670,7 +670,7 @@ fn assert_full_mesh_run(run: &ScenarioRun) {
         // Channel matrix: both labels from both peers = 12 receive events total.
         assert_exchange_received_from(&run.logs[index], who, &others);
         assert_exchange_sent_to(&run.logs[index], who, &others);
-        // Appendix G status + fan-out.
+        // Transport-fallback status + fan-out.
         assert_transport_status_true(&run.logs[index], who);
         assert_peer_status_fan_out(run.window(index), who, &others_true);
         // The relay floor carried GameData in the same session window.
@@ -734,7 +734,7 @@ async fn host_star_n3_browser_client() {
     let client_ids: BTreeSet<&str> = run.other_ids(0);
 
     // Host plan: exactly the two clients, none of which the host offers to
-    // (clients offer to the host; the host answers all — Appendix E).
+    // (clients offer to the host; the host answers all — the host offerer rule).
     let host_plan = session_plan(run.window(0), CLIENT_NAMES[0], "host", 2);
     assert_eq!(
         str_field(host_plan, "host"),

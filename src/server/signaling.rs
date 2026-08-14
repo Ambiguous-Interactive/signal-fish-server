@@ -14,7 +14,7 @@
 //! overtake any recipient's plan.
 //!
 //! Every code path is gated on negotiated v3 (plus the WebRTC transport for
-//! `Signal`) so v2 clients never observe `Signal` or `SessionPlan` (Appendix K).
+//! `Signal`) so v2 clients never observe `Signal` or `SessionPlan` (the v3 gate).
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,7 +31,7 @@ use crate::protocol::{
 use super::session_policy::membership_session_decision;
 use super::EnhancedGameServer;
 
-/// Glare-avoidance offerer designation (Appendix E mesh rule).
+/// Glare-avoidance offerer designation (the deterministic mesh rule).
 ///
 /// For a pair of peers, exactly one side must send the offer. The local peer
 /// initiates iff its id sorts before the remote peer's id (UUID compare). This
@@ -163,7 +163,7 @@ impl EnhancedGameServer {
             return;
         };
 
-        // 3. Same-room enforcement (PLAN invariant #6 / Appendix I).
+        // 3. Same-room enforcement: signaling never crosses a room boundary.
         if from_room != to_room {
             self.reject_signal(
                 from,
@@ -194,8 +194,9 @@ impl EnhancedGameServer {
         //    chosen a peer that lacks the WebRTC transport, but enforce
         //    defense-in-depth: a sender that targets a v2 or v3-relay-only peer
         //    is told the target was not found rather than delivering a `Signal`
-        //    the target never opted into (Appendix K). Both `handle_signal`
-        //    gates (sender + target) are deliberately TRANSPORT-only, weaker
+        //    the target never opted into (the target's negotiated WebRTC
+        //    capability gate). Both `handle_signal` gates (sender + target) are
+        //    deliberately TRANSPORT-only, weaker
         //    than the full session predicate that gates `NewPeer` / plan peer
         //    lists: `Signal` relay is dumb plumbing between endpoints that both
         //    negotiated the transport, and it must not second-guess (or
@@ -756,7 +757,7 @@ impl EnhancedGameServer {
     /// Whether this connection can participate in targeted WebRTC signaling
     /// (negotiated v3 + the WebRTC transport).
     ///
-    /// This is `handle_signal`'s transport-level plumbing gate (Appendix K),
+    /// This is `handle_signal`'s transport-level v3 capability gate,
     /// deliberately weaker than the full sticky topology/transport predicate
     /// that shapes plan peer lists: the relay forwards signals between any two
     /// transport-capable endpoints without reinterpreting the plan.

@@ -35,16 +35,16 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/CapacityPermitLifecycle.tla` | P73's classified control-permit lifecycle: exact reservation accounting, producer liveness, terminal release, and commit-time scope validation |
 | `tla/RoomMessageTransaction.tla` | P74/P75's exact room-publication transaction: sparse production batches, pre-hook retry, final routing validation, durable hook, ordered phases, and degraded accounting |
 | `tla/RoomEventSequencer.tla` | P76's mutation-gate handoff: owned-job ordering, caller-cancellation immunity, panic recovery, and weak-registry generation safety |
-| `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
+| `tla/DeliveryContractTrace.tla` | Replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
 | `tla/SequencedRelayTrace.tla` | P98 receiver-observation refinement for production-shaped v3 sequencing JSONL traces; exact gaps, lifecycle epochs, and reconnect baselines replay fail-closed |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
 | `tla/ReconnectReplay.tla`     | v3 reconnect replay: faithful replay, honest status + the split-brain theorem      |
 | `tla/RoomLifecycleGC.tla`     | Room GC vs activity refresh + the reconnection-window guard (BUG-1)                |
 | `tla/SenderPacingReaper.tla`  | Sender-pacing vs the activity reaper: the timeout inversion, discrete-time (BUG-2) |
-| `tla/ControlPriorityDelivery.tla` | Spec-first for v3/P10.E2: control-priority queue split + sojourn eviction (liveness) |
-| `tla/DeliveryClasses.tla`     | Spec-first for v3/P10.E2: reliable/latest/volatile delivery classes + supersession accounting |
-| `tla/EndToEndGapAccountability.tla` | Flagship v3/P10.D4 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal (validates E5); exhaustive `_Small` + simulation `_Sim` |
+| `tla/ControlPriorityDelivery.tla` | Spec-first for v3 delivery: control-priority queue split + sojourn eviction (liveness) |
+| `tla/DeliveryClasses.tla`     | Spec-first for v3 reliable/latest/volatile delivery classes + supersession accounting |
+| `tla/EndToEndGapAccountability.tla` | Flagship v3 composition: end-to-end gap accountability over two senders + socket-buffer loss + reconnect snapshot heal; exhaustive `_Small` + simulation `_Sim` |
 | `tla/ReconnectLossBound.tla` | Additional disconnect/outage exposure: queue + all client-unobserved post-queue stages + burst/rate-bounded outage traffic; exhaustive `_Small` / `_ZeroWindow` + CI-pinned `_ExpectedFailure` |
 | `tla/ReconnectionClaimLifecycle.tla` | Atomic reconnect credential reservation: duplicate valid sockets, invalid identity, stale handles, expiry cleanup, restore failure, and one-time completion; exhaustive `_Small` + four CI-pinned expected failures |
 | `traces/slow-consumer-close-flush-invalid.jsonl` | Checked-in negative proving a slow-consumer close cannot enter the healthy lifecycle close-flush path |
@@ -72,7 +72,7 @@ bash scripts/run-tla-model-check.sh
 bash scripts/run-tla-model-check.sh --config Mesh
 bash scripts/run-tla-model-check.sh --config Host --verbose
 
-# P10.D7: capture the paused-clock delivery property corpus, then replay it.
+# Capture the paused-clock delivery property corpus, then replay it.
 : > /tmp/delivery.jsonl
 SIGNAL_FISH_DELIVERY_TRACE_PATH=/tmp/delivery.jsonl PROPTEST_CASES=32 \
   cargo test --locked --features trace-validation \
@@ -82,8 +82,8 @@ SIGNAL_FISH_DELIVERY_TRACE_PATH=/tmp/delivery.jsonl \
   --test e2e_tests test_websocket_connection -- --exact
 bash scripts/run-delivery-trace-validation.sh /tmp/delivery.jsonl
 
-# P98: replay the checked corpus and prove duplicate/regression, silent-gap,
-# backward-epoch, and late-lifecycle negatives.
+# Sequenced relay: replay the checked corpus and prove duplicate/regression,
+# silent-gap, backward-epoch, and late-lifecycle negatives.
 bash scripts/run-sequenced-relay-trace-validation.sh \
   formal/traces/sequenced-relay-replay.jsonl
 
@@ -97,7 +97,7 @@ version **and** SHA256 into `${XDG_CACHE_HOME:-~/.cache}/signal-fish/tla` (overr
 tampered jar never executes. CI runs both scripts via
 `.github/workflows/formal-verification.yml` (a `tlc` job and a `z3` job).
 
-## Delivery trace validation (P10.D7)
+## Delivery trace validation
 
 The trace pilot closes one deliberately narrow spec-to-code loop. With the
 internal `trace-validation` Cargo feature, a harness can attach one
@@ -163,11 +163,11 @@ and TLC evidence, and runs only for schedule/manual dispatch—not PRs. Parser,
 schema, feature compilation, action emission, and positive generator tests
 remain ordinary PR gates.
 
-## Sequenced-relay trace refinement (P98)
+## Sequenced-relay trace refinement
 
-P98 closes the second trace-validation target left by P10.D7. The two focused
-production scenarios construct a protocol-v3 `ConformanceAuditor` that writes
-a stable, payload-free receiver view when
+This contract closes the second trace-validation target left by the original
+pilot. The two focused production scenarios construct a protocol-v3
+`ConformanceAuditor` that writes a stable, payload-free receiver view when
 `SIGNAL_FISH_SEQUENCED_TRACE_PATH` is set. One auditor owns the path
 exclusively, and trace-enabled operations serialize validation with emission.
 The recorder observes only already-validated wire facts: counted initial
@@ -279,7 +279,7 @@ this table and may drift a few lines.
 | `TypeOK`                      | Variable domains; member list duplicate-free and within `max_players`                         |
 | `AuthorityIsCurrentMember`    | `remove_player_from_room` clears a departing authority                                        |
 | `PlanLegality`                | Only ladder rungs are ever stored; the relay floor is never stored (`is_valid_pair`)          |
-| `V2Gating`                    | Appendix K: no `SessionPlan` ever reaches a sub-v3 connection                                  |
+| `V2Gating`                    | No `SessionPlan` ever reaches a sub-v3 connection                                               |
 | `HostValid`                   | A stored host plan always names a current, session-capable member — a theorem of the atomic-event abstraction (see [Atomicity argument](#atomicity-argument)) |
 | `CeilingRespected`            | Stored topology rank never exceeds the desired ceiling (`topology_rank` gate)                 |
 | `PeerCapability`              | No current recipient's plan names itself or a member that cannot run the pair; immutable-capability scenarios also retain the stronger stale-plan check |
@@ -403,8 +403,8 @@ every dependent permit. The transaction's room-scoped routing read gate blocks n
 same-room sender replacement during that hook without excluding unrelated rooms.
 `RoomMessageTransaction.tla` nevertheless injects a
 synthetic permit-scope invalidation at the composition seam to verify that transaction
-accounting remains correct under P73's already-proved stale-permit cancellation lemma;
-it does not claim that invalidation is a normal routed lifecycle interleaving.
+accounting remains correct under the already-proved stale-permit cancellation
+lemma from `CapacityPermitLifecycle.tla`; it does not claim that invalidation is a normal routed lifecycle interleaving.
 
 `HostValid` is therefore a theorem of the process-local serialized event domain, not a
 claim about a future multi-node coordinator or an unavailable process. The widened
@@ -445,7 +445,7 @@ spurious deadlocks, so the spec adds an explicit `Done` self-loop action once th
 is exhausted; any remaining deadlock TLC reports is then a real modeling bug (a reachable
 mid-protocol state with no enabled action).
 
-### Tooling decisions (P10.D8)
+### Tooling decisions
 
 - **TLC-first (explicit-state), not Apalache-first.** Every model here is small and
   finite by construction (tiny budgets/caps), so exhaustive state enumeration is fast and
@@ -478,7 +478,7 @@ join-with-unknown-code **creates** the room (the `Ok(None)` create arm of
 `join_room_with_coordination` → `src/server/room_service.rs:519`), so the same
 room code presented to two instances behind a naive LB yields two independent
 live rooms — each with its own stamp counter, its own replay ring, and its own
-reconnection tokens (ARCH-10 in `PLAN.md`). The honest posture is therefore
+reconnection tokens. The honest posture is therefore
 **LB room-affinity** (one home per room; reconnects must land on that home),
 documented as doctrine — not multi-instance sharding.
 
@@ -506,13 +506,14 @@ session-lifecycle invariants in `SignalFishSession.tla` are likewise per-room an
 single-instance by the same construction. The multi-instance seams
 (`DedupCache`, the in-memory "distributed lock", `should_process_message`) are
 dead stubs today; the deliberate single-node CP stance and the LB room-affinity
-requirement are the subject of the `F1` doctrine page in `PLAN.md`.
+requirement are documented in
+[`docs/architecture/single-instance-deployment.md`](../docs/architecture/single-instance-deployment.md).
 
 ## Timing theorem (sender pacing vs the activity reaper)
 
-`SenderPacingReaper.tla` (P10.D3) is the repo's first **discrete-time** model
-(Appendix-O house rule: an integer `now` + a `Tick` action, timers as
-absolute-deadline guards). It pins **BUG-2**, the timeout inversion the P10.A2
+`SenderPacingReaper.tla` is the repo's first **discrete-time** model
+(house rule: an integer `now` + a `Tick` action, timers as
+absolute-deadline guards). It pins **BUG-2**, the timeout inversion the
 config cross-field check prevents: a message handler records a sender's activity
 at dispatch, then — still on the same task — does a throttled room refresh
 (`maybe_update_last_seen`, a DB write + `rooms` write-lock) and parks on the
@@ -550,11 +551,11 @@ against the provable inversion region, not a liveness proof under unbounded load
 
 ## Delivery-revision spec-first (control priority + sojourn)
 
-`ControlPriorityDelivery.tla` is **spec-first** for the protocol-v3 P10.E2
+`ControlPriorityDelivery.tla` is **spec-first** for the protocol-v3
 delivery revision — it is merged BEFORE the code and pins the two properties the
 queue split must satisfy, composing with the #131 `DeliveryContract.tla`
 substrate rather than re-deriving it. Frames are modeled by CLASS (data | ctrl)
-and carry a discrete AGE (the Appendix-O `now`/`Tick` convention, sojourn as an
+and carry a discrete AGE (the `now`/`Tick` convention, sojourn as an
 absolute-age guard). The writer (the peer draining) is deliberately UNFAIR.
 
 | Property | What it pins | Seeded bug (checked `FALSE`) → result |
@@ -573,7 +574,7 @@ exactly what makes the sojourn close load-bearing.
 
 ## Delivery classes (reliable / latest / volatile)
 
-`DeliveryClasses.tla` is the second **spec-first** module for P10.E2 (with
+`DeliveryClasses.tla` is the second **spec-first** delivery-classes module (with
 `ControlPriorityDelivery.tla`), pinning the per-class and wire-accountability
 contract before the code. One recipient observes one sender whose globally
 monotone `seq` spans all three classes and at least two latest keys. This matters:
@@ -644,7 +645,7 @@ invariants pin the two production obligations on that reachable branch.
 
 ## End-to-end gap accountability (flagship composition)
 
-`EndToEndGapAccountability.tla` (P10.D4) is the **flagship** module: it composes
+`EndToEndGapAccountability.tla` is the **flagship** module: it composes
 three previously separate contracts — `SequencedRelay.tla` (per-`(sender, room)`
 contiguous stamping + every-gap-bracketed accountability), `ReconnectReplay.tla`
 (the bounded replay ring + eviction watermark), and `ConnectionTeardown` (a
@@ -652,7 +653,7 @@ slow-consumer eviction that abandons a recipient's queued messages) — into one
 behavior and proves the **client-facing** promise: driven only by what the server
 puts on its socket, a client can classify every sequence discontinuity it ever
 observes, and the reconnection snapshot heals the tail the server dropped when it
-evicted the client. This is the executable proof of the P10.E5 client-SDK
+evicted the client. This is the executable proof of the reconnect-watermark client-SDK
 re-baseline obligation.
 
 Topology is deliberately **one recipient observing two senders**. Two senders is
@@ -798,11 +799,11 @@ parser error, or unrelated failure cannot make the non-vacuity gates pass.
 ## Exact room-message transaction
 
 `RoomMessageTransaction.tla` composes those permits inside
-`commit_room_messages_if_members_with_hook`. P74 first checked the symmetric
-two-recipient/two-frame transaction. P75 retains that maximum bound but chooses
-each recipient's frame plan independently from every subset of the two phases,
-excluding only an all-empty transaction. The two-recipient run therefore
-checks all 15 labeled nonempty plans (nine up to recipient symmetry): solo and
+`commit_room_messages_if_members_with_hook`. The model first checked the
+symmetric two-recipient/two-frame transaction, then retained that maximum bound
+while choosing each recipient's frame plan independently from every subset of
+the two phases, excluding only an all-empty transaction. The two-recipient run
+therefore checks all 15 labeled nonempty plans (nine up to recipient symmetry): solo and
 mixed one-phase plans, phase-one-only plans, full plans, and identity-only
 members beside any nonempty plan. An empty member consumes no queue capacity
 but remains in the final exact route and sender-generation validation.

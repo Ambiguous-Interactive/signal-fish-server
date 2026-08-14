@@ -209,7 +209,7 @@ async fn authenticate_v3_full(ws: &mut WsStream) {
 }
 
 /// Authenticate as a v3 client that negotiated the webrtc transport but only
-/// the relay topology — session-incapable of any webrtc rung (Appendix D).
+/// the relay topology — session-incapable of any WebRTC selection rung.
 async fn authenticate_v3_relay_topology_only(ws: &mut WsStream) {
     authenticate(
         ws,

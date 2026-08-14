@@ -49,7 +49,9 @@ The client drives `webrtc` 0.20 itself (one peer connection per planned peer, `r
 serialization of webrtc-rs's `RTCIceCandidateInit` — exactly what `matchbox_socket` emits. Going direct rather
 than through `matchbox_socket` is deliberate:
 
-- the conformance harness needs full control over the v3 surface `matchbox_socket` does not model — Appendix G
+- the conformance harness needs full control over the v3 surface
+  `matchbox_socket` does not model — the
+  [transport-fallback contract](../architecture/transport-fallback.md):
   `TransportStatus` reporting, fallback engagement, per-recipient glare assertions, deterministic ICE crippling
   for fallback scenarios, protocol-version downshift to pure v2;
 - compatibility with `matchbox_socket` remains a wire contract rather than a
@@ -77,7 +79,7 @@ the version-less path dependency). CI audits it via a dedicated cargo-deny job i
 `clients/native/tests/interop_e2e.rs` spawns the **real server binary** (located via the environment variable
 documented in the client README and exported by `scripts/run-webrtc-interop.sh`) and N real client processes per
 scenario, then asserts over their drained JSONL event logs: glare-matrix antisymmetry, the
-full per-channel message matrix, Appendix G status resolution and fan-out, relay-floor liveness during P2P,
+full per-channel message matrix, transport-fallback status resolution and fan-out, relay-floor liveness during P2P,
 crippled-ICE fallback, late-join (seat-fill) full-plan refreshes, and mixed v2/v3 relay-floor rooms. Everything is
 deadline-bounded; there are no sleeps-as-synchronization.
 

@@ -596,7 +596,7 @@ async fn overflowed_replay_ring_reports_truncated() {
 }
 
 // ---------------------------------------------------------------------------
-// H7 (P10.C): a truncated replay still hands the reconnector a COMPLETE room
+// H7: a truncated replay still hands the reconnector a COMPLETE room
 //    snapshot, so it can resync app state even though the event log was lost.
 //    Pre-registered prediction: "membership + authority recoverable; ready-state
 //    and spectator roster are LIKELY HOLES in ReconnectedPayload." Result:

@@ -1,6 +1,6 @@
 ---------------------- MODULE RoomMessageTransaction ----------------------
 (***************************************************************************)
-(* Exact-membership, two-phase room-message transaction (P75).             *)
+(* Exact-membership, two-phase room-message transaction.                   *)
 (*                                                                         *)
 (* The model bounds production at one or two recipients and two phases.    *)
 (* framePlan is chosen nondeterministically from every per-recipient subset *)
@@ -89,7 +89,7 @@ VARIABLES
     unavailableResults,       \* closed/slow sibling results joined with Canceled
     staleCancellationObserved,
     queueOpen,                \* receiver can close during the async hook
-    permitGeneration,         \* synthetic import of P73 stale-permit behavior
+    permitGeneration,         \* synthetic import of stale-permit behavior
     frameState,               \* lifecycle of each recipient/phase frame
     reservedSlots,            \* queue capacity claims held by permits
     permitProducers,          \* permit-backed producer capabilities

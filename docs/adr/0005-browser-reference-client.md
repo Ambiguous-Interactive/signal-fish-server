@@ -40,7 +40,7 @@ The package builds two esbuild bundles from one strict-TypeScript source tree:
 
 - **`dist/page.js`** (IIFE, injected into the page): WebSocket wire + the v3 protocol state machine + the
   `RTCPeerConnection` engine — a faithful port of the native client's orchestrator (same ready-barrier gating,
-  server-owned initiator roles, Appendix G one-shot transport status, success criteria, and event ordering via a
+  server-owned initiator roles, one-shot transport-fallback status, success criteria, and event ordering via a
   single serialized input chain).
 - **`dist/cli.js`** (Node ESM, the process entrypoint): argv parsing (the native client's flag surface plus
   `--mdns-obfuscation`), Chromium launch, `page.exposeFunction` stdout bridge (pure JSONL; Chromium and

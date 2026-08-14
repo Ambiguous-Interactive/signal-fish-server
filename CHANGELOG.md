@@ -104,6 +104,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Decide reconnect eligibility from one monotonic deadline captured at the
+  genuine disconnect. A host clock adjustment — an NTP step, a manual
+  correction, or a suspend/resume — can no longer expire a live reconnector
+  early or keep an elapsed one claimable, and validation, claiming, expiry
+  cleanup, and room-GC protection can no longer disagree at the boundary. A
+  reconnect attempt after the window elapses now reports the documented
+  `RECONNECTION_EXPIRED`; previously the token's own wall-clock expiry, armed
+  to the same instant, masked it as `RECONNECTION_TOKEN_INVALID`, so clients
+  could not tell a closed window from a bad credential. Reported
+  `disconnected_at` and token timestamps are unchanged (issue #373).
+- Keep duplicate same-room disconnect registration from extending a reconnect
+  deadline, reopening an active single-use claim, or consuming the replacement
+  connection's next token, including when late teardown overlaps an already
+  reserved reconnect (issue #372).
 - Prevent slow or contended Miri safety runs from spuriously failing rate-limit
   preflight accounting when the 100-millisecond unit fixture expires between
   assertions. Asynchronous rate-limit assertion sequences now use paused virtual

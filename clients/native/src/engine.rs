@@ -1,7 +1,7 @@
 //! WebRTC engine: one `RTCPeerConnection` per remote peer, two data channels
 //! per pair, trickle ICE relayed through the server's opaque `Signal` envelope.
 //!
-//! # Protocol steps implemented here (PLAN Appendix E/G, ADR-0002)
+//! # Protocol steps implemented here (`docs/protocol.md`, ADR-0002)
 //!
 //! - **Initiator rule comes only from the server** (`SessionPlan.peers[].initiate`
 //!   / `NewPeer.you_initiate`) — the engine never recomputes glare locally.

@@ -1,5 +1,5 @@
 //! End-to-end protocol v3 ICE pre-gather tests through the real WebSocket stack
-//! (PLAN §P4's deferred "RoomJoined ICE pre-gather" refinement).
+//! (the `RoomJoined` ICE pre-gather contract in `docs/protocol.md`).
 //!
 //! An eligible v3 client — one that negotiated the WebRTC transport and the
 //! game's desired topology — joining (or reconnecting into) a non-finalized

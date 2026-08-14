@@ -30,6 +30,9 @@ serde_json = "1.0"
 rmp-serde = "1.3"
 # Structured op-sequence fuzzing (fuzz_session_machine, fuzz_reconnect_tokens).
 arbitrary = { version = "1", features = ["derive"] }
+# `fuzz_reconnect_tokens` builds the `PlayerInfo` records it hands the manager,
+# whose `connected_at` is a `chrono` timestamp.
+chrono = "0.4"
 # The state-machine targets drive the async in-process server core; each input
 # runs on a fresh current-thread runtime so background tasks cannot accumulate
 # across libFuzzer iterations.

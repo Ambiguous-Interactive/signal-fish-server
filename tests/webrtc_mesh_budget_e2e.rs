@@ -1,4 +1,4 @@
-//! P10.C empirical native WebRTC topology/size and H8 signal-budget experiments.
+//! Empirical native WebRTC topology/size and H8 signal-budget experiments.
 //!
 //! The nightly real-process matrix covers clean mesh and host topologies at
 //! N=2/8/16, one exact N=3 pairwise ICE partition, and fail-loud 1% `tc netem`

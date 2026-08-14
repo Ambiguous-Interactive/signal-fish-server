@@ -8,8 +8,8 @@ own `deny.toml`, its own CI job — so the server crate's MSRV build, lockfile, 
 and the root `Cargo.toml` excludes the whole `clients/` tree from `cargo package`, so the published server crate
 ships none of it. (The root panic/timeout policy scans do walk the client sources. The native fixtures track the
 server MSRV; the Godot/WASM fixture declares the higher floor required by its exact released adapter.)
-See [ADR-0004](../docs/adr/0004-native-reference-client.md) for the full rationale and PLAN.md P7 for the roadmap
-context.
+See [ADR-0004](../docs/adr/0004-native-reference-client.md) for the full rationale and
+[the platform integration guide](../docs/guides/platform-integration.md) for the support roadmap.
 
 ## Clients
 

@@ -172,7 +172,7 @@ pub async fn relay_one_signal(
 /// Assert the GLOBAL mesh glare matrix over per-recipient plans: each plan
 /// lists exactly the other members, and for every unordered pair `{a, b}`
 /// exactly one side has `initiate: true` — the side with the smaller UUID
-/// (the documented Appendix E rule).
+/// (the documented deterministic offerer rule).
 ///
 /// Mesh `SessionPeer.is_authority` mirrors the stored member flag, which in
 /// turn mirrors the room's `authority_player`. The conformance suites create

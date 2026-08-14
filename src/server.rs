@@ -3165,7 +3165,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         // Keep the uncontended borrowed handoff's boxed trait future compact:
         // routing/map guards live only inside the synchronous helper. The
         // larger wait state is boxed only on actual contention, preserving the
-        // checked-in P71 allocation-byte ceiling in the healthy path.
+        // checked-in allocation-byte ceiling in the healthy path.
         match self.try_borrowed_room_broadcast(room_id, except_player, build_message) {
             ImmediateGameDataBroadcast::Complete => {}
             ImmediateGameDataBroadcast::Pending(finish) => finish.await,

@@ -10,7 +10,9 @@ use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 /// Why a reconnection attempt was rejected.
@@ -112,9 +114,24 @@ impl ReconnectionToken {
         Utc::now() > self.expires_at
     }
 
-    /// Check if token is valid for given player and room
+    /// Check if token is valid for given player and room.
+    ///
+    /// Combines the binding with this token's own wall-clock expiry, so it is a
+    /// convenience for embedders rather than the server's admission decision:
+    /// the manager admits a reconnect on the binding plus its own monotonic
+    /// deadline, captured at the disconnect.
     pub fn is_valid(&self, player_id: &PlayerId, room_id: &RoomId) -> bool {
         !self.is_expired() && self.player_id == *player_id && self.room_id == *room_id
+    }
+
+    /// Whether the token is bound to exactly this player and room.
+    ///
+    /// The manager checks the binding here and elapsed time against its own
+    /// monotonic deadline, so an elapsed window is reported as
+    /// [`ReconnectionError::WindowExpired`] rather than being masked by the
+    /// token's wall-clock `expires_at` (which lands at the same instant).
+    fn matches_binding(&self, player_id: &PlayerId, room_id: &RoomId) -> bool {
+        self.player_id == *player_id && self.room_id == *room_id
     }
 }
 
@@ -135,6 +152,23 @@ fn expiration_from_unsigned(now: DateTime<Utc>, validity_seconds: u64) -> DateTi
         return DateTime::<Utc>::MAX_UTC;
     };
     expiration_from_signed(now, validity_seconds)
+}
+
+/// A reconnect window opened at `now` closes at this MONOTONIC instant.
+///
+/// Reconnect eligibility must not move when the wall clock does: an NTP step,
+/// a manual clock correction, or a host suspend/resume would otherwise expire a
+/// live reconnector early or keep an elapsed one claimable. The UTC timestamps
+/// on the record and its token are retained verbatim for diagnostics and wire
+/// compatibility; only this deadline decides eligibility.
+///
+/// Saturates rather than panicking: an absurd configured window becomes a
+/// practically unreachable deadline instead of an overflow.
+fn monotonic_deadline(now: Instant, window_seconds: u64) -> Instant {
+    const SATURATED_WINDOW: StdDuration = StdDuration::from_secs(100 * 365 * 24 * 60 * 60);
+    now.checked_add(StdDuration::from_secs(window_seconds))
+        .or_else(|| now.checked_add(SATURATED_WINDOW))
+        .unwrap_or(now)
 }
 
 /// Event buffer for a room
@@ -264,22 +298,27 @@ pub struct DisconnectedPlayer {
 struct PreservedPending {
     token: String,
     token_created_at: DateTime<Utc>,
+    token_expires_at: DateTime<Utc>,
+    disconnected_at: DateTime<Utc>,
     identity: Option<Arc<str>>,
     last_sequence: u64,
     last_epoch: u32,
     was_authority: bool,
     player_info: Option<PlayerInfo>,
+    /// The monotonic reconnect deadline captured at the FIRST disconnect. A
+    /// duplicate teardown is not a new disconnect, so it must not restart it.
+    deadline: Instant,
 }
 
 impl DisconnectedPlayer {
-    /// Check if reconnection window has expired
+    /// Whether `window_seconds` has elapsed since the captured wall-clock
+    /// disconnect instant.
+    ///
+    /// Diagnostic only. The manager decides real reconnect eligibility from a
+    /// monotonic deadline captured at the genuine disconnect, so this answer
+    /// can differ from the server's after a wall-clock adjustment.
     pub fn is_expired(&self, window_seconds: i64) -> bool {
         let expiry = expiration_from_signed(self.disconnected_at, window_seconds);
-        Utc::now() > expiry
-    }
-
-    fn is_expired_with_unsigned_window(&self, window_seconds: u64) -> bool {
-        let expiry = expiration_from_unsigned(self.disconnected_at, window_seconds);
         Utc::now() > expiry
     }
 }
@@ -289,6 +328,23 @@ struct ReconnectionRecord {
     disconnected: DisconnectedPlayer,
     identity: Option<Arc<str>>,
     claim: Option<ReconnectionClaimState>,
+    /// The single monotonic instant after which this record's reconnect window
+    /// is closed. Captured once per GENUINE disconnect and carried verbatim
+    /// through duplicate same-room registration, so a repeated teardown cannot
+    /// extend it and a wall-clock jump cannot move it.
+    deadline: Instant,
+}
+
+impl ReconnectionRecord {
+    /// Whether the reconnect window is closed at `now`.
+    ///
+    /// Exactly at the deadline the record is still claimable; only a strictly
+    /// later instant closes it. Every eligibility decision — validation,
+    /// claiming, expiry cleanup, and room-GC protection — asks this one
+    /// question, so those four can never disagree at a boundary.
+    fn window_closed_at(&self, now: Instant) -> bool {
+        now > self.deadline
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -544,14 +600,6 @@ impl ReconnectionManager {
         last_epoch: u32,
         identity: Option<Arc<str>>,
     ) -> String {
-        // Reuse the token STRING pre-issued at join (the client already holds
-        // it — issue #136, F4), re-stamping its expiry so the reconnect gate
-        // stays "window seconds from THIS disconnect". A missing or
-        // wrong-room entry falls back to minting fresh (embedders that never
-        // pre-issue keep the old disconnect-time semantics; such a token is
-        // unclaimable by an honest client, exactly as before).
-        let pre_issued = self.pre_issued.write().await.remove(&player_id);
-
         let mut state = self.replay_state.write().await;
         let fresh_last_sequence = state.next_sequence;
 
@@ -569,14 +617,52 @@ impl ReconnectionManager {
             .map(|existing| PreservedPending {
                 token: existing.disconnected.token.token.clone(),
                 token_created_at: existing.disconnected.token.created_at,
+                token_expires_at: existing.disconnected.token.expires_at,
+                disconnected_at: existing.disconnected.disconnected_at,
                 identity: existing.identity.clone(),
                 last_sequence: existing.disconnected.last_sequence,
                 last_epoch: existing.disconnected.last_epoch,
                 was_authority: existing.disconnected.was_authority,
                 player_info: existing.disconnected.player_info.clone(),
+                deadline: existing.deadline,
             });
 
+        // A late teardown from the replaced socket may overlap an in-flight
+        // reconnect. Once the credential is claimed, registration is a strict
+        // no-op: replacing the record would reopen the single-use credential,
+        // invalidate the original claim handle, and could consume the freshly
+        // pre-issued token for the replacement connection's next disconnect.
+        if let Some(existing) = existing_same_room.as_ref() {
+            if state
+                .disconnected_players
+                .get(&player_id)
+                .is_some_and(|record| record.claim.is_some())
+            {
+                return existing.token.clone();
+            }
+        }
+
+        // Reuse the token STRING pre-issued at join (the client already holds
+        // it — issue #136, F4), re-stamping its expiry so the reconnect gate
+        // stays "window seconds from THIS disconnect". A duplicate same-room
+        // registration already has an armed record and must not remove a token
+        // rotated for the replacement connection. A missing or wrong-room
+        // entry falls back to minting fresh (embedders that never pre-issue keep
+        // the old disconnect-time semantics; such a token is unclaimable by an
+        // honest client, exactly as before). The replay-state -> pre-issued
+        // lock order is unique to registration; no path holds the latter while
+        // awaiting the former.
+        let pre_issued = if existing_same_room.is_none() {
+            self.pre_issued.write().await.remove(&player_id)
+        } else {
+            None
+        };
+
+        // Both clocks are read at the same moment: the UTC captures stay the
+        // human-readable record, while the monotonic instant anchors the only
+        // deadline that decides eligibility.
         let now = Utc::now();
+        let monotonic_now = Instant::now();
         // Token, in preference order: (1) the token from an existing same-room
         // pending record — the FIRST registration already consumed the
         // pre-issued entry, so minting fresh here would overwrite the record
@@ -591,7 +677,7 @@ impl ReconnectionManager {
                     player_id,
                     room_id,
                     created_at: existing.token_created_at,
-                    expires_at: expiration_from_unsigned(now, self.reconnection_window),
+                    expires_at: existing.token_expires_at,
                 },
                 existing.identity.clone(),
                 false,
@@ -664,7 +750,9 @@ impl ReconnectionManager {
             disconnected: DisconnectedPlayer {
                 player_id,
                 room_id,
-                disconnected_at: Utc::now(),
+                disconnected_at: existing_same_room
+                    .as_ref()
+                    .map_or(now, |existing| existing.disconnected_at),
                 token,
                 last_sequence,
                 was_authority,
@@ -673,6 +761,10 @@ impl ReconnectionManager {
             },
             identity: credential_identity,
             claim: None,
+            deadline: existing_same_room.as_ref().map_or_else(
+                || monotonic_deadline(monotonic_now, self.reconnection_window),
+                |existing| existing.deadline,
+            ),
         };
         let previous = state.disconnected_players.insert(player_id, record);
         // A re-registration from a NEW room replaces the old pending record.
@@ -761,12 +853,12 @@ impl ReconnectionManager {
             return Err(ReconnectionError::TokenMismatch);
         }
 
-        if !player.token.is_valid(player_id, room_id) {
+        if !player.token.matches_binding(player_id, room_id) {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::TokenInvalid);
         }
 
-        if player.is_expired_with_unsigned_window(self.reconnection_window) {
+        if record.window_closed_at(Instant::now()) {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::WindowExpired);
         }
@@ -830,12 +922,12 @@ impl ReconnectionManager {
             return Err(ReconnectionError::TokenMismatch);
         }
 
-        if !player.token.is_valid(player_id, room_id) {
+        if !player.token.matches_binding(player_id, room_id) {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::TokenInvalid);
         }
 
-        if player.is_expired_with_unsigned_window(self.reconnection_window) {
+        if record.window_closed_at(Instant::now()) {
             self.metrics.increment_reconnection_validation_failure();
             return Err(ReconnectionError::WindowExpired);
         }
@@ -1085,17 +1177,13 @@ impl ReconnectionManager {
     /// Snapshot expired, unclaimed reconnect records that require durable room
     /// cleanup before their reservation can be discarded.
     pub async fn expired_cleanup_candidates(&self) -> Vec<(PlayerId, RoomId)> {
+        let now = Instant::now();
         self.replay_state
             .read()
             .await
             .disconnected_players
             .iter()
-            .filter(|(_, record)| {
-                record.claim.is_none()
-                    && record
-                        .disconnected
-                        .is_expired_with_unsigned_window(self.reconnection_window)
-            })
+            .filter(|(_, record)| record.claim.is_none() && record.window_closed_at(now))
             .map(|(player_id, record)| (*player_id, record.disconnected.room_id))
             .collect()
     }
@@ -1104,15 +1192,11 @@ impl ReconnectionManager {
     /// caller completed its durable cleanup. Returns whether it was removed.
     pub async fn remove_expired_reconnection(&self, player_id: &PlayerId) -> bool {
         let mut state = self.replay_state.write().await;
+        let now = Instant::now();
         let removable = state
             .disconnected_players
             .get(player_id)
-            .is_some_and(|record| {
-                record.claim.is_none()
-                    && record
-                        .disconnected
-                        .is_expired_with_unsigned_window(self.reconnection_window)
-            });
+            .is_some_and(|record| record.claim.is_none() && record.window_closed_at(now));
         if !removable {
             return false;
         }
@@ -1146,11 +1230,9 @@ impl ReconnectionManager {
         let initial_count = state.disconnected_players.len();
         let mut expired_rooms = Vec::new();
 
+        let now = Instant::now();
         state.disconnected_players.retain(|player_id, record| {
-            let expired = record.claim.is_none()
-                && record
-                    .disconnected
-                    .is_expired_with_unsigned_window(self.reconnection_window);
+            let expired = record.claim.is_none() && record.window_closed_at(now);
             if expired {
                 tracing::info!(%player_id, "Removing expired reconnection record");
                 expired_rooms.push(record.disconnected.room_id);
@@ -1214,16 +1296,13 @@ impl ReconnectionManager {
     /// unclaimed records both protect, since an in-flight claim still needs
     /// the room to exist.
     pub async fn rooms_with_active_reconnections(&self) -> HashSet<RoomId> {
-        let window = self.reconnection_window;
+        let now = Instant::now();
         self.replay_state
             .read()
             .await
             .disconnected_players
             .values()
-            .filter(|record| {
-                record.claim.is_some()
-                    || !record.disconnected.is_expired_with_unsigned_window(window)
-            })
+            .filter(|record| record.claim.is_some() || !record.window_closed_at(now))
             .map(|record| record.disconnected.room_id)
             .collect()
     }
@@ -1458,7 +1537,7 @@ mod tests {
     /// storage or room-lane work is still in flight. Room GC must therefore
     /// continue protecting the empty room until the claim completes or is
     /// released.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn claimed_reconnection_remains_gc_protected_after_original_window() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = ReconnectionManager::new(300, 100, metrics);
@@ -1474,15 +1553,7 @@ mod tests {
             .await
             .expect("the still-valid reconnect is admitted and claimed");
 
-        manager
-            .replay_state
-            .write()
-            .await
-            .disconnected_players
-            .get_mut(&player_id)
-            .expect("claimed record remains pending")
-            .disconnected
-            .disconnected_at = Utc::now() - Duration::seconds(301);
+        tokio::time::advance(StdDuration::from_secs(301)).await;
 
         let protected = manager.rooms_with_active_reconnections().await;
         assert!(
@@ -1614,7 +1685,7 @@ mod tests {
         assert!(!manager.has_pending_reconnection(&player_id).await);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_reconnection_cleanup_updates_active_session_gauge() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = ReconnectionManager::new(1, 100, Arc::clone(&metrics));
@@ -1623,14 +1694,7 @@ mod tests {
         let _token = manager
             .register_disconnection(player_id, room_id, false, None, 0)
             .await;
-        {
-            let mut state = manager.replay_state.write().await;
-            let record = state
-                .disconnected_players
-                .get_mut(&player_id)
-                .expect("registered disconnection record exists");
-            record.disconnected.disconnected_at = Utc::now() - Duration::seconds(5);
-        }
+        tokio::time::advance(StdDuration::from_secs(5)).await;
 
         assert_eq!(
             metrics.reconnection_sessions_active.load(Ordering::Relaxed),
@@ -1835,7 +1899,7 @@ mod tests {
         assert!(!missed.truncated);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn last_expiry_cleanup_cannot_delete_a_new_registration_gate() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = Arc::new(ReconnectionManager::new(1, 100, Arc::clone(&metrics)));
@@ -1845,14 +1909,11 @@ mod tests {
         manager
             .register_disconnection(expired_player, room_id, false, None, 0)
             .await;
+        tokio::time::advance(StdDuration::from_secs(5)).await;
 
-        let mut state_guard = manager.replay_state.write().await;
-        state_guard
-            .disconnected_players
-            .get_mut(&expired_player)
-            .expect("expired player remains pending")
-            .disconnected
-            .disconnected_at = Utc::now() - Duration::seconds(5);
+        // Hold the write lock so the spawned sweep parks on it and the new
+        // registration can be ordered against it deterministically.
+        let state_guard = manager.replay_state.write().await;
 
         let cleanup_started = Arc::new(Notify::new());
         let cleanup = {
@@ -1983,6 +2044,277 @@ mod tests {
         assert!(
             claim.is_ok(),
             "the join-time token must stay claimable after re-registration: {claim:?}"
+        );
+    }
+
+    /// Every eligibility surface reads the same monotonic deadline, so all of
+    /// them are live at exactly the deadline and all of them are closed one
+    /// tick later. A record still claimable at its exact deadline must not be
+    /// nominated for cleanup or dropped from room-GC protection, and the
+    /// elapsed window must surface as `WindowExpired` — not as the
+    /// token's own wall-clock expiry, which lands at the same instant.
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_eligibility_flips_once_at_the_monotonic_deadline() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+
+        for (label, step) in [
+            (
+                "one second before the deadline",
+                StdDuration::from_secs(299),
+            ),
+            ("exactly at the deadline", StdDuration::from_secs(1)),
+        ] {
+            tokio::time::advance(step).await;
+            assert!(
+                manager
+                    .validate_reconnection(&player_id, &room_id, &token)
+                    .await
+                    .is_ok(),
+                "{label}: validation must still admit the record"
+            );
+            assert!(
+                manager
+                    .rooms_with_active_reconnections()
+                    .await
+                    .contains(&room_id),
+                "{label}: room GC must still spare the room"
+            );
+            assert!(
+                manager.expired_cleanup_candidates().await.is_empty(),
+                "{label}: cleanup must not nominate the record"
+            );
+        }
+
+        tokio::time::advance(StdDuration::from_millis(1)).await;
+        assert_eq!(
+            manager
+                .validate_reconnection(&player_id, &room_id, &token)
+                .await
+                .expect_err("the window closed"),
+            ReconnectionError::WindowExpired,
+            "an elapsed window is RECONNECTION_EXPIRED, not a token rejection"
+        );
+        assert!(
+            !manager
+                .rooms_with_active_reconnections()
+                .await
+                .contains(&room_id),
+            "past the deadline the room loses reconnection protection"
+        );
+        assert_eq!(
+            manager.expired_cleanup_candidates().await,
+            vec![(player_id, room_id)],
+            "past the deadline the record is a cleanup candidate"
+        );
+        assert_eq!(manager.cleanup_expired().await, 1);
+    }
+
+    /// The deadline is monotonic, so no wall-clock adjustment can move it in
+    /// either direction. Both cases rewrite every UTC field the eligibility
+    /// decision used to read.
+    #[tokio::test(start_paused = true)]
+    async fn wall_clock_jumps_cannot_open_or_close_the_reconnect_window() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+
+        // A forward jump of a day ages both UTC captures far past the window.
+        {
+            let mut state = manager.replay_state.write().await;
+            let disconnected = &mut state
+                .disconnected_players
+                .get_mut(&player_id)
+                .expect("pending record")
+                .disconnected;
+            disconnected.disconnected_at = Utc::now() - Duration::days(1);
+            disconnected.token.expires_at = Utc::now() - Duration::days(1);
+        }
+        assert!(
+            manager
+                .validate_reconnection(&player_id, &room_id, &token)
+                .await
+                .is_ok(),
+            "a forward wall-clock jump must not close a live reconnect window"
+        );
+        assert!(
+            manager.expired_cleanup_candidates().await.is_empty(),
+            "a forward wall-clock jump must not make the record collectable"
+        );
+
+        // A backward jump cannot resurrect a genuinely elapsed window.
+        tokio::time::advance(StdDuration::from_secs(301)).await;
+        {
+            let mut state = manager.replay_state.write().await;
+            let disconnected = &mut state
+                .disconnected_players
+                .get_mut(&player_id)
+                .expect("pending record")
+                .disconnected;
+            disconnected.disconnected_at = Utc::now() + Duration::days(1);
+            disconnected.token.expires_at = Utc::now() + Duration::days(1);
+        }
+        assert_eq!(
+            manager
+                .validate_reconnection(&player_id, &room_id, &token)
+                .await
+                .expect_err("the monotonic window elapsed"),
+            ReconnectionError::WindowExpired,
+            "a backward wall-clock jump must not reopen an elapsed window"
+        );
+    }
+
+    /// Registration only opens a NEW monotonic window for a genuine disconnect.
+    /// A duplicate same-room teardown carries the original deadline forward; a
+    /// different-room registration is a new disconnect and starts a fresh one.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_genuine_disconnect_opens_a_new_monotonic_window() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let other_room = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+
+        tokio::time::advance(StdDuration::from_secs(200)).await;
+        let duplicate = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+        assert_eq!(duplicate, token, "a duplicate teardown reuses the token");
+
+        tokio::time::advance(StdDuration::from_secs(100)).await;
+        assert!(
+            manager
+                .validate_reconnection(&player_id, &room_id, &token)
+                .await
+                .is_ok(),
+            "the original deadline is exactly here, so the record is still live"
+        );
+        tokio::time::advance(StdDuration::from_millis(1)).await;
+        assert_eq!(
+            manager
+                .validate_reconnection(&player_id, &room_id, &token)
+                .await
+                .expect_err("the original window elapsed"),
+            ReconnectionError::WindowExpired,
+            "a duplicate teardown must not extend the original window"
+        );
+
+        let replacement = manager
+            .register_disconnection(player_id, other_room, false, None, 0)
+            .await;
+        tokio::time::advance(StdDuration::from_secs(300)).await;
+        assert!(
+            manager
+                .validate_reconnection(&player_id, &other_room, &replacement)
+                .await
+                .is_ok(),
+            "a different-room registration is a genuine disconnect with a fresh window"
+        );
+        tokio::time::advance(StdDuration::from_millis(1)).await;
+        assert_eq!(
+            manager
+                .validate_reconnection(&player_id, &other_room, &replacement)
+                .await
+                .expect_err("the replacement window elapsed"),
+            ReconnectionError::WindowExpired,
+            "the fresh window closes exactly one window after the replacement"
+        );
+    }
+
+    /// A duplicate teardown is not a new disconnect and therefore cannot
+    /// extend either deadline exposed by the pending record.
+    #[tokio::test]
+    async fn same_room_reregistration_preserves_original_disconnect_deadline() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        let (original_disconnected_at, original_token_expiry) = {
+            let mut state = manager.replay_state.write().await;
+            let disconnected = &mut state
+                .disconnected_players
+                .get_mut(&player)
+                .expect("pending disconnect")
+                .disconnected;
+            disconnected.disconnected_at = Utc::now() - Duration::seconds(120);
+            disconnected.token.expires_at =
+                expiration_from_unsigned(disconnected.disconnected_at, 300);
+            (disconnected.disconnected_at, disconnected.token.expires_at)
+        };
+
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+
+        let state = manager.replay_state.read().await;
+        let disconnected = &state.disconnected_players[&player].disconnected;
+        assert_eq!(
+            disconnected.disconnected_at, original_disconnected_at,
+            "same-room re-registration must not restart the window clock"
+        );
+        assert_eq!(
+            disconnected.token.expires_at, original_token_expiry,
+            "same-room re-registration must not extend token expiry"
+        );
+    }
+
+    /// A late teardown from the replaced socket can overlap a successful
+    /// reconnect after the claim is reserved and the next token is rotated.
+    /// It must be a no-op for both pieces of state: the active claim stays
+    /// single-owner, and the fresh token remains armed for the next genuine
+    /// disconnect.
+    #[tokio::test]
+    async fn same_room_reregistration_preserves_active_claim_and_rotated_token() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+        let first_token = manager.pre_issue_token(player, room).await;
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        let claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player, &room, &first_token)
+            .await
+            .expect("first socket reserves the reconnect record");
+        let next_token = manager.pre_issue_token(player, room).await;
+
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+
+        assert!(matches!(
+            manager
+                .claim_reconnection(&Uuid::new_v4(), &player, &room, &first_token)
+                .await,
+            Err(ReconnectionError::AlreadyInProgress)
+        ));
+        assert!(
+            manager.complete_claimed_reconnection(&claim).await,
+            "duplicate teardown must not invalidate the active claim handle"
+        );
+        assert_eq!(
+            manager
+                .register_disconnection(player, room, false, None, 0)
+                .await,
+            next_token,
+            "duplicate teardown must not consume the replacement connection's token"
         );
     }
 
@@ -2263,7 +2595,7 @@ mod tests {
         assert_eq!(manager.get_missed_events(&room_a, 0).await.events.len(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn expired_cleanup_releases_the_room_buffer_when_last_pending_player_expires() {
         let metrics = Arc::new(ServerMetrics::new());
         let manager = ReconnectionManager::new(1, 100, metrics);
@@ -2281,15 +2613,7 @@ mod tests {
                 .contains_key(&room_id),
             "registering a disconnection opens the room's replay gate"
         );
-        {
-            let mut state = manager.replay_state.write().await;
-            state
-                .disconnected_players
-                .get_mut(&player_id)
-                .expect("registered disconnection record exists")
-                .disconnected
-                .disconnected_at = Utc::now() - Duration::seconds(5);
-        }
+        tokio::time::advance(StdDuration::from_secs(5)).await;
 
         assert_eq!(manager.cleanup_expired().await, 1);
         assert!(

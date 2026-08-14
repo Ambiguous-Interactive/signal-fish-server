@@ -201,7 +201,7 @@ def proof_set_a() -> None:
 # Proof set B — all_support re-attached to member capabilities
 # (src/server/session_policy.rs:175). Quantified over an unbounded member set:
 # proves "a single non-v3 member forces the relay floor" — the relay-floor
-# back-compat invariant (Appendix K) — and that all_support is monotone.
+# v3 capability-gating invariant — and that all_support is monotone.
 # ---------------------------------------------------------------------------
 def proof_set_b() -> None:
     print("Proof set B — all_support over unbounded members (relay-floor invariant)")
