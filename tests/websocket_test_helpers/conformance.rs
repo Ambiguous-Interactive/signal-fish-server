@@ -7,7 +7,10 @@
 //! entry point so protocol and payload accounting cannot drift apart.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 use signal_fish_server::metrics::{DeliveryClassMetrics, DeliveryMetricsByClass, ServerMetrics};
 pub use signal_fish_server::protocol::V3BinaryGameDataFrame as RecordedBinaryGameData;
@@ -24,6 +27,24 @@ pub struct ConformanceAuditor {
     default_mode: ReceiverProtocolMode,
     ledger: DeliveryLedger,
     state: Mutex<AuditorState>,
+    sequenced_operation: Mutex<()>,
+    sequenced_trace: Option<SequencedRelayTrace>,
+}
+
+/// Payload-free protocol-v3 observation stream consumed by the bounded
+/// `SequencedRelay` trace-refinement checker. UUIDs and test-authored payloads
+/// never leave this process: receiver/sender identities are assigned stable
+/// per-auditor aliases (`r1`, `s1`, ...).
+struct SequencedRelayTrace {
+    path: PathBuf,
+    state: Mutex<SequencedRelayTraceState>,
+}
+
+struct SequencedRelayTraceState {
+    trace_id: String,
+    next_event: u64,
+    receiver_aliases: BTreeMap<String, String>,
+    sender_aliases: BTreeMap<PlayerId, String>,
 }
 
 /// Wire contract expected for one physical receiver identity.
@@ -119,18 +140,199 @@ struct RelayStatsSnapshot {
     backpressure_events: u64,
 }
 
+impl SequencedRelayTrace {
+    const SCHEMA: &'static str = "signal-fish.sequenced-relay/v1";
+
+    fn new(path: PathBuf) -> Self {
+        static NEXT_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let trace_id = format!(
+            "conformance-{}-{}",
+            std::process::id(),
+            NEXT_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let header = serde_json::json!({
+            "kind": "header",
+            "schema": Self::SCHEMA,
+            "trace_id": trace_id,
+            "protocol_version": 3,
+        });
+        let mut encoded = serde_json::to_vec(&header).expect("serialize sequenced trace header");
+        encoded.push(b'\n');
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "create exclusive sequenced relay trace {}: {error}",
+                    path.display()
+                )
+            });
+        file.write_all(&encoded)
+            .expect("write sequenced relay trace header");
+        Self {
+            path,
+            state: Mutex::new(SequencedRelayTraceState {
+                trace_id,
+                next_event: 1,
+                receiver_aliases: BTreeMap::new(),
+                sender_aliases: BTreeMap::new(),
+            }),
+        }
+    }
+
+    fn record(
+        &self,
+        receiver: &str,
+        sender: Option<PlayerId>,
+        action: &str,
+        fields: serde_json::Value,
+    ) {
+        let mut state = self.state.lock().expect("sequenced trace poisoned");
+        let next_receiver = state.receiver_aliases.len() + 1;
+        let receiver_alias = state
+            .receiver_aliases
+            .entry(receiver.to_string())
+            .or_insert_with(|| format!("r{next_receiver}"))
+            .clone();
+        let sender_alias = sender.map(|sender| {
+            let next_sender = state.sender_aliases.len() + 1;
+            state
+                .sender_aliases
+                .entry(sender)
+                .or_insert_with(|| format!("s{next_sender}"))
+                .clone()
+        });
+        let event_seq = state.next_event;
+        state.next_event = state
+            .next_event
+            .checked_add(1)
+            .expect("sequenced relay trace event counter overflow");
+        let trace_id = state.trace_id.clone();
+
+        let mut record = serde_json::Map::from_iter([
+            ("kind".to_string(), serde_json::json!("event")),
+            ("schema".to_string(), serde_json::json!(Self::SCHEMA)),
+            ("trace_id".to_string(), serde_json::json!(trace_id)),
+            ("seq".to_string(), serde_json::json!(event_seq)),
+            ("action".to_string(), serde_json::json!(action)),
+            ("receiver".to_string(), serde_json::json!(receiver_alias)),
+        ]);
+        if let Some(sender_alias) = sender_alias {
+            record.insert("sender".to_string(), serde_json::json!(sender_alias));
+        }
+        let serde_json::Value::Object(fields) = fields else {
+            panic!("sequenced relay trace fields must be a JSON object")
+        };
+        record.extend(fields);
+        // Keep the trace-state mutex through the append so concurrent receiver
+        // tasks cannot allocate seq N/N+1 and write the corresponding JSONL
+        // records in the opposite order.
+        self.append(&serde_json::Value::Object(record));
+    }
+
+    fn continue_receiver_identity(&self, previous: &str, replacement: &str) {
+        let mut state = self.state.lock().expect("sequenced trace poisoned");
+        let next_receiver = state.receiver_aliases.len() + 1;
+        let alias = state
+            .receiver_aliases
+            .entry(previous.to_string())
+            .or_insert_with(|| format!("r{next_receiver}"))
+            .clone();
+        if let Some(existing) = state
+            .receiver_aliases
+            .insert(replacement.to_string(), alias.clone())
+        {
+            assert_eq!(
+                existing, alias,
+                "replacement receiver already belongs to another trace identity"
+            );
+        }
+    }
+
+    fn append(&self, record: &serde_json::Value) {
+        let mut encoded =
+            serde_json::to_vec(record).expect("serialize sequenced relay trace record");
+        encoded.push(b'\n');
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "open sequenced relay trace {}: {error}",
+                    self.path.display()
+                )
+            });
+        file.write_all(&encoded)
+            .expect("append sequenced relay trace record");
+    }
+}
+
+impl Drop for SequencedRelayTrace {
+    fn drop(&mut self) {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let footer = serde_json::json!({
+            "kind": "footer",
+            "schema": Self::SCHEMA,
+            "trace_id": state.trace_id,
+            "event_count": state.next_event.saturating_sub(1),
+        });
+        // Destructors must not panic while unwinding an earlier trace I/O
+        // failure. A missing footer still makes the strict parser reject the
+        // incomplete corpus.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.append(&footer)));
+    }
+}
+
 impl ConformanceAuditor {
     pub fn new(mode: ReceiverProtocolMode) -> Self {
+        Self::with_optional_sequenced_trace(mode, None)
+    }
+
+    /// Construct an auditor and attach the trace path from the nightly-only
+    /// environment variable when it is present.
+    pub fn with_sequenced_trace_from_env(mode: ReceiverProtocolMode) -> Self {
+        Self::with_optional_sequenced_trace(
+            mode,
+            std::env::var_os("SIGNAL_FISH_SEQUENCED_TRACE_PATH").map(PathBuf::from),
+        )
+    }
+
+    /// Construct an auditor that always records a payload-free sequencing
+    /// trace at `path`, independent of process environment.
+    pub fn with_sequenced_trace(mode: ReceiverProtocolMode, path: PathBuf) -> Self {
+        Self::with_optional_sequenced_trace(mode, Some(path))
+    }
+
+    fn with_optional_sequenced_trace(mode: ReceiverProtocolMode, path: Option<PathBuf>) -> Self {
+        assert!(
+            path.is_none() || mode == ReceiverProtocolMode::V3,
+            "sequenced relay traces require a protocol-v3 conformance auditor"
+        );
         Self {
             default_mode: mode,
             ledger: DeliveryLedger::new(),
             state: Mutex::new(AuditorState::default()),
+            sequenced_operation: Mutex::new(()),
+            sequenced_trace: path.map(SequencedRelayTrace::new),
         }
+    }
+
+    fn sequenced_operation_guard(&self) -> Option<MutexGuard<'_, ()>> {
+        self.sequenced_trace.as_ref().map(|_| {
+            self.sequenced_operation
+                .lock()
+                .expect("sequenced relay operation mutex poisoned")
+        })
     }
 
     /// Register the protocol mode for one physical receiver identity before
     /// recording its traffic. Re-registering the same mode is harmless.
     pub fn register_receiver_mode(&self, receiver: &str, mode: ReceiverProtocolMode) {
+        let _trace_order = self.sequenced_operation_guard();
         let mut state = self.state.lock().expect("conformance auditor poisoned");
         if let Some(receiver_state) = state.receivers.get(receiver) {
             assert!(
@@ -188,6 +390,18 @@ impl ConformanceAuditor {
             .or_insert(self.default_mode)
     }
 
+    fn trace_event(
+        &self,
+        receiver: &str,
+        sender: Option<PlayerId>,
+        action: &str,
+        fields: serde_json::Value,
+    ) {
+        if let Some(trace) = &self.sequenced_trace {
+            trace.record(receiver, sender, action, fields);
+        }
+    }
+
     /// Parse and record one text frame, returning the parsed message for any
     /// scenario-specific assertion. Callers therefore never deserialize a
     /// frame once for the ledger and again for protocol checks.
@@ -207,6 +421,7 @@ impl ConformanceAuditor {
     /// interpreting its opaque payload unless it is a generic JSON/MessagePack
     /// ledger fixture.
     pub fn record_binary_frame(&self, receiver: &str, wire: &[u8]) -> RecordedBinaryGameData {
+        let _trace_order = self.sequenced_operation_guard();
         self.validate_non_message_frame_precondition(receiver, "binary game-data frame");
         let frame = decode_v3_binary_game_data(wire).unwrap_or_else(|error| {
             panic!("{receiver}: invalid MessagePack game-data frame: {error}; bytes={wire:?}")
@@ -240,6 +455,7 @@ impl ConformanceAuditor {
 
     /// Record one already-decoded server message exactly once.
     pub fn record_message(&self, receiver: &str, message: &ServerMessage) {
+        let _trace_order = self.sequenced_operation_guard();
         self.validate_message_precondition(receiver, message);
         match message {
             ServerMessage::GameData {
@@ -349,6 +565,7 @@ impl ConformanceAuditor {
     /// Record a terminal WebSocket close without collapsing server-owned close
     /// causes into test-authored transport faults.
     pub fn record_close(&self, receiver: &str, code: u16, reason: &str) {
+        let _trace_order = self.sequenced_operation_guard();
         let (cause, disconnect_reason) = match code {
             4000 => {
                 assert_eq!(
@@ -417,6 +634,7 @@ impl ConformanceAuditor {
 
     /// Record a test-authored transport fault (RST, SIGKILL, proxy cut, etc.).
     pub fn note_injected_fault(&self, receiver: &str, description: impl Into<String>) {
+        let _trace_order = self.sequenced_operation_guard();
         let description = description.into();
         self.record_disconnect(
             receiver,
@@ -428,6 +646,7 @@ impl ConformanceAuditor {
     /// Record a process restart/SIGKILL that cannot produce a WebSocket close
     /// frame but is still an explicit, loud terminal delivery cause.
     pub fn note_server_restart(&self, receiver: &str) {
+        let _trace_order = self.sequenced_operation_guard();
         self.record_disconnect(
             receiver,
             ReceiverDisconnectCause::ServerRestart,
@@ -456,10 +675,14 @@ impl ConformanceAuditor {
         reconnected_receiver: &str,
         payload: &ReconnectedPayload,
     ) {
+        let _trace_order = self.sequenced_operation_guard();
         assert_ne!(
             disconnected_receiver, reconnected_receiver,
             "a reconnected socket must use a fresh auditor/ledger receiver identity"
         );
+        if let Some(trace) = &self.sequenced_trace {
+            trace.continue_receiver_identity(disconnected_receiver, reconnected_receiver);
+        }
         {
             let state = self.state.lock().expect("conformance auditor poisoned");
             let previous = state
@@ -813,10 +1036,35 @@ impl ConformanceAuditor {
                 }
             }
         }
+        drop(state);
+        if mode == ReceiverProtocolMode::V3 {
+            self.trace_event(
+                receiver,
+                None,
+                "ReceiverSnapshot",
+                serde_json::json!({ "sender_count": current_players.len() }),
+            );
+            for player in current_players {
+                let (epoch, baseline_seq) = player
+                    .epoch
+                    .zip(player.seq)
+                    .expect("v3 room snapshot stamp validated above");
+                self.trace_event(
+                    receiver,
+                    Some(player.id),
+                    "ReceiverBaseline",
+                    serde_json::json!({ "epoch": epoch, "baseline_seq": baseline_seq }),
+                );
+            }
+        }
     }
 
     fn record_room_exit(&self, receiver: &str, expected_state: ReceiverRoomState, source: &str) {
         let mut state = self.state.lock().expect("conformance auditor poisoned");
+        let mode = *state
+            .receiver_modes
+            .entry(receiver.to_string())
+            .or_insert(self.default_mode);
         let receiver_state = state.receivers.entry(receiver.to_string()).or_default();
         assert_eq!(
             receiver_state.room_state, expected_state,
@@ -828,6 +1076,10 @@ impl ConformanceAuditor {
         receiver_state.membership_history.clear();
         receiver_state.pending_gaps.clear();
         receiver_state.unadvised_unsupported_gap = None;
+        drop(state);
+        if mode == ReceiverProtocolMode::V3 {
+            self.trace_event(receiver, None, "ReceiverReset", serde_json::json!({}));
+        }
     }
 
     fn record_lifecycle_epoch(
@@ -912,6 +1164,20 @@ impl ConformanceAuditor {
         }
         sender_state.present = true;
         sender_state.known_member = true;
+        let trace_stamp = stamp;
+        drop(state);
+        if let Some((epoch, baseline_seq)) = trace_stamp {
+            let action = match kind {
+                PeerLifecycleKind::Joined => "PlayerJoined",
+                PeerLifecycleKind::Reconnected => "PlayerReconnected",
+            };
+            self.trace_event(
+                receiver,
+                Some(sender),
+                action,
+                serde_json::json!({ "epoch": epoch, "baseline_seq": baseline_seq }),
+            );
+        }
     }
 
     fn record_player_left(
@@ -935,6 +1201,7 @@ impl ConformanceAuditor {
             sender_state.known_member,
             "{receiver} <- {sender}: PlayerLeft arrived without sender membership"
         );
+        let mut duplicate_terminal = false;
         let terminal_epoch = match (mode, epoch, final_seq) {
             (ReceiverProtocolMode::V2, None, None) => None,
             (ReceiverProtocolMode::V2, _, _) => {
@@ -959,6 +1226,7 @@ impl ConformanceAuditor {
                         final_seq, *existing,
                         "{receiver} <- {sender}: PlayerLeft terminal watermark changed in epoch {epoch}"
                     );
+                    duplicate_terminal = true;
                 }
                 assert!(
                     sender_state
@@ -983,6 +1251,17 @@ impl ConformanceAuditor {
         sender_state.present = false;
         if let Some(epoch) = terminal_epoch {
             Self::try_retire_sender(receiver, receiver_state, sender, epoch);
+        }
+        drop(state);
+        if !duplicate_terminal {
+            if let (Some(epoch), Some(final_seq)) = (epoch, final_seq) {
+                self.trace_event(
+                    receiver,
+                    Some(sender),
+                    "PlayerLeft",
+                    serde_json::json!({ "epoch": epoch, "final_seq": final_seq }),
+                );
+            }
         }
     }
 
@@ -1091,6 +1370,26 @@ impl ConformanceAuditor {
                 seen, snapshot_player_ids,
                 "{receiver}: reconnect watermarks must cover every current player exactly once"
             );
+        }
+
+        if mode == ReceiverProtocolMode::V3 {
+            self.trace_event(
+                receiver,
+                None,
+                "ReceiverReconnect",
+                serde_json::json!({ "sender_count": payload.sender_watermarks.len() }),
+            );
+            for watermark in &payload.sender_watermarks {
+                self.trace_event(
+                    receiver,
+                    Some(watermark.player_id),
+                    "ReceiverBaseline",
+                    serde_json::json!({
+                        "epoch": watermark.epoch,
+                        "baseline_seq": watermark.seq,
+                    }),
+                );
+            }
         }
 
         let mut state = self.state.lock().expect("conformance auditor poisoned");
@@ -1268,6 +1567,21 @@ impl ConformanceAuditor {
         receiver_state.last_delivery_counters = Some(report.per_class);
         for gap in &report.gaps {
             Self::try_retire_sender(receiver, receiver_state, gap.from_player, gap.epoch);
+        }
+        let trace_gaps = report.gaps.clone();
+        drop(state);
+        for gap in trace_gaps {
+            self.trace_event(
+                receiver,
+                Some(gap.from_player),
+                "DeliveryGap",
+                serde_json::json!({
+                    "epoch": gap.epoch,
+                    "from_seq": gap.from_seq,
+                    "to_seq": gap.to_seq,
+                    "reason": delivery_gap_reason_name(gap.reason),
+                }),
+            );
         }
     }
 
@@ -1520,6 +1834,13 @@ impl ConformanceAuditor {
         sender_state.active_epoch = Some(epoch);
         sender_state.epochs.insert(epoch, seq);
         Self::try_retire_sender(receiver, receiver_state, sender, epoch);
+        drop(state);
+        self.trace_event(
+            receiver,
+            Some(sender),
+            "Data",
+            serde_json::json!({ "epoch": epoch, "data_seq": seq }),
+        );
     }
 
     fn assert_stamp_not_reported(
@@ -1729,6 +2050,15 @@ fn receiver_state_is_reconnect_preface(state: &ReceiverState) -> bool {
         && !state.abandoned_requires_disconnect
         && !state.abandoned_advisory_seen
         && !state.had_room_lifecycle
+}
+
+fn delivery_gap_reason_name(reason: DeliveryGapReason) -> &'static str {
+    match reason {
+        DeliveryGapReason::LatestSuperseded => "latest_superseded",
+        DeliveryGapReason::LatestDroppedFull => "latest_dropped_full",
+        DeliveryGapReason::VolatileDropped => "volatile_dropped",
+        DeliveryGapReason::UnsupportedFormat => "unsupported_format",
+    }
 }
 
 /// Assert the exact server-wide conservation law for every delivery class.

@@ -36,6 +36,7 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/RoomMessageTransaction.tla` | P74/P75's exact room-publication transaction: sparse production batches, pre-hook retry, final routing validation, durable hook, ordered phases, and degraded accounting |
 | `tla/RoomEventSequencer.tla` | P76's mutation-gate handoff: owned-job ordering, caller-cancellation immunity, panic recovery, and weak-registry generation safety |
 | `tla/DeliveryContractTrace.tla` | P10.D7 replay checker for generated reliable-queue JSONL traces; an invalid next action deadlocks at its exact index |
+| `tla/SequencedRelayTrace.tla` | P98 receiver-observation refinement for production-shaped v3 sequencing JSONL traces; exact gaps, lifecycle epochs, and reconnect baselines replay fail-closed |
 | `tla/ConnectionTeardown.tla`  | Per-connection task teardown: no zombie sockets, exact drop accounting             |
 | `tla/SequencedRelay.tla`      | v3 per-(sender, room) sequence contract: gap accountability + the split-brain theorem |
 | `tla/ReconnectReplay.tla`     | v3 reconnect replay: faithful replay, honest status + the split-brain theorem      |
@@ -80,6 +81,11 @@ SIGNAL_FISH_DELIVERY_TRACE_PATH=/tmp/delivery.jsonl \
   cargo test --locked --features trace-validation \
   --test e2e_tests test_websocket_connection -- --exact
 bash scripts/run-delivery-trace-validation.sh /tmp/delivery.jsonl
+
+# P98: replay the checked corpus and prove duplicate/regression, silent-gap,
+# backward-epoch, and late-lifecycle negatives.
+bash scripts/run-sequenced-relay-trace-validation.sh \
+  formal/traces/sequenced-relay-replay.jsonl
 
 # Z3: all SMT proofs (needs the python `z3` module — `python3-z3` or `pip install z3-solver`):
 bash scripts/run-z3-proofs.sh
@@ -156,6 +162,61 @@ The daily `verification-nightly.yml` job is initially informational
 and TLC evidence, and runs only for schedule/manual dispatch—not PRs. Parser,
 schema, feature compilation, action emission, and positive generator tests
 remain ordinary PR gates.
+
+## Sequenced-relay trace refinement (P98)
+
+P98 closes the second trace-validation target left by P10.D7. The two focused
+production scenarios construct a protocol-v3 `ConformanceAuditor` that writes
+a stable, payload-free receiver view when
+`SIGNAL_FISH_SEQUENCED_TRACE_PATH` is set. One auditor owns the path
+exclusively, and trace-enabled operations serialize validation with emission.
+The recorder observes only already-validated wire facts: counted initial
+receiver snapshots and sender watermarks, stamped data, exact
+classified `DeliveryGap` ranges, sender leave/join/reconnect epochs, and a
+receiver reconnect carrying its authoritative sender count and followed by
+exactly that many watermark baselines.
+Per-auditor aliases (`r1`, `s1`, and so on) replace physical receiver labels
+and player UUIDs; application payloads and injected-fault details are never
+written.
+
+The JSONL compiler accepts only `signal-fish.sequenced-relay/v1`, protocol
+version 3, exact action-specific fields, contiguous record sequence numbers,
+at most 4096 events per trace and bounds every epoch, sequence, and sender count
+to 4096. The corpus-wide dense replay domain is additionally bounded to 65,536
+cells (`sum(receiver/sender pairs) × maximum epoch`), while the source JSONL is
+limited to 8 MiB and 256 traces. These aggregate limits prevent individually
+legal fields from expanding into an unsafe TLC state representation. Declared
+gap reasons and anonymized aliases are also mandatory. Every initial or
+post-reset view starts with a counted
+`ReceiverSnapshot`; every `ReceiverReconnect` continues an active logical view
+and declares the size of its complete authoritative replacement. Each marker
+must be followed immediately by exactly that many unique `ReceiverBaseline`
+events, including a legal zero-sender block. Baselines are rejected anywhere
+else. Reconnect replacement permits legitimate leave/join churn during the
+outage while retaining pre-cut high-water history, so a continuing sender
+cannot move backward. `ReceiverReset` explicitly clears an active local
+room/spectator view before the same physical socket enters another lifecycle.
+Unknown, extra, incomplete, oversized, or malformed input fails before TLA+
+generation.
+
+`SequencedRelayTrace.tla` is an executable receiver-observation refinement of
+`SequencedRelay.tla`. It strengthens the original boolean accountability
+witness into causally prior exact gap ranges while retaining the lifecycle
+brackets and reconnect reset. A false guard deadlocks at the first divergent
+event. The wrapper must replay the positive corpus and must observe a deadlock
+for each deterministic corruption: duplicate/regressing data, an unreported
+sequence gap, a backward lifecycle epoch, and a sender lifecycle notification
+delayed until after its successor epoch begins.
+
+The formal PR gate runs those five replays against the checked, production-
+shaped corpus whenever the model, compiler, recorder, relevant socket
+scenarios, or modeled production source changes. The informational nightly job
+additionally captures real sockets: the classified latest-value scenario proves
+an exact omission report precedes its successor, and `reconnect_under_fire`
+exercises ordinary delivery, sender lifecycle transitions, receiver reconnect
+re-baselining, and all four negative oracles. Its raw JSONL and generated TLC
+bundles are uploaded on every job outcome when present; missing partial
+evidence is reported as an artifact warning.
 
 ## Z3 proofs
 

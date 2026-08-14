@@ -30,6 +30,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use test_helpers::{create_test_server_with_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
 use websocket_test_helpers::{
     assert_message_conservation, next_matching_server_message_within, WsStream,
 };
@@ -148,13 +149,22 @@ fn join_message(room_code: &str, player_name: &str) -> ClientMessage {
 
 /// Join a room, returning `(player_id, room_id)` from the RoomJoined payload.
 async fn join_room(ws: &mut WsStream, room_code: &str, player_name: &str) -> (PlayerId, RoomId) {
+    let payload = join_room_payload(ws, room_code, player_name).await;
+    (payload.player_id, payload.room_id)
+}
+
+async fn join_room_payload(
+    ws: &mut WsStream,
+    room_code: &str,
+    player_name: &str,
+) -> Box<signal_fish_server::protocol::RoomJoinedPayload> {
     send(ws, &join_message(room_code, player_name)).await;
     next_matching_server_message_within(
         ws,
         SERVER_MESSAGE_TIMEOUT,
         "room join response",
         |message| match message {
-            ServerMessage::RoomJoined(payload) => Some((payload.player_id, payload.room_id)),
+            ServerMessage::RoomJoined(payload) => Some(payload),
             ServerMessage::RoomJoinFailed { reason, error_code } => {
                 panic!("room join failed: {reason} ({error_code:?})")
             }
@@ -436,10 +446,15 @@ async fn latest_coalescing_reports_exact_gap_before_successor() {
     let addr = running_server.addr();
     let mut sender = connect(addr).await;
     let mut recipient = connect(addr).await;
+    let auditor = ConformanceAuditor::with_sequenced_trace_from_env(ReceiverProtocolMode::V3);
     authenticate_v3(&mut sender).await;
     authenticate_v3(&mut recipient).await;
     let (sender_id, _) = join_room(&mut sender, "CLSCOA", "LatestSender").await;
-    join_room(&mut recipient, "CLSCOA", "LatestRecipient").await;
+    let recipient_join = join_room_payload(&mut recipient, "CLSCOA", "LatestRecipient").await;
+    auditor.record_message(
+        "latest-recipient",
+        &ServerMessage::RoomJoined(recipient_join),
+    );
 
     for n in [1, 2] {
         send(
@@ -453,12 +468,12 @@ async fn latest_coalescing_reports_exact_gap_before_successor() {
         .await;
     }
 
-    let report = next_matching_server_message_within(
+    let report_message = next_matching_server_message_within(
         &mut recipient,
         SERVER_MESSAGE_TIMEOUT,
         "DeliveryReport before latest successor",
         |message| match message {
-            ServerMessage::DeliveryReport(report) => Some(*report),
+            message @ ServerMessage::DeliveryReport(_) => Some(message),
             ServerMessage::GameData { .. } => {
                 panic!("latest successor arrived before its causal DeliveryReport")
             }
@@ -466,6 +481,11 @@ async fn latest_coalescing_reports_exact_gap_before_successor() {
         },
     )
     .await;
+    auditor.record_message("latest-recipient", &report_message);
+    let ServerMessage::DeliveryReport(report) = report_message else {
+        unreachable!("matching closure only accepts DeliveryReport")
+    };
+    let report = *report;
     assert_eq!(report.per_class.latest.superseded, 1);
     assert_eq!(report.gaps.len(), 1);
     assert_eq!(report.gaps[0].from_player, sender_id);
@@ -474,22 +494,28 @@ async fn latest_coalescing_reports_exact_gap_before_successor() {
     assert_eq!(report.gaps[0].to_seq, 1);
     assert_eq!(report.gaps[0].reason, DeliveryGapReason::LatestSuperseded);
 
-    let successor = next_matching_server_message_within(
+    let successor_message = next_matching_server_message_within(
         &mut recipient,
         SERVER_MESSAGE_TIMEOUT,
         "coalesced latest successor",
         |message| match message {
-            ServerMessage::GameData {
-                data,
-                seq,
-                class,
-                key,
-                ..
-            } => Some((data, seq, class, key)),
+            message @ ServerMessage::GameData { .. } => Some(message),
             _ => None,
         },
     )
     .await;
+    auditor.record_message("latest-recipient", &successor_message);
+    let ServerMessage::GameData {
+        data,
+        seq,
+        class,
+        key,
+        ..
+    } = successor_message
+    else {
+        unreachable!("matching closure only accepts GameData")
+    };
+    let successor = (data, seq, class, key);
     assert_eq!(successor.0, serde_json::json!({ "n": 2 }));
     assert_eq!(successor.1, Some(2));
     assert_eq!(successor.2, Some(DeliveryClass::Latest));

@@ -16,7 +16,10 @@
 #     room-event mutation-gate handoff (caller-cancellation immunity, isolated
 #     panic recovery, and weak-registry generation safety), and the atomic
 #     reconnection-claim lifecycle (identity validation, stale-handle rejection,
-#     expiry cleanup exclusion, and failed-restore release) —
+#     expiry cleanup exclusion, and failed-restore release), plus the
+#     production-shaped protocol-v3 sequenced-relay observation replay
+#     (ordinary delivery, exact classified gaps, sender lifecycle, and receiver
+#     reconnect re-baselining, with four seeded negative oracles) —
 #     exploring reachable states.
 #   * Z3 discharges universally quantified SMT proofs of the pure decision
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the
@@ -43,6 +46,8 @@ on:
     paths:
       - "formal/**"
       - "scripts/run-tla-model-check.sh"
+      - "scripts/generate-sequenced-relay-trace.py"
+      - "scripts/run-sequenced-relay-trace-validation.sh"
       - "scripts/run-z3-proofs.sh"
       - "src/server/session_policy.rs"
       - "src/server/signaling.rs"
@@ -50,17 +55,24 @@ on:
       - "src/reconnection.rs"
       - "src/server/reconnection_service.rs"
       - "src/server/connection_manager.rs"
+      - "src/server/game_data.rs"
       - "src/database/mod.rs"
-      - "src/protocol/room_state.rs"
+      - "src/protocol/**"
       - "src/server.rs"
       - "src/coordination/**"
       - "src/websocket/**"
+      - "tests/delivery_trace_generator_tests.rs"
+      - "tests/scenario_realworld_e2e.rs"
+      - "tests/v3_game_data_sequencing_e2e.rs"
+      - "tests/websocket_test_helpers/**"
       - ".github/workflows/formal-verification.yml"
   pull_request:
     branches: [main]
     paths:
       - "formal/**"
       - "scripts/run-tla-model-check.sh"
+      - "scripts/generate-sequenced-relay-trace.py"
+      - "scripts/run-sequenced-relay-trace-validation.sh"
       - "scripts/run-z3-proofs.sh"
       - "src/server/session_policy.rs"
       - "src/server/signaling.rs"
@@ -68,11 +80,16 @@ on:
       - "src/reconnection.rs"
       - "src/server/reconnection_service.rs"
       - "src/server/connection_manager.rs"
+      - "src/server/game_data.rs"
       - "src/database/mod.rs"
-      - "src/protocol/room_state.rs"
+      - "src/protocol/**"
       - "src/server.rs"
       - "src/coordination/**"
       - "src/websocket/**"
+      - "tests/delivery_trace_generator_tests.rs"
+      - "tests/scenario_realworld_e2e.rs"
+      - "tests/v3_game_data_sequencing_e2e.rs"
+      - "tests/websocket_test_helpers/**"
       - ".github/workflows/formal-verification.yml"
   workflow_dispatch:
 
@@ -109,6 +126,11 @@ jobs:
 
       - name: Run TLC model check (all configurations)
         run: bash scripts/run-tla-model-check.sh
+
+      - name: Replay sequenced-relay refinement and seeded divergences
+        run: >-
+          bash scripts/run-sequenced-relay-trace-validation.sh
+          formal/traces/sequenced-relay-replay.jsonl
 
   z3:
     name: Z3 SMT Proofs

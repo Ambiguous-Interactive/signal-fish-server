@@ -911,7 +911,7 @@ async fn reconnect_under_fire() {
     let (running_server, game_server) = start_reconnect_server().await;
     let addr = running_server.addr();
     let metrics = game_server.metrics();
-    let ledger = ConformanceAuditor::new(ReceiverProtocolMode::V3);
+    let ledger = ConformanceAuditor::with_sequenced_trace_from_env(ReceiverProtocolMode::V3);
 
     let scenario = async {
         let mut sender = connect_v3(addr).await;
@@ -1071,11 +1071,31 @@ async fn reconnect_under_fire() {
         })
         .await;
 
-        (pre_total, post_total)
+        // The reconnected sender's new epoch must itself carry data. Besides
+        // exercising bidirectional recovery, this gives the trace-refinement
+        // negative oracle a production-shaped successor-epoch observation.
+        let mut reborn_payload = LedgerPayload::new("RebornPost", PADDING_BYTES);
+        send_on(
+            &mut reborn,
+            &ClientMessage::GameData {
+                class: None,
+                key: None,
+                data: reborn_payload.next(),
+            },
+        )
+        .await;
+        let reborn_total = reborn_payload.sent();
+        drain_ws_until(&mut watcher, &ledger, "Watcher", |ledger| {
+            ledger.received_count("Watcher", "RebornPost") >= reborn_total
+        })
+        .await;
+
+        (pre_total, post_total, reborn_total)
     };
-    let (pre_total, post_total) = tokio::time::timeout(Duration::from_secs(120), scenario)
-        .await
-        .expect("reconnect-under-fire scenario exceeded its deadline");
+    let (pre_total, post_total, reborn_total) =
+        tokio::time::timeout(Duration::from_secs(120), scenario)
+            .await
+            .expect("reconnect-under-fire scenario exceeded its deadline");
 
     assert_eq!(
         metrics
@@ -1090,7 +1110,11 @@ async fn reconnect_under_fire() {
             &[
                 expectation(
                     "Watcher",
-                    &[("SenderPre", pre_total), ("SenderPost", post_total)],
+                    &[
+                        ("SenderPre", pre_total),
+                        ("SenderPost", post_total),
+                        ("RebornPost", reborn_total),
+                    ],
                 ),
                 // Disconnected mid-burst: any gap-free prefix of the pre-cut
                 // stream is legal; a mid-stream hole is not.
