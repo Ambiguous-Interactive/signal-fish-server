@@ -101,7 +101,7 @@ pub struct Cli {
     pub unreliable_exchange_release_file: Option<PathBuf>,
 
     /// After GameStarting (plus a short settle), send one GameData message with
-    /// payload {"relay_msg": <text>} over the WebSocket relay floor.
+    /// payload `{"relay_msg": "<text>"}` over the WebSocket relay floor.
     #[arg(long)]
     pub relay_payload: Option<String>,
 

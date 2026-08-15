@@ -89,6 +89,16 @@ pub struct NativeClientProcess {
 
 impl Drop for NativeClientProcess {
     fn drop(&mut self) {
+        if let Some(directory) = std::env::var_os("SIGNAL_FISH_MULTIPROCESS_EVIDENCE_DIR") {
+            let directory = PathBuf::from(directory);
+            if let Err(error) = self.try_persist_diagnostics(&directory) {
+                eprintln!(
+                    "failed to persist client {} diagnostics on drop to {}: {error}",
+                    self.name,
+                    directory.display()
+                );
+            }
+        }
         if let Some(child) = self.child.as_mut() {
             if let Err(error) = child.start_kill() {
                 eprintln!("failed to kill client {} on drop: {error}", self.name);
@@ -145,6 +155,38 @@ impl NativeClientProcess {
                 Some(_) => {}
                 None => panic!(
                     "client {}: stdout ended before `{event_name}`;\n{}",
+                    self.name,
+                    self.diagnostics()
+                ),
+            }
+        }
+    }
+
+    /// Read until an event with `event_name` also satisfies an exact semantic
+    /// predicate. One absolute deadline bounds the whole scan.
+    // This shared helper is used only by the multiprocess delivery test binary.
+    #[allow(dead_code)]
+    pub async fn await_event_matching(
+        &mut self,
+        event_name: &str,
+        timeout: Duration,
+        mut predicate: impl FnMut(&Value) -> bool,
+    ) -> Value {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self
+                .next_event_before(deadline, &format!("awaiting matching `{event_name}`"))
+                .await
+            {
+                Some(event)
+                    if event.get("event").and_then(Value::as_str) == Some(event_name)
+                        && predicate(&event) =>
+                {
+                    return event;
+                }
+                Some(_) => {}
+                None => panic!(
+                    "client {}: stdout ended before matching `{event_name}`;\n{}",
                     self.name,
                     self.diagnostics()
                 ),
@@ -300,6 +342,7 @@ impl NativeClientProcess {
         Ok(Some(event))
     }
 
+    #[cfg(unix)]
     fn child_exited_by_signal(&mut self) -> bool {
         use std::os::unix::process::ExitStatusExt;
 
@@ -307,6 +350,11 @@ impl NativeClientProcess {
             .as_mut()
             .and_then(|child| child.try_wait().ok().flatten())
             .is_some_and(|status| status.signal().is_some())
+    }
+
+    #[cfg(not(unix))]
+    fn child_exited_by_signal(&mut self) -> bool {
+        false
     }
 
     /// Drain stdout to EOF, reap the child, and return its exact exit status.
@@ -336,6 +384,41 @@ impl NativeClientProcess {
             .filter_map(|event| event.get("message").and_then(Value::as_str))
             .map(str::to_string)
             .collect()
+    }
+
+    /// Persist the complete JSONL observation stream and captured stderr for
+    /// retained CI diagnostics. Repeated calls replace the same per-client
+    /// snapshot atomically enough for a single-process test harness.
+    // This shared helper is used only by the multiprocess delivery test binary.
+    #[allow(dead_code)]
+    pub fn persist_diagnostics(&self, directory: &Path) {
+        self.try_persist_diagnostics(directory)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "client {}: persist evidence in {}: {error}",
+                    self.name,
+                    directory.display()
+                )
+            });
+    }
+
+    fn try_persist_diagnostics(&self, directory: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(directory)?;
+        let mut jsonl = self
+            .events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !jsonl.is_empty() {
+            jsonl.push('\n');
+        }
+        std::fs::write(directory.join(format!("client-{}.jsonl", self.name)), jsonl)?;
+        std::fs::copy(
+            &self.stderr_path,
+            directory.join(format!("client-{}-stderr.log", self.name)),
+        )?;
+        Ok(())
     }
 
     pub fn diagnostics(&self) -> String {

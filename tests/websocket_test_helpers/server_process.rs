@@ -85,6 +85,7 @@ const FIXED_PORT_SPAWN_ATTEMPTS: usize = 6;
 /// never leaks an orphan server process into CI.
 pub struct ServerProcess {
     child: Option<tokio::process::Child>,
+    process_id: u32,
     /// The port the child is listening on (the reserved fresh port, or the
     /// fixed restart port).
     pub port: u16,
@@ -151,10 +152,37 @@ impl ServerProcess {
             read("stderr", &self.stderr_path)
         )
     }
+
+    fn try_persist_diagnostics(&self, directory: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(directory)?;
+        let prefix = format!("server-{}-pid-{}", self.port, self.process_id);
+        std::fs::copy(
+            &self.stdout_path,
+            directory.join(format!("{prefix}-stdout.log")),
+        )?;
+        std::fs::copy(
+            &self.stderr_path,
+            directory.join(format!("{prefix}-stderr.log")),
+        )?;
+        std::fs::copy(
+            self._workdir.path().join("server-config.json"),
+            directory.join(format!("{prefix}-config.json")),
+        )?;
+        Ok(())
+    }
 }
 
 impl Drop for ServerProcess {
     fn drop(&mut self) {
+        if let Some(directory) = std::env::var_os("SIGNAL_FISH_MULTIPROCESS_EVIDENCE_DIR") {
+            let directory = PathBuf::from(directory);
+            if let Err(error) = self.try_persist_diagnostics(&directory) {
+                eprintln!(
+                    "failed to persist server diagnostics on drop to {}: {error}",
+                    directory.display()
+                );
+            }
+        }
         if let Some(child) = self.child.as_mut() {
             if let Err(error) = child.start_kill() {
                 eprintln!("failed to kill server process on drop: {error}");
@@ -305,8 +333,10 @@ async fn try_spawn_server(port: u16, overlay: &Value) -> Result<ServerProcess, S
     command.env("SIGNAL_FISH__PORT", port.to_string());
 
     let child = command.spawn().expect("spawn the server binary");
+    let process_id = child.id().expect("spawned server has a process id");
     let mut server = ServerProcess {
         child: Some(child),
+        process_id,
         port,
         stdout_path,
         stderr_path,

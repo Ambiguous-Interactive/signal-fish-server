@@ -611,17 +611,26 @@ impl EnhancedGameServer {
                 // carries the joiner's current incarnation epoch (Some after the
                 // `assign_client_to_room` above bumped it); pre-v3 (v2)
                 // recipients have it stripped per-recipient in `websocket::sending`.
-                let player_info = PlayerInfo {
-                    id: *player_id,
-                    name: player_name,
-                    is_authority,
-                    is_ready: false,
-                    connected_at: chrono::Utc::now(),
-                    connection_info: None,
-                    epoch: Some(membership_stamp.epoch),
-                    seq: Some(membership_stamp.seq),
-                    region_id: self.region_id().to_string(),
-                };
+                let mut player_info =
+                    current_room
+                        .players
+                        .get(player_id)
+                        .cloned()
+                        .unwrap_or_else(|| PlayerInfo {
+                            id: *player_id,
+                            name: player_name,
+                            is_authority,
+                            is_ready: false,
+                            connected_at: chrono::Utc::now(),
+                            connection_info: None,
+                            epoch: None,
+                            seq: None,
+                            region_id: self.region_id().to_string(),
+                        });
+                player_info.is_authority = is_authority;
+                player_info.is_ready = false;
+                player_info.epoch = Some(membership_stamp.epoch);
+                player_info.seq = Some(membership_stamp.seq);
                 let committed = if current_room.lobby_state == LobbyState::Finalized {
                     self.publish_finalized_join_membership(
                         &current_room,

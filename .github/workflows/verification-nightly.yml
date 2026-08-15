@@ -21,7 +21,7 @@
 #     (see the module docs in tests/load_tests.rs); the delivery contract is
 #     verified by the soak/backpressure suites above.
 #   - multiprocess-delivery: tests/multiprocess_delivery_e2e.rs — REAL server
-#     + REAL client processes with OS faults (SIGSTOP/SIGKILL); the two
+#     + REAL client processes with OS faults (SIGSTOP/SIGKILL); the three
 #     ignored child-process tests need the pre-built native reference client
 #     (SIGNAL_FISH_CLIENT_BIN), which is why they are nightly-only.
 #     The same job runs the clean WebRTC {mesh,host} x {2,8,16} matrix, the H8
@@ -301,8 +301,8 @@ jobs:
         run: |
           cargo build --locked --manifest-path clients/native/Cargo.toml \
             --bin signal-fish-reference-native
-      # --run-ignored all activates the two nightly-only child-process tests
-      # (SIGSTOP eviction, SIGKILL mid-burst) alongside the PR-lane
+      # --run-ignored all activates the three nightly-only child-process tests
+      # (SIGSTOP resume, SIGSTOP eviction, SIGKILL mid-burst) alongside the PR-lane
       # server-restart test; the pre-built client binary is handed over via
       # SIGNAL_FISH_CLIENT_BIN so the suite's nested-build fallback never
       # runs in CI.
@@ -310,11 +310,22 @@ jobs:
         shell: bash
         env:
           SIGNAL_FISH_CLIENT_BIN: ${{ github.workspace }}/clients/native/target/debug/signal-fish-reference-native
+          SIGNAL_FISH_MULTIPROCESS_EVIDENCE_DIR: ${{ runner.temp }}/multiprocess-delivery
         run: |
           set -o pipefail
           cargo nextest run --profile ci --locked --all-features \
             --test multiprocess_delivery_e2e --run-ignored all \
             --success-output final 2>&1 | tee multiprocess-output.txt
+      - name: Upload multi-process delivery evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: multiprocess-delivery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            multiprocess-output.txt
+            ${{ runner.temp }}/multiprocess-delivery/**
+          retention-days: 30
+          if-no-files-found: error
       - name: Run WebRTC topology, size, and deterministic partition matrix
         shell: bash
         env:

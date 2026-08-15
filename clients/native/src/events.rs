@@ -10,7 +10,9 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
-use signal_fish_server::protocol::{LobbyState, PlayerId, RoomId, Topology, Transport};
+use signal_fish_server::protocol::{
+    DeliveryClass, DeliveryReportPayload, LobbyState, PlayerId, RoomId, Topology, Transport,
+};
 
 /// One JSONL stdout event. Variant names serialize as the snake_case `event`
 /// tag (e.g. `P2pPairConnected` -> `"p2p_pair_connected"`).
@@ -38,9 +40,19 @@ pub enum Event {
         lobby_state: LobbyState,
     },
     /// Another player joined the room.
-    PeerJoined { player_id: PlayerId },
+    PeerJoined {
+        player_id: PlayerId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
+    },
     /// Another player left the room.
-    PlayerLeft { player_id: PlayerId },
+    PlayerLeft {
+        player_id: PlayerId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_seq: Option<u64>,
+    },
     /// Lobby finalized; `is_authority` is this client's own flag from `GameStarting`.
     GameStarting { is_authority: bool },
     /// The per-recipient v3 session directive (peers list this recipient's pairings).
@@ -140,7 +152,17 @@ pub enum Event {
     GameDataReceived {
         from: PlayerId,
         payload: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        class: Option<DeliveryClass>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<u32>,
     },
+    /// A validated v3 delivery-accountability update, in causal wire order.
+    DeliveryReport { report: DeliveryReportPayload },
     /// The P2P window resolved with zero connected pairs; relay carries the session.
     FallbackEngaged,
     /// Every flag-driven success criterion currently holds. When a harness
@@ -207,7 +229,7 @@ static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
 ///   keys, no fallible impls); if it ever does, the failure is reported on
 ///   stderr and the event is dropped.
 /// - A failed stdout write (typically `BrokenPipe` after the consumer hung
-///   up) is reported on stderr once and latches [`STDOUT_CLOSED`]: event
+///   up) is reported on stderr once and latches `STDOUT_CLOSED`: event
 ///   emission shuts down gracefully while the client continues toward its
 ///   configured exit frontier (`--run-for-secs` / `--max-runtime-secs`).
 pub fn emit(event: &Event) {
@@ -240,6 +262,10 @@ fn write_event_line(target: &mut impl Write, line: &str) -> std::io::Result<()> 
 
 #[cfg(test)]
 mod tests {
+    use signal_fish_server::protocol::{
+        DeliveryCountersByClass, DeliveryGap, DeliveryGapReason, VolatileDeliveryCounters,
+    };
+
     use super::*;
     use serde_json::json;
 
@@ -306,6 +332,12 @@ mod tests {
                 "local_candidate",
             ),
             (Event::GameDataSent, "game_data_sent"),
+            (
+                Event::DeliveryReport {
+                    report: DeliveryReportPayload::default(),
+                },
+                "delivery_report",
+            ),
             (Event::FallbackEngaged, "fallback_engaged"),
             (Event::ExchangeReady, "exchange_ready"),
             (Event::ExchangeReliableReady, "exchange_reliable_ready"),
@@ -320,6 +352,109 @@ mod tests {
                 "tag for {event:?}"
             );
         }
+    }
+
+    #[test]
+    fn game_data_event_preserves_v3_accountability_metadata_without_changing_v2_shape() {
+        let from = PlayerId::new_v4();
+        let v3 = serde_json::to_value(Event::GameDataReceived {
+            from,
+            payload: serde_json::json!({ "frame": 7 }),
+            seq: Some(19),
+            epoch: Some(3),
+            class: Some(DeliveryClass::Latest),
+            key: Some(41),
+        })
+        .expect("event serializes");
+        assert_eq!(
+            v3,
+            serde_json::json!({
+                "event": "game_data_received",
+                "from": from,
+                "payload": { "frame": 7 },
+                "seq": 19,
+                "epoch": 3,
+                "class": "latest",
+                "key": 41
+            })
+        );
+
+        let v2 = serde_json::to_value(Event::GameDataReceived {
+            from,
+            payload: serde_json::json!({ "frame": 7 }),
+            seq: None,
+            epoch: None,
+            class: None,
+            key: None,
+        })
+        .expect("event serializes");
+        assert_eq!(
+            v2,
+            serde_json::json!({
+                "event": "game_data_received",
+                "from": from,
+                "payload": { "frame": 7 }
+            }),
+            "absent v3 metadata must stay absent rather than serializing as null"
+        );
+    }
+
+    #[test]
+    fn lifecycle_events_preserve_optional_v3_epoch_and_terminal_watermark() {
+        let player_id = PlayerId::new_v4();
+        let joined = serde_json::to_value(Event::PeerJoined {
+            player_id,
+            epoch: Some(4),
+        })
+        .expect("event serializes");
+        assert_eq!(joined["epoch"], 4);
+        let left = serde_json::to_value(Event::PlayerLeft {
+            player_id,
+            epoch: Some(4),
+            final_seq: Some(19),
+        })
+        .expect("event serializes");
+        assert_eq!(left["epoch"], 4);
+        assert_eq!(left["final_seq"], 19);
+
+        let legacy = serde_json::to_value(Event::PlayerLeft {
+            player_id,
+            epoch: None,
+            final_seq: None,
+        })
+        .expect("event serializes");
+        assert!(legacy.get("epoch").is_none());
+        assert!(legacy.get("final_seq").is_none());
+    }
+
+    #[test]
+    fn delivery_report_event_preserves_exact_ranges_and_counter_shape() {
+        let from = PlayerId::new_v4();
+        let report = DeliveryReportPayload {
+            per_class: DeliveryCountersByClass {
+                volatile: VolatileDeliveryCounters {
+                    dropped: 2,
+                    ..VolatileDeliveryCounters::default()
+                },
+                ..DeliveryCountersByClass::default()
+            },
+            gaps: vec![DeliveryGap {
+                from_player: from,
+                epoch: 4,
+                from_seq: 8,
+                to_seq: 9,
+                reason: DeliveryGapReason::VolatileDropped,
+            }],
+        };
+        let value =
+            serde_json::to_value(Event::DeliveryReport { report }).expect("event serializes");
+        assert_eq!(value["event"], "delivery_report");
+        assert_eq!(value["report"]["per_class"]["volatile"]["dropped"], 2);
+        assert_eq!(value["report"]["gaps"][0]["from_player"], from.to_string());
+        assert_eq!(value["report"]["gaps"][0]["epoch"], 4);
+        assert_eq!(value["report"]["gaps"][0]["from_seq"], 8);
+        assert_eq!(value["report"]["gaps"][0]["to_seq"], 9);
+        assert_eq!(value["report"]["gaps"][0]["reason"], "volatile_dropped");
     }
 
     #[test]

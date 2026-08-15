@@ -129,8 +129,8 @@ process continues to its normal bounded exit.
 | `protocol_info` | `negotiated_version` | Negotiation result (v2 connections report `2`) |
 | `room_created` | `room_code` | This client created the room (harnesses scrape the code) |
 | `room_joined` | `room_id`, `player_id`, `lobby_state` | Seated in the room; `lobby_state` ∈ `waiting`/`lobby`/`finalized` — `finalized` marks a late join into a running session |
-| `peer_joined` | `player_id` | Another player joined |
-| `player_left` | `player_id` | Another player left |
+| `peer_joined` | `player_id`, optional `epoch` | Another player joined or reconnected |
+| `player_left` | `player_id`, optional `epoch`/`final_seq` | Another player left with its v3 terminal watermark |
 | `game_starting` | `is_authority` | Lobby finalized (this client's own authority flag); never re-broadcast to late joiners |
 | `session_plan` | `topology`, `transport`, `host`, `peers[{player_id, initiate}]`, `ice_servers_count`, `fallback` | The full authoritative per-recipient v3 directive; Relay/Relay carries no peers. This WebRTC reference client explicitly rejects Direct plans, reports `connected: false`, and uses the relay fallback |
 | `new_peer` | `peer_id`, `you_initiate` | Compatible incremental pairing directive (the universal server uses full plans) |
@@ -152,7 +152,8 @@ process continues to its normal bounded exit.
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out under the transport-fallback contract |
 | `peer_transport_status` | `peer`, `transport`, `connected` | A same-room peer's reported state changed (server fan-out) |
 | `game_data_sent` | — | The `--relay-payload` GameData was sent |
-| `game_data_received` | `from`, `payload` | A validated, application-current relayed GameData payload arrived; lifecycle-overtaken stale tails are accounted but suppressed |
+| `game_data_received` | `from`, `payload`, optional `seq`/`epoch`/`class`/`key` | A validated, application-current relayed GameData payload arrived; v3 accountability stamps are preserved while lifecycle-overtaken stale tails are suppressed |
+| `delivery_report` | `report` | A validated v3 cumulative delivery-counter update plus any exact, causally prior gap ranges |
 | `fallback_engaged` | — | The P2P window resolved with ZERO connected pairs; the relay floor carries the session |
 | `success_criteria_met` | — | Harness-only barrier emitted when criteria hold and `--success-release-file` was supplied; the client remains connected until the path exists |
 | `error` | `message` | Non-fatal or fatal error (fatal ones are followed by `exiting`) |
