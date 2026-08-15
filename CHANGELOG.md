@@ -129,6 +129,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix automated release preparation so transformation validation, rollback,
+  scope checks, and Git staging share one complete file inventory, including
+  dynamically discovered lockfiles and the versioned getting-started URL.
+  Live runs now authenticate the auto-commit GitHub App with its configured
+  client ID, while credential-free dry runs remain available.
+- Require operators to configure the scheduled public WebSocket probe endpoint
+  through the repository instead of shipping a deployment-specific hostname.
+  Manual dispatch can still override the endpoint, and an unconfigured monitor
+  now fails with an explicit diagnostic before probing.
 - Decide reconnect eligibility from one monotonic deadline captured at the
   genuine disconnect. A host clock adjustment — an NTP step, a manual
   correction, or a suspend/resume — can no longer expire a live reconnector

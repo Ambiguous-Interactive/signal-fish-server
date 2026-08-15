@@ -9,6 +9,69 @@ fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
+#[test]
+fn public_upgrade_probe_workflow_requires_repository_configuration_without_external_identity() {
+    let workflow = fs::read_to_string(repo_path(".github/workflows/public-upgrade-probe.yml"))
+        .expect("read public upgrade probe workflow");
+    let plan = fs::read_to_string(repo_path("PLAN.md")).expect("read deployment plan");
+
+    for required in [
+        "vars.SIGNAL_FISH_PUBLIC_WS_URL",
+        "inputs.endpoint_url || vars.SIGNAL_FISH_PUBLIC_WS_URL",
+        "'unconfigured'",
+        "Validate probe endpoint configuration",
+        "SIGNAL_FISH_PUBLIC_WS_URL is not configured",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "the public probe workflow must contain {required:?}"
+        );
+    }
+    let workflow_without_descriptions = workflow
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("description:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !workflow_without_descriptions.contains("ws://")
+            && !workflow_without_descriptions.contains("wss://"),
+        "the probe workflow must not contain a literal public WebSocket endpoint"
+    );
+    let deployment_section = plan
+        .split("### P97 — Public WebSocket upgrade deployment and first eligible probe (#367)")
+        .nth(1)
+        .expect("P97 deployment section")
+        .split("\n### ")
+        .next()
+        .expect("bounded P97 deployment section");
+    assert!(
+        !deployment_section.contains("github.com/") && !deployment_section.contains("](http"),
+        "the deployment requirement must not identify an external repository:\n{deployment_section}"
+    );
+
+    let validation = workflow
+        .find("Validate probe endpoint configuration")
+        .expect("endpoint validation step");
+    let probe = workflow
+        .find("Probe simultaneous WebSocket upgrades")
+        .expect("probe step");
+    assert!(
+        validation < probe,
+        "missing endpoint configuration must fail clearly before network probing"
+    );
+    let validation_step = &workflow[validation..probe];
+    let empty_check = validation_step
+        .find(r#"if [ -z "${PROBE_URL:-}" ]; then"#)
+        .expect("validation step must check for an empty probe URL");
+    let nonzero_exit = validation_step[empty_check..]
+        .find("exit 1")
+        .expect("empty endpoint validation must exit nonzero");
+    assert!(
+        nonzero_exit > 0,
+        "empty endpoint validation must fail after detecting the empty URL"
+    );
+}
+
 fn write_fake_curl(root: &Path) -> PathBuf {
     let path = root.join("fake-curl");
     fs::write(

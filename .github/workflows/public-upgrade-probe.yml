@@ -18,7 +18,6 @@ on:
       endpoint_url:
         description: Public ws:// or wss:// endpoint to probe
         required: false
-        default: wss://atom.sharkdad.io/signalfish/v2/ws
         type: string
       bursts:
         description: Number of simultaneous two-client bursts
@@ -46,16 +45,24 @@ jobs:
       group: >-
         public-upgrade-${{ inputs.endpoint_url ||
             vars.SIGNAL_FISH_PUBLIC_WS_URL ||
-            'wss://atom.sharkdad.io/signalfish/v2/ws' }}
+            'unconfigured' }}
       cancel-in-progress: true
     env:
       PROBE_URL: >-
-        ${{ inputs.endpoint_url || vars.SIGNAL_FISH_PUBLIC_WS_URL ||
-            'wss://atom.sharkdad.io/signalfish/v2/ws' }}
+        ${{ inputs.endpoint_url || vars.SIGNAL_FISH_PUBLIC_WS_URL }}
       PROBE_BURSTS: ${{ inputs.bursts || '20' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+
+      - name: Validate probe endpoint configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PROBE_URL:-}" ]; then
+            echo "ERROR: SIGNAL_FISH_PUBLIC_WS_URL is not configured and no endpoint_url input was provided." >&2
+            exit 1
+          fi
 
       - name: Probe simultaneous WebSocket upgrades
         shell: bash

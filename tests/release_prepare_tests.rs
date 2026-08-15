@@ -228,6 +228,63 @@ fn read(path: impl AsRef<Path>) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
+fn release_inventory(root: &Path) -> Output {
+    Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/list-release-files.sh"))
+        .current_dir(root)
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("list canonical release files")
+}
+
+fn release_inventory_paths(root: &Path) -> Vec<String> {
+    let output = release_inventory(root);
+    assert!(
+        output.status.success(),
+        "release inventory failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect()
+}
+
+fn validate_release_scope(root: &Path) -> Output {
+    Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/validate-release-file-scope.sh"))
+        .current_dir(root)
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("validate release file scope")
+}
+
+#[test]
+fn release_scope_helpers_guard_empty_arrays_for_macos_bash_3_2() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scope = read(root.join("scripts/validate-release-file-scope.sh"));
+    for required_guard in [
+        r#"[ "$expected_count" -gt 0 ] && array_contains"#,
+        r#"[ "$actual_count" -eq 0 ] || ! array_contains"#,
+        r#"[ "$present_count" -eq 0 ] || ! array_contains"#,
+        r#"if [ "$actual_count" -gt 0 ]; then"#,
+    ] {
+        assert!(
+            scope.contains(required_guard),
+            "scope validation must guard empty-array expansion under set -u on Bash 3.2: {required_guard}"
+        );
+    }
+
+    let lockfiles = read(root.join("scripts/list-release-lockfiles.sh"));
+    assert!(
+        lockfiles.contains("lockfile_count=0")
+            && lockfiles.contains(r#"[ "$lockfile_count" -eq 0 ]"#),
+        "lockfile discovery must diagnose an empty inventory without expanding an empty array under set -u on Bash 3.2"
+    );
+}
+
 const RELEASE_FILES: [&str; 9] = [
     "Cargo.toml",
     "Cargo.lock",
@@ -457,19 +514,20 @@ fn prepare_release_fails_closed_on_empty_notes_existing_version_or_lock_drift() 
 #[test]
 fn prepare_release_discovers_future_tracked_standalone_lockfiles() {
     let fixture = Fixture::new("1.2.3");
-    let package = fixture.root.join("tools/replay-client");
+    let package_name = "-future replay-client";
+    let package = fixture.root.join(package_name);
     fs::create_dir_all(&package).expect("create future standalone package");
     write(
         &package.join("Cargo.toml"),
         "[package]\nname = \"replay-client\"\nversion = \"0.1.0\"\n\n\
-         [dependencies]\nsignal-fish-server = { path = \"../..\" }\n",
+         [dependencies]\nsignal-fish-server = { path = \"..\" }\n",
     );
     write(
         &package.join("Cargo.lock"),
         "version = 4\n\n[[package]]\nname = \"signal-fish-server\"\nversion = \"1.2.3\"\n",
     );
     assert!(git_at(&fixture.root)
-        .args(["add", "tools/replay-client"])
+        .args(["add", "--", package_name])
         .status()
         .expect("track future standalone package")
         .success());
@@ -488,6 +546,239 @@ fn prepare_release_discovers_future_tracked_standalone_lockfiles() {
     );
     assert!(read(package.join("Cargo.lock"))
         .contains("name = \"signal-fish-server\"\nversion = \"1.2.4\""));
+}
+
+#[test]
+fn canonical_release_inventory_includes_fixed_files_and_future_lockfiles() {
+    let fixture = Fixture::new("1.2.3");
+    let future = fixture.root.join("tools/replay-client");
+    fs::create_dir_all(&future).expect("create future package");
+    write(
+        &future.join("Cargo.toml"),
+        "[package]\nname = \"replay-client\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &future.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"signal-fish-server\"\nversion = \"1.2.3\"\n",
+    );
+    assert!(git_at(&fixture.root)
+        .args(["add", "tools/replay-client"])
+        .status()
+        .expect("track future package")
+        .success());
+
+    let paths = release_inventory_paths(&fixture.root);
+    for required in [
+        ".llm/context.md",
+        "CHANGELOG.md",
+        "Cargo.toml",
+        "docs/getting-started.md",
+        "docs/library-usage.md",
+        "fuzz/Cargo.toml",
+        "Cargo.lock",
+        "clients/native/Cargo.lock",
+        "fuzz/Cargo.lock",
+        "tools/replay-client/Cargo.lock",
+    ] {
+        assert!(
+            paths.iter().any(|path| path == required),
+            "missing {required}"
+        );
+    }
+    assert_eq!(
+        paths.len(),
+        paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "the canonical release inventory must not contain duplicates: {paths:?}"
+    );
+}
+
+#[test]
+fn canonical_release_inventory_rejects_an_untracked_fixed_file() {
+    let fixture = Fixture::new("1.2.3");
+    assert!(git_at(&fixture.root)
+        .args(["rm", "--cached", "--quiet", "docs/getting-started.md"])
+        .status()
+        .expect("untrack fixed release file")
+        .success());
+    assert!(git_at(&fixture.root)
+        .args(["commit", "--quiet", "-m", "untrack fixed release file"])
+        .status()
+        .expect("commit untracked fixed release file")
+        .success());
+
+    let output = release_inventory(&fixture.root);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Canonical release file is not tracked at HEAD: docs/getting-started.md"),
+        "unexpected diagnostic:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn prepared_diff_exactly_matches_canonical_release_inventory() {
+    let fixture = Fixture::new("1.2.3");
+    let prepared = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(prepared.status.success());
+
+    let validation = validate_release_scope(&fixture.root);
+    assert!(
+        validation.status.success(),
+        "prepared fixture must match workflow release scope:\n{}",
+        String::from_utf8_lossy(&validation.stderr)
+    );
+}
+
+#[test]
+fn release_scope_validation_reports_missing_and_unexpected_files_separately() {
+    for case in [
+        "missing",
+        "deleted-expected",
+        "extra",
+        "deleted-extra",
+        "renamed",
+        "untracked",
+    ] {
+        let fixture = Fixture::new("1.2.3");
+        let prepared = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+        assert!(prepared.status.success(), "prepare {case} fixture");
+
+        match case {
+            "missing" => {
+                assert!(git_at(&fixture.root)
+                    .args(["checkout", "--", "docs/getting-started.md"])
+                    .status()
+                    .expect("restore expected file")
+                    .success());
+            }
+            "deleted-expected" => {
+                assert!(git_at(&fixture.root)
+                    .args(["rm", "--quiet", "--force", "docs/getting-started.md"])
+                    .status()
+                    .expect("delete expected release file")
+                    .success());
+            }
+            "extra" => write(&fixture.root.join("README.md"), "# Changed README\n"),
+            "deleted-extra" => {
+                assert!(git_at(&fixture.root)
+                    .args(["rm", "--quiet", "README.md"])
+                    .status()
+                    .expect("delete unexpected tracked file")
+                    .success());
+            }
+            "renamed" => {
+                assert!(git_at(&fixture.root)
+                    .args([
+                        "mv",
+                        "docs/getting-started.md",
+                        "docs/getting-started-renamed.md",
+                    ])
+                    .status()
+                    .expect("rename expected file")
+                    .success());
+            }
+            "untracked" => write(&fixture.root.join("release-notes.tmp"), "unexpected\n"),
+            _ => unreachable!(),
+        }
+
+        let validation = validate_release_scope(&fixture.root);
+        assert!(!validation.status.success(), "{case} unexpectedly passed");
+        let stderr = String::from_utf8_lossy(&validation.stderr);
+        match case {
+            "missing" => assert!(
+                stderr.contains("Missing release files:")
+                    && stderr.contains("  - docs/getting-started.md")
+                    && !stderr.contains("Unexpected release files:")
+            ),
+            "deleted-expected" => assert!(
+                stderr.contains("Missing release files:")
+                    && stderr.contains("  - docs/getting-started.md")
+                    && !stderr.contains("Unexpected release files:")
+            ),
+            "extra" => assert!(
+                stderr.contains("Unexpected release files:")
+                    && stderr.contains("  - README.md")
+                    && !stderr.contains("Missing release files:")
+            ),
+            "deleted-extra" => assert!(
+                stderr.contains("Unexpected release files:")
+                    && stderr.contains("  - README.md")
+                    && !stderr.contains("Missing release files:")
+            ),
+            "renamed" => assert!(
+                stderr.contains("Missing release files:")
+                    && stderr.contains("  - docs/getting-started.md")
+                    && stderr.contains("Unexpected release files:")
+                    && stderr.contains("  - docs/getting-started-renamed.md")
+            ),
+            "untracked" => assert!(
+                stderr.contains("Unexpected release files:")
+                    && stderr.contains("  - release-notes.tmp")
+            ),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn release_scope_validation_rejects_whitespace_errors() {
+    let fixture = Fixture::new("1.2.3");
+    let prepared = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(prepared.status.success());
+    let mut changelog = read(fixture.root.join("CHANGELOG.md"));
+    changelog.push_str("trailing whitespace: \n");
+    write(&fixture.root.join("CHANGELOG.md"), &changelog);
+
+    let validation = validate_release_scope(&fixture.root);
+    assert!(!validation.status.success());
+    assert!(
+        String::from_utf8_lossy(&validation.stderr).contains("whitespace errors"),
+        "unexpected diagnostic:\n{}",
+        String::from_utf8_lossy(&validation.stderr)
+    );
+}
+
+#[test]
+fn canonical_inventory_staging_matches_the_prepared_worktree() {
+    let fixture = Fixture::new("1.2.3");
+    let prepared = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(prepared.status.success());
+    assert!(validate_release_scope(&fixture.root).status.success());
+
+    let before = git_at(&fixture.root)
+        .args(["diff", "--binary", "HEAD", "--"])
+        .output()
+        .expect("capture prepared worktree patch");
+    assert!(before.status.success());
+    let files = release_inventory_paths(&fixture.root);
+    assert!(git_at(&fixture.root)
+        .arg("add")
+        .arg("--")
+        .args(&files)
+        .status()
+        .expect("stage canonical release inventory")
+        .success());
+    let staged = git_at(&fixture.root)
+        .args(["diff", "--binary", "--cached", "HEAD", "--"])
+        .output()
+        .expect("capture staged release patch");
+    assert!(staged.status.success());
+    assert_eq!(before.stdout, staged.stdout);
+    assert!(git_at(&fixture.root)
+        .args(["commit", "--quiet", "-m", "release fixture"])
+        .status()
+        .expect("commit staged release files")
+        .success());
+    let status = git_at(&fixture.root)
+        .args(["status", "--porcelain=v1"])
+        .output()
+        .expect("inspect post-commit worktree");
+    assert!(status.status.success());
+    assert!(status.stdout.is_empty(), "unstaged release changes remain");
 }
 
 #[test]

@@ -1282,6 +1282,9 @@ fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
         "SIGNAL_FISH_CONFIG_PATH",
         "SIGNAL_FISH_PRODUCTION",
         "SIGNAL_FISH_HOOK_PROFILE",
+        // GitHub Actions repository variable for the operated monitor target,
+        // not a server configuration field override.
+        "SIGNAL_FISH_PUBLIC_WS_URL",
         "SIGNAL_FISH_WARM_CARGO_CHECK",
     ];
 
