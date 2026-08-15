@@ -60,6 +60,20 @@ this acceptance criterion.
 
 ## External acceptance
 
+### Reviewer capacity for a literal all-green pull request (#377)
+
+- Restore the external Copilot reviewer quota, or disable/reconfigure that
+  administrative integration without weakening repository-owned CI or human
+  review policy.
+- Exercise the integration on the exact pull-request head after the owner-side
+  change, retaining any substantive feedback and its resolution.
+
+Acceptance: the exact pull-request head or a dedicated test pull request has a
+terminal successful review result, or explicitly reports neutral/skipped
+unavailability after owner reconfiguration, with no failed required check.
+Repository-owned green checks alone do not satisfy this administrative
+requirement.
+
 ### P97 — Public WebSocket upgrade deployment and first eligible probe (#367)
 
 Deployment of the correlated server image is tracked in
@@ -106,12 +120,16 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
-- #205 — scope the remaining broader safety work against guarantees not already
-  covered by unsafe-code prohibition, warnings-as-errors, Miri, and sanitizers.
+- #220 — extend formal models only around a named, evidence-backed correctness
+  seam not already covered by the retained TLA+/TLC and Z3 suites.
 - #213 — add analyzers only when they prevent a demonstrated defect class with
   acceptable signal and maintenance cost.
 - #318 — use representative cross-platform measurements to choose the next
   hook-latency reduction without weakening fail-closed checks.
+- #378 — consolidate duplicate hosted link validation only with an atomic
+  branch-protection migration and equivalent-or-broader coverage evidence.
+- #379 — make verification-nightly pull-request fan-out path-aware with a
+  fail-closed classifier, stable checks, and measured hosted savings.
 - #204 — obtain and integrate the remaining design assets while preserving
   protocol and client compatibility.
 - #207 — pursue the next optimization only from current allocation and latency

@@ -1907,7 +1907,15 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // Every expensive compile/test job must wait on the gate. `needs:` is declared
     // in the first few lines of a job block, so a bounded window after the header
     // is sufficient and avoids brittle full-block parsing.
-    for job in ["lint", "nextest", "relay-allocations", "msrv", "coverage"] {
+    for job in [
+        "lint",
+        "nextest",
+        "relay-allocations",
+        "msrv",
+        "docker",
+        "coverage",
+        "panic-policy",
+    ] {
         let header = format!("\n  {job}:");
         let start = workflow
             .find(&header)
@@ -1970,6 +1978,44 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
                 first_step.as_mapping_get("shell").and_then(Yaml::as_str),
                 Some("bash"),
                 "{job} matrix guard must use Bash on Windows"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_actionlint_runs_on_relevant_changes_without_a_static_weekly_rerun() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/actionlint.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("actionlint.yml must parse");
+    let triggers = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("on"))
+        .expect("actionlint.yml must declare triggers");
+
+    assert!(
+        triggers.as_mapping_get("schedule").is_none(),
+        "actionlint validates pinned repository files deterministically and must not allocate a \n\
+         weekly runner when the same workflow already runs on every relevant push and pull \n\
+         request. Remove the `schedule` trigger from actionlint.yml."
+    );
+
+    for event in ["push", "pull_request"] {
+        let paths = triggers
+            .as_mapping_get(event)
+            .and_then(|trigger| trigger.as_mapping_get("paths"))
+            .and_then(Yaml::as_sequence)
+            .unwrap_or_else(|| panic!("actionlint.yml `{event}` must declare path filters"));
+        let paths = paths.iter().filter_map(Yaml::as_str).collect::<Vec<_>>();
+        for required in [
+            ".github/workflows/**",
+            ".github/actions/**",
+            ".github/actionlint.yaml",
+        ] {
+            assert!(
+                paths.contains(&required),
+                "actionlint.yml `{event}` must retain `{required}` change-time coverage after \n\
+                 removing the redundant weekly run. Observed paths: {paths:?}"
             );
         }
     }
