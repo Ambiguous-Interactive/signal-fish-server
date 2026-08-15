@@ -128,8 +128,14 @@ correctness evidence appears.
   hook-latency reduction without weakening fail-closed checks.
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
-- #379 — make verification-nightly pull-request fan-out path-aware with a
-  fail-closed classifier, stable checks, and measured hosted savings.
+- #379 — make verification-nightly pull-request fan-out path-aware only after
+  an owner exports the required-check/ruleset inventory and a historical
+  changed-file replay proves net allocation and runner-time savings. On the
+  2026-08-15 replay, classification reduced retained-trigger workers from 469
+  to 454, but 67 classifier jobs raised total allocations to 521; broadening
+  fail-closed triggers raised them to 569. Do not add per-lane status runners;
+  prefer a required classifier with server-side job skips and retain hosted
+  before/after evidence.
 - #204 — obtain and integrate the remaining design assets while preserving
   protocol and client compatibility.
 - #207 — pursue the next optimization only from current allocation and latency

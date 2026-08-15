@@ -8,7 +8,12 @@
 #
 # Runs on:
 #   - Pushes and pull requests that change the root Rust package or this workflow
-#   - Weekly schedule (Monday at 00:00 UTC) for proactive dependency cleanup
+#   - Manual dispatch for on-demand diagnostics
+#
+# There is intentionally no schedule: unused-dependency results are a pure
+# function of the pinned source graph, nightly toolchain, and analyzer versions,
+# all of which are covered by the path triggers below. Workflow Hygiene owns the
+# weekly staleness check for the shared pinned nightly.
 #
 # Features:
 #   - Shared checkout, nightly toolchain, and Rust dependency cache
@@ -79,10 +84,6 @@ on:
       - 'benches/**'
       - 'examples/**'
       - '.github/workflows/unused-deps.yml'
-  schedule:
-    # Run weekly on Monday at 00:00 UTC
-    - cron: '0 0 * * 1'
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
   cancel-in-progress: true
@@ -94,7 +95,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # runs-on-schedule
   unused-deps:
     name: Check Unused Dependencies
     runs-on: ubuntu-latest
