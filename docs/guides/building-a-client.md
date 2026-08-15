@@ -45,13 +45,15 @@ This is the lifecycle every client must implement. Connect a WebSocket to the
 server's `/v2/ws` (or `/v3/ws`) endpoint, then:
 
 ```text
-Authenticate  ->  JoinRoom  ->  PlayerReady  ->  StartGame  ->  GameStarting  ->  GameData ... ->  LeaveRoom
+[Authenticate when needed]  ->  JoinRoom  ->  PlayerReady  ->  StartGame  ->  GameStarting  ->  GameData ... ->  LeaveRoom
 ```
 
-1. **Authenticate** — MUST be the first message. Send your public `app_id` (it is
-   an identifier, not a secret — safe to embed in builds). The server replies
-   `Authenticated` followed by `ProtocolInfo`. On failure you get
-   `AuthenticationError` with an `error_code`.
+1. **Authenticate when needed** — in allowlist mode, this MUST be the first
+   message and its public `app_id` must be allowed. In open mode it is optional;
+   you may send `JoinRoom` first. If you do send `Authenticate` in open mode, it
+   must still be your first message. Use it to negotiate v3 capabilities or a
+   non-default game-data format. A successful handshake returns `Authenticated`
+   followed by `ProtocolInfo`; a rejected one returns `AuthenticationError`.
 2. **JoinRoom** — create or join a room. Omit `room_code` to create a new room
    (the server generates one); provide a `room_code` to join an existing room, or
    to create one with that specific code if none exists yet. The server replies
@@ -103,7 +105,8 @@ your "Start" affordance when both conditions allow it.
 
 | Message / feature | Status |
 | --- | --- |
-| `Authenticate`, `JoinRoom`, `PlayerReady`, `StartGame`, `GameStarting`, `GameData`, `LeaveRoom` | **Mandatory** (v2 floor) |
+| `JoinRoom`, `PlayerReady`, `StartGame`, `GameStarting`, `GameData`, `LeaveRoom` | **Mandatory** (v2 floor) |
+| `Authenticate` | **Mandatory in allowlist mode**; optional in open mode, but required to advertise v3 capabilities or select a non-default game-data format |
 | `Ping` / `Pong` heartbeat | **Mandatory** (avoid idle timeout) |
 | Handling `Error` and the `*Failed` messages with `error_code` | **Mandatory** |
 | `Reconnect` after a drop | Optional (see [Reconnection](../concepts/reconnection.md)) |
@@ -116,8 +119,8 @@ your "Start" affordance when both conditions allow it.
 
 ## Optional v3 upgrade
 
-To use peer-to-peer or classified delivery, negotiate v3 during `Authenticate`.
-Advertise only the peer-to-peer capabilities you actually implement:
+To advertise peer-to-peer capabilities, send `Authenticate` as the first frame,
+request v3, and list only the transports and topologies you actually implement:
 
 ```json
 {
@@ -132,7 +135,9 @@ Advertise only the peer-to-peer capabilities you actually implement:
 ```
 
 Omitting `supported_transports` / `supported_topologies` keeps you relay-only
-even on the `/v3/ws` endpoint. The server echoes the negotiated
+even on the `/v3/ws` endpoint. In open mode, a client may skip `Authenticate`:
+`/v3/ws` then uses v3 classified relay without peer-to-peer capabilities, while
+`/v2/ws` uses v2. When you do authenticate, the server echoes the negotiated
 `protocol_version`, accepted range, and current server message `transports`
 (`["websocket"]` today) in `ProtocolInfo`.
 
@@ -245,7 +250,10 @@ Worked v3 sessions: [mesh + WebRTC](../scenarios/v3-mesh-webrtc.md),
   Pings, and treat close `4002 slow_consumer` or `4003 activity_timeout` as a
   terminal physical connection that must be reconnected. See the
   [directional partition table](../architecture/scaling.md#directional-partition-detection).
-- **Authenticate first.** Any other message before `Authenticate` is an error.
+- **Choose the handshake path before sending anything.** In allowlist mode,
+  `Authenticate` must be first. In open mode you may omit it and start with
+  `JoinRoom`; if you use it for app identification or protocol negotiation, it
+  must still precede every application message.
 - **Rejoining by code re-creates a vanished room — carry your original
   `max_players`.** If a room no longer exists (the server restarted, or every
   member left and its reconnection window elapsed) and your party rejoins by room
@@ -265,7 +273,9 @@ Worked v3 sessions: [mesh + WebRTC](../scenarios/v3-mesh-webrtc.md),
 
 A client is conformant when it passes these scenarios:
 
-- [ ] **Auth + join + relay:** authenticate, create a room, send and receive a
+- [ ] **Handshake policy + join + relay:** in allowlist mode, authenticate first;
+      in open mode, exercise the path your client supports (optional first
+      `Authenticate` or immediate `JoinRoom`). Create a room, send and receive a
       `GameData` round-trip, then `LeaveRoom`.
 - [ ] **Two-player lobby + start:** two clients join, both `PlayerReady`, observe
       `all_ready`, the authorized client sends `StartGame`, both see

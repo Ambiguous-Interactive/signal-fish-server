@@ -4,87 +4,30 @@
 
 # Signal Fish Server
 
-**A lightweight, in-memory WebSocket signaling server with zero external
-runtime dependencies for peer-to-peer game networking.**
+Signal Fish Server helps players find and connect to each other. A player creates
+a room, shares its short code, and the other players join over WebSocket.
 
-[Quick Start](quickstart.md){ .md-button .md-button--primary .sf-home-action }
+It runs as one small, in-memory server. You do not need a database, message
+broker, or other service.
+
+[Start in five minutes](quickstart.md){ .md-button .md-button--primary .sf-home-action }
 [View on GitHub](https://github.com/Ambiguous-Interactive/signal-fish-server){ .md-button .sf-home-action }
 
-Built in Rust with axum and tokio, Signal Fish Server handles the hardest
-part of multiplayer game networking: getting players connected. No database,
-no message broker, no cloud services required.
+## How It Fits Into a Game
 
-## What It Does
+1. Your game clients connect to Signal Fish Server.
+2. One player creates a room and shares the room code.
+3. Other players join, ready up, and start the game.
+4. Clients exchange game data through the relay or use the connection plan to
+   establish peer-to-peer links.
 
-Signal Fish Server is a WebSocket signaling server purpose-built for
-multiplayer games. Players connect over WebSocket, create or join rooms
-using shareable 6-character room codes, and coordinate through a built-in
-lobby system with ready-up state management. Once every player is ready, a
-member explicitly starts the game and the server facilitates peer-to-peer
-connection establishment so your game clients can communicate directly. Everything runs in-memory in a single
-binary -- deploy it anywhere and start matchmaking in seconds.
+Rooms live in memory and disappear when the server stops.
 
-## Key Features
+## Where to Go Next
 
-- **Room codes for easy matchmaking** -- players share a short 6-character
-  code to join the same room
-- **Lobby system with ready-up state machine** -- tracks player readiness
-  and manages Waiting, Lobby, and Finalized states automatically
-- **Authority system** -- designate one player as the authoritative host
-  for server-authoritative game logic
-- **Spectator mode** -- observers can watch games without counting toward
-  player limits
-- **Reconnection with event replay** -- players who disconnect can rejoin
-  and receive all events they missed
-- **Rate limiting and metrics** -- built-in protection against abuse, with
-  JSON and Prometheus metrics endpoints
-- **Docker-ready, zero configuration needed** -- pull the image and run it;
-  the defaults work out of the box
-
-## Quick Taste
-
-Here is a minimal Rust example that connects to the server and creates
-a new room:
-
-```rust
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
-
-#[tokio::main]
-async fn main() {
-    let (mut ws, _) = connect_async("ws://localhost:3536/v2/ws")
-        .await
-        .expect("Failed to connect");
-
-    let join_msg = serde_json::json!({
-        "type": "JoinRoom",
-        "data": {
-            "game_name": "my-game",
-            "player_name": "Player1",
-            "max_players": 4
-        }
-    });
-    ws.send(Message::Text(join_msg.to_string().into()))
-        .await
-        .expect("Failed to send");
-
-    if let Some(Ok(msg)) = ws.next().await {
-        println!("Server response: {}", msg);
-        // Prints a RoomJoined message with your room_code
-    }
-}
-```
-
-## Getting Started
-
-Ready to build multiplayer into your game? Start here:
-
-- **[Quick Start](quickstart.md)** -- get a server running and two clients
-  talking in under 5 minutes
-- **[Rust Client Guide](guides/rust-client.md)** -- build a complete
-  game client with room management, lobby flow, and data exchange
-- **[Platform Integration Guide](guides/platform-integration.md)** -- which WebRTC
-  stack to use per platform (browser, native, mobile, Steam, Godot, Unity, Unreal)
-- **[Protocol Reference](protocol.md)** -- every message type, field,
-  and flow documented
+- [Run the quick start](quickstart.md) to start a local server and join two
+  players.
+- [Build a client](guides/building-a-client.md) to add the flow to your game.
+- [Read the protocol reference](protocol.md) for every message and field.
+- [Configure and deploy the server](configuration.md) when you are ready to
+  move beyond local development.

@@ -261,6 +261,46 @@ fn link_targets(markdown: &str) -> Vec<String> {
     targets
 }
 
+fn markdown_link_destinations(markdown: &str) -> Vec<String> {
+    let mut targets = link_targets(markdown);
+    targets.extend(markdown.lines().filter_map(|line| {
+        let definition = line.trim().strip_prefix('[')?.split_once("]:")?.1.trim();
+        definition.split_whitespace().next().map(str::to_string)
+    }));
+    targets
+}
+
+fn level_two_headings(markdown: &str) -> BTreeSet<String> {
+    let mut headings = BTreeSet::new();
+    let mut in_fence = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        } else if !in_fence {
+            if let Some(heading) = trimmed.strip_prefix("## ") {
+                if !heading.starts_with('#') {
+                    headings.insert(heading.trim_end_matches('#').trim().to_string());
+                }
+            }
+        }
+    }
+    headings
+}
+
+fn mkdocs_nav_page_targets(mkdocs: &str) -> BTreeSet<&str> {
+    let mut lines = mkdocs.lines().skip_while(|line| *line != "nav:");
+    assert_eq!(lines.next(), Some("nav:"), "mkdocs.yml must define nav");
+
+    lines
+        .take_while(|line| line.starts_with(' ') || line.trim().is_empty())
+        .filter_map(|line| line.trim().strip_prefix("- "))
+        .filter_map(|item| item.rsplit_once(':').map(|(_, target)| target.trim()))
+        .map(|target| target.trim_matches(['\'', '"']))
+        .filter(|target| target.ends_with(".md"))
+        .collect()
+}
+
 /// Normalize a relative link (handling `.` / `..`) against the linking file.
 fn resolve_relative(base_file: &Path, rel: &str) -> PathBuf {
     let mut path = base_file
@@ -290,6 +330,35 @@ fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+fn fenced_blocks_with_info<'a>(markdown: &'a str, expected_info: &str) -> Vec<&'a str> {
+    let mut blocks = Vec::new();
+    let mut offset = 0;
+    let lines: Vec<&str> = markdown.split_inclusive('\n').collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line_start = offset;
+        if let Some((marker, info)) = code_fence_open(lines[i]) {
+            offset += lines[i].len();
+            let body_start = offset;
+            i += 1;
+            while i < lines.len() && !is_code_fence_close(lines[i], &marker) {
+                offset += lines[i].len();
+                i += 1;
+            }
+            if info == expected_info {
+                blocks.push(&markdown[body_start..offset]);
+            }
+            if i < lines.len() {
+                offset += lines[i].len();
+            }
+        } else {
+            offset = line_start + lines[i].len();
+        }
+        i += 1;
+    }
+    blocks
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +549,115 @@ fn collect_reconnection_reasons(value: &Value, line: usize, out: &mut Vec<(usize
 // ---------------------------------------------------------------------------
 // Guards
 // ---------------------------------------------------------------------------
+
+#[test]
+fn readme_is_an_on_ramp_to_authoritative_docs() {
+    let readme = read_file(&repo_root().join("README.md"));
+    let headings = level_two_headings(&readme);
+    let links = markdown_link_destinations(&readme);
+    let word_count = readme.split_whitespace().count();
+    let reference_manual_sections = [
+        "Configuration",
+        "Protocol Reference",
+        "Building from Source",
+        "Development",
+        "Contributing",
+        "Project Structure",
+    ];
+    let exposed_sections: Vec<&str> = reference_manual_sections
+        .into_iter()
+        .filter(|heading| headings.contains(*heading))
+        .collect();
+
+    let authoritative_docs = [
+        "docs/configuration.md",
+        "docs/protocol.md",
+        "docs/development.md",
+    ];
+    let missing_links: Vec<&str> = authoritative_docs
+        .into_iter()
+        .filter(|target| {
+            !links.iter().any(|link| {
+                link.split(['#', '?'])
+                    .next()
+                    .is_some_and(|destination| destination.ends_with(*target))
+            })
+        })
+        .collect();
+
+    assert!(
+        exposed_sections.is_empty() && missing_links.is_empty() && word_count <= 800,
+        "README.md must be a concise user on-ramp, not a duplicate reference manual. \
+         Move exhaustive configuration, protocol, build/contributor, and project-structure \
+         material to the authoritative docs.\nTop-level reference sections still exposed: \
+         {exposed_sections:?}\nMissing authoritative doc links: {missing_links:?}\nREADME word count: \
+         {word_count} (maximum 800)"
+    );
+}
+
+#[test]
+fn onboarding_join_room_examples_keep_the_wire_shape() {
+    let root = repo_root();
+    for (path, minimum_examples) in [("README.md", 1), ("docs/quickstart.md", 2)] {
+        let markdown = read_file(&root.join(path));
+        let examples: Vec<&str> = fenced_blocks_with_info(&markdown, "javascript")
+            .into_iter()
+            .filter(|block| block.contains("type: \"JoinRoom\""))
+            .collect();
+        assert!(
+            examples.len() >= minimum_examples,
+            "{path} must keep at least {minimum_examples} JavaScript JoinRoom example(s)"
+        );
+
+        if path == "README.md" {
+            assert!(
+                examples.iter().any(|example| {
+                    example.contains("new WebSocket(")
+                        && (example.contains(".onopen")
+                            || example.contains("addEventListener(\"open\""))
+                }),
+                "README.md JoinRoom onboarding must include a self-contained WebSocket example that sends after the socket opens"
+            );
+        }
+
+        for example in examples {
+            for required in ["data:", "game_name:", "player_name:"] {
+                assert!(
+                    example.contains(required),
+                    "{path} JoinRoom examples must preserve the wire field `{required}`"
+                );
+            }
+            for drifted in ["gameName:", "playerName:"] {
+                assert!(
+                    !example.contains(drifted),
+                    "{path} JoinRoom examples must use snake_case wire fields, not `{drifted}`"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mkdocs_public_nav_excludes_contributor_only_pages() {
+    let mkdocs = read_live_file(&repo_root().join("mkdocs.yml"));
+    let nav_targets = mkdocs_nav_page_targets(&mkdocs);
+    let contributor_only_pages = [
+        "development.md",
+        "releasing.md",
+        "architecture/formal-verification.md",
+    ];
+    let exposed: Vec<&str> = contributor_only_pages
+        .into_iter()
+        .filter(|page| nav_targets.contains(page))
+        .collect();
+
+    assert!(
+        exposed.is_empty(),
+        "mkdocs.yml public nav must focus on user documentation; contributor-only \
+         development, release, and deep formal-verification pages remain available \
+         in the repository but must not be primary navigation entries. Exposed pages: {exposed:?}"
+    );
+}
 
 #[test]
 fn error_code_reference_documents_every_error_code() {

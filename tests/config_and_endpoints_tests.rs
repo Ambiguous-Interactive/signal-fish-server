@@ -532,64 +532,6 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     },
 ];
 
-const README_REQUIRED_CONFIG_ROWS: &[ConfigReferenceRow] = &[
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__PORT",
-        path: "port",
-        default: Some("3536"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA",
-        path: "protocol.enable_message_pack_game_data",
-        default: Some("true"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__PROTOCOL__MIN_PROTOCOL_VERSION",
-        path: "protocol.min_protocol_version",
-        default: Some("2"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION",
-        path: "protocol.max_protocol_version",
-        default: Some("3"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__LOGGING__LEVEL",
-        path: "logging.level",
-        default: Some("null"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING",
-        path: "logging.enable_file_logging",
-        default: Some("true"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__LOGGING__FORMAT",
-        path: "logging.format",
-        default: Some("json"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__SECURITY__CORS_ORIGINS",
-        path: "security.cors_origins",
-        default: Some("http://localhost:3000,http://localhost:5173"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST",
-        path: "security.enforce_app_id_allowlist",
-        default: Some("true"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH",
-        path: "security.require_metrics_auth",
-        default: Some("true"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING",
-        path: "websocket.enable_batching",
-        default: Some("false"),
-    },
-];
-
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedConfigRow {
     env: String,
@@ -1320,13 +1262,12 @@ fn test_config_reference_expected_defaults_match_code() {
 }
 
 #[test]
-fn test_config_reference_tables_are_complete_and_current() {
+fn test_configuration_reference_table_is_complete_and_current() {
     assert_config_reference_rows(
         &repo_path("docs/configuration.md"),
         CONFIG_REFERENCE_ROWS,
         true,
     );
-    assert_config_reference_rows(&repo_path("README.md"), README_REQUIRED_CONFIG_ROWS, false);
 }
 
 #[test]

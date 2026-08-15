@@ -37,6 +37,11 @@ signal-fish-server = { version = "0.1.1", features = ["tls"] }
             .to_string(),
         ),
         (
+            "docs/getting-started.md",
+            "# Getting Started\n\nhttps://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v0.1.1/config.example.json\n"
+                .to_string(),
+        ),
+        (
             ".llm/context.md",
             r#"# Context
 
@@ -44,15 +49,23 @@ signal-fish-server = { version = "0.1.1", features = ["tls"] }
 
 [v2 client sample](code-samples/protocol/v2-client-messages.jsonl)
 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)
+[v3 client sample](code-samples/protocol/v3-client-messages.jsonl)
+[v3 server sample](code-samples/protocol/v3-server-messages.jsonl)
 "#
             .to_string(),
         ),
         (
             "README.md",
-            r#"# README
+            "# README\n".to_string(),
+        ),
+        (
+            "docs/protocol.md",
+            r#"# Protocol Reference
 
-[v2 client sample](.llm/code-samples/protocol/v2-client-messages.jsonl)
-[v2 server sample](.llm/code-samples/protocol/v2-server-messages.jsonl)
+[v2 client sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-client-messages.jsonl)
+[v2 server sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-server-messages.jsonl)
+[v3 client sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-client-messages.jsonl)
+[v3 server sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl)
 "#
             .to_string(),
         ),
@@ -67,6 +80,22 @@ signal-fish-server = { version = "0.1.1", features = ["tls"] }
             ".llm/code-samples/protocol/v2-server-messages.jsonl",
             r#"{"type":"Authenticated","data":{"app_name":"my-game","rate_limits":{"per_minute":60}}}
 {"type":"ProtocolInfo","data":{"capabilities":["reconnection"],"game_data_formats":["json"]}}
+"#
+            .to_string(),
+        ),
+        (
+            ".llm/code-samples/protocol/v3-client-messages.jsonl",
+            r#"{"type":"Authenticate","data":{"protocol_version":3}}
+{"type":"Signal","data":{}}
+{"type":"TransportStatus","data":{}}
+"#
+            .to_string(),
+        ),
+        (
+            ".llm/code-samples/protocol/v3-server-messages.jsonl",
+            r#"{"type":"DeliveryReport","data":{}}
+{"type":"SessionPlan","data":{}}
+{"type":"GoingAway","data":{}}
 "#
             .to_string(),
         ),
@@ -450,6 +479,17 @@ fn test_doc_consistency_script_data_driven_cases() {
             must_contain: vec![".llm/context.md must contain exact line"],
             must_not_contain: vec![],
         },
+        ScriptCase {
+            name: "fails_on_stale_release_config_url",
+            overrides: vec![(
+                "docs/getting-started.md",
+                "# Getting Started\n\nhttps://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v0.1.0/config.example.json\n",
+            )],
+            args: vec![],
+            expected_exit: 1,
+            must_contain: vec!["stale release config URL version '0.1.0'"],
+            must_not_contain: vec![],
+        },
         // Superset coverage: the scan validates EVERY doc that quotes the crate
         // version, not just docs/library-usage.md. A new doc that drifts must be
         // caught -- this is the class of bug that broke six CI jobs after a bump.
@@ -495,7 +535,7 @@ fn test_doc_consistency_script_data_driven_cases() {
             name: "passes_context_version_check_with_crlf_line_endings",
             overrides: vec![(
                 ".llm/context.md",
-                "# Context\r\n\r\n- **Version:** 0.1.1\r\n\r\n[v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\r\n[v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\r\n",
+                "# Context\r\n\r\n- **Version:** 0.1.1\r\n\r\n[v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\r\n[v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\r\n[v3 client sample](code-samples/protocol/v3-client-messages.jsonl)\r\n[v3 server sample](code-samples/protocol/v3-server-messages.jsonl)\r\n",
             )],
             args: vec![],
             expected_exit: 0,
@@ -711,6 +751,8 @@ pub enum GameDataEncoding {
             must_contain: vec![
                 ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v2-client-messages.jsonl",
                 ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v2-server-messages.jsonl",
+                ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v3-client-messages.jsonl",
+                ".llm/context.md must reference canonical protocol sample: code-samples/protocol/v3-server-messages.jsonl",
             ],
             must_not_contain: vec![],
         },

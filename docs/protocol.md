@@ -5,6 +5,17 @@ optional `data` field.
 
 MessagePack encoding is also supported for game data when `enable_message_pack_game_data` is enabled.
 
+Illustrative v2 examples and canonical, machine-checked v3 wire samples:
+
+- v2 client messages (non-exhaustive examples):
+  <https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-client-messages.jsonl>
+- v2 server messages (non-exhaustive examples):
+  <https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-server-messages.jsonl>
+- v3 client messages (canonical wire frames):
+  <https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-client-messages.jsonl>
+- v3 server messages (canonical wire frames):
+  <https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl>
+
 ## Client Messages
 
 ### Authenticate
@@ -1917,6 +1928,6 @@ delivery class. It never authorizes a sequence gap; use a prior exact
 
 ## Next Steps
 
-- [Getting Started](getting-started.md) - Basic usage examples
+- [Install Signal Fish Server](getting-started.md) - installation options
 - [Platform Integration Guide](guides/platform-integration.md) - which WebRTC stack to use per platform
 - [Features](features.md) - Complete feature overview

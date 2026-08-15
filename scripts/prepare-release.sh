@@ -103,7 +103,7 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
 cd "$REPO_ROOT"
 
 for required in \
-    Cargo.toml Cargo.lock CHANGELOG.md .llm/context.md docs/library-usage.md \
+    Cargo.toml Cargo.lock CHANGELOG.md .llm/context.md docs/library-usage.md docs/getting-started.md \
     clients/native/Cargo.toml clients/native/Cargo.lock \
     fuzz/Cargo.toml fuzz/Cargo.lock scripts/check-doc-consistency.sh; do
     if [ ! -f "$required" ]; then
@@ -470,6 +470,37 @@ replace_context_version() {
     rm -f "$count_file"
 }
 
+replace_release_config_url() {
+    local file="$1"
+    local current_version="$2"
+    local next_version="$3"
+    local output count_file
+    output=$(mktemp)
+    count_file=$(mktemp)
+    awk \
+        -v current="/v$current_version/config.example.json" \
+        -v replacement="/v$next_version/config.example.json" \
+        -v count_file="$count_file" '
+        BEGIN { changed = 0 }
+        {
+            position = index($0, current)
+            if (position != 0) {
+                $0 = substr($0, 1, position - 1) replacement substr($0, position + length(current))
+                changed++
+            }
+            print
+        }
+        END { print changed > count_file }
+    ' "$file" > "$output"
+    if [ "$(cat "$count_file")" -ne 1 ]; then
+        echo "ERROR: Expected exactly one v$current_version config.example.json release URL in $file." >&2
+        rm -f "$output" "$count_file"
+        exit 1
+    fi
+    mv "$output" "$file"
+    rm -f "$count_file"
+}
+
 cut_changelog_release() {
     local file="$1"
     local next_version="$2"
@@ -516,6 +547,7 @@ ROLLBACK_FILES=(
     "${RELEASE_LOCKFILES[@]}"
     CHANGELOG.md
     docs/library-usage.md
+    docs/getting-started.md
     .llm/context.md
 )
 for file in "${ROLLBACK_FILES[@]}"; do
@@ -543,6 +575,7 @@ for lockfile in "${RELEASE_LOCKFILES[@]}"; do
     replace_locked_path_package_version "$lockfile" "$NEXT_VERSION"
 done
 replace_documented_version docs/library-usage.md "$CURRENT_VERSION" "$NEXT_VERSION"
+replace_release_config_url docs/getting-started.md "$CURRENT_VERSION" "$NEXT_VERSION"
 replace_context_version .llm/context.md "$CURRENT_VERSION" "$NEXT_VERSION"
 cut_changelog_release CHANGELOG.md "$NEXT_VERSION" "$RELEASE_DATE" "$CURRENT_VERSION"
 
@@ -558,7 +591,7 @@ for lockfile in "${RELEASE_LOCKFILES[@]}"; do
 done
 "$PREPARE_RELEASE_DOC_CHECK" --changed-files \
     Cargo.toml "${RELEASE_LOCKFILES[@]}" \
-    CHANGELOG.md docs/library-usage.md .llm/context.md fuzz/Cargo.toml
+    CHANGELOG.md docs/library-usage.md docs/getting-started.md .llm/context.md fuzz/Cargo.toml
 
 ROLLBACK_ACTIVE=0
 

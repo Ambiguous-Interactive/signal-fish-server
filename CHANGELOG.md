@@ -77,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Simplify the README and public documentation around a clear start-to-build-to-deploy
+  path. Concise onboarding and capability pages now point to the authoritative
+  protocol, configuration, and operator references instead of duplicating their
+  detailed tables and examples, and contributor-only material no longer appears
+  in the primary documentation navigation (issue #383).
 - Adopt the accessible Vector design system across the README and documentation
   site, including the approved fish mark, favicon, responsive wordmark,
   self-hosted typography, contrast-safe light and dark themes, and preserved

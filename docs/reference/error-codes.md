@@ -320,5 +320,5 @@ every `JoinAsSpectator` is answered by `SpectatorJoined` or
 ## See Also
 
 - [Protocol](../protocol.md) -- full message format documentation
-- [Getting Started](../getting-started.md) -- basic usage examples
+- [Install Signal Fish Server](../getting-started.md) -- installation options
 - [Features](../features.md) -- complete feature overview

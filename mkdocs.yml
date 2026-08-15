@@ -114,22 +114,21 @@ validation:
 
 nav:
   - Home: index.md
-  - Getting Started:
+  - Start Here:
       - Quick Start: quickstart.md
-      - Installation & Running: getting-started.md
-  - Concepts:
-      - What is Signal Fish?: concepts/overview.md
-      - Protocol v2 vs v3: concepts/protocol-versions.md
+      - What Signal Fish Does: concepts/overview.md
+      - Choose v2 or v3: concepts/protocol-versions.md
+  - Build a Client:
+      - Client Contract: guides/building-a-client.md
+      - Rust Client: guides/rust-client.md
+      - Platform Integration: guides/platform-integration.md
+  - Game Flow:
       - Rooms & Lobbies: concepts/rooms-and-lobbies.md
       - Authority System: concepts/authority.md
       - Reconnection: concepts/reconnection.md
       - Spectator Mode: concepts/spectator-mode.md
-  - Guides:
-      - Building a Client: guides/building-a-client.md
-      - Rust Client: guides/rust-client.md
-      - Platform Integration: guides/platform-integration.md
-  - Examples:
-      - Overview: scenarios/index.md
+  - Worked Examples:
+      - Choose an Example: scenarios/index.md
       - "v2: Two-Player Relay": scenarios/v2-two-player-relay.md
       - "v3: Mesh + WebRTC": scenarios/v3-mesh-webrtc.md
       - "v3: Host Topology": scenarios/v3-host-topology.md
@@ -137,26 +136,22 @@ nav:
       - Reconnection: scenarios/reconnection.md
       - Spectator: scenarios/spectator.md
       - Error Handling: scenarios/error-handling.md
-  - Configuration:
-      - Server Config: configuration.md
+  - Run a Server:
+      - Configuration: configuration.md
       - Run Modes: run-modes.md
-      - Configuration Recipes: configuration-recipes.md
+      - Common Recipes: configuration-recipes.md
+      - Application Identification: authentication.md
+      - Deployment Guide: deployment.md
       - Pre-deployment Checklist: pre-deployment-checklist.md
-      - Application identification: authentication.md
-      - Deployment: deployment.md
-      - TURN Deployment: deployment-turn.md
+      - Self-hosted TURN: deployment-turn.md
   - Reference:
       - Protocol Messages: protocol.md
       - Error Codes: reference/error-codes.md
       - Feature Matrix: reference/feature-matrix.md
-      - Features: features.md
       - Architecture: architecture.md
       - Transport Fallback (v3): architecture/transport-fallback.md
       - Handoff & Topologies (v3): architecture/handoff-and-topologies.md
-      - Formal Verification (v3): architecture/formal-verification.md
       - Single-Instance Deployment: architecture/single-instance-deployment.md
       - Consistency and Durability: architecture/consistency-and-durability.md
       - Scaling: architecture/scaling.md
       - Library Usage: library-usage.md
-      - Development: development.md
-      - Release Runbook: releasing.md
