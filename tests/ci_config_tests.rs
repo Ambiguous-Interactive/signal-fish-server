@@ -5390,12 +5390,14 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "dtolnay/rust-toolchain@v1",
         "toolchain: ${{ steps.toolchain.outputs.channel }}",
         "bash scripts/prepare-release.sh --bump \"$BUMP\"",
-        "git diff --check",
+        "bash scripts/validate-release-file-scope.sh",
         "Validate prepared release state",
         "cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency",
-        "bash scripts/list-release-lockfiles.sh",
-        "release_files=(",
-        "git add \"${release_files[@]}\"",
+        "bash scripts/list-release-files.sh",
+        "release_inventory=$(mktemp)",
+        "bash scripts/list-release-files.sh > \"$release_inventory\"",
+        "done < \"$release_inventory\"",
+        "git add -- \"${release_files[@]}\"",
         "bash scripts/resolve-prepared-release.sh",
         "VERIFIED_BRANCH_SHA: ${{ steps.release.outputs.branch_sha }}",
         "if: ${{ always() && !inputs.dry_run }}",
@@ -5418,12 +5420,34 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
          runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
     );
 
-    assert_eq!(
-        prepare.matches("fuzz/Cargo.toml").count(),
-        2,
-        "The synchronized fuzz dependency manifest must appear once in the exact prepared-diff \
-         allowlist and once in the staged release_files array.\nJob block:\n{prepare}"
-    );
+    for duplicated_release_path in [
+        ".llm/context.md",
+        "docs/getting-started.md",
+        "docs/library-usage.md",
+        "fuzz/Cargo.toml",
+    ] {
+        assert!(
+            !prepare.contains(duplicated_release_path),
+            "prepare-release.yml must consume the canonical inventory instead of duplicating \
+             release path {duplicated_release_path:?}.\nJob block:\n{prepare}"
+        );
+    }
+
+    for required in [
+        "AUTO_COMMIT_APP_CLIENT_ID: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}",
+        "client-id: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}",
+    ] {
+        assert!(
+            prepare.contains(required),
+            "missing current App credential {required}"
+        );
+    }
+    for legacy in ["AUTO_COMMIT_APP_ID", "app-id:"] {
+        assert!(
+            !prepare.contains(legacy),
+            "legacy App credential remains: {legacy}"
+        );
+    }
 
     let prepare_files_position = prepare
         .find("- name: Prepare release files")
@@ -5487,8 +5511,8 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     );
     for mutation in [
         "git checkout -b \"$BRANCH\"",
-        "release_files=(",
-        "git add \"${release_files[@]}\"",
+        "while IFS= read -r -d '' release_file; do",
+        "git add -- \"${release_files[@]}\"",
         "git commit -m \"release: ${VERSION}\"",
         "push origin \"HEAD:refs/heads/${BRANCH}\"",
         "expected_head_sha=$(git rev-parse HEAD)",
@@ -5774,10 +5798,15 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         "clients/native/Cargo.lock",
         "fuzz/Cargo.lock",
         "RELEASE_LOCKFILES",
+        "RELEASE_FILES",
+        "DOC_CHECK_FILES",
+        "RELEASE_FILE_INVENTORY",
         "TRACKED_MANIFESTS",
         "git ls-files -z -- ':(glob)**/Cargo.toml'",
         "required_lockfile in Cargo.lock clients/native/Cargo.lock fuzz/Cargo.lock",
         "list-release-lockfiles.sh",
+        "list-release-files.sh",
+        "bash \"$SCRIPT_DIR/list-release-files.sh\" > \"$RELEASE_FILE_INVENTORY\"",
         "release-lockfile-packages.awk",
         "docs/library-usage.md",
         "docs/getting-started.md",
@@ -5787,7 +5816,7 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         "cut_changelog_release CHANGELOG.md \"$NEXT_VERSION\" \"$RELEASE_DATE\" \"$CURRENT_VERSION\"",
         "metadata --locked --format-version 1",
         "scripts/check-doc-consistency.sh",
-        "CHANGELOG.md docs/library-usage.md docs/getting-started.md .llm/context.md fuzz/Cargo.toml",
+        "--changed-files \"${DOC_CHECK_FILES[@]}\"",
     ] {
         assert!(
             script.contains(required),
@@ -5795,6 +5824,12 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
              changelog, and documented release identities cannot drift."
         );
     }
+
+    assert!(
+        !script.contains("< <(bash \"$SCRIPT_DIR/list-release-files.sh\")"),
+        "prepare-release.sh must capture the inventory helper status instead of hiding failures \
+         behind process substitution"
+    );
 
     for manifest in ["Cargo.toml", "clients/native/Cargo.toml", "fuzz/Cargo.toml"] {
         assert!(

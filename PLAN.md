@@ -76,11 +76,11 @@ requirement.
 
 ### P97 — Public WebSocket upgrade deployment and first eligible probe (#367)
 
-Deployment of the correlated server image is tracked in
-[signal-fish-cloud#595](https://github.com/Ambiguous-Interactive/signal-fish-cloud/issues/595).
-
-- Deploy the correlated image and record the platform-authoritative immutable
-  digest, source revision, and rollout-complete UTC in signal-fish-cloud#595.
+- Configure the repository variable `SIGNAL_FISH_PUBLIC_WS_URL` with the
+  operator-owned public WebSocket endpoint.
+- Deploy the correlated image and record its platform-authoritative immutable
+  image digest, source revision, and rollout-complete UTC in the operator-owned
+  deployment record.
 - Classify the first schedule-triggered public probe with
   `github.run_attempt == 1` whose start time follows that rollout boundary,
   regardless of outcome or which headers survive the proxy.

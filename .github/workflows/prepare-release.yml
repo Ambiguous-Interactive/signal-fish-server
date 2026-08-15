@@ -48,19 +48,19 @@ jobs:
 
       - name: Check auto-commit GitHub App credentials
         env:
-          AUTO_COMMIT_APP_ID: ${{ secrets.AUTO_COMMIT_APP_ID }}
+          AUTO_COMMIT_APP_CLIENT_ID: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}
           AUTO_COMMIT_APP_PRIVATE_KEY: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          if [ -n "${AUTO_COMMIT_APP_ID:-}" ] && [ -n "${AUTO_COMMIT_APP_PRIVATE_KEY:-}" ]; then
+          if [ -n "${AUTO_COMMIT_APP_CLIENT_ID:-}" ] && [ -n "${AUTO_COMMIT_APP_PRIVATE_KEY:-}" ]; then
             exit 0
           fi
           if [ "$DRY_RUN" = "true" ]; then
-            echo "WARNING: AUTO_COMMIT_APP_* secrets are missing; dry-run can continue." >&2
+            echo "WARNING: AUTO_COMMIT_APP_CLIENT_ID or AUTO_COMMIT_APP_PRIVATE_KEY is missing; dry-run can continue." >&2
             exit 0
           fi
-          echo "ERROR: AUTO_COMMIT_APP_ID and AUTO_COMMIT_APP_PRIVATE_KEY are required." >&2
+          echo "ERROR: AUTO_COMMIT_APP_CLIENT_ID and AUTO_COMMIT_APP_PRIVATE_KEY are required." >&2
           echo "The App must have repository Contents and Pull requests read/write permissions." >&2
           exit 1
 
@@ -69,7 +69,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         uses: actions/create-github-app-token@v3.2.0
         with:
-          app-id: ${{ secrets.AUTO_COMMIT_APP_ID }}
+          client-id: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}
           private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
@@ -104,27 +104,7 @@ jobs:
         run: bash scripts/prepare-release.sh --bump "$BUMP"
 
       - name: Validate prepared diff scope
-        run: |
-          set -euo pipefail
-          git diff --check
-
-          expected=$(mktemp)
-          actual=$(mktemp)
-          printf '%s\n' \
-            .llm/context.md \
-            CHANGELOG.md \
-            Cargo.toml \
-            docs/library-usage.md \
-            fuzz/Cargo.toml > "$expected"
-          while IFS= read -r -d '' lockfile; do
-            printf '%s\n' "$lockfile" >> "$expected"
-          done < <(bash scripts/list-release-lockfiles.sh)
-          sort -o "$expected" "$expected"
-          git diff --name-only | sort > "$actual"
-          if ! diff -u "$expected" "$actual"; then
-            echo "ERROR: Release preparation changed an unexpected file set." >&2
-            exit 1
-          fi
+        run: bash scripts/validate-release-file-scope.sh
 
       - name: Validate prepared release state
         run: cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency
@@ -175,17 +155,16 @@ jobs:
             expected_head_sha=$VERIFIED_BRANCH_SHA
           else
             git checkout -b "$BRANCH"
-            release_files=(
-              .llm/context.md
-              CHANGELOG.md
-              Cargo.toml
-              docs/library-usage.md
-              fuzz/Cargo.toml
-            )
-            while IFS= read -r -d '' lockfile; do
-              release_files+=("$lockfile")
-            done < <(bash scripts/list-release-lockfiles.sh)
-            git add "${release_files[@]}"
+            release_inventory=$(mktemp)
+            trap 'rm -f "$release_inventory"' EXIT
+            bash scripts/list-release-files.sh > "$release_inventory"
+            release_files=()
+            while IFS= read -r -d '' release_file; do
+              release_files+=("$release_file")
+            done < "$release_inventory"
+            rm -f "$release_inventory"
+            trap - EXIT
+            git add -- "${release_files[@]}"
             git commit -m "release: ${VERSION}"
             auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
             git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \

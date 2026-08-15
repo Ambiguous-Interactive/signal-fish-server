@@ -9,6 +9,119 @@ fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
+fn workflow_step_run_body(workflow: &str, step_name: &str) -> String {
+    let step_marker = format!("      - name: {step_name}\n");
+    let step = workflow
+        .split_once(&step_marker)
+        .unwrap_or_else(|| panic!("workflow step {step_name:?} must exist"))
+        .1;
+    let step = step
+        .split_once("\n      - ")
+        .map_or(step, |(current_step, _)| current_step);
+    let run = step
+        .split_once("        run: |\n")
+        .unwrap_or_else(|| panic!("workflow step {step_name:?} must contain a literal run block"))
+        .1;
+
+    run.lines()
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
+        .map(|line| line.strip_prefix("          ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+#[should_panic(expected = "workflow step \"Target\" must contain a literal run block")]
+fn workflow_run_body_extraction_does_not_cross_step_boundaries() {
+    workflow_step_run_body(
+        "      - name: Target\n        shell: bash\n\n      - id: later\n        run: |\n          exit 0\n",
+        "Target",
+    );
+}
+
+#[test]
+fn public_upgrade_probe_workflow_requires_repository_configuration_without_external_identity() {
+    let workflow = fs::read_to_string(repo_path(".github/workflows/public-upgrade-probe.yml"))
+        .expect("read public upgrade probe workflow");
+    let plan = fs::read_to_string(repo_path("PLAN.md")).expect("read deployment plan");
+
+    for required in [
+        "vars.SIGNAL_FISH_PUBLIC_WS_URL",
+        "inputs.endpoint_url || vars.SIGNAL_FISH_PUBLIC_WS_URL",
+        "'unconfigured'",
+        "Validate probe endpoint configuration",
+        "SIGNAL_FISH_PUBLIC_WS_URL is not configured",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "the public probe workflow must contain {required:?}"
+        );
+    }
+    let workflow_without_descriptions = workflow
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("description:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !workflow_without_descriptions.contains("ws://")
+            && !workflow_without_descriptions.contains("wss://"),
+        "the probe workflow must not contain a literal public WebSocket endpoint"
+    );
+    let deployment_section = plan
+        .split("### P97 — Public WebSocket upgrade deployment and first eligible probe (#367)")
+        .nth(1)
+        .expect("P97 deployment section")
+        .split("\n### ")
+        .next()
+        .expect("bounded P97 deployment section");
+    assert!(
+        !deployment_section.contains("github.com/") && !deployment_section.contains("](http"),
+        "the deployment requirement must not identify an external repository:\n{deployment_section}"
+    );
+
+    let validation = workflow
+        .find("Validate probe endpoint configuration")
+        .expect("endpoint validation step");
+    let probe = workflow
+        .find("Probe simultaneous WebSocket upgrades")
+        .expect("probe step");
+    assert!(
+        validation < probe,
+        "missing endpoint configuration must fail clearly before network probing"
+    );
+
+    let validation_script =
+        workflow_step_run_body(&workflow, "Validate probe endpoint configuration");
+    let temp = tempfile::tempdir().expect("create endpoint-validation test directory");
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(validation_script)
+        .current_dir(temp.path())
+        .env_remove("PROBE_URL")
+        .output()
+        .expect("execute endpoint validation run block");
+    let diagnostic = b"ERROR: SIGNAL_FISH_PUBLIC_WS_URL is not configured and no endpoint_url input was provided.\n";
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "empty endpoint must fail once"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "configuration failure must not write stdout"
+    );
+    assert_eq!(
+        output.stderr, diagnostic,
+        "stderr must retain the primary diagnostic"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("public-upgrade-probe.log"))
+            .expect("configuration failure must create uploadable evidence"),
+        diagnostic,
+        "uploaded evidence must contain the same primary diagnostic"
+    );
+}
+
 fn write_fake_curl(root: &Path) -> PathBuf {
     let path = root.join("fake-curl");
     fs::write(

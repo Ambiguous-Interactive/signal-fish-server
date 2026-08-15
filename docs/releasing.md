@@ -17,8 +17,9 @@ Run the **Prepare Release** workflow from the default branch:
 3. Review and merge the generated `release/vX.Y.Z` pull request only after its
    normal CI and documentation workflows pass on the exact release commit.
 
-The non-dry-run path requires the repository secrets `AUTO_COMMIT_APP_ID` and
-`AUTO_COMMIT_APP_PRIVATE_KEY`. The installed GitHub App needs read/write access
+The non-dry-run path requires the repository variable
+`AUTO_COMMIT_APP_CLIENT_ID` and secret `AUTO_COMMIT_APP_PRIVATE_KEY`. The
+installed GitHub App needs read/write access
 to repository contents and pull requests. The workflow deliberately uses its
 installation token when pushing the branch and opening the pull request so the
 generated `pull_request` event starts normal CI; GitHub suppresses new workflow

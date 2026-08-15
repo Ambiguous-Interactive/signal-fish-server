@@ -439,6 +439,10 @@ scheduled Public WebSocket Upgrade Probe runs this check against the configured
 public endpoint four times daily and retains its per-request evidence for 30
 days. If runs for the same endpoint overlap, the newer scheduled or manual run
 cancels the stale one so the retained result describes the latest probe window.
+Set the repository variable `SIGNAL_FISH_PUBLIC_WS_URL` to the operated
+`ws://` or `wss://` endpoint before relying on scheduled monitoring. A manual
+dispatch can override it with `endpoint_url`; if neither value is configured,
+the workflow fails before attempting a network request.
 
 ### Metrics
 

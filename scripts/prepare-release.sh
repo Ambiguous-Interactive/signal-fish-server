@@ -113,6 +113,7 @@ for required in \
 done
 for required_helper in \
     "$SCRIPT_DIR/list-release-lockfiles.sh" \
+    "$SCRIPT_DIR/list-release-files.sh" \
     "$SCRIPT_DIR/release-lockfile-packages.awk"; do
     if [ ! -f "$required_helper" ]; then
         echo "ERROR: Required release helper is missing: $required_helper" >&2
@@ -124,26 +125,54 @@ done
 # rewrite targets. A newly added path dependency can make its sibling lockfile
 # stale before that lockfile contains the root package, so manifest discovery is
 # deliberately independent of package-block discovery.
+TRACKED_MANIFEST_INVENTORY=$(mktemp)
+if ! git ls-files -z -- ':(glob)**/Cargo.toml' > "$TRACKED_MANIFEST_INVENTORY"; then
+    rm -f "$TRACKED_MANIFEST_INVENTORY"
+    echo "ERROR: Could not inventory tracked Cargo.toml manifests." >&2
+    exit 1
+fi
 TRACKED_MANIFESTS=()
 while IFS= read -r -d '' manifest; do
     TRACKED_MANIFESTS+=("$manifest")
-done < <(git ls-files -z -- ':(glob)**/Cargo.toml')
+done < "$TRACKED_MANIFEST_INVENTORY"
+rm -f "$TRACKED_MANIFEST_INVENTORY"
 if [ "${#TRACKED_MANIFESTS[@]}" -eq 0 ]; then
     echo "ERROR: No tracked Cargo.toml manifests were found." >&2
     exit 1
 fi
 
-# Discover every committed standalone lockfile that embeds the root path package
-# and therefore needs its local package identity rewritten for this release.
+# Load the canonical inventory once and derive the transformation's lockfile
+# subset from it. Capturing the helper output before reading preserves its exit
+# status; process substitution would hide a partial-output failure.
+RELEASE_FILE_INVENTORY=$(mktemp)
+if ! bash "$SCRIPT_DIR/list-release-files.sh" > "$RELEASE_FILE_INVENTORY"; then
+    rm -f "$RELEASE_FILE_INVENTORY"
+    echo "ERROR: Could not build the canonical release file inventory." >&2
+    exit 1
+fi
+RELEASE_FILES=()
 RELEASE_LOCKFILES=()
-while IFS= read -r -d '' lockfile; do
-    RELEASE_LOCKFILES+=("$lockfile")
-done < <(bash "$SCRIPT_DIR/list-release-lockfiles.sh")
-
+while IFS= read -r -d '' release_file; do
+    RELEASE_FILES+=("$release_file")
+    case "$release_file" in
+        Cargo.lock|*/Cargo.lock) RELEASE_LOCKFILES+=("$release_file") ;;
+    esac
+done < "$RELEASE_FILE_INVENTORY"
+rm -f "$RELEASE_FILE_INVENTORY"
+if [ "${#RELEASE_FILES[@]}" -eq 0 ]; then
+    echo "ERROR: Canonical release file inventory is empty." >&2
+    exit 1
+fi
 if [ "${#RELEASE_LOCKFILES[@]}" -eq 0 ]; then
     echo "ERROR: No tracked Cargo.lock embeds the signal-fish-server path package." >&2
     exit 1
 fi
+for release_file in "${RELEASE_FILES[@]}"; do
+    if [ ! -f "$release_file" ]; then
+        echo "ERROR: Canonical release file is missing: $release_file" >&2
+        exit 1
+    fi
+done
 
 for required_lockfile in Cargo.lock clients/native/Cargo.lock fuzz/Cargo.lock; do
     required_found=0
@@ -395,7 +424,11 @@ replace_fuzz_root_dependency_version() {
 replace_locked_path_package_version() {
     local file="$1"
     local next_version="$2"
-    local output count_file
+    local file_operand output count_file
+    file_operand="$file"
+    case "$file_operand" in
+        -*) file_operand="./$file_operand" ;;
+    esac
     output=$(mktemp)
     count_file=$(mktemp)
     awk \
@@ -403,13 +436,13 @@ replace_locked_path_package_version() {
         -v next_version="$next_version" \
         -v count_file="$count_file" \
         -f "$SCRIPT_DIR/release-lockfile-packages.awk" \
-        -- "$file" > "$output"
+        -- "$file_operand" > "$output"
     if [ "$(cat "$count_file")" -ne 1 ]; then
         echo "ERROR: Expected exactly one signal-fish-server package entry in $file." >&2
         rm -f "$output" "$count_file"
         exit 1
     fi
-    mv "$output" "$file"
+    mv "$output" "$file_operand"
     rm -f "$count_file"
 }
 
@@ -541,26 +574,17 @@ cut_changelog_release() {
 }
 
 ROLLBACK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/signal-fish-release-rollback.XXXXXX")
-ROLLBACK_FILES=(
-    Cargo.toml
-    fuzz/Cargo.toml
-    "${RELEASE_LOCKFILES[@]}"
-    CHANGELOG.md
-    docs/library-usage.md
-    docs/getting-started.md
-    .llm/context.md
-)
-for file in "${ROLLBACK_FILES[@]}"; do
+for file in "${RELEASE_FILES[@]}"; do
     mkdir -p "$ROLLBACK_DIR/$(dirname -- "$file")"
-    cp -p "$file" "$ROLLBACK_DIR/$file"
+    cp -p "./$file" "$ROLLBACK_DIR/$file"
 done
 ROLLBACK_ACTIVE=1
 restore_on_failure() {
     local status=$?
     trap - EXIT
     if [ "$ROLLBACK_ACTIVE" -eq 1 ] && [ "$status" -ne 0 ]; then
-        for file in "${ROLLBACK_FILES[@]}"; do
-            cp -p "$ROLLBACK_DIR/$file" "$file"
+        for file in "${RELEASE_FILES[@]}"; do
+            cp -p "$ROLLBACK_DIR/$file" "./$file"
         done
         echo "ERROR: Release preparation failed; restored every release file." >&2
     fi
@@ -589,9 +613,14 @@ for lockfile in "${RELEASE_LOCKFILES[@]}"; do
     "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --format-version 1 \
         --manifest-path "$manifest" >/dev/null
 done
-"$PREPARE_RELEASE_DOC_CHECK" --changed-files \
-    Cargo.toml "${RELEASE_LOCKFILES[@]}" \
-    CHANGELOG.md docs/library-usage.md docs/getting-started.md .llm/context.md fuzz/Cargo.toml
+DOC_CHECK_FILES=()
+for file in "${RELEASE_FILES[@]}"; do
+    case "$file" in
+        -*) DOC_CHECK_FILES+=("./$file") ;;
+        *) DOC_CHECK_FILES+=("$file") ;;
+    esac
+done
+"$PREPARE_RELEASE_DOC_CHECK" --changed-files "${DOC_CHECK_FILES[@]}"
 
 ROLLBACK_ACTIVE=0
 
