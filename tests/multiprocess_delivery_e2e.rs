@@ -78,8 +78,10 @@ use native_client_process::{spawn_native_client, NativeClientProcess};
 use serde_json::{json, Value};
 use signal_fish_server::protocol::{
     ClientMessage, DeliveryClass, DeliveryGap, DeliveryGapReason, DeliveryReportPayload, PlayerId,
-    ServerMessage, Topology, Transport,
+    ServerMessage,
 };
+#[cfg(target_os = "linux")]
+use signal_fish_server::protocol::{Topology, Transport};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use websocket_test_helpers::delivery_ledger::{extract, LedgerPayload};
 use websocket_test_helpers::prometheus_scrape::{
@@ -230,6 +232,7 @@ async fn connect_raw_version(port: u16, version: u16) -> (WsSink, WsReceiver) {
     stream.split()
 }
 
+#[cfg(target_os = "linux")]
 async fn send_raw(sink: &mut WsSink, message: &ClientMessage) {
     let json = serde_json::to_string(message).expect("serialize client message");
     sink.send(Message::Text(json.into()))
@@ -237,6 +240,7 @@ async fn send_raw(sink: &mut WsSink, message: &ClientMessage) {
         .expect("send client message");
 }
 
+#[cfg(target_os = "linux")]
 async fn authenticate_raw_v3(sink: &mut WsSink, receiver: &mut WsReceiver) {
     send_raw(
         sink,
