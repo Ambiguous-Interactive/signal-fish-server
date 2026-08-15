@@ -9,6 +9,24 @@ fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
+fn workflow_step_run_body(workflow: &str, step_name: &str) -> String {
+    let step_marker = format!("      - name: {step_name}\n");
+    let step = workflow
+        .split_once(&step_marker)
+        .unwrap_or_else(|| panic!("workflow step {step_name:?} must exist"))
+        .1;
+    let run = step
+        .split_once("        run: |\n")
+        .unwrap_or_else(|| panic!("workflow step {step_name:?} must contain a literal run block"))
+        .1;
+
+    run.lines()
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
+        .map(|line| line.strip_prefix("          ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn public_upgrade_probe_workflow_requires_repository_configuration_without_external_identity() {
     let workflow = fs::read_to_string(repo_path(".github/workflows/public-upgrade-probe.yml"))
@@ -59,21 +77,36 @@ fn public_upgrade_probe_workflow_requires_repository_configuration_without_exter
         validation < probe,
         "missing endpoint configuration must fail clearly before network probing"
     );
-    let validation_step = &workflow[validation..probe];
-    let empty_check = validation_step
-        .find(r#"if [ -z "${PROBE_URL:-}" ]; then"#)
-        .expect("validation step must check for an empty probe URL");
-    let failure_path = &validation_step[empty_check..];
-    let nonzero_exit = failure_path
-        .find("exit 1")
-        .expect("empty endpoint validation must exit nonzero");
-    assert!(
-        nonzero_exit > 0,
-        "empty endpoint validation must fail after detecting the empty URL"
+
+    let validation_script =
+        workflow_step_run_body(&workflow, "Validate probe endpoint configuration");
+    let temp = tempfile::tempdir().expect("create endpoint-validation test directory");
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(validation_script)
+        .current_dir(temp.path())
+        .env_remove("PROBE_URL")
+        .output()
+        .expect("execute endpoint validation run block");
+    let diagnostic = b"ERROR: SIGNAL_FISH_PUBLIC_WS_URL is not configured and no endpoint_url input was provided.\n";
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "empty endpoint must fail once"
     );
     assert!(
-        failure_path[..nonzero_exit].contains("tee public-upgrade-probe.log"),
-        "an unconfigured probe must preserve its primary diagnostic as uploadable evidence"
+        output.stdout.is_empty(),
+        "configuration failure must not write stdout"
+    );
+    assert_eq!(
+        output.stderr, diagnostic,
+        "stderr must retain the primary diagnostic"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("public-upgrade-probe.log"))
+            .expect("configuration failure must create uploadable evidence"),
+        diagnostic,
+        "uploaded evidence must contain the same primary diagnostic"
     );
 }
 
