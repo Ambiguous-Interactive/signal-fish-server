@@ -16,7 +16,7 @@ fn workflow_step_run_body(workflow: &str, step_name: &str) -> String {
         .unwrap_or_else(|| panic!("workflow step {step_name:?} must exist"))
         .1;
     let step = step
-        .split_once("\n      - name:")
+        .split_once("\n      - ")
         .map_or(step, |(current_step, _)| current_step);
     let run = step
         .split_once("        run: |\n")
@@ -34,7 +34,7 @@ fn workflow_step_run_body(workflow: &str, step_name: &str) -> String {
 #[should_panic(expected = "workflow step \"Target\" must contain a literal run block")]
 fn workflow_run_body_extraction_does_not_cross_step_boundaries() {
     workflow_step_run_body(
-        "      - name: Target\n        shell: bash\n\n      - name: Later\n        run: |\n          exit 0\n",
+        "      - name: Target\n        shell: bash\n\n      - id: later\n        run: |\n          exit 0\n",
         "Target",
     );
 }
