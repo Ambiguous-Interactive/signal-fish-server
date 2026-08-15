@@ -5,7 +5,6 @@
 # Runs on:
 # - Push to main branch (when workflow files change)
 # - Pull requests to main (when workflow files change)
-# - Weekly schedule (Monday at 00:00 UTC) for proactive validation
 #
 # Features:
 # - Path filtering to only run when workflow/action files change
@@ -28,9 +27,6 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - '.github/actionlint.yaml'
-  schedule:
-    # Run every Monday at 00:00 UTC for proactive validation
-    - cron: '0 0 * * 1'
 
 # Limit permissions to minimum required (security best practice)
 permissions:

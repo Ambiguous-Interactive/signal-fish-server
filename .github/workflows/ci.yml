@@ -52,8 +52,9 @@ jobs:
   # Fast-fail gate. A single cheap "does it format and compile" pass that the
   # expensive compile/test jobs in this workflow depend on via `needs:
   # quick-check`. A file that does not parse or type-check fails here in seconds,
-  # so the nine gated lanes (lint x3, nextest x3, relay allocations, msrv,
-  # coverage) allocate only a setup-free fail-closed status job —
+  # so the eleven gated lanes (lint x3, nextest x3, relay allocations, msrv,
+  # Docker, coverage, panic policy) allocate only a setup-free fail-closed
+  # status job —
   # collapsing what was a redundant per-lane recompile-and-fail into one fast
   # failure. This exists because an unclosed delimiter in a committed test file
   # once failed every one of those lanes independently. (Compile jobs in sibling
@@ -585,10 +586,15 @@ jobs:
 
   docker:
     name: Docker Build
-    if: github.event_name != 'schedule'
+    needs: quick-check
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Require fast-fail gate success
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Set up Docker Buildx
@@ -740,10 +746,15 @@ jobs:
 
   panic-policy:
     name: Panic Policy
-    if: github.event_name != 'schedule'
+    needs: quick-check
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Require fast-fail gate success
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
