@@ -835,8 +835,10 @@ fn docs_brand_assets_and_self_hosted_fonts_are_wired() {
         "logo: assets/logo.svg",
         "favicon: assets/favicon.svg",
         "font: false",
-        "scheme: signalfish-dark",
-        "scheme: signalfish-light",
+        "scheme: slate",
+        "scheme: default",
+        "primary: custom",
+        "accent: custom",
         "copyright: © 2026 Ambiguous Interactive",
     ] {
         assert!(
@@ -880,7 +882,7 @@ fn docs_brand_assets_and_self_hosted_fonts_are_wired() {
 #[test]
 fn docs_brand_text_tokens_meet_wcag_aa_contrast() {
     let css = read_file(&repo_root().join("docs/stylesheets/extra.css"));
-    for scheme in ["signalfish-dark", "signalfish-light"] {
+    for scheme in ["slate", "default"] {
         let background = css_scheme_value(&css, scheme, "--md-default-bg-color");
         for property in [
             "--md-default-fg-color",

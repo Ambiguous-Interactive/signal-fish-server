@@ -13,12 +13,16 @@ theme:
   font: false
   palette:
     - media: "(prefers-color-scheme: dark)"
-      scheme: signalfish-dark
+      scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to light mode
     - media: "(prefers-color-scheme: light)"
-      scheme: signalfish-light
+      scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to dark mode
