@@ -1,8 +1,14 @@
-<p align="center">
-  <img src="assets/logo-banner.svg" alt="Signal Fish Server" width="600">
-</p>
+<img class="sf-home-logo" src="assets/logo-banner.svg" alt="Signal Fish Server">
 
-**A lightweight, in-memory WebSocket signaling server for peer-to-peer game networking.**
+**Signaling for peer-to-peer multiplayer**{ .sf-hero-tag }
+
+# Signal Fish Server
+
+**A lightweight, in-memory WebSocket signaling server with zero external
+runtime dependencies for peer-to-peer game networking.**
+
+[Quick Start](quickstart.md){ .md-button .md-button--primary .sf-home-action }
+[View on GitHub](https://github.com/Ambiguous-Interactive/signal-fish-server){ .md-button .sf-home-action }
 
 Built in Rust with axum and tokio, Signal Fish Server handles the hardest
 part of multiplayer game networking: getting players connected. No database,

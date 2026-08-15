@@ -77,6 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Adopt the accessible Vector design system across the README and documentation
+  site, including the approved fish mark, favicon, responsive wordmark,
+  self-hosted typography, and contrast-safe light and dark themes (issue #204).
 - Refresh compatible dependencies across every tracked Rust lockfile, remove
   the unused direct `once_cell` development dependency, and pin plus verify the
   CI `cargo-audit` version. The no-thread Godot fixture remains unified on its

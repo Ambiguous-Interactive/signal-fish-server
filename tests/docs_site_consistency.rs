@@ -31,7 +31,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use common::{read_file, repo_root};
+use common::{read_file, read_live_file, repo_root};
 use serde_json::Value;
 use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::GameDataEncoding;
@@ -767,6 +767,164 @@ fn docs_internal_anchor_links_resolve_on_both_github_and_mkdocs() {
          slugs agree (avoid ` / `, `&`, and double spaces):\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+fn css_scheme_value<'a>(css: &'a str, scheme: &str, property: &str) -> &'a str {
+    let selector = format!(r#"[data-md-color-scheme="{scheme}"]"#);
+    let scheme_start = css
+        .find(&selector)
+        .unwrap_or_else(|| panic!("missing CSS scheme selector {selector}"));
+    let block_start = css[scheme_start..]
+        .find('{')
+        .map(|offset| scheme_start + offset + 1)
+        .expect("scheme block must open");
+    let block_end = css[block_start..]
+        .find('}')
+        .map(|offset| block_start + offset)
+        .expect("scheme block must close");
+    let declaration = format!("{property}:");
+
+    css[block_start..block_end]
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix(&declaration)
+                .map(|value| value.trim().trim_end_matches(';').trim())
+        })
+        .unwrap_or_else(|| panic!("{selector} must define {property}"))
+}
+
+fn srgb_luminance(hex: &str) -> f64 {
+    assert!(
+        hex.len() == 7 && hex.starts_with('#'),
+        "expected a six-digit hexadecimal CSS color, got {hex}"
+    );
+    let channel = |start| {
+        let value = u8::from_str_radix(&hex[start..start + 2], 16)
+            .unwrap_or_else(|_| panic!("invalid hexadecimal CSS color {hex}"));
+        let normalized = f64::from(value) / 255.0;
+        if normalized <= 0.04045 {
+            normalized / 12.92
+        } else {
+            ((normalized + 0.055) / 1.055).powf(2.4)
+        }
+    };
+
+    0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+}
+
+fn contrast_ratio(first: &str, second: &str) -> f64 {
+    let first = srgb_luminance(first);
+    let second = srgb_luminance(second);
+    let (lighter, darker) = if first >= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+#[test]
+fn docs_brand_assets_and_self_hosted_fonts_are_wired() {
+    let root = repo_root();
+    let mkdocs = read_live_file(&root.join("mkdocs.yml"));
+    let css = read_file(&root.join("docs/stylesheets/extra.css"));
+
+    for required in [
+        "logo: assets/logo.svg",
+        "favicon: assets/favicon.svg",
+        "font: false",
+        "scheme: signalfish-dark",
+        "scheme: signalfish-light",
+        "copyright: © 2026 Ambiguous Interactive",
+    ] {
+        assert!(
+            mkdocs.contains(required),
+            "mkdocs.yml must preserve the approved Signal Fish Server brand contract: {required}"
+        );
+    }
+
+    for asset in [
+        "docs/assets/logo.svg",
+        "docs/assets/favicon.svg",
+        "docs/assets/logo-banner.svg",
+        "docs/assets/fonts/hanken-grotesk-latin.woff2",
+        "docs/assets/fonts/jetbrains-mono-latin.woff2",
+        "docs/assets/fonts/space-grotesk-latin.woff2",
+        "docs/assets/fonts/Hanken-Grotesk-OFL.txt",
+        "docs/assets/fonts/JetBrains-Mono-OFL.txt",
+        "docs/assets/fonts/Space-Grotesk-OFL.txt",
+    ] {
+        assert!(root.join(asset).is_file(), "missing brand asset {asset}");
+    }
+
+    for family in ["Hanken Grotesk", "JetBrains Mono", "Space Grotesk"] {
+        assert!(
+            css.contains(&format!("font-family: \"{family}\"")),
+            "extra.css must self-host the approved {family} family"
+        );
+    }
+    assert!(
+        !css.contains("fonts.googleapis.com") && !css.contains("fonts.gstatic.com"),
+        "the documentation theme must not fetch fonts from third-party origins at runtime"
+    );
+
+    let banner = read_file(&root.join("docs/assets/logo-banner.svg"));
+    assert!(
+        !banner.contains("<text"),
+        "logo-banner.svg typography must be converted to paths so GitHub and MkDocs render the same approved lockup"
+    );
+}
+
+#[test]
+fn docs_brand_text_tokens_meet_wcag_aa_contrast() {
+    let css = read_file(&repo_root().join("docs/stylesheets/extra.css"));
+    for scheme in ["signalfish-dark", "signalfish-light"] {
+        let background = css_scheme_value(&css, scheme, "--md-default-bg-color");
+        for property in [
+            "--md-default-fg-color",
+            "--md-default-fg-color--light",
+            "--md-default-fg-color--lighter",
+            "--md-typeset-color",
+            "--md-typeset-a-color",
+            "--sf-accent",
+        ] {
+            let foreground = css_scheme_value(&css, scheme, property);
+            let ratio = contrast_ratio(foreground, background);
+            assert!(
+                ratio >= 4.5,
+                "{scheme} {property} ({foreground}) has only {ratio:.2}:1 contrast against {background}; text tokens require at least 4.5:1"
+            );
+        }
+
+        for (foreground_property, background_property, surface) in [
+            ("--sf-on-accent", "--sf-accent", "primary button"),
+            ("--sf-code-comment", "--md-code-bg-color", "code comment"),
+            (
+                "--md-primary-bg-color",
+                "--md-primary-fg-color",
+                "site header",
+            ),
+        ] {
+            let foreground = css_scheme_value(&css, scheme, foreground_property);
+            let surface_color = css_scheme_value(&css, scheme, background_property);
+            let ratio = contrast_ratio(foreground, surface_color);
+            assert!(
+                ratio >= 4.5,
+                "{scheme} {surface} colors {foreground}/{surface_color} have only {ratio:.2}:1 contrast; text requires at least 4.5:1"
+            );
+        }
+    }
+
+    let logo = read_file(&repo_root().join("docs/assets/logo.svg"));
+    assert!(
+        logo.contains("#2EE6C6") && logo.contains("#0B1A22"),
+        "the approved Vector logo must retain its aqua-on-dark-tile colorway"
+    );
+    assert!(
+        contrast_ratio("#2EE6C6", "#0B1A22") >= 3.0,
+        "the compact Vector mark must retain at least 3:1 non-text contrast"
     );
 }
 
