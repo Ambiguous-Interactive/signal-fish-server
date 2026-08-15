@@ -63,12 +63,17 @@ fn public_upgrade_probe_workflow_requires_repository_configuration_without_exter
     let empty_check = validation_step
         .find(r#"if [ -z "${PROBE_URL:-}" ]; then"#)
         .expect("validation step must check for an empty probe URL");
-    let nonzero_exit = validation_step[empty_check..]
+    let failure_path = &validation_step[empty_check..];
+    let nonzero_exit = failure_path
         .find("exit 1")
         .expect("empty endpoint validation must exit nonzero");
     assert!(
         nonzero_exit > 0,
         "empty endpoint validation must fail after detecting the empty URL"
+    );
+    assert!(
+        failure_path[..nonzero_exit].contains("tee public-upgrade-probe.log"),
+        "an unconfigured probe must preserve its primary diagnostic as uploadable evidence"
     );
 }
 

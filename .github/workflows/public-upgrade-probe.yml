@@ -60,7 +60,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${PROBE_URL:-}" ]; then
-            echo "ERROR: SIGNAL_FISH_PUBLIC_WS_URL is not configured and no endpoint_url input was provided." >&2
+            printf '%s\n' \
+              "ERROR: SIGNAL_FISH_PUBLIC_WS_URL is not configured and no endpoint_url input was provided." \
+              | tee public-upgrade-probe.log >&2
             exit 1
           fi
 
