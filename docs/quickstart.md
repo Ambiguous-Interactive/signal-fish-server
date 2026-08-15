@@ -1,327 +1,92 @@
 # Quick Start
 
-Get Signal Fish Server running and two clients connected in under 5 minutes.
+Start Signal Fish Server, create a room, and join it from a second WebSocket.
 
-## Prerequisites
+## 1. Start the Server
 
-You need one of the following:
-
-- **Rust 1.91+** -- to build and run from source
-- **Docker** -- to run the pre-built container image
-
-## Step 1: Start the Server
+Choose Docker or Cargo.
 
 <!-- markdownlint-disable MD046 -->
 
 === "Docker"
 
-    Pull and run the container image. No configuration needed.
+    The published image is ready for local development without a config file.
+    This command exposes it only on your computer and permits the browser page
+    used below as a WebSocket origin.
 
     ```bash
-    docker run -p 3536:3536 ghcr.io/ambiguous-interactive/signal-fish-server:latest
+    docker run --rm -p 127.0.0.1:3536:3536 \
+      -e SIGNAL_FISH__SECURITY__CORS_ORIGINS=http://localhost:3536 \
+      ghcr.io/ambiguous-interactive/signal-fish-server:latest
     ```
 
 === "Cargo"
 
-    Clone the repository and run with Cargo.
+    Install Rust 1.91+, then clone the repository. Copy the local
+    development config before starting the server; the secure built-in defaults
+    require settings that are not suitable for this first run.
+
+    !!! warning "Trusted development networks only"
+
+        `config.example.json` binds on all network interfaces and leaves browser
+        origins, app IDs, and metrics open. Keep it behind a firewall on a
+        trusted development network. Use the loopback-bound Docker command
+        above instead if other machines could reach your development host.
 
     ```bash
     git clone https://github.com/Ambiguous-Interactive/signal-fish-server.git
     cd signal-fish-server
+    cp config.example.json config.json
     cargo run
     ```
 
 <!-- markdownlint-enable MD046 -->
 
-The server starts on port 3536 by default. Verify it is running:
+The server listens on port 3536. Open
+<http://localhost:3536/v2/health> in a browser to check it.
 
-```bash
-curl http://localhost:3536/v2/health
+## 2. Create a Room
+
+On that health page, open the browser's developer console and paste this
+JavaScript:
+
+```javascript
+const alice = new WebSocket("ws://localhost:3536/v2/ws");
+alice.onmessage = ({ data }) => console.log("Alice:", JSON.parse(data));
+alice.onopen = () => alice.send(JSON.stringify({
+  type: "JoinRoom",
+  data: { game_name: "my-game", player_name: "Alice", max_players: 2 }
+}));
 ```
 
-## Step 2: Connect and Create a Room
+Alice receives a `RoomJoined` message. Copy `data.room_code` from that message.
+Leaving out `room_code` is what creates a new room.
 
-Open a new terminal and create a Rust project for your first client.
-Add the following dependencies to your `Cargo.toml`:
+## 3. Join the Room
 
-```toml
-[dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-tungstenite = "0.28"
-futures-util = "0.3"
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
+In the same console, replace `ABC123` below with Alice's room code and paste:
+
+```javascript
+const bob = new WebSocket("ws://localhost:3536/v2/ws");
+bob.onmessage = ({ data }) => console.log("Bob:", JSON.parse(data));
+bob.onopen = () => bob.send(JSON.stringify({
+  type: "JoinRoom",
+  data: { game_name: "my-game", player_name: "Bob", room_code: "ABC123" }
+}));
 ```
 
-Create a file called `src/main.rs` with the following code. This client
-connects to the server and creates a new room by sending a `JoinRoom`
-message without a `room_code`:
+Bob receives `RoomJoined`, and Alice receives `PlayerJoined`. You now have two
+players in the same room.
 
-```rust
-use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
+This example uses the open app-ID policy provided by the Docker image and
+`config.example.json`. A production allowlist requires `Authenticate` before
+`JoinRoom`; see [Application identification and access](authentication.md).
 
-#[tokio::main]
-async fn main() {
-    let url = "ws://localhost:3536/v2/ws";
-    let (mut ws, _) = connect_async(url)
-        .await
-        .expect("Failed to connect");
+## Next Steps
 
-    println!("Connected to Signal Fish Server");
-
-    // Create a new room (no room_code means "create")
-    let join_msg = serde_json::json!({
-        "type": "JoinRoom",
-        "data": {
-            "game_name": "my-game",
-            "player_name": "Player1",
-            "max_players": 2
-        }
-    });
-    ws.send(Message::Text(join_msg.to_string().into()))
-        .await
-        .expect("Failed to send JoinRoom");
-
-    // Read the RoomJoined response
-    if let Some(Ok(Message::Text(text))) = ws.next().await {
-        let response: Value = serde_json::from_str(&text)
-            .expect("Invalid JSON from server");
-        let msg_type = response["type"].as_str().unwrap_or("unknown");
-        let room_code = response["data"]["room_code"]
-            .as_str()
-            .unwrap_or("none");
-
-        println!("Response type: {msg_type}");
-        println!("Room code: {room_code}");
-        println!("Share this room code with another player!");
-    }
-}
-```
-
-Run this client:
-
-```bash
-cargo run
-```
-
-You should see output like:
-
-```text
-Connected to Signal Fish Server
-Response type: RoomJoined
-Room code: A7X2K9
-Share this room code with another player!
-```
-
-Copy the room code from the output. You will need it in the next step.
-
-## Step 3: Join from Another Client
-
-In a separate terminal, create a second Rust project. Use the same
-`Cargo.toml` dependencies as Step 2, then create `src/main.rs` with
-the following code. Replace `A7X2K9` with the room code from Step 2:
-
-```rust
-use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
-
-#[tokio::main]
-async fn main() {
-    let url = "ws://localhost:3536/v2/ws";
-    let (mut ws, _) = connect_async(url)
-        .await
-        .expect("Failed to connect");
-
-    println!("Connected to Signal Fish Server");
-
-    // Join the existing room using the room code from Step 2
-    let join_msg = serde_json::json!({
-        "type": "JoinRoom",
-        "data": {
-            "game_name": "my-game",
-            "room_code": "A7X2K9",
-            "player_name": "Player2"
-        }
-    });
-    ws.send(Message::Text(join_msg.to_string().into()))
-        .await
-        .expect("Failed to send JoinRoom");
-
-    // Read the RoomJoined response
-    if let Some(Ok(Message::Text(text))) = ws.next().await {
-        let response: Value = serde_json::from_str(&text)
-            .expect("Invalid JSON from server");
-        let msg_type = response["type"].as_str().unwrap_or("unknown");
-        let players = &response["data"]["current_players"];
-        let player_count = players.as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
-
-        println!("Response type: {msg_type}");
-        println!("Players in room: {player_count}");
-    }
-}
-```
-
-Run the second client:
-
-```bash
-cargo run
-```
-
-You should see that the room now has 2 players:
-
-```text
-Connected to Signal Fish Server
-Response type: RoomJoined
-Players in room: 2
-```
-
-Meanwhile, the first client will receive a `PlayerJoined` notification
-from the server indicating that Player2 has entered the room.
-
-## Step 4: Exchange Data
-
-Once both players are in the room, either client can send arbitrary game
-data to the other using the `GameData` message type. The server relays
-the data to all other players in the room.
-
-Add a send-and-receive loop to your client after joining the room:
-
-```rust
-// Send game data to all other players in the room.
-// The outer "data" is the serde content tag; the inner "data"
-// is the GameData variant's field name.
-let game_data = serde_json::json!({
-    "type": "GameData",
-    "data": {
-        "data": {
-            "action": "move",
-            "x": 100,
-            "y": 200
-        }
-    }
-});
-ws.send(Message::Text(game_data.to_string().into()))
-    .await
-    .expect("Failed to send GameData");
-
-// Listen for incoming messages
-while let Some(Ok(Message::Text(text))) = ws.next().await {
-    let msg: Value = serde_json::from_str(&text)
-        .expect("Invalid JSON");
-    let msg_type = msg["type"].as_str().unwrap_or("unknown");
-
-    match msg_type {
-        "GameData" => {
-            let from = msg["data"]["from_player"]
-                .as_str()
-                .unwrap_or("unknown");
-            println!("Game data from {from}: {}", msg["data"]["data"]);
-        }
-        other => println!("Received: {other}"),
-    }
-}
-```
-
-The `data` field inside `GameData` accepts any valid JSON value. Use it
-to send positions, inputs, chat messages, or any game state your
-application needs.
-
-## Step 5: Ready Up and Start
-
-Signal Fish Server includes a lobby system that tracks when players are
-ready. `PlayerReady` is a toggle (ready/unready for the sending player). Once
-every current player is ready, a member sends `StartGame` to finalize the
-lobby (`max_players` is a ceiling, so the room need not be full; the room's
-authority starts it if it has one, else any member). The lobby then
-transitions to `Finalized` and the server sends a `GameStarting` event with
-legacy peer metadata. Every negotiated v3 member then receives a per-recipient
-`SessionPlan` with an opaque generation, topology, transport, peers, relay fallback, and ICE only when
-the selected transport is WebRTC. A relay-floor result is explicit
-`relay`/`relay` with no peers or ICE; v2 members receive no plan.
-
-After both clients have joined the room, send the ready signal:
-
-```rust
-// Toggle this player's ready state (first send marks ready)
-let ready_msg = serde_json::json!({
-    "type": "PlayerReady"
-});
-ws.send(Message::Text(ready_msg.to_string().into()))
-    .await
-    .expect("Failed to send PlayerReady");
-
-// Listen for lobby state changes
-while let Some(Ok(Message::Text(text))) = ws.next().await {
-    let msg: Value = serde_json::from_str(&text)
-        .expect("Invalid JSON");
-    let msg_type = msg["type"].as_str().unwrap_or("unknown");
-
-    match msg_type {
-        "LobbyStateChanged" => {
-            let state = msg["data"]["lobby_state"]
-                .as_str()
-                .unwrap_or("unknown");
-            let all_ready = msg["data"]["all_ready"].as_bool().unwrap_or(false);
-            println!("Lobby state: {state}");
-
-            // Readiness no longer auto-starts. Once every current player is
-            // ready, a member finalizes the lobby with StartGame (the room's
-            // authority if it has one, else any member). max_players is a
-            // ceiling, so the room need not be full.
-            if all_ready {
-                let start_msg = serde_json::json!({ "type": "StartGame" });
-                ws.send(Message::Text(start_msg.to_string().into()))
-                    .await
-                    .expect("Failed to send StartGame");
-            }
-        }
-        "GameStarting" => {
-            println!("Game is starting!");
-            println!("Peer connections: {}", msg["data"]["peer_connections"]);
-            break;
-        }
-        other => println!("Received: {other}"),
-    }
-}
-```
-
-When both players send `PlayerReady` once (becoming ready) and a member then
-sends `StartGame`, you will see the lobby transition:
-
-```text
-Lobby state: lobby
-Lobby state: finalized
-Game is starting!
-```
-
-At this point the server has done its job: players are matched and ready. V2
-clients receive the legacy handoff. Negotiated v3 clients treat the latest
-`SessionPlan` as authoritative, including a relay plan that clears prior peer
-state after a finalized membership change. When its generation changes, they
-rebuild retained WebRTC pairs with the new ICE credentials and discard signals
-from older generations.
-
-## What's Next
-
-Now that you have a working signaling flow, explore the deeper concepts
-and build a production-ready integration:
-
-- **[Rooms and Lobbies](concepts/rooms-and-lobbies.md)** -- understand
-  room lifecycle, lobby states, and player management
-- **[Authority System](concepts/authority.md)** -- designate a host
-  player for server-authoritative game logic
-- **[Reconnection](concepts/reconnection.md)** -- handle dropped
-  connections gracefully with event replay
-- **[Rust Client Guide](guides/rust-client.md)** -- build a complete,
-  robust game client
-- **[Configuration](configuration.md)** -- customize ports, limits,
-  authentication, and more
-- **[Protocol Reference](protocol.md)** -- every message type and field
-  documented in detail
+- [Build a client](guides/building-a-client.md) to handle room events and game
+  data.
+- [Learn about rooms and lobbies](concepts/rooms-and-lobbies.md) to ready players
+  and start a game.
+- [Read the protocol reference](protocol.md) for all client and server messages.
+- [Configure the server](configuration.md) before deploying it.

@@ -23,656 +23,122 @@
   </a>
 </p>
 
-A lightweight, zero-external-dependency WebSocket signaling server for
-peer-to-peer game networking. Run locally with Rust or Docker -- no database, no cloud
-services required.
+Signal Fish Server is a lightweight, in-memory WebSocket signaling server for
+peer-to-peer multiplayer games. It puts players into rooms, coordinates lobby
+state and peer setup, and can relay game data. It runs as one Rust binary with
+no database, message broker, or cloud service required.
 
 Built by [Ambiguous Interactive](https://github.com/Ambiguous-Interactive).
 
----
+> **AI disclosure:** This project was developed with substantial assistance
+> from Claude Opus 4.6 and Codex 5.3. Humans created the protocol concepts and
+> core design and retained oversight of architecture and code review.
 
-> **🤖 AI Disclosure**
->
-> This project was developed with **substantial AI assistance**. The protocol
-> design and core technology concepts were created entirely by humans, but the
-> vast majority of the code, documentation, and tests were written with the
-> help of **Claude Opus 4.6** and **Codex 5.3**. Human oversight covered code
-> review and architectural decisions, but day-to-day implementation was
-> primarily AI-driven. This transparency is provided so users can make informed
-> decisions about using this crate.
+## What it is — and is not
 
----
+Signal Fish Server handles connection coordination, not your game simulation.
+It provides rooms, lobbies, reconnection, spectator and authority flows,
+WebRTC signaling, rate limits, and operational metrics. WebSocket relay is
+still available when v3 clients negotiate a peer-to-peer data path.
 
-## Quick Start
+Live rooms, connections, reconnect state, and relay buffers are process-local
+and are lost when the server restarts. The server does not make game state
+durable or synchronize independent instances. Production deployments must
+choose their own TLS, routing, capacity, and application-identification policy;
+the operator guides below cover those decisions.
 
-### Rust
-
-```bash
-cargo run
-```
-
-The server starts on port 3536 by default.
+## Run the server
 
 ### Docker
 
-```bash
-docker run -p 3536:3536 ghcr.io/ambiguous-interactive/signal-fish-server:latest
-```
-
-The published image is a multi-architecture manifest, so the same tag pulls the
-right build automatically on `linux/amd64`, `linux/arm64` (AWS Graviton, Ampere,
-Raspberry Pi 64-bit, Apple Silicon under Docker), and `linux/arm/v7` (32-bit
-ARM / Raspberry Pi).
-
-### Docker Compose
+The published image starts with development-friendly access defaults:
 
 ```bash
-docker compose up
+docker run --rm -p 127.0.0.1:3536:3536 \
+  ghcr.io/ambiguous-interactive/signal-fish-server:latest
 ```
 
-### Prebuilt binaries
-
-Each [GitHub Release](https://github.com/Ambiguous-Interactive/signal-fish-server/releases)
-ships standalone, self-contained executables — no Rust toolchain or Docker
-required — for:
-
-| OS | Architectures |
-| --- | --- |
-| Linux | x86_64, aarch64 (ARM64) |
-| macOS | x86_64 (Intel), aarch64 (Apple Silicon) |
-| Windows | x86_64, aarch64 (ARM64) |
-
-Every archive is accompanied by a `.sha256` checksum for verification. Download
-the archive for your platform, extract it, and run the `signal-fish-server`
-binary.
-
-### Connect
-
-Point your WebSocket client at:
-
-```text
-ws://localhost:3536/v2/ws
-```
-
-## Features
-
-- **Room management** -- create and join rooms with auto-generated 6-character room codes
-- **Lobby state machine** -- waiting, countdown, and playing states with automatic transitions
-- **Player ready-state** -- per-player ready toggles that drive lobby state progression
-- **Authority management** -- request and grant game authority to specific players
-- **Spectator mode** -- join rooms as a spectator without participating in gameplay
-- **Reconnection** -- token-based reconnection with event replay within a configurable window
-- **Message batching** -- configurable batching for high-throughput game data delivery
-- **Delivery classes** -- v3 reliable, keyed-latest, and volatile JSON relay with exact gap accountability
-- **Rate limiting** -- in-memory limits for app-ID handshakes, room creation/join, and WebRTC signaling
-- **Metrics** -- Prometheus-compatible metrics at `/metrics/prom` and JSON metrics at `/metrics`
-- **Flexible configuration** -- JSON config file with environment variable overrides
-- **Optional app allowlisting** -- config-file-backed app IDs with per-app room and rate limits
-- **Zero external dependencies** -- everything runs in-memory; no database, no message broker, no cloud services
-
-## Endpoints
-
-| Path               | Method    | Description                                |
-| ------------------ | --------- | ------------------------------------------ |
-| `/v2/ws`           | WebSocket | Signaling WebSocket endpoint               |
-| `/v3/ws`           | WebSocket | Protocol v3 WebSocket alias                |
-| `/v2/health`       | GET       | Health check (returns 200 OK)              |
-| `/metrics`         | GET       | JSON server metrics                        |
-| `/v1/metrics`      | GET       | JSON server metrics (alias)                |
-| `/metrics/prom`    | GET       | Prometheus text format metrics             |
-| `/v1/metrics/prom` | GET       | Prometheus text format metrics (alias)     |
-
-## Configuration
-
-Signal Fish Server is configured through a JSON config file and environment variable overrides.
-On startup the server looks for `config.json` in the working directory. See
-[`config.example.json`](config.example.json) for a complete local-development reference.
-
-### Example Configuration
-
-```json
-{
-  "port": 3536,
-  "server": {
-    "default_max_players": 8,
-    "ping_timeout": 30,
-    "room_cleanup_interval": 60,
-    "max_rooms_per_game": 1000,
-    "empty_room_timeout": 300,
-    "inactive_room_timeout": 3600,
-    "reconnection_window": 300,
-    "event_buffer_size": 100,
-    "enable_reconnection": true,
-    "heartbeat_throttle_secs": 30,
-    "region_id": "default"
-  },
-  "rate_limit": {
-    "max_room_creations": 5,
-    "time_window": 60,
-    "max_join_attempts": 20,
-    "max_signals": 600,
-    "max_signal_errors": 60
-  },
-  "protocol": {
-    "max_game_name_length": 64,
-    "room_code_length": 6,
-    "max_player_name_length": 32,
-    "max_players_limit": 100,
-    "enable_message_pack_game_data": true,
-    "min_protocol_version": 2,
-    "max_protocol_version": 3
-  },
-  "logging": {
-    "dir": "logs",
-    "filename": "server.log",
-    "rotation": "daily",
-    "enable_file_logging": true,
-    "format": "json"
-  },
-  "security": {
-    "cors_origins": "*",
-    "enforce_app_id_allowlist": false,
-    "require_metrics_auth": false,
-    "max_message_size": 65536,
-    "max_signal_bytes": 16384,
-    "max_connections_per_ip": 24,
-    "transport": {
-      "tls": { "enabled": false },
-      "token_binding": { "enabled": false }
-    },
-    "allowed_apps": [
-      {
-        "app_id": "my-game",
-        "app_name": "My Awesome Game",
-        "max_rooms": 100,
-        "max_players_per_room": 16,
-        "rate_limit_per_minute": 60
-      }
-    ]
-  },
-  "coordination": {
-    "dedup_cache": {
-      "capacity": 100000,
-      "ttl_secs": 60,
-      "cleanup_interval_secs": 30
-    },
-    "membership_snapshot_interval_secs": 30
-  },
-  "metrics": {
-    "dashboard_cache_refresh_interval_secs": 5,
-    "dashboard_cache_ttl_secs": 30,
-    "dashboard_cache_history_window_secs": 300
-  },
-  "relay_types": {
-    "default_relay_type": "matchbox",
-    "game_relay_mappings": {}
-  },
-  "session": {
-    "default_topology": "relay",
-    "game_topology_mappings": {},
-    "enable_webrtc": true,
-    "enable_direct": true,
-    "enable_ice_pregather": true,
-    "ice_servers": []
-  },
-  "turn": {
-    "enabled": false,
-    "static_auth_secret": "",
-    "urls": [],
-    "stun_urls": ["stun:stun.l.google.com:19302"],
-    "credential_ttl_secs": 3600
-  },
-  "websocket": {
-    "enable_batching": false,
-    "batch_size": 10,
-    "batch_interval_ms": 16,
-    "auth_timeout_secs": 10,
-    "idle_timeout_secs": 300,
-    "server_ping_interval_secs": 10,
-    "pong_timeout_secs": 5,
-    "socket_send_buffer_bytes": 65536,
-    "send_queue_capacity": 1024,
-    "control_queue_capacity": 128,
-    "slow_consumer_timeout_ms": 5000,
-    "max_sojourn_ms": 15000,
-    "delivery_stats_interval_secs": 0
-  }
-}
-```
-
-### Environment Variable Overrides
-
-Any configuration field can be overridden with an environment variable using the
-`SIGNAL_FISH__` prefix. Nested fields use double underscores (`__`) as separators.
-Values are parsed as the type expected by the corresponding config field. Common
-overrides are listed below; see [Configuration][config-docs] for the
-complete reference.
-
-| Environment Variable                             | Config Path                        | Default   | Description                                         |
-| ------------------------------------------------ | ---------------------------------- | --------- | --------------------------------------------------- |
-| `SIGNAL_FISH__PORT`                               | `port`                             | `3536`    | Server listen port                                  |
-| `SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS`        | `server.default_max_players`       | `8`       | Default max players per room                        |
-| `SIGNAL_FISH__SERVER__PING_TIMEOUT`               | `server.ping_timeout`              | `30`      | Seconds before a silent client is dropped           |
-| `SIGNAL_FISH__SERVER__ROOM_CLEANUP_INTERVAL`      | `server.room_cleanup_interval`     | `60`      | Seconds between room cleanup sweeps                 |
-| `SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME`         | `server.max_rooms_per_game`        | `1000`    | Max rooms allowed per game name                     |
-| `SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT`         | `server.empty_room_timeout`        | `300`     | Seconds before an empty room is removed             |
-| `SIGNAL_FISH__SERVER__INACTIVE_ROOM_TIMEOUT`      | `server.inactive_room_timeout`     | `3600`    | Seconds before inactive-room removal and close `4005` |
-| `SIGNAL_FISH__SERVER__RECONNECTION_WINDOW`        | `server.reconnection_window`       | `300`     | Seconds a reconnection token stays valid            |
-| `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE`          | `server.event_buffer_size`         | `100`     | Max events buffered for replay (ceiling: 65,536)    |
-| `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION`        | `server.enable_reconnection`       | `true`    | Enable reconnection support                         |
-| `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS`    | `server.heartbeat_throttle_secs`   | `30`      | Min seconds between `last_seen` heartbeat writes    |
-| `SIGNAL_FISH__SERVER__REGION_ID`                  | `server.region_id`                 | `default` | Region identifier for metrics                       |
-| `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX`           | `server.room_code_prefix`          | `null`    | Optional ASCII-alphanumeric generated-code prefix   |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS`     | `rate_limit.max_room_creations`    | `5`       | Max room creations per player per window            |
-| `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW`            | `rate_limit.time_window`           | `60`      | Rate limit window in seconds                        |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS`      | `rate_limit.max_join_attempts`     | `20`      | Shared max room-creation, seated-join, and spectator-join attempts per player per window |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS`            | `rate_limit.max_signals`           | `600`     | Max validated WebRTC Signal dispatch attempts per player per window |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS`      | `rate_limit.max_signal_errors`     | `60`      | Detailed WebRTC rejection errors per player/window  |
-| `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH`     | `protocol.max_game_name_length`    | `64`      | Max characters in a game name                       |
-| `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH`         | `protocol.room_code_length`        | `6`       | Nonzero length of generated room codes              |
-| `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH`   | `protocol.max_player_name_length`  | `32`      | Max characters in a player name                     |
-| `SIGNAL_FISH__PROTOCOL__MAX_PLAYERS_LIMIT`        | `protocol.max_players_limit`       | `100`     | Hard ceiling on players per room                    |
-| `SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA` | `protocol.enable_message_pack_game_data` | `true` | Enable MessagePack game-data frames                 |
-| `SIGNAL_FISH__PROTOCOL__MIN_PROTOCOL_VERSION`     | `protocol.min_protocol_version`    | `2`       | Lowest accepted protocol version                    |
-| `SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION`     | `protocol.max_protocol_version`    | `3`       | Highest negotiated protocol version                 |
-| `SIGNAL_FISH__LOGGING__LEVEL`                     | `logging.level`                    | `null`    | Log level override (`trace`, `debug`, `info`, `warn`, `error`) |
-| `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING`       | `logging.enable_file_logging`      | `true`    | Enable rolling file logs                            |
-| `SIGNAL_FISH__LOGGING__FORMAT`                    | `logging.format`                   | `json`    | Log output format (`json` or `text`)                |
-| `SIGNAL_FISH__SECURITY__CORS_ORIGINS`             | `security.cors_origins`            | `http://localhost:3000,http://localhost:5173` | Allowed HTTP and browser WebSocket origins (comma-separated or `*`) |
-| `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST`   | `security.enforce_app_id_allowlist`  | `true`    | Require the public app ID to appear in `allowed_apps` |
-| `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH`     | `security.require_metrics_auth`    | `true`    | Require auth token for metrics endpoints            |
-| `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE`         | `security.max_message_size`        | `65536`   | Max WebSocket message size in bytes                 |
-| `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES`         | `security.max_signal_bytes`        | `16384`   | Max serialized size of a v3 `Signal` payload        |
-| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP`   | `security.max_connections_per_ip`  | `24`      | Max concurrent connections from one IP              |
-| `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING`         | `websocket.enable_batching`        | `false`   | Opt-in outbound batching (off keeps relay latency low) |
-| `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE`              | `websocket.batch_size`             | `10`      | Max messages per batch (ceiling: 65,536)            |
-| `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS`       | `websocket.batch_interval_ms`      | `16`      | Batch flush interval in milliseconds                |
-| `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS`       | `websocket.auth_timeout_secs`      | `10`      | Exclusive app-ID handshake deadline after connect   |
-| `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS`       | `websocket.idle_timeout_secs`      | `300`     | Exclusive post-handshake idle deadline (`0` disables) |
-| `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Server RFC 6455 Ping cadence (`0` disables)       |
-| `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS`       | `websocket.pong_timeout_secs`      | `5`       | Matching Pong deadline before close `4003`          |
-| `SIGNAL_FISH__WEBSOCKET__SOCKET_SEND_BUFFER_BYTES` | `websocket.socket_send_buffer_bytes` | `65536` | TCP handoff bound ahead of control (`0` = OS default) |
-| `SIGNAL_FISH__WEBSOCKET__SEND_QUEUE_CAPACITY`     | `websocket.send_queue_capacity`    | `1024`    | Per-connection data queue capacity                  |
-| `SIGNAL_FISH__WEBSOCKET__CONTROL_QUEUE_CAPACITY`  | `websocket.control_queue_capacity` | `128`     | Per-connection v3 control queue capacity            |
-| `SIGNAL_FISH__WEBSOCKET__SLOW_CONSUMER_TIMEOUT_MS` | `websocket.slow_consumer_timeout_ms` | `5000`  | Reliable capacity wait before close `4002`          |
-| `SIGNAL_FISH__WEBSOCKET__MAX_SOJOURN_MS`          | `websocket.max_sojourn_ms`         | `15000`   | Exclusive reliable/control sojourn/write deadline   |
-| `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Periodic v3 counter snapshots (`0` disables)        |
-| `RUST_LOG`                                       | --                                 | `info`    | Standard `tracing` log filter                       |
-
-### CLI Flags
-
-```text
-signal-fish-server [OPTIONS]
-
-Options:
-  -c, --validate-config    Validate config and exit
-      --print-config       Print resolved config as JSON and exit
-  -h, --help               Print help
-  -V, --version            Print version
-```
-
-Note: The server automatically loads `config.json` from the working
-directory if it exists. Use environment variables to override specific
-configuration values.
-
-## Protocol Reference
-
-Signal Fish Server uses a JSON-based WebSocket protocol with a frozen v2 relay
-floor and additive v3 capabilities. Messages are JSON objects with a `type`
-field and an optional `data` field. MessagePack encoding is also supported for
-game data when `enable_message_pack_game_data` is enabled.
-
-Building a client? See the [Platform Integration Guide](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/guides/platform-integration.md)
-for which WebRTC stack to use per platform (browser, native, mobile, Steam, Godot,
-Unity, Unreal), and the [Rust Client Guide][rust-client-guide] for a complete
-relay-floor client walkthrough.
-
-### Client Messages
-
-Canonical sample: [.llm/code-samples/protocol/v2-client-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-client-messages.jsonl)
-(v3 additions: [.llm/code-samples/protocol/v3-client-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-client-messages.jsonl))
-
-| Message            | Description                                                                      |
-| ------------------ | -------------------------------------------------------------------------------- |
-| `Authenticate`     | Submit a public app ID (required when allowlist enforcement is enabled)          |
-| `JoinRoom`         | Join or create a room (implicit create with no `room_code`, explicit join/create with `room_code`) |
-| `GameData`         | Send arbitrary game data; negotiated v3 JSON may select reliable, keyed-latest, or volatile delivery |
-| `AuthorityRequest` | Request or release game authority                                                |
-| `PlayerReady`      | Toggle your ready/unready state in the lobby                                     |
-| `ProvideConnectionInfo` | Share self-declared peer metadata; a usable Direct endpoint can make an otherwise-capable `host + direct` plan executable, but is not reachability proof |
-| `Reconnect`        | Reconnect after disconnect using `player_id`, `room_id`, and `auth_token`        |
-| `JoinAsSpectator`  | Join a room as a spectator (read-only observer)                                  |
-| `LeaveSpectator`   | Leave spectator mode                                                             |
-| `LeaveRoom`        | Leave the current room                                                           |
-| `Ping`             | Heartbeat ping (server responds with `Pong`)                                     |
-
-#### `JoinRoom` Behavior (Implicit vs Explicit)
-
-`JoinRoom` is the only room-entry message. The server resolves it using
-`game_name` and `room_code`:
-
-1. Omit `room_code`: create a new room with a generated room code.
-2. Provide `room_code` and room exists for that `game_name`: join that room.
-3. Provide `room_code` and no room exists for that `game_name`: create a new
-   room with that room code.
-
-Automatic creation tries up to eight generated candidates when a code is
-already occupied; those internal attempts count as one rate-limited client
-operation. Explicit room-code requests keep the join/create behavior above.
-
-In all successful cases, the caller receives `RoomJoined`. When joining an
-existing room, current members also receive `PlayerJoined`.
-
-#### `PlayerReady` Behavior
-
-`PlayerReady` has no payload and works as a toggle:
-
-1. Send once in `lobby` state: you become ready.
-2. Send again in `lobby` state: you become unready.
-3. Each toggle broadcasts `LobbyStateChanged` with `ready_players` and
-   `all_ready`.
-4. When `all_ready` becomes `true`, the server sends `GameStarting`.
-
-### Server Messages
-
-Canonical sample: [.llm/code-samples/protocol/v2-server-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-server-messages.jsonl)
-(v3 additions: [.llm/code-samples/protocol/v3-server-messages.jsonl](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl))
-
-| Message              | Description                                              |
-| -------------------- | -------------------------------------------------------- |
-| `Authenticated`      | Public app ID accepted; includes context and rate limits |
-| `ProtocolInfo`       | SDK/protocol compatibility details and capabilities      |
-| `RoomJoined`         | Successfully joined a room                               |
-| `PlayerJoined`       | Another player joined the room                           |
-| `PlayerLeft`         | A player left the room                                   |
-| `GameData`           | Game data relayed from another player                    |
-| `DeliveryReport`     | V3 cumulative per-class outcomes and exact prior gap ranges |
-| `LobbyStateChanged`  | Lobby state transitioned (`waiting`, `lobby`, `finalized`) |
-| `AuthorityResponse`  | Authority request result                                 |
-| `Error`              | An error occurred; includes message and optional code    |
-| `Pong`               | Response to a client `Ping`                              |
-
-Delivery class policy is per recipient. A classified v3 send can use
-latest/volatile policy for a v3 peer while the same message remains reliable
-FIFO, with v3 fields stripped, for a v2 peer. Raw binary game data is always
-reliable. On a continuing v3 stream, only the union of causally prior exact
-`DeliveryReport` ranges authorizes a sequence hole; aggregate counters do not.
-
-Operators can inspect raw JSON
-`metricsSnapshot.connections.delivery_by_class` from
-`/metrics?includeSnapshot=true`, or Prometheus
-`signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`. At
-quiescence, each class's `attempted` value equals the sum of its terminal
-outcomes. See [Delivery semantics](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/protocol.md#delivery-semantics).
-
-### Typical Session Flow
-
-```text
-Client                              Server
-  |                                    |
-  |--- Authenticate ------------------>|
-  |<-- Authenticated ------------------|
-  |<-- ProtocolInfo -------------------|
-  |                                    |
-  |--- JoinRoom (no room_code) ------->|
-  |<-- RoomJoined ---------------------|
-  |                                    |
-  |         (other client joins)       |
-  |<-- PlayerJoined -------------------|
-  |                                    |
-  |--- PlayerReady ------------------->|
-  |<-- LobbyStateChanged (lobby) ------|
-  |                                    |
-  |--- GameData ---------------------->|
-  |<-- GameData (from other player) ---|
-  |                                    |
-  |--- LeaveRoom --------------------->|
-  |<-- RoomLeft -----------------------|
-  |                                    |
-  |        (other clients receive      |
-  |         PlayerLeft)                |
-```
-
-## Optional Features
-
-Signal Fish Server supports two optional Cargo features that are disabled by
-default to keep the dependency tree minimal.
-
-### `legacy-fullmesh`
-
-Enables the upstream [matchbox](https://github.com/johanhelsing/matchbox)
-full-mesh signaling mode. When activated, set `MATCHBOX_ENHANCED_MODE=false` to
-run in legacy mode. The legacy signaling server listens on port+1.
+Verify it is ready:
 
 ```bash
-cargo run --features legacy-fullmesh
-```
-
-### `tls`
-
-Adds built-in TLS and mutual TLS (mTLS) support via
-[rustls](https://github.com/rustls/rustls). When enabled, configure TLS
-through the `security.transport.tls` section of the config file. Most
-deployments should use a reverse proxy (nginx, Caddy, cloud load balancer)
-instead of built-in TLS.
-
-```bash
-cargo build --features tls
-```
-
-Official release archives and container images include this feature. Source
-builds keep it optional; requesting `security.transport.tls.enabled=true` from
-a binary built without it fails validation instead of falling back to
-plaintext HTTP.
-
-Build with all optional features:
-
-```bash
-cargo build --all-features
-```
-
-## Library Usage
-
-Signal Fish Server is published as both a binary (`signal-fish-server`) and a
-library crate (`signal_fish_server`). You can embed the signaling server into
-your own Rust application:
-
-```rust
-use signal_fish_server::{
-    config,
-    database::DatabaseConfig,
-    server::{EnhancedGameServer, ServerConfig},
-    websocket,
-};
-use std::{net::SocketAddr, sync::Arc};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Load configuration from config.json + environment variables
-    let cfg = Arc::new(config::load());
-
-    // Build the server configuration (see main.rs for the full field mapping)
-    let server_config = ServerConfig {
-        default_max_players: cfg.server.default_max_players,
-        ..Default::default()
-    };
-
-    // Create the game server with in-memory storage
-    let game_server = EnhancedGameServer::new(
-        server_config,
-        cfg.protocol.clone(),
-        cfg.relay_types.clone(),
-        cfg.session.clone(),
-        cfg.turn.clone(),
-        DatabaseConfig::InMemory,
-        cfg.metrics.clone(),
-        cfg.coordination.clone(),
-        cfg.security.transport.clone(),
-        cfg.security.allowed_apps.clone(),
-    )
-    .await?;
-
-    // Start background cleanup task
-    let cleanup = game_server.clone();
-    tokio::spawn(async move { cleanup.cleanup_task().await });
-
-    // Build the Axum router
-    let router = websocket::create_standalone_router(&cfg.security.cors_origins)
-        .with_state(game_server);
-
-    // Start listening
-    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
-
-    Ok(())
-}
-```
-
-The `GameDatabase` trait is public, so you can implement your own storage
-backend for room-record storage beyond the built-in `InMemoryDatabase`. That
-does not make live rooms restartable: connection routes, reconnect claims,
-replay buffers, relay counters, and session plans remain process-local. See the
-[consistency and durability contract](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/architecture/consistency-and-durability.md).
-
-## Building from Source
-
-### Prerequisites
-
-- Rust 1.91.0 or later (see `rust-version` in `Cargo.toml`)
-- No system libraries required for the default build
-
-### Build
-
-```bash
-# Debug build
-cargo build
-
-# Release build (optimized, stripped)
-cargo build --release
-
-# With all optional features
-cargo build --release --all-features
-```
-
-### Test
-
-```bash
-cargo test
-cargo test --all-features
-```
-
-### Lint
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-### Docker
-
-```bash
-# Build the image
-docker build -t signal-fish-server .
-
-# Run it
-docker run -p 3536:3536 signal-fish-server
-
-# With a custom config
-docker run -p 3536:3536 -v ./config.json:/app/config.json:ro signal-fish-server
-
-# Verify it is running
 curl http://localhost:3536/v2/health
 ```
 
-The Docker image uses a multi-stage build with `cargo-chef` for dependency
-caching and `mold` for fast linking. The final runtime image is based on
-`debian:bookworm-slim` and runs as a non-root user. Its health check probes
-both HTTP and HTTPS. Required-mTLS deployments can set
-`SF_HEALTHCHECK_CURL_CONFIG` to a mounted curl config containing the
-health probe's client certificate and key.
+### From source
 
-## Project Structure
+Source builds require Rust 1.91.0 or newer. Copy the development configuration so
+the local server accepts clients without a configured app-ID allowlist:
 
-```text
-signal-fish-server/
-├── src/
-│   ├── main.rs                  # Binary entry point
-│   ├── lib.rs                   # Library crate root
-│   ├── server.rs                # EnhancedGameServer core
-│   ├── distributed.rs           # In-memory coordination extension seams
-│   ├── logging.rs               # tracing-subscriber initialization
-│   ├── metrics.rs               # Atomic counters + HDR histograms
-│   ├── rate_limit.rs            # In-memory rate limiter
-│   ├── reconnection.rs          # Token-based reconnection manager
-│   ├── retry.rs                 # Exponential backoff utility
-│   ├── auth/                    # In-memory public app-ID allowlist
-│   ├── config/                  # JSON + env var configuration
-│   ├── coordination/            # Room coordination and dedup cache
-│   ├── database/                # GameDatabase trait + InMemoryDatabase
-│   ├── protocol/                # Message types, room state, error codes
-│   ├── security/                # TLS (optional) and crypto utilities
-│   ├── server/                  # Room service, messaging, authority, etc.
-│   └── websocket/               # WebSocket handler, routes, batching
-├── tests/                       # Integration, e2e, concurrency, load tests
-├── benches/                     # Criterion benchmarks
-├── Cargo.toml
-├── Dockerfile
-├── docker-compose.yml
-├── config.example.json
-└── clippy.toml
+```bash
+git clone https://github.com/Ambiguous-Interactive/signal-fish-server.git
+cd signal-fish-server
+cp config.example.json config.json
+cargo run
 ```
 
-## Application ID allowlist
+The server listens on port `3536` by default. `config.example.json` binds on all
+network interfaces and leaves origins, app IDs, and metrics open. Use it only on
+a trusted development network behind a firewall; use the loopback-bound Docker
+command above when that is not appropriate.
 
-The compiled config default enforces a public app-ID allowlist. The development
-example config opts out with `security.enforce_app_id_allowlist: false`; remove
-that override or set it to `true`, then add entries to the
-`security.allowed_apps` array.
+## Create a room
 
-When the allowlist is enforced, clients must send the frozen-wire
-`Authenticate` message immediately after connecting. The server matches its
-public `app_id` against configured apps and enforces per-app rate limiting from the
-`rate_limit_per_minute` field.
+Follow the [complete five-minute quick start](https://ambiguous-interactive.github.io/signal-fish-server/quickstart/)
+to start a local server, open two browser WebSockets from an allowed origin,
+create a room, and join it from a second client. It includes the exact commands
+and messages to paste, plus the production allowlist difference.
 
-```json
-{
-  "security": {
-    "enforce_app_id_allowlist": true,
-    "allowed_apps": [
-      {
-        "app_id": "my-game",
-        "app_name": "My Game",
-        "max_rooms": 100,
-        "max_players_per_room": 16,
-        "rate_limit_per_minute": 60
-      }
-    ]
+The room-creation step uses this complete browser-console example:
+
+```javascript
+const socket = new WebSocket("ws://localhost:3536/v2/ws");
+socket.addEventListener("open", () => {
+  socket.send(JSON.stringify({
+    type: "JoinRoom",
+    data: {
+      game_name: "my-game",
+      player_name: "Alice",
+      max_players: 2
+    }
+  }));
+});
+socket.addEventListener("message", ({ data }) => {
+  const message = JSON.parse(data);
+  if (message.type === "RoomJoined") {
+    console.log("Room code:", message.data.room_code);
   }
-}
+});
 ```
 
-The client handshake sends and checks only a public `app_id`; no client secret
-exists. App IDs provide allowlisting, quota accounting, and
-accidental room-collision isolation, not protection from a hostile client that
-knows another app's public ID. See [Application identification][auth-docs] for
-the exact trust boundary.
+## Protocol versions
 
-## MSRV
+- **v2** is the reliable WebSocket relay floor and the simplest place to start.
+- **v3** adds capability negotiation for direct or WebRTC peer plans and
+  delivery classes for JSON relay traffic. It is additive: v2 clients continue
+  to use v2 message shapes, while v3 clients opt into the extra capabilities.
 
-The minimum supported Rust version is **1.91.0**.
+Use `/v2/ws` for the v2 default or `/v3/ws` for the v3 default. Read the
+[protocol-version guide](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/concepts/protocol-versions.md)
+before advertising v3 capabilities.
+
+## Go deeper
+
+- [Build a client](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/guides/building-a-client.md)
+  for the required lifecycle, heartbeats, room flow, and v3 client rules.
+- [Configure the server](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/configuration.md)
+  and [deploy it](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/deployment.md)
+  with production-oriented settings.
+- Use the [protocol reference](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/protocol.md)
+  for message shapes, fields, and error behavior.
+- See [library usage](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/library-usage.md)
+  to embed `signal_fish_server` in a Rust application.
+- Follow the [contributor development guide](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/development.md)
+  to build, test, and work on the repository.
+
+The complete user documentation is available on the
+[Signal Fish Server documentation site](https://ambiguous-interactive.github.io/signal-fish-server/).
 
 ## License
 
-MIT -- [Ambiguous Interactive](https://github.com/Ambiguous-Interactive)
-
-See [LICENSE](LICENSE) for the full license text.
-
-[auth-docs]: https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/authentication.md
-[config-docs]: https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/configuration.md
-[rust-client-guide]: https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/docs/guides/rust-client.md
+Signal Fish Server is available under the
+[MIT License](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/LICENSE).

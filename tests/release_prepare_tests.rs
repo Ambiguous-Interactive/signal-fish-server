@@ -72,11 +72,19 @@ impl Fixture {
             ),
         );
         write(
+            &root.join("docs/getting-started.md"),
+            &format!(
+                "https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v{version}/config.example.json\n"
+            ),
+        );
+        write(
             &root.join(".llm/context.md"),
             &format!(
                 "# Context\n\n- **Version:** {version}\n\n\
                  [v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\n\
-                 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n"
+                 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n\
+                 [v3 client sample](code-samples/protocol/v3-client-messages.jsonl)\n\
+                 [v3 server sample](code-samples/protocol/v3-server-messages.jsonl)\n"
             ),
         );
         write(
@@ -94,9 +102,10 @@ impl Fixture {
              [Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v{version}...HEAD\n\
              [{version}]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v{version}\n"),
         );
+        write(&root.join("README.md"), "# README\n");
         write(
-            &root.join("README.md"),
-            "# README\n\n[v2 client sample](.llm/code-samples/protocol/v2-client-messages.jsonl)\n[v2 server sample](.llm/code-samples/protocol/v2-server-messages.jsonl)\n",
+            &root.join("docs/protocol.md"),
+            "# Protocol\n\n[v2 client sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-client-messages.jsonl)\n[v2 server sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v2-server-messages.jsonl)\n[v3 client sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-client-messages.jsonl)\n[v3 server sample](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl)\n",
         );
         write(
             &root.join(".llm/code-samples/protocol/v2-client-messages.jsonl"),
@@ -105,6 +114,14 @@ impl Fixture {
         write(
             &root.join(".llm/code-samples/protocol/v2-server-messages.jsonl"),
             "{\"type\":\"Authenticated\",\"data\":{\"app_name\":\"test\",\"rate_limits\":{}}}\n",
+        );
+        write(
+            &root.join(".llm/code-samples/protocol/v3-client-messages.jsonl"),
+            "{\"type\":\"Authenticate\",\"data\":{\"protocol_version\":3}}\n",
+        );
+        write(
+            &root.join(".llm/code-samples/protocol/v3-server-messages.jsonl"),
+            "{\"type\":\"SessionPlan\",\"data\":{}}\n",
         );
         write(
             &root.join("docs/guides/rust-client.md"),
@@ -211,7 +228,7 @@ fn read(path: impl AsRef<Path>) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
-const RELEASE_FILES: [&str; 8] = [
+const RELEASE_FILES: [&str; 9] = [
     "Cargo.toml",
     "Cargo.lock",
     "fuzz/Cargo.toml",
@@ -219,6 +236,7 @@ const RELEASE_FILES: [&str; 8] = [
     "fuzz/Cargo.lock",
     "CHANGELOG.md",
     "docs/library-usage.md",
+    "docs/getting-started.md",
     ".llm/context.md",
 ];
 
@@ -278,11 +296,19 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
         assert_eq!(docs.matches(expected).count(), 2);
         assert!(!docs.contains("1.2.3"));
         assert_eq!(
+            read(fixture.root.join("docs/getting-started.md")),
+            format!(
+                "https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v{expected}/config.example.json\n"
+            )
+        );
+        assert_eq!(
             read(fixture.root.join(".llm/context.md")),
             format!(
                 "# Context\n\n- **Version:** {expected}\n\n\
                  [v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\n\
-                 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n"
+                 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n\
+                 [v3 client sample](code-samples/protocol/v3-client-messages.jsonl)\n\
+                 [v3 server sample](code-samples/protocol/v3-server-messages.jsonl)\n"
             )
         );
 

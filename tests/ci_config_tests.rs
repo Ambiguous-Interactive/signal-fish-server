@@ -5780,12 +5780,14 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         "list-release-lockfiles.sh",
         "release-lockfile-packages.awk",
         "docs/library-usage.md",
+        "docs/getting-started.md",
+        "replace_release_config_url",
         ".llm/context.md",
         "Unreleased",
         "cut_changelog_release CHANGELOG.md \"$NEXT_VERSION\" \"$RELEASE_DATE\" \"$CURRENT_VERSION\"",
         "metadata --locked --format-version 1",
         "scripts/check-doc-consistency.sh",
-        "CHANGELOG.md docs/library-usage.md .llm/context.md fuzz/Cargo.toml",
+        "CHANGELOG.md docs/library-usage.md docs/getting-started.md .llm/context.md fuzz/Cargo.toml",
     ] {
         assert!(
             script.contains(required),

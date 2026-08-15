@@ -5,7 +5,7 @@
 # 1) Selected project version references are synchronized with Cargo.toml package version.
 # 2) CHANGELOG.md follows Keep a Changelog structure and link conventions.
 # 3) Non-internal changed files are accompanied by a CHANGELOG.md update.
-# 4) README/.llm protocol quick references do not drift to removed message shapes.
+# 4) Public protocol/.llm references do not drift from canonical wire samples.
 #
 # Usage:
 #   ./scripts/check-doc-consistency.sh
@@ -164,6 +164,9 @@ SFS_DEP_PATTERN='signal-fish-server[[:space:]]*=[[:space:]]*["{]'
 # The canonical usage doc must always exist and carry an example, so the scan can
 # never pass vacuously if it is renamed or loses its dependency snippet.
 CANONICAL_USAGE_DOC="docs/library-usage.md"
+GETTING_STARTED_DOC="docs/getting-started.md"
+CONFIG_EXAMPLE_URL_PREFIX="https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server"
+CONFIG_EXAMPLE_URL_PATTERN="${CONFIG_EXAMPLE_URL_PREFIX}/v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)/config[.]example[.]json"
 
 validate_signal_fish_dependency_versions() {
     local file="$1"
@@ -252,6 +255,26 @@ if [ -n "$CARGO_VERSION" ]; then
             action_ok ".llm/context.md version line matches Cargo.toml"
         else
             action_error ".llm/context.md must contain exact line: $expected_context_line"
+            VERSION_DRIFT=1
+        fi
+    fi
+
+    if [ ! -f "$GETTING_STARTED_DOC" ]; then
+        action_error "Missing required file: $GETTING_STARTED_DOC"
+    else
+        config_url_count=0
+        while IFS= read -r config_url; do
+            [ -z "$config_url" ] && continue
+            config_url_count=$((config_url_count + 1))
+            observed_version=${config_url#"$CONFIG_EXAMPLE_URL_PREFIX/v"}
+            observed_version=${observed_version%/config.example.json}
+            if [ "$observed_version" != "$CARGO_VERSION" ]; then
+                action_error "$GETTING_STARTED_DOC has stale release config URL version '$observed_version' (expected '$CARGO_VERSION' from Cargo.toml)"
+                VERSION_DRIFT=1
+            fi
+        done < <(grep -Eo "$CONFIG_EXAMPLE_URL_PATTERN" "$GETTING_STARTED_DOC" || true)
+        if [ "$config_url_count" -ne 1 ]; then
+            action_error "$GETTING_STARTED_DOC must contain exactly one versioned config.example.json release URL (found: $config_url_count)"
             VERSION_DRIFT=1
         fi
     fi
@@ -582,11 +605,13 @@ validate_rust_client_game_data_formats() {
     done <<< "$diagnostics"
 }
 
-PROTOCOL_SAMPLE_CLIENT=".llm/code-samples/protocol/v2-client-messages.jsonl"
-PROTOCOL_SAMPLE_SERVER=".llm/code-samples/protocol/v2-server-messages.jsonl"
+PROTOCOL_SAMPLE_V2_CLIENT=".llm/code-samples/protocol/v2-client-messages.jsonl"
+PROTOCOL_SAMPLE_V2_SERVER=".llm/code-samples/protocol/v2-server-messages.jsonl"
 PROTOCOL_SAMPLE_FILES=(
-    "$PROTOCOL_SAMPLE_CLIENT"
-    "$PROTOCOL_SAMPLE_SERVER"
+    "$PROTOCOL_SAMPLE_V2_CLIENT"
+    "$PROTOCOL_SAMPLE_V2_SERVER"
+    ".llm/code-samples/protocol/v3-client-messages.jsonl"
+    ".llm/code-samples/protocol/v3-server-messages.jsonl"
 )
 
 validate_protocol_stale_tokens "README.md"
@@ -596,11 +621,11 @@ for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
     validate_protocol_stale_tokens "$sample_file"
 done
 
-validate_protocol_authenticated_payload_shape "$PROTOCOL_SAMPLE_SERVER"
+validate_protocol_authenticated_payload_shape "$PROTOCOL_SAMPLE_V2_SERVER"
 validate_rust_client_game_data_formats
 
 for sample_file in "${PROTOCOL_SAMPLE_FILES[@]}"; do
-    validate_protocol_sample_reference "README.md" "$sample_file"
+    validate_protocol_sample_reference "docs/protocol.md" "$sample_file"
     validate_protocol_sample_reference ".llm/context.md" "${sample_file#.llm/}"
 done
 

@@ -367,13 +367,17 @@ fn test_protocol_docs_reference_canonical_samples_data_driven() {
             required_references: &[
                 "code-samples/protocol/v2-client-messages.jsonl",
                 "code-samples/protocol/v2-server-messages.jsonl",
+                "code-samples/protocol/v3-client-messages.jsonl",
+                "code-samples/protocol/v3-server-messages.jsonl",
             ],
         },
         ProtocolReferenceCase {
-            file: "README.md",
+            file: "docs/protocol.md",
             required_references: &[
                 ".llm/code-samples/protocol/v2-client-messages.jsonl",
                 ".llm/code-samples/protocol/v2-server-messages.jsonl",
+                ".llm/code-samples/protocol/v3-client-messages.jsonl",
+                ".llm/code-samples/protocol/v3-server-messages.jsonl",
             ],
         },
     ];
@@ -410,6 +414,16 @@ fn test_protocol_sample_files_are_present_and_valid_data_driven() {
         ProtocolSampleCase {
             file: ".llm/code-samples/protocol/v2-server-messages.jsonl",
             required_tokens: &["\"app_name\"", "\"rate_limits\"", "\"ProtocolInfo\""],
+            forbidden_tokens: &["server_version", "RoomCreated", "AuthorityGranted"],
+        },
+        ProtocolSampleCase {
+            file: ".llm/code-samples/protocol/v3-client-messages.jsonl",
+            required_tokens: &["\"protocol_version\"", "\"Signal\"", "\"TransportStatus\""],
+            forbidden_tokens: &["server_version", "CreateRoom", "SetReady"],
+        },
+        ProtocolSampleCase {
+            file: ".llm/code-samples/protocol/v3-server-messages.jsonl",
+            required_tokens: &["\"DeliveryReport\"", "\"SessionPlan\"", "\"GoingAway\""],
             forbidden_tokens: &["server_version", "RoomCreated", "AuthorityGranted"],
         },
     ];

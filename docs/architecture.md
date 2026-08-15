@@ -1,446 +1,103 @@
 # Architecture
 
-System design and project structure overview.
+Signal Fish Server is a single-process, in-memory coordination service for
+multiplayer games. This page explains the choices that affect client design and
+server operation. For message fields and configuration keys, use the linked
+references.
 
-## System Overview
-
-```text
-┌─────────────────────────────────────────────────────┐
-│              Game Clients (WebSocket)                │
-│  Browser | Unity | Godot | Custom                    │
-└────────────────────┬────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│            Signal Fish Server (Rust)                 │
-│  ┌───────────────────────────────────────────────┐  │
-│  │  WebSocket Layer (axum)                       │  │
-│  │  - Upgrade handling                           │  │
-│  │  - Message batching                           │  │
-│  │  - App-ID allowlist enforcement               │  │
-│  └───────────────┬───────────────────────────────┘  │
-│                  ▼                                   │
-│  ┌───────────────────────────────────────────────┐  │
-│  │  EnhancedGameServer (Core Logic)              │  │
-│  │  - Room management                            │  │
-│  │  - Player state                               │  │
-│  │  - Authority management                       │  │
-│  │  - Message routing                            │  │
-│  └───────────────┬───────────────────────────────┘  │
-│                  ▼                                   │
-│  ┌───────────────────────────────────────────────┐  │
-│  │  In-Memory Storage                            │  │
-│  │  - Rooms (DashMap)                            │  │
-│  │  - Players (DashMap)                          │  │
-│  │  - Rate limits                                │  │
-│  │  - Reconnection tokens                        │  │
-│  └───────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
-
-```
-
-## Core Components
-
-### WebSocket Layer
-
-**Location:** `src/websocket/`
-
-Handles WebSocket upgrade, message serialization, and connection lifecycle.
-
-Key modules:
-
-- `handler.rs` - WebSocket upgrade and initialization
-- `connection.rs` - Connection lifecycle management
-- `batching.rs` - Outbound message batching
-- `sending.rs` - Message serialization (JSON/MessagePack)
-- `routes.rs` - Axum router configuration
-
-### EnhancedGameServer
-
-**Location:** `src/server.rs`
-
-Core server logic coordinating all operations.
-
-Responsibilities:
-
-- Room creation and lifecycle
-- Player join/leave handling
-- Message routing between players
-- Authority management
-- Lobby state transitions
-- Cleanup tasks
-
-### Protocol Layer
-
-**Location:** `src/protocol/`
-
-Defines message types, validation, and domain types.
-
-Key modules:
-
-- `messages.rs` - `ClientMessage` and `ServerMessage` enums
-- `types.rs` - `PlayerId`, `RoomId`, domain types
-- `room_state.rs` - `Room`, `Player`, `LobbyState`
-- `validation.rs` - Input validation functions
-- `room_codes.rs` - Room code generation
-- `error_codes.rs` - `ErrorCode` enum
-
-### Protocol v3 Session Layer (Topology + Transport)
-
-**Location:** `src/server/session_policy.rs`, `src/server/signaling.rs`
-
-On `/v3/ws` (the default v3 endpoint), the server negotiates a peer-to-peer
-session plan instead of pure relay: a two-axis ladder
-(`mesh+webrtc -> host+webrtc -> host+direct -> relay`) with a per-recipient
-`SessionPlan` and `Signal` messages for WebRTC signaling brokering and
-host-failover / membership re-planning. A single v2 or relay-only member forces
-the whole room to the relay floor; each v3 member receives an explicit no-peer
-relay plan while v2 behavior stays byte-identical. The server also mints ephemeral coturn-REST TURN credentials for
-operator-configured external TURN URLs and advertises STUN; optional
-`ice_servers` are attached to `RoomJoined` / `Reconnected` for v3
-WebRTC-capable clients when ICE pre-gather is enabled.
-
-See:
-
-- [Transport Fallback (v3)](architecture/transport-fallback.md)
-- [Handoff & Topologies (v3)](architecture/handoff-and-topologies.md)
-- [Formal Verification (v3)](architecture/formal-verification.md)
-- [Single-Instance Deployment](architecture/single-instance-deployment.md)
-- [Consistency and Durability](architecture/consistency-and-durability.md)
-- [Scaling](architecture/scaling.md)
-
-### Configuration
-
-**Location:** `src/config/`
-
-Configuration loading, validation, and defaults.
-
-Structure:
-
-- `loader.rs` - JSON file + environment variable loading
-- `validation.rs` - Config validation rules
-- `defaults.rs` - Default values
-- Type-specific configs: `server.rs`, `security.rs`, `protocol.rs`, etc.
-
-### Database
-
-**Location:** `src/database/`
-
-Storage abstraction with in-memory implementation.
-
-- `GameDatabase` trait - Abstract storage interface
-- `InMemoryDatabase` - Default implementation using `DashMap`
-
-Designed for extension with custom backends (Redis, PostgreSQL, etc.).
-
-### Application identification
-
-**Location:** `src/auth/`
-
-Public app-ID allowlisting, connection-bound accounting context, and per-app
-rate limiting. It does not authenticate a hostile client.
-
-- `middleware.rs` - `AppIdAllowlist`
-- `rate_limiter.rs` - Per-app sliding-window rate limiter
-- `error.rs` - App-ID handshake policy error types
-
-### Coordination
-
-**Location:** `src/coordination/`
-
-In-memory coordination primitives and extension seams. The shipped
-implementations do not coordinate multiple server processes; see the
-[single-instance deployment contract](architecture/single-instance-deployment.md).
-
-- `room_coordinator.rs` - Room operation coordination
-- `dedup.rs` - Deduplication cache (LRU)
-
-### Metrics
-
-**Location:** `src/metrics.rs`, `src/websocket/metrics.rs`, `src/websocket/prometheus.rs`
-
-Metrics collection and export.
-
-- Atomic counters for room/player counts
-- HDR histograms for latency tracking
-- JSON and Prometheus export formats
-
-## Data Flow
-
-### JoinRoom Resolution
-
-`JoinRoom` is the only room-entry message. `EnhancedGameServer` resolves each
-request by `(game_name, room_code)`:
-
-1. Validate/rate-limit the request.
-2. If `room_code` is omitted, generate one and create a new room.
-3. If `room_code` is provided:
-   - If room exists for that `game_name`, add player to existing room.
-   - If room does not exist for that `game_name`, create a new room with the
-     requested `room_code`.
-4. Send `RoomJoined` to the caller. If they joined an existing room, broadcast
-   `PlayerJoined` to other room members.
+## At a glance
 
 ```text
-Client                    WebSocket Handler         EnhancedGameServer        Database
-  |                              |                         |                      |
-  |-- JoinRoom ----------------->|                         |                      |
-  |                              |-- handle_message ------>|                      |
-  |                              |                         |-- get_room --------->|
-  |                              |                         |<-- hit or miss ------|
-  |                              |                         |-- add_player/create->|
-  |                              |<-- RoomJoined ----------|                      |
-  |<-- RoomJoined ---------------|                         |                      |
-  |                              |                         |                      |
-  |<-- PlayerJoined -------------|<-- broadcast (join only)                       |
-(other clients)                                                                   |
+Game clients
+    │ WebSocket
+    ▼
+Signal Fish Server
+    ├─ rooms, lobby state, and reconnect state (in memory)
+    ├─ WebSocket game-data relay
+    └─ optional peer-to-peer coordination
+             │
+             └─ operator-provided STUN/TURN for WebRTC
 ```
 
-### Game Data Relay
+Clients use one long-lived WebSocket for room operations and for the relay.
+Protocol v2 always sends game data through that relay. Protocol v3 can select a
+Direct or WebRTC peer-to-peer plan when every current player supports it, while
+keeping the relay available as the fallback.
 
-```text
+Read [Choose v2 or v3](concepts/protocol-versions.md) for the compatibility
+rules and [Transport Fallback](architecture/transport-fallback.md) for the v3
+client contract.
 
-Client A                 EnhancedGameServer                    Client B
-  |                              |                                  |
-  |-- GameData ----------------->|                                  |
-  |                              |-- broadcast to room ------------->|
-  |                              |                                  |<-- GameData
+## The room is the ownership boundary
 
-```
+One running process owns a room and all of its live state:
 
-## Concurrency Model
+- membership, readiness, spectators, and authority;
+- reconnect tokens and buffered reconnect events;
+- negotiated v3 session plans and signaling; and
+- connection queues, rate-limit state, and operational counters.
 
-### Async Runtime
+That state is not copied to another server and does not survive a restart.
+Putting several independent instances behind a generic load balancer can split
+players with the same room code into different rooms. Run one active process
+for a routing domain, or place an external room directory in front of Signal
+Fish that assigns every room to exactly one process before the WebSocket opens.
 
-Uses **Tokio** for async I/O and task scheduling.
+The [Single-Instance Deployment Contract](architecture/single-instance-deployment.md)
+defines the supported routing boundary. The [Consistency and Durability
+Contract](architecture/consistency-and-durability.md) explains what clients can
+and cannot recover after a disconnect or process loss.
 
-### Shared State
+## Data paths
 
-- `Arc<DashMap>` for concurrent room/player access
-- `RwLock` for infrequent writes (config, auth state)
-- Atomic counters for metrics
+### WebSocket relay
 
-### Message Passing
+The relay is the simplest and universal path. A client sends `GameData`; the
+room's process routes it to the other current players. Work grows with message
+rate, encoded message size, and the number of recipients. Slow recipients are
+bounded by per-connection queues and may be disconnected rather than allowing
+memory use to grow without limit.
 
-- Bounded per-connection data and control queues
-- Class-aware data admission: reliable backpressure, loss-accounted v3 latest/volatile
-- Generation-scoped v3 control priority for peer lifecycle and exact accountability
+### Optional peer-to-peer path
 
-### Locking Strategy
+With protocol v3, the server chooses one room-wide topology and transport from
+the capabilities every player advertised. It tells each client which peers to
+connect to and forwards opaque WebRTC signaling messages. Signal Fish does not
+carry peer data on those direct connections and does not operate a STUN or TURN
+service. Operators provide that infrastructure when required.
 
-- Fine-grained locking per room
-- Never hold locks across `.await` points
-- Use `tokio::spawn` to avoid blocking
+See [Handoff and Topologies](architecture/handoff-and-topologies.md) for plan
+selection and [Self-hosted TURN](deployment-turn.md) for WebRTC infrastructure.
 
-## Scalability
+## Access and trust
 
-### Single Instance Limits
+The optional app-ID allowlist identifies a public application label for
+admission, quotas, and metrics. It is not user authentication and an app ID is
+not a secret. Browser-origin checks, message validation, rate limits, TLS, and
+metrics authentication are separate controls.
 
-Recommended per instance:
+Read [Application Identification and Access](authentication.md) for the exact
+trust boundary and [Configuration](configuration.md) for the available limits.
 
-- **Rooms:** < 500 active rooms
-- **Players:** < 2000 concurrent players
-- **Messages:** < 10,000 messages/second
+## Capacity and operations
 
-### Multi-Instance Deployment
+There is no fixed rooms, players, or messages-per-second recommendation that is
+portable across games and hosts. Capacity depends especially on relay fanout,
+message size and rate, slow clients, reconnect buffering, WebRTC/TURN use, and
+the CPU and network available to the process.
 
-Transparent multi-instance deployment is not supported. `RoomOperationCoordinator`
-and `DistributedLock` use in-memory implementations and cannot preserve a room
-across processes. Run one active process per routing domain, or use an external
-directory that assigns isolated room homes before WebSocket connection. See
-[Single-Instance Deployment](architecture/single-instance-deployment.md).
+Benchmark the release binary with your expected room sizes and traffic, then
+monitor queue pressure, delivery latency, connection closes, CPU, memory, and
+network egress. The [Scaling Architecture](architecture/scaling.md) provides
+the sizing model and measured examples without treating them as deployment
+promises. Use the [Deployment Guide](deployment.md) for health checks, metrics,
+TLS, proxying, and shutdown behavior.
 
-### Storage Options
+## Where to go next
 
-- **In-Memory** (default) - Fast, ephemeral, no external dependencies
-- Custom persistent backends would require a separately designed distributed
-  authority and routing protocol; implementing `GameDatabase` alone is not
-  sufficient for multi-instance safety.
-
-## Security Architecture
-
-### Layers
-
-1. **Transport** - Optional TLS (feature-gated)
-2. **Application identification** - Public app-ID allowlist (optional)
-3. **Rate Limiting** - Per-IP and per-app limits
-4. **Validation** - Input validation at protocol boundaries
-5. **Connection Limits** - Max connections per IP
-
-### Trust Model
-
-- **Untrusted clients** - All input validated
-- **Public app labels** - App-ID allowlisting + accounting rate limits; not
-  hostile-client identity
-- **Trusted admin** - Metrics endpoints (optional auth)
-
-## Module Dependencies
-
-```text
-main.rs
-  └── lib.rs
-       ├── server.rs (EnhancedGameServer)
-       │    ├── server/admin.rs
-       │    ├── server/authority.rs
-       │    ├── server/connection_manager.rs
-       │    ├── server/dashboard_cache.rs
-       │    ├── server/game_data.rs
-       │    ├── server/heartbeat.rs
-       │    ├── server/maintenance.rs
-       │    ├── server/message_router.rs
-       │    ├── server/messaging.rs
-       │    ├── server/ready_state.rs
-       │    ├── server/reconnection_service.rs
-       │    ├── server/relay_policy.rs
-       │    ├── server/room_service.rs
-       │    ├── server/session_policy.rs (Protocol v3 session-plan selection/emission/re-planning)
-       │    ├── server/signaling.rs (Protocol v3 signal relay + finalized membership refresh)
-       │    ├── server/spectator_handlers.rs
-       │    └── server/spectator_service.rs
-       ├── protocol/
-       │    ├── messages.rs (ClientMessage, ServerMessage)
-       │    ├── types.rs (PlayerId, RoomId, etc.)
-       │    ├── room_state.rs (Room, Player, LobbyState)
-       │    ├── room_codes.rs (Room code generation)
-       │    ├── validation.rs (Input validation)
-       │    └── error_codes.rs (ErrorCode enum)
-       ├── database/
-       │    └── mod.rs (GameDatabase trait, InMemoryDatabase)
-       ├── coordination/
-       │    ├── mod.rs (MessageCoordinator trait)
-       │    ├── room_coordinator.rs (RoomOperationCoordinator)
-       │    └── dedup.rs (DedupCache)
-       ├── auth/
-       │    ├── middleware.rs (InMemoryAuthBackend)
-       │    ├── rate_limiter.rs (Per-app rate limiter)
-       │    └── error.rs (AuthError types)
-       ├── websocket/
-       │    ├── handler.rs (WebSocket upgrade)
-       │    ├── connection.rs (Connection lifecycle)
-       │    ├── batching.rs (Message batching)
-       │    ├── sending.rs (Serialization + send)
-       │    ├── token_binding.rs (Token binding)
-       │    ├── routes.rs (Axum router)
-       │    ├── metrics.rs (/metrics endpoint)
-       │    └── prometheus.rs (Prometheus format)
-       ├── config/
-       │    ├── types.rs (Root Config struct)
-       │    ├── server.rs (ServerConfig)
-       │    ├── protocol.rs (ProtocolConfig)
-       │    ├── security.rs (SecurityConfig)
-       │    ├── websocket.rs (WebSocketConfig)
-       │    ├── logging.rs (LoggingConfig)
-       │    ├── relay.rs (RelayTypeConfig)
-       │    ├── session.rs (SessionConfig: topology/transport policy, ICE pre-gather)
-       │    ├── turn.rs (TurnConfig: ephemeral coturn-REST TURN credentials + STUN)
-       │    ├── ice_url.rs (ICE URL scheme validation)
-       │    ├── coordination.rs (CoordinationConfig)
-       │    ├── metrics.rs (MetricsConfig)
-       │    ├── defaults.rs (Default values)
-       │    ├── loader.rs (JSON + env loading)
-       │    └── validation.rs (Config validation)
-       ├── security/
-       │    ├── tls.rs (TLS support, feature-gated)
-       │    ├── crypto.rs (AES-GCM envelope encryption)
-       │    ├── token_binding.rs (Channel-bound tokens)
-       │    └── turn_credentials.rs (ephemeral coturn-REST TURN credential minting)
-       ├── metrics.rs (AtomicU64 + HDR histograms)
-       ├── logging.rs (Structured logging init)
-       ├── distributed.rs (InMemoryDistributedLock)
-       ├── rate_limit.rs (In-memory RoomRateLimiter)
-       ├── reconnection.rs (In-memory ReconnectionManager)
-       └── retry.rs (Exponential backoff utility)
-
-```
-
-## Architecture Decision Records
-
-Key architectural decisions are documented in [Architecture Decision Records (ADRs)](adr/README.md).
-
-Current ADRs:
-
-- [ADR-001: Reconnection Protocol](adr/reconnection-protocol.md) - WebSocket reconnection and event replay
-- [ADR-0001: Protocol v3 Two-Axis (Topology + Transport)](adr/0001-protocol-v3-two-axis.md) - Capability-gated signaling
-- [ADR-0003: Formal Verification and Fuzzing](adr/0003-formal-verification-and-fuzzing.md) - Verifying the v3 session core
-
-## Design Principles
-
-### Zero-Cost Abstractions
-
-- Prefer value types over heap allocations
-- Use `Bytes` for network data (zero-copy)
-- Borrow instead of clone where possible
-
-### Fail-Fast Validation
-
-- Validate at system boundaries
-- Return typed errors (`Result<T, E>`)
-- Never `.unwrap()` in production code
-
-### Graceful Degradation
-
-- Handle partial failures
-- Make delivery policy explicit: reliable data waits on the bounded data queue
-  and closes a slow recipient loudly; v3 `latest` and `volatile` data never
-  backpressure and record every omission in an exact prior `DeliveryReport`
-- Keep v3 control traffic on a bounded lane that has strict priority within the
-  active recipient generation; use barriers for the recipient's own room and
-  spectator transitions. If the server cannot publish exact accountability
-  before later data, or reliable/control sojourn or a selected socket write
-  exceeds `websocket.max_sojourn_ms`, fail closed with `4002 slow_consumer`.
-  Bound accepted-socket kernel handoff with
-  `websocket.socket_send_buffer_bytes` so TCP cannot bury later priority frames
-- Timeout on slow operations
-
-### Observable by Default
-
-- Structured logging with `tracing`
-- Metrics for all operations
-- Correlation IDs for request tracking
-
-## Testing Strategy
-
-### Unit Tests
-
-Module-level tests in the same file:
-
-```rust
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_room_code_validation() {
-        // ...
-    }
-}
-
-```
-
-### Integration Tests
-
-Multi-component tests in `tests/`:
-
-```rust
-#[tokio::test]
-async fn test_room_lifecycle() {
-    // ...
-}
-
-```
-
-### E2E Tests
-
-Full WebSocket session tests:
-
-```rust
-#[tokio::test]
-async fn test_websocket_flow() {
-    // ...
-}
-
-```
-
-## Next Steps
-
-- [Development](development.md) - Building and testing
-- [Library Usage](library-usage.md) - Embedding the server
-- [Protocol Reference](protocol.md) - Message types
+- [Build a Client](guides/building-a-client.md) — required connection and room
+  lifecycle
+- [Configure the Server](configuration.md) — policy, limits, transports, and
+  operational settings
+- [Protocol Reference](protocol.md) — exact wire messages and errors
+- [Library Usage](library-usage.md) — embed the server in a Rust application
