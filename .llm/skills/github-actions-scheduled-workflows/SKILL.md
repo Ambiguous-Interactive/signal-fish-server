@@ -76,7 +76,7 @@ on:
 | Dependency updates           | Weekly               | Balance freshness with stability       |
 | Link checking                | Weekly               | Catch external link rot                |
 | Workflow hygiene             | Weekly               | Detect stale toolchains                |
-| Unused dependencies          | Weekly               | Proactive dependency cleanup           |
+| Unused dependencies          | Changes/manual       | Pinned inputs change in Git            |
 
 ### Common Cron Schedules
 
@@ -179,10 +179,10 @@ security-audit:
   schedule:
     - cron: '0 12 * * *'  # Daily at noon
 
-# Medium priority: Weekly dependency cleanup
+# Deterministic source analysis: relevant changes plus manual dispatch
 unused-deps:
-  schedule:
-    - cron: '0 0 * * 1'  # Weekly on Monday
+  # No cron: pinned analyzers cannot discover new unused code until source or
+  # manifests change.
 
 # Low priority: Monthly workflow hygiene
 workflow-hygiene:
@@ -255,6 +255,7 @@ This ensures:
 - [ ] Every non-audit job has `if: github.event_name != 'schedule'`
 - [ ] The audit job (`deny`) omits the schedule guard
 - [ ] Different schedules used for different priorities (no everything-at-midnight)
+- [ ] Deterministic source-only analyzers use path triggers plus manual dispatch, not cron
 - [ ] Failure notifications configured for scheduled-run failures
 - [ ] Concurrency control prevents overlapping scheduled runs
 - [ ] `test_ci_schedule_only_runs_audit` test validates guard coverage

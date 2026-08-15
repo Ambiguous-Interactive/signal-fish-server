@@ -19694,6 +19694,11 @@ fn test_unused_deps_workflow_only_allocates_for_root_rust_graph_changes() {
         triggers.as_mapping_get("workflow_dispatch").is_some(),
         "unused-deps.yml must retain a manual full-analysis trigger"
     );
+    assert!(
+        triggers.as_mapping_get("schedule").is_none(),
+        "unused-deps.yml must not allocate a deterministic weekly rerun: its source graph, \
+         toolchain, and analyzer versions only change through already-covered repository paths"
+    );
 }
 
 /// Parse the `exclude_path = [...]` array from `.lychee.toml` content,
