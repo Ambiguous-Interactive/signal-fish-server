@@ -16,6 +16,7 @@
 #
 # Features:
 #   - Strict rustdoc validation (broken links, invalid code blocks)
+#   - Strict MkDocs build for rendered pages, themes, and assets
 #   - Multi-language code block validation (Rust, JSON, YAML, TOML, Bash)
 #   - Smart skipping of placeholder/incomplete code
 #   - Comprehensive link checking with anchor validation
@@ -27,10 +28,13 @@ on:
   push:
     branches: [main]
     paths:
+      - "docs/**"
       - "**/*.md"
       - "**/*.rs"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
       - "rust-toolchain.toml"
       - ".lychee.toml"
       - "scripts/read-toml-string.sh"
@@ -44,10 +48,13 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - "docs/**"
       - "**/*.md"
       - "**/*.rs"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
       - "rust-toolchain.toml"
       - ".lychee.toml"
       - "scripts/read-toml-string.sh"
@@ -633,6 +640,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Setup Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - name: Build rendered documentation
+        run: |
+          pip install -r requirements-docs.txt
+          mkdocs build --strict
       - name: Install lychee
         run: bash scripts/install-lychee.sh
       # Required validation checks repository-owned links only. External hosts are

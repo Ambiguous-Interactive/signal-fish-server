@@ -7370,10 +7370,19 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
     // Critical paths that doc-validation must trigger on.
     // These ensure documentation changes are always validated.
     const REQUIRED_DOC_PATHS: &[(&str, &str)] = &[
+        (
+            "docs/**",
+            "Documentation pages and rendered assets such as CSS, SVG, and fonts",
+        ),
         ("**/*.md", "Markdown documentation files"),
         ("**/*.rs", "Rust source files (contain doc-comments)"),
         ("Cargo.toml", "Dependency changes affect doc builds"),
         ("Cargo.lock", "Lockfile changes affect doc builds"),
+        ("mkdocs.yml", "MkDocs site configuration"),
+        (
+            "requirements-docs.txt",
+            "Pinned dependencies used by the strict MkDocs build",
+        ),
         (
             "rust-toolchain.toml",
             "Rustdoc jobs read the pinned toolchain",
@@ -7427,6 +7436,21 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
             workflow_path.display()
         );
     }
+}
+
+#[test]
+fn test_doc_validation_builds_mkdocs_in_strict_mode() {
+    let workflow_path = repo_root().join(".github/workflows/doc-validation.yml");
+    let content = read_live_file(&workflow_path);
+
+    assert!(
+        content.contains("pip install -r requirements-docs.txt")
+            && content.contains("mkdocs build --strict"),
+        "doc-validation.yml must install the pinned documentation dependencies and run \
+         `mkdocs build --strict` on pull requests. Reuse one of the four stable documentation \
+         jobs instead of allocating a new runner.\nFile: {}",
+        workflow_path.display()
+    );
 }
 
 #[test]

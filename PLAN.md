@@ -136,7 +136,5 @@ correctness evidence appears.
   fail-closed triggers raised them to 569. Do not add per-lane status runners;
   prefer a required classifier with server-side job skips and retain hosted
   before/after evidence.
-- #204 — obtain and integrate the remaining design assets while preserving
-  protocol and client compatibility.
 - #207 — pursue the next optimization only from current allocation and latency
   profiles, with exact wire and delivery semantics held constant.

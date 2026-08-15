@@ -1,7 +1,7 @@
 <p align="center">
   <img
     src="https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/main/docs/assets/logo-banner.svg"
-    alt="Signal Fish Server" width="600">
+    alt="Signal Fish Server" width="640">
 </p>
 
 <p align="center">
