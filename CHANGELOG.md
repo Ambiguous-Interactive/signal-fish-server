@@ -132,8 +132,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix automated release preparation so transformation validation, rollback,
   scope checks, and Git staging share one complete file inventory, including
   dynamically discovered lockfiles and the versioned getting-started URL.
-  Live runs now authenticate the auto-commit GitHub App with its configured
-  client ID, while credential-free dry runs remain available.
+  Live runs now prefer the auto-commit GitHub App client ID while remaining
+  compatible with the existing App ID secret, credential-free dry runs remain
+  available, and recovery capture can no longer mask an earlier failure.
+  Preparation attempts now retain their queue position, pin the dispatched
+  source, accept only canonical one-commit recovery branches, and reconcile
+  ambiguous branch or pull-request mutations without repeating a write.
+- Require release publication preflight to prove successful required-workflow
+  push runs for the exact retained default-branch source. Every manual retry or
+  human tag must resolve to the unique first-parent commit that introduced its
+  package version, so missing Documentation Validation runs fail closed without
+  approximating a historical push's changed-file range. Release attempts remain
+  queued, and human tag publication follows the same gated path as manual
+  publication.
+- Prevent delayed GHCR publications and historical backfills from rolling
+  mutable image aliases backward. `latest` now moves only for the current
+  default-branch head, and `X.Y` only for the highest canonical annotated
+  `vX.Y.Z` tag and a non-newer verified registry alias, while immutable release
+  and commit aliases remain repairable. Manual backfills must be dispatched
+  from the default branch and use the unique first-parent version-introduction
+  commit.
 - Require operators to configure the scheduled public WebSocket probe endpoint
   through the repository instead of shipping a deployment-specific hostname.
   Manual dispatch can still override the endpoint, and an unconfigured monitor
@@ -1041,9 +1059,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add canonical release identity across the annotated Git tag, crates.io,
   GitHub Release, and multi-architecture GHCR image. Manual releases now invoke
   container publication directly, publish matching `vX.Y.Z`, `X.Y.Z`, and
-  immutable `sha-*` tags from one verified digest, record that digest and source
-  revision in the Release notes, fail closed on identity drift, and support safe
-  retry completion plus tagged historical backfills.
+  immutable full-revision `sha-<40-character-commit>` tags from one verified
+  digest, record that digest and source revision in the Release notes, fail
+  closed on identity drift, and support safe retry completion plus tagged
+  historical backfills.
 - Document the single-instance deployment contract and prove its unsupported
   multi-process failure modes with a nightly two-binary H5 experiment. Startup
   logs now state that room/reconnect state is in-memory, room affinity is

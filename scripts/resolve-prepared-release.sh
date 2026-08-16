@@ -14,6 +14,10 @@ fi
 branch="release/v${version}"
 tag="v${version}"
 auth_header=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+if ! base_sha=$(git rev-parse --verify HEAD 2>&1); then
+    echo "ERROR: Failed to resolve immutable local HEAD: ${base_sha}" >&2
+    exit 1
+fi
 
 remote_git() {
     git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
@@ -41,6 +45,20 @@ if [ "$branch_status" -eq 0 ]; then
     fetched_sha=$(git rev-parse FETCH_HEAD)
     if [ "$fetched_sha" != "$remote_sha" ]; then
         echo "ERROR: Release branch ${branch} changed while it was being verified." >&2
+        exit 1
+    fi
+    if ! parent_record=$(git rev-list --parents --max-count=1 "$fetched_sha" 2>&1); then
+        echo "ERROR: Failed to inspect release branch ${branch} ancestry: ${parent_record}" >&2
+        exit 1
+    fi
+    read -r -a commit_and_parents <<< "$parent_record"
+    parent_count=$((${#commit_and_parents[@]} - 1))
+    if [ "${commit_and_parents[0]:-}" != "$fetched_sha" ] || [ "$parent_count" -ne 1 ]; then
+        echo "ERROR: Release branch ${branch} must be exactly one non-merge commit above local HEAD ${base_sha}; found ${parent_count} parent(s) at ${fetched_sha}." >&2
+        exit 1
+    fi
+    if [ "${commit_and_parents[1]}" != "$base_sha" ]; then
+        echo "ERROR: Release branch ${branch} may be reused only when its sole parent is local HEAD ${base_sha}; found ${commit_and_parents[1]}." >&2
         exit 1
     fi
     branch_sha=$fetched_sha

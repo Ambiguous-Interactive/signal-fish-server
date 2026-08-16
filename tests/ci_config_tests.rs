@@ -949,17 +949,6 @@ fn extract_workflow_event_paths(workflow_content: &str, event: &str) -> Vec<Stri
     extract_yaml_field_values(&event_block, "paths")
 }
 
-fn release_preflight_pattern_for_doc_path(path: &str) -> String {
-    match path {
-        "**/*.md" => "*.md".to_string(),
-        "**/*.rs" => "*.rs".to_string(),
-        directory_glob if directory_glob.ends_with("/**") => {
-            format!("{}/", directory_glob.trim_end_matches("/**"))
-        }
-        exact_path => exact_path.to_string(),
-    }
-}
-
 #[test]
 fn test_extract_yaml_mapping_block_ignores_inline_mapping_values() {
     let content = concat!(
@@ -4958,11 +4947,9 @@ fn test_docker_publish_workflow_generates_owner_derived_metadata_locally() {
         "Cargo.toml description package",
         "Cargo.toml license package",
         "image_created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-        "tags+=(\"${IMAGE}:latest\")",
-        "tags+=(\"${IMAGE}:sha-${SHORT_SHA}\")",
+        "tags+=(\"${IMAGE}:sha-${SOURCE_REVISION}\")",
         "\"${IMAGE}:${RELEASE_TAG}\"",
         "\"${IMAGE}:${RELEASE_VERSION}\"",
-        "\"${IMAGE}:${MAJOR_MINOR}\"",
         "org.opencontainers.image.created=${image_created}",
         "org.opencontainers.image.description=${image_description}",
         "org.opencontainers.image.licenses=${image_licenses}",
@@ -4976,6 +4963,20 @@ fn test_docker_publish_workflow_generates_owner_derived_metadata_locally() {
         assert!(
             metadata_step.contains(required),
             "docker-publish.yml local metadata generation is missing `{required}`."
+        );
+    }
+    for forbidden in ["short_sha", "SHORT_SHA", "${source_revision:0:7}"] {
+        assert!(
+            !content_live.contains(forbidden),
+            "docker-publish.yml must not derive immutable OCI aliases from truncated commit \
+             identity `{forbidden}`"
+        );
+    }
+    for mutable_alias in ["${IMAGE}:latest", "${IMAGE}:${MAJOR_MINOR}"] {
+        assert!(
+            !metadata_step.contains(mutable_alias),
+            "docker-publish.yml must keep mutable alias `{mutable_alias}` out of Buildx metadata \
+             until immutable verification and Git authority checks pass."
         );
     }
     assert!(
@@ -5385,7 +5386,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "actions/create-github-app-token@v3.2.0",
         "permission-contents: write",
         "permission-pull-requests: write",
-        "ref: ${{ github.event.repository.default_branch }}",
+        "ref: ${{ github.sha }}",
         "Read Rust toolchain",
         "dtolnay/rust-toolchain@v1",
         "toolchain: ${{ steps.toolchain.outputs.channel }}",
@@ -5400,11 +5401,10 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "git add -- \"${release_files[@]}\"",
         "bash scripts/resolve-prepared-release.sh",
         "VERIFIED_BRANCH_SHA: ${{ steps.release.outputs.branch_sha }}",
-        "if: ${{ always() && !inputs.dry_run }}",
+        "if: ${{ !cancelled() && !inputs.dry_run && steps.checkout.outcome == 'success' }}",
+        "bash scripts/push-release-branch.sh \"$BRANCH\" \"$expected_head_sha\"",
         "bash scripts/ensure-release-pr.sh",
         "\"$body_file\" \"$expected_head_sha\"",
-        "auth_header=$(printf 'x-access-token:%s' \"$GH_TOKEN\" | base64 | tr -d '\\n')",
-        "push origin \"HEAD:refs/heads/${BRANCH}\"",
         "Release - Publish Crate",
         "actions/upload-artifact@v7.0.1",
     ] {
@@ -5414,10 +5414,27 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         );
     }
 
+    let selected_app_token =
+        "${{ steps.app-token-client.outputs.token || steps.app-token-id.outputs.token }}";
+    let delivery =
+        extract_named_workflow_step(&prepare, "Push release branch and open pull request")
+            .expect("prepare job must define the live delivery step");
     assert!(
-        prepare.contains("GH_TOKEN: ${{ steps.app-token.outputs.token }}"),
-        "The release PR must be created with the installation token so normal pull_request CI \
-         runs; workflow-created PRs made with GITHUB_TOKEN do not trigger new workflows."
+        delivery.contains(&format!("GH_TOKEN: {selected_app_token}"))
+            && !delivery.contains("github.token"),
+        "The release PR must be created with the selected installation token so normal \
+         pull_request CI runs without an approval hold; live delivery must not fall back to \
+         GITHUB_TOKEN.\nStep:\n{delivery}"
+    );
+    let resolve = extract_named_workflow_step(&prepare, "Resolve prepared release identity")
+        .expect("prepare job must define the prepared release resolver step");
+    assert!(
+        resolve.contains(
+            "GH_TOKEN: ${{ steps.app-token-client.outputs.token || \
+             steps.app-token-id.outputs.token || github.token }}"
+        ),
+        "Prepared release resolution must use the selected App token for live runs while \
+         retaining the read-only built-in token for credential-free dry runs.\nStep:\n{resolve}"
     );
 
     for duplicated_release_path in [
@@ -5433,21 +5450,72 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         );
     }
 
+    let credentials =
+        extract_named_workflow_step(&prepare, "Check auto-commit GitHub App credentials")
+            .expect("prepare job must define the App credential selector");
     for required in [
+        "id: app-credentials",
         "AUTO_COMMIT_APP_CLIENT_ID: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}",
-        "client-id: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}",
+        "AUTO_COMMIT_APP_ID: ${{ secrets.AUTO_COMMIT_APP_ID }}",
+        "AUTO_COMMIT_APP_PRIVATE_KEY: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}",
+        "mode=client-id",
+        "mode=app-id",
     ] {
         assert!(
-            prepare.contains(required),
-            "missing current App credential {required}"
+            credentials.contains(required),
+            "The App credential selector must contain `{required}`.\nStep:\n{credentials}"
         );
     }
-    for legacy in ["AUTO_COMMIT_APP_ID", "app-id:"] {
+
+    for (name, required, forbidden) in [
+        (
+            "Generate auto-commit GitHub App token from client ID",
+            [
+                "id: app-token-client",
+                "if: steps.app-credentials.outputs.mode == 'client-id'",
+                "uses: actions/create-github-app-token@v3.2.0",
+                "client-id: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}",
+                "private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}",
+                "permission-contents: write",
+                "permission-pull-requests: write",
+            ],
+            "app-id:",
+        ),
+        (
+            "Generate auto-commit GitHub App token from App ID",
+            [
+                "id: app-token-id",
+                "if: steps.app-credentials.outputs.mode == 'app-id'",
+                "uses: actions/create-github-app-token@v3.2.0",
+                "app-id: ${{ secrets.AUTO_COMMIT_APP_ID }}",
+                "private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}",
+                "permission-contents: write",
+                "permission-pull-requests: write",
+            ],
+            "client-id:",
+        ),
+    ] {
+        let step = extract_named_workflow_step(&prepare, name)
+            .unwrap_or_else(|| panic!("prepare job must define `{name}`"));
+        for field in required {
+            assert!(
+                step.contains(field),
+                "`{name}` must contain `{field}`.\nStep:\n{step}"
+            );
+        }
         assert!(
-            !prepare.contains(legacy),
-            "legacy App credential remains: {legacy}"
+            !step.contains(forbidden),
+            "`{name}` must not accept the other credential mode `{forbidden}`.\nStep:\n{step}"
         );
     }
+    assert_eq!(
+        prepare
+            .matches("uses: actions/create-github-app-token@v3.2.0")
+            .count(),
+        2,
+        "prepare-release.yml must have exactly one mutually exclusive token action per \
+         supported identifier.\nJob block:\n{prepare}"
+    );
 
     let prepare_files_position = prepare
         .find("- name: Prepare release files")
@@ -5514,8 +5582,8 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "while IFS= read -r -d '' release_file; do",
         "git add -- \"${release_files[@]}\"",
         "git commit -m \"release: ${VERSION}\"",
-        "push origin \"HEAD:refs/heads/${BRANCH}\"",
         "expected_head_sha=$(git rev-parse HEAD)",
+        "bash scripts/push-release-branch.sh \"$BRANCH\" \"$expected_head_sha\"",
     ] {
         let positions: Vec<_> = prepare
             .match_indices(mutation)
@@ -5556,21 +5624,27 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
          failed 0.10.1 dispatch for the 0.4.1 release.\nJob block:\n{prepare}"
     );
 
-    assert_eq!(
-        prepare
-            .matches(
-                "git -c \"http.https://github.com/.extraheader=AUTHORIZATION: basic \
-                 ${auth_header}\""
-            )
-            .count(),
-        1,
-        "The release-branch push must use the installation-token authorization header; the \
-         tested release-state helper authenticates its remote probes separately."
-    );
-
     let checkout = prepare
         .find("Checkout default branch")
         .expect("prepare job must check out the repository");
+    let checkout_step = extract_named_workflow_step(&prepare, "Checkout default branch")
+        .expect("prepare job must define its checkout step");
+    assert!(
+        checkout_step.contains("ref: ${{ github.sha }}")
+            && !checkout_step.contains("ref: ${{ github.event.repository.default_branch }}"),
+        "Release preparation must check out the immutable workflow-dispatch revision after the \
+         default-branch guard. Checking out the mutable branch name can silently prepare a later \
+         commit if main advances while the run is queued.\nStep:\n{checkout_step}"
+    );
+    let credential_check = prepare
+        .find("Check auto-commit GitHub App credentials")
+        .expect("prepare job must select compatible App credentials");
+    let client_token = prepare
+        .find("Generate auto-commit GitHub App token from client ID")
+        .expect("prepare job must support the preferred client ID");
+    let app_id_token = prepare
+        .find("Generate auto-commit GitHub App token from App ID")
+        .expect("prepare job must support the compatible App ID fallback");
     let read_toolchain = prepare
         .find("Read Rust toolchain")
         .expect("prepare job must read the pinned Rust toolchain");
@@ -5581,14 +5655,18 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         .find("Prepare release files")
         .expect("prepare job must run the release transformer");
     assert!(
-        checkout < read_toolchain
+        checkout < credential_check
+            && credential_check < client_token
+            && credential_check < app_id_token
+            && client_token < read_toolchain
+            && app_id_token < read_toolchain
             && read_toolchain < install_toolchain
             && install_toolchain < prepare_files,
-        "The pinned Rust toolchain must be installed after checkout and before release \
-         preparation invokes Cargo."
+        "Checkout must succeed before credential selection so recovery has a Git repository, \
+         and the pinned Rust toolchain must be installed before preparation invokes Cargo."
     );
 
-    let recovery = prepare
+    let recovery_position = prepare
         .find("Create recovery patch")
         .expect("prepare job must capture recovery state");
     let push = prepare
@@ -5598,10 +5676,254 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         .find("Upload release preparation recovery patch")
         .expect("prepare job must upload recovery state after a failure");
     assert!(
-        recovery < push && push < upload,
+        recovery_position < push && push < upload,
         "Recovery data must be captured before delivery can fail and uploaded only after that \
          failure."
     );
+    let recovery = extract_named_workflow_step(&prepare, "Create recovery patch")
+        .expect("prepare job must define the recovery step");
+    for required in [
+        "id: recovery",
+        "!cancelled()",
+        "steps.checkout.outcome == 'success'",
+        "continue-on-error: true",
+    ] {
+        assert!(
+            recovery.contains(required),
+            "Recovery capture must contain `{required}` so it cannot run without a checkout or \
+             mask the primary release failure.\nStep:\n{recovery}"
+        );
+    }
+    let recovery_upload =
+        extract_named_workflow_step(&prepare, "Upload release preparation recovery patch")
+            .expect("prepare job must define the recovery upload step");
+    assert!(
+        recovery_upload.contains("failure() && !cancelled()")
+            && recovery_upload.contains("steps.recovery.outcome == 'success'")
+            && recovery_upload.contains("if-no-files-found: error"),
+        "Recovery upload must run after failure but not cancellation, require a successful \
+         capture, and fail on an unexpectedly empty artifact.\nStep:\n{recovery_upload}"
+    );
+}
+
+#[test]
+fn test_release_workflows_queue_every_serialized_attempt() {
+    let root = repo_root();
+    let cases = [
+        ("prepare-release.yml", "prepare-release"),
+        ("release.yml", "release-publish"),
+    ];
+
+    for (workflow_file, expected_group) in cases {
+        let workflow = read_live_file(&root.join(".github/workflows").join(workflow_file));
+        let documents = Yaml::load_from_str(&workflow)
+            .unwrap_or_else(|error| panic!("{workflow_file} must parse as YAML: {error}"));
+        let concurrency = documents
+            .first()
+            .and_then(|document| document.as_mapping_get("concurrency"))
+            .unwrap_or_else(|| panic!("{workflow_file} must define workflow-level concurrency"));
+
+        assert_eq!(
+            concurrency.as_mapping_get("group").and_then(Yaml::as_str),
+            Some(expected_group),
+            "{workflow_file} must serialize every release attempt through `{expected_group}`"
+        );
+        assert_eq!(
+            concurrency.as_mapping_get("queue").and_then(Yaml::as_str),
+            Some("max"),
+            "{workflow_file} must use `queue: max`; without it, a third release attempt replaces \
+             the already-pending attempt instead of preserving FIFO delivery"
+        );
+        assert_eq!(
+            concurrency
+                .as_mapping_get("cancel-in-progress")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{workflow_file} must never cancel an in-progress release mutation"
+        );
+    }
+
+    let actionlint_config = read_live_file(&root.join(".github/actionlint.yaml"));
+    let documents = Yaml::load_from_str(&actionlint_config)
+        .expect(".github/actionlint.yaml must parse as YAML");
+    let paths = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("paths"))
+        .expect("actionlint config must define path-scoped compatibility exceptions");
+    for workflow_path in [
+        ".github/workflows/prepare-release.yml",
+        ".github/workflows/release.yml",
+    ] {
+        let ignored_messages = paths
+            .as_mapping_get(workflow_path)
+            .and_then(|settings| settings.as_mapping_get("ignore"))
+            .and_then(Yaml::as_sequence)
+            .unwrap_or_else(|| {
+                panic!(
+                    "actionlint config must scope the queue-schema compatibility exception to \
+                     {workflow_path}"
+                )
+            });
+        assert!(
+            ignored_messages.iter().any(|message| {
+                message.as_str() == Some("unexpected key \"queue\" for \"concurrency\" section")
+            }),
+            "{workflow_path} must ignore only pinned actionlint's stale `concurrency.queue` \
+             schema error; GitHub Actions supports the field"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_prepare_release_credential_selection_matrix() {
+    struct Case {
+        name: &'static str,
+        dry_run: bool,
+        client_id: &'static str,
+        app_id: &'static str,
+        private_key: &'static str,
+        expected_success: bool,
+        expected_mode: Option<&'static str>,
+        expected_stderr: Option<&'static str>,
+    }
+
+    let workflow = read_live_file(&repo_root().join(".github/workflows/prepare-release.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("prepare-release.yml must parse");
+    let steps = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("prepare"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("prepare-release.yml must define prepare steps");
+    let credential_script = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Check auto-commit GitHub App credentials")
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("credential selection step must define a shell script");
+
+    let cases = [
+        Case {
+            name: "credential_free_dry_run",
+            dry_run: true,
+            client_id: "",
+            app_id: "",
+            private_key: "",
+            expected_success: true,
+            expected_mode: Some("dry-run"),
+            expected_stderr: None,
+        },
+        Case {
+            name: "configured_dry_run_still_skips_authentication",
+            dry_run: true,
+            client_id: "dummy-client-id",
+            app_id: "123456",
+            private_key: "dummy-private-key",
+            expected_success: true,
+            expected_mode: Some("dry-run"),
+            expected_stderr: None,
+        },
+        Case {
+            name: "client_id_takes_precedence",
+            dry_run: false,
+            client_id: "dummy-client-id",
+            app_id: "123456",
+            private_key: "dummy-private-key",
+            expected_success: true,
+            expected_mode: Some("client-id"),
+            expected_stderr: None,
+        },
+        Case {
+            name: "app_id_compatible_fallback",
+            dry_run: false,
+            client_id: "",
+            app_id: "123456",
+            private_key: "dummy-private-key",
+            expected_success: true,
+            expected_mode: Some("app-id"),
+            expected_stderr: Some("configure AUTO_COMMIT_APP_CLIENT_ID to migrate"),
+        },
+        Case {
+            name: "live_run_requires_private_key",
+            dry_run: false,
+            client_id: "dummy-client-id",
+            app_id: "",
+            private_key: "",
+            expected_success: false,
+            expected_mode: None,
+            expected_stderr: Some("AUTO_COMMIT_APP_PRIVATE_KEY is required"),
+        },
+        Case {
+            name: "live_run_requires_an_identifier",
+            dry_run: false,
+            client_id: "",
+            app_id: "",
+            private_key: "dummy-private-key",
+            expected_success: false,
+            expected_mode: None,
+            expected_stderr: Some("AUTO_COMMIT_APP_CLIENT_ID or AUTO_COMMIT_APP_ID is required"),
+        },
+    ];
+
+    for case in cases {
+        let temp = unique_temp_dir(&format!("release-credentials-{}", case.name));
+        let github_output = temp.path().join("github-output.txt");
+        let output = bash_command()
+            .arg("-c")
+            .arg(credential_script)
+            .env_clear()
+            .env("DRY_RUN", case.dry_run.to_string())
+            .env("AUTO_COMMIT_APP_CLIENT_ID", case.client_id)
+            .env("AUTO_COMMIT_APP_ID", case.app_id)
+            .env("AUTO_COMMIT_APP_PRIVATE_KEY", case.private_key)
+            .env("GITHUB_OUTPUT", &github_output)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("{}: failed to run credential selector: {error}", case.name)
+            });
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            case.expected_success,
+            "{}: unexpected exit status; stderr:\n{stderr}",
+            case.name
+        );
+        let github_output_contents = fs::read_to_string(&github_output).unwrap_or_default();
+        let selected_mode = github_output_contents
+            .lines()
+            .find_map(|line| line.strip_prefix("mode="));
+        assert_eq!(
+            selected_mode, case.expected_mode,
+            "{}: unexpected selected credential mode; stderr:\n{stderr}",
+            case.name
+        );
+        match case.expected_stderr {
+            Some(expected_stderr) => assert!(
+                stderr.contains(expected_stderr),
+                "{}: expected stderr to contain `{expected_stderr}`; stderr:\n{stderr}",
+                case.name
+            ),
+            None => assert!(
+                stderr.is_empty(),
+                "{}: expected no diagnostics; stderr:\n{stderr}",
+                case.name
+            ),
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("dummy-private-key")
+                && !stderr.contains("dummy-private-key")
+                && !github_output_contents.contains("dummy-private-key"),
+            "{}: credential selector must never expose private-key material",
+            case.name
+        );
+    }
 }
 
 #[test]
@@ -5613,6 +5935,8 @@ fn test_release_dispatch_derives_identity_and_reuses_only_safe_tags() {
     let resolve = extract_workflow_job_block(&release, "resolve-release")
         .expect("release.yml must define resolve-release");
     let resolver = read_live_file(&root.join("scripts/resolve-release-source.sh"));
+    let introduction_finder =
+        read_live_file(&root.join("scripts/find-release-version-introduction.sh"));
 
     assert!(
         on_block.contains("workflow_dispatch:") && !on_block.contains("release_version:"),
@@ -5645,14 +5969,13 @@ fn test_release_dispatch_derives_identity_and_reuses_only_safe_tags() {
         "version=$(read_cargo_version)",
         "tag=\"v${version}\"",
         "find_version_introduction \"$dispatch_revision\" \"$version\"",
-        "git rev-parse --is-shallow-repository",
-        "git rev-list --first-parent \"$dispatch_revision\" -- Cargo.toml",
-        "multiple first-parent introduction commits",
         "git ls-remote --exit-code --tags origin \"refs/tags/${tag}\"",
         "Existing release tag ${candidate_tag} is lightweight",
         "source_revision=$(git rev-parse \"refs/tags/${tag}^{commit}\")",
         "git merge-base --is-ancestor \"$source_revision\" \"$dispatch_revision\"",
         "git merge-base --is-ancestor \"$source_revision\" \"origin/${DEFAULT_BRANCH}\"",
+        "find_version_introduction \"origin/${DEFAULT_BRANCH}\" \"$version\"",
+        "find-release-version-introduction.sh",
         "resolver_scratch=$(mktemp -d \"${scratch_base}/release-resolver.XXXXXX\")",
         "cp scripts/read-toml-string.sh \"${resolver_scratch}/read-toml-string.sh\"",
         "git checkout --detach \"$source_revision\"",
@@ -5663,6 +5986,17 @@ fn test_release_dispatch_derives_identity_and_reuses_only_safe_tags() {
             "resolve-release must contain `{required}` so a manual retry can safely reuse an \
              immutable annotated release tag while rejecting unmerged or mismatched sources.\n\
              Resolver:\n{resolver}"
+        );
+    }
+    for required in [
+        "git -C \"$repository\" rev-parse --is-shallow-repository",
+        "git -C \"$repository\" rev-list --first-parent \"$history_revision\" -- Cargo.toml",
+        "multiple first-parent introduction commits",
+    ] {
+        assert!(
+            introduction_finder.contains(required),
+            "Shared release version-introduction helper must contain `{required}`.\n\
+             Helper:\n{introduction_finder}"
         );
     }
     assert!(
@@ -6219,6 +6553,25 @@ fn test_container_publish_supports_release_and_backfill_entry_points() {
     let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
     let documents = Yaml::load_from_str(&docker).expect("docker-publish.yml must parse as YAML");
     let document = documents.first().expect("docker-publish YAML document");
+    let triggers = document
+        .as_mapping_get("on")
+        .expect("docker-publish.yml must define triggers");
+    let push = triggers
+        .as_mapping_get("push")
+        .expect("Docker publication must retain its main push trigger");
+    assert!(
+        push.as_mapping_get("tags").is_none(),
+        "Docker Publish must not independently publish human tag pushes; release.yml owns the \
+         CI-gated tag entry point"
+    );
+    assert_eq!(
+        push.as_mapping_get("branches")
+            .and_then(Yaml::as_sequence)
+            .and_then(|branches| branches.first())
+            .and_then(Yaml::as_str),
+        Some("main"),
+        "Docker Publish must retain only its default-branch rolling push entry point"
+    );
     let concurrency = document
         .as_mapping_get("concurrency")
         .expect("docker publication must define workflow-level serialization");
@@ -6244,24 +6597,37 @@ fn test_container_publish_supports_release_and_backfill_entry_points() {
         "workflow_call:",
         "workflow_dispatch:",
         "push:",
-        "tags:",
-        "- \"v*\"",
         "release_tag:",
         "source_ref:",
         "source_revision:",
-        "ref: ${{ inputs.source_ref || inputs.release_tag || github.ref }}",
+        "ref: ${{ inputs.source_ref || inputs.release_tag || github.sha }}",
         "if [ -n \"$CALL_REVISION\" ]",
         "workflow_dispatch)",
-        "refs/tags/",
+        "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+        "git -C source rev-list --first-parent",
+        "publication-tools/scripts/find-release-version-introduction.sh",
+        "not the unique first-parent version-introduction commit",
         "group: container-publish",
     ] {
         assert!(
             docker.contains(required),
             "docker-publish.yml must contain live `{required}` configuration so reusable \
-             releases, direct human tag pushes, and historical tagged backfills share one \
-             publication implementation."
+             releases, default-branch images, and historical tagged backfills share one \
+             publication implementation without an ungated tag-push duplicate."
         );
     }
+
+    let dispatch_arm = docker
+        .split_once("workflow_dispatch)")
+        .and_then(|(_, remainder)| remainder.split_once(";;"))
+        .map(|(arm, _)| arm)
+        .expect("Docker Publish identity resolver must define a workflow_dispatch case arm");
+    assert!(
+        dispatch_arm.contains("if [ \"$GITHUB_REF\" != \"refs/heads/${DEFAULT_BRANCH}\" ]")
+            && dispatch_arm.contains("Docker backfills must be dispatched from"),
+        "Manual Docker backfills must fail closed unless workflow_dispatch targets the default \
+         branch. Dispatch arm:\n{dispatch_arm}"
+    );
 }
 
 #[test]
@@ -6307,6 +6673,14 @@ fn test_container_publish_bootstraps_tools_from_workflow_revision() {
         );
     }
 
+    let resolve = extract_workflow_job_block(&docker, "resolve")
+        .expect("docker-publish.yml must define resolve");
+    assert!(
+        resolve.contains("scripts/find-release-version-introduction.sh"),
+        "Docker identity resolution must load the shared version-introduction helper from the \
+         workflow revision.\nJob block:\n{resolve}"
+    );
+
     for required in [
         "source_revision=$(git -C source rev-parse",
         "publication-tools/scripts/read-toml-string.sh source/Cargo.toml",
@@ -6339,6 +6713,7 @@ fn test_release_identity_fails_closed_across_artifacts() {
     let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
     let verifier = read_live_file(&root.join("scripts/verify-release-image.sh"));
     let resolver = read_live_file(&root.join("scripts/resolve-release-source.sh"));
+    let tag_reconciler = read_live_file(&root.join("scripts/ensure-release-tag.sh"));
     let crate_check = read_live_file(&root.join("scripts/check-crates-io-release.sh"));
     let release_check = read_live_file(&root.join("scripts/check-github-release.sh"));
     let publish =
@@ -6369,9 +6744,18 @@ fn test_release_identity_fails_closed_across_artifacts() {
             &release,
             vec![
                 "scripts/resolve-release-source.sh",
-                "git cat-file -t \"refs/tags/${TAG}\"",
-                "refusing to move it",
+                "run: bash tag-tools/scripts/ensure-release-tag.sh",
                 "Verify GitHub Release metadata before asset uploads",
+            ],
+        ),
+        (
+            "ensure-release-tag.sh",
+            &tag_reconciler,
+            vec![
+                "git cat-file -t \"$readback_ref\"",
+                "not an annotated Git tag",
+                "refusing to move it",
+                "max_readback_attempts=3",
             ],
         ),
         (
@@ -6413,12 +6797,15 @@ fn test_release_identity_fails_closed_across_artifacts() {
                 "Cargo.toml version package",
                 "git -C source fetch --no-tags origin \"refs/tags/${release_tag}:refs/tags/${release_tag}\"",
                 "git -C source cat-file -t \"refs/tags/${release_tag}\"",
+                "git -C source merge-base --is-ancestor",
+                "git -C source rev-list --first-parent",
+                "not on the first-parent history",
                 "escaped_version=${release_version//./\\\\.}",
                 "grep -Eq \"^## \\\\[${escaped_version}\\\\]",
                 "org.opencontainers.image.revision=",
                 "org.opencontainers.image.version=",
-                "Verify versioned tags, platforms, and source labels",
-                "tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\" \"$MAJOR_MINOR\")",
+                "Verify immutable versioned tags, platforms, and source labels",
+                "tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\")",
             ],
         ),
         (
@@ -6576,13 +6963,11 @@ fn test_release_retries_reuse_digest_and_record_verification() {
     for required in [
         "group: container-publish",
         "queue: max",
-        "Update latest from verified immutable digest",
-        "needs.resolve.outputs.is_release != 'true' && steps.existing.outputs.reuse == 'true'",
+        "Verify immutable rolling tag, platforms, and source labels",
         "VERIFY_SHA: ${{ steps.existing.outputs.verify_sha }}",
-        "tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\" \"$MAJOR_MINOR\")",
+        "tags=(\"$RELEASE_TAG\" \"$RELEASE_VERSION\")",
         "if [ \"$VERIFY_SHA\" != \"false\" ]",
         "tags+=(\"$SHA_TAG\")",
-        "steps.existing.outputs.digest || steps.build.outputs.digest",
     ] {
         assert!(
             docker.contains(required),
@@ -6602,7 +6987,7 @@ fn test_release_retries_reuse_digest_and_record_verification() {
     }
 
     assert!(
-        docker.contains("steps.verify.outputs.digest || steps.rolling-digest.outputs.digest"),
+        docker.contains("steps.verify.outputs.digest || steps.rolling-verify.outputs.digest"),
         "docker-publish.yml must expose a digest for both versioned releases and rolling main-branch publishes."
     );
     for required in [
@@ -6625,6 +7010,8 @@ fn test_container_publish_immutable_state_transitions() {
 
     struct Case {
         name: &'static str,
+        source_revision: &'static str,
+        sha_tag: &'static str,
         is_release: bool,
         is_backfill: bool,
         initial_tags: &'static [&'static str],
@@ -6635,9 +7022,19 @@ fn test_container_publish_immutable_state_transitions() {
         expected_tags: &'static [&'static str],
     }
 
+    const SOURCE_A: &str = "1234567890abcdef1234567890abcdef12345678";
+    const SOURCE_B: &str = "1234567fedcba09876543210fedcba0987654321";
+    const SHA_TAG_A: &str = "sha-1234567890abcdef1234567890abcdef12345678";
+    const SHA_TAG_B: &str = "sha-1234567fedcba09876543210fedcba0987654321";
+    assert_eq!(&SOURCE_A[..7], &SOURCE_B[..7], "collision fixture prefix");
+    assert_ne!(SOURCE_A, SOURCE_B, "collision fixture full identity");
+    assert_ne!(SHA_TAG_A, SHA_TAG_B, "full-revision aliases must differ");
+
     let cases = [
         Case {
             name: "rolling first publication",
+            source_revision: SOURCE_A,
+            sha_tag: SHA_TAG_A,
             is_release: false,
             is_backfill: false,
             initial_tags: &[],
@@ -6649,58 +7046,81 @@ fn test_container_publish_immutable_state_transitions() {
         },
         Case {
             name: "rolling rerun",
+            source_revision: SOURCE_A,
+            sha_tag: SHA_TAG_A,
             is_release: false,
             is_backfill: false,
-            initial_tags: &["sha-source"],
+            initial_tags: &[SHA_TAG_A],
             initial_version: "0.4.0",
             expected_reuse: true,
             expected_publish_sha: false,
             expected_verify_sha: true,
-            expected_tags: &["sha-source"],
+            expected_tags: &[SHA_TAG_A],
         },
         Case {
             name: "release after rolling",
+            source_revision: SOURCE_A,
+            sha_tag: SHA_TAG_A,
             is_release: true,
             is_backfill: false,
-            initial_tags: &["sha-source"],
+            initial_tags: &[SHA_TAG_A],
             initial_version: "0.4.0",
             expected_reuse: true,
             expected_publish_sha: false,
             expected_verify_sha: true,
-            expected_tags: &["sha-source", "v0.4.0", "0.4.0"],
+            expected_tags: &[SHA_TAG_A, "v0.4.0", "0.4.0"],
         },
         Case {
             name: "release retry",
+            source_revision: SOURCE_A,
+            sha_tag: SHA_TAG_A,
             is_release: true,
             is_backfill: false,
-            initial_tags: &["sha-source", "v0.4.0", "0.4.0"],
+            initial_tags: &[SHA_TAG_A, "v0.4.0", "0.4.0"],
             initial_version: "0.4.0",
             expected_reuse: true,
             expected_publish_sha: false,
             expected_verify_sha: true,
-            expected_tags: &["sha-source", "v0.4.0", "0.4.0"],
+            expected_tags: &[SHA_TAG_A, "v0.4.0", "0.4.0"],
         },
         Case {
             name: "main after release",
+            source_revision: SOURCE_A,
+            sha_tag: SHA_TAG_A,
             is_release: false,
             is_backfill: false,
-            initial_tags: &["sha-source", "v0.4.0", "0.4.0"],
+            initial_tags: &[SHA_TAG_A, "v0.4.0", "0.4.0"],
             initial_version: "0.4.0",
             expected_reuse: true,
             expected_publish_sha: false,
             expected_verify_sha: true,
-            expected_tags: &["sha-source", "v0.4.0", "0.4.0"],
+            expected_tags: &[SHA_TAG_A, "v0.4.0", "0.4.0"],
         },
         Case {
             name: "historical backfill preserves latest-version SHA",
+            source_revision: SOURCE_A,
+            sha_tag: SHA_TAG_A,
             is_release: true,
             is_backfill: true,
-            initial_tags: &["sha-source"],
+            initial_tags: &[SHA_TAG_A],
             initial_version: "latest",
             expected_reuse: false,
             expected_publish_sha: false,
             expected_verify_sha: false,
-            expected_tags: &["sha-source"],
+            expected_tags: &[SHA_TAG_A],
+        },
+        Case {
+            name: "same_seven_character_prefix_remains_distinct",
+            source_revision: SOURCE_B,
+            sha_tag: SHA_TAG_B,
+            is_release: false,
+            is_backfill: false,
+            initial_tags: &[SHA_TAG_A],
+            initial_version: "0.4.0",
+            expected_reuse: false,
+            expected_publish_sha: true,
+            expected_verify_sha: true,
+            expected_tags: &[SHA_TAG_A],
         },
     ];
 
@@ -6788,8 +7208,8 @@ printf '%s\n' "$digest"
             .env("VERIFY_RELEASE_IMAGE_SCRIPT", &fake_verifier)
             .env("GITHUB_OUTPUT", &github_output)
             .env("IMAGE", image)
-            .env("SOURCE_REVISION", "0123456789abcdef")
-            .env("SHA_TAG", "sha-source")
+            .env("SOURCE_REVISION", case.source_revision)
+            .env("SHA_TAG", case.sha_tag)
             .env("IMAGE_VERSION", "0.4.0")
             .env("IS_RELEASE", case.is_release.to_string())
             .env("IS_BACKFILL", case.is_backfill.to_string())
@@ -6836,31 +7256,652 @@ printf '%s\n' "$digest"
             );
         }
         let registry_contents = read_file(&registry);
-        let tags: BTreeMap<&str, &str> = registry_contents
+        let actual_tags: BTreeMap<String, (String, String)> = registry_contents
             .lines()
-            .filter_map(|line| {
+            .map(|line| {
                 let mut fields = line.split_whitespace();
-                Some((fields.next()?, fields.next()?))
+                let reference = fields
+                    .next()
+                    .unwrap_or_else(|| panic!("{} registry entry has no reference", case.name));
+                let digest = fields
+                    .next()
+                    .unwrap_or_else(|| panic!("{} registry entry has no digest", case.name));
+                let version = fields
+                    .next()
+                    .unwrap_or_else(|| panic!("{} registry entry has no version", case.name));
+                assert!(
+                    fields.next().is_none(),
+                    "{} registry entry has unexpected fields: {line}",
+                    case.name
+                );
+                (
+                    reference.to_owned(),
+                    (digest.to_owned(), version.to_owned()),
+                )
             })
             .collect();
-        for tag in case.expected_tags {
-            let reference = format!("{image}:{tag}");
-            assert_eq!(
-                tags.get(reference.as_str()),
-                Some(&"sha256:stable"),
-                "{} must leave `{tag}` on the original immutable digest",
+        let expected_tags: BTreeMap<String, (String, String)> = case
+            .expected_tags
+            .iter()
+            .map(|tag| {
+                (
+                    format!("{image}:{tag}"),
+                    ("sha256:stable".to_owned(), case.initial_version.to_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual_tags, expected_tags,
+            "{} must produce exactly the expected immutable registry state",
+            case.name
+        );
+    }
+}
+
+#[test]
+fn test_container_publish_wires_mutable_aliases_after_matching_verification() {
+    let root = repo_root();
+    let docker = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+
+    let contracts: &[(&str, &[&str], &[&str])] = &[
+        (
+            "Update eligible release rolling tag",
+            &[
+                "if: needs.resolve.outputs.is_release == 'true'",
+                "ALIAS_KIND: major-minor",
+                "IMAGE: ${{ steps.image.outputs.name }}",
+                "DIGEST: ${{ steps.verify.outputs.digest }}",
+                "SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}",
+                "IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}",
+                "RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}",
+                "MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}",
+                "SOURCE_DIR: source",
+                "VERIFY_RELEASE_IMAGE_SCRIPT: ${{ github.workspace }}/publication-tools/scripts/verify-release-image.sh",
+                "run: bash publication-tools/scripts/update-container-alias.sh",
+            ],
+            &[
+                "ALIAS_KIND: latest",
+                "steps.rolling-verify.outputs.digest",
+                "DEFAULT_BRANCH:",
+                "needs.resolve.outputs.publish_latest",
+            ],
+        ),
+        (
+            "Update eligible latest tag",
+            &[
+                "if: needs.resolve.outputs.publish_latest == 'true'",
+                "ALIAS_KIND: latest",
+                "IMAGE: ${{ steps.image.outputs.name }}",
+                "DIGEST: ${{ steps.rolling-verify.outputs.digest }}",
+                "SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}",
+                "IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}",
+                "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+                "SOURCE_DIR: source",
+                "VERIFY_RELEASE_IMAGE_SCRIPT: ${{ github.workspace }}/publication-tools/scripts/verify-release-image.sh",
+                "run: bash publication-tools/scripts/update-container-alias.sh",
+            ],
+            &[
+                "ALIAS_KIND: major-minor",
+                "steps.verify.outputs.digest",
+                "RELEASE_VERSION:",
+                "MAJOR_MINOR:",
+                "needs.resolve.outputs.is_release",
+            ],
+        ),
+    ];
+    for (name, required_fields, forbidden_fields) in contracts {
+        let step = extract_named_workflow_step(&docker, name)
+            .unwrap_or_else(|| panic!("Docker publication must define `{name}`"));
+        for field in *required_fields {
+            assert!(
+                step.contains(field),
+                "`{name}` must contain `{field}`.\nStep:\n{step}"
+            );
+        }
+        for field in *forbidden_fields {
+            assert!(
+                !step.contains(field),
+                "`{name}` must not consume the opposite alias mode's field `{field}`.\n\
+                 Step:\n{step}"
+            );
+        }
+    }
+    assert_eq!(
+        docker
+            .matches("run: bash publication-tools/scripts/update-container-alias.sh")
+            .count(),
+        contracts.len(),
+        "Docker publication must have exactly one helper invocation for each mutable alias mode"
+    );
+
+    let release_verify_position = docker
+        .find("Verify immutable versioned tags, platforms, and source labels")
+        .expect("release immutable verification step");
+    let release_alias_position = docker
+        .find("Update eligible release rolling tag")
+        .expect("release mutable-alias step");
+    let rolling_verify_position = docker
+        .find("Verify immutable rolling tag, platforms, and source labels")
+        .expect("rolling immutable verification step");
+    let latest_alias_position = docker
+        .find("Update eligible latest tag")
+        .expect("latest mutable-alias step");
+    assert!(
+        release_verify_position < release_alias_position
+            && rolling_verify_position < latest_alias_position,
+        "Every mutable alias update must follow verification of its immutable source digest."
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_container_alias_policy_state_matrix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Case {
+        name: &'static str,
+        alias_kind: &'static str,
+        source_revision: &'static str,
+        release_version: &'static str,
+        default_head: &'static str,
+        remote_tags: &'static str,
+        current_alias_version: &'static str,
+        current_alias_digest: &'static str,
+        alias_inspect_error: &'static str,
+        git_failure: bool,
+        verifier_failure: bool,
+        expected_success: bool,
+        expected_updated_alias: Option<&'static str>,
+        expected_error: Option<&'static str>,
+    }
+
+    const SOURCE: &str = "1111111111111111111111111111111111111111";
+    const NEWER: &str = "2222222222222222222222222222222222222222";
+    const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OTHER_DIGEST: &str =
+        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+    let cases = [
+        Case {
+            name: "latest_at_current_default_branch_head_updates",
+            alias_kind: "latest",
+            source_revision: SOURCE,
+            release_version: "",
+            default_head: SOURCE,
+            remote_tags: "",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: Some("latest"),
+            expected_error: None,
+        },
+        Case {
+            name: "latest_from_older_rerun_skips",
+            alias_kind: "latest",
+            source_revision: SOURCE,
+            release_version: "",
+            default_head: NEWER,
+            remote_tags: "",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: None,
+            expected_error: None,
+        },
+        Case {
+            name: "latest_remote_query_failure_fails_closed",
+            alias_kind: "latest",
+            source_revision: SOURCE,
+            release_version: "",
+            default_head: SOURCE,
+            remote_tags: "",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: true,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("could not resolve the current default-branch head"),
+        },
+        Case {
+            name: "latest_empty_remote_result_fails_closed",
+            alias_kind: "latest",
+            source_revision: SOURCE,
+            release_version: "",
+            default_head: "",
+            remote_tags: "",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("invalid default-branch response"),
+        },
+        Case {
+            name: "highest_patch_release_updates_major_minor",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v0.4.9\n\
+                          1111111111111111111111111111111111111111\trefs/tags/v0.4.9^{}\n\
+                          bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: Some("0.4"),
+            expected_error: None,
+        },
+        Case {
+            name: "buildx_reference_scoped_not_found_creates_first_alias",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "ERROR: ghcr.io/example/signal-fish-server:0.4: not found",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: Some("0.4"),
+            expected_error: None,
+        },
+        Case {
+            name: "older_patch_backfill_skips_major_minor",
+            alias_kind: "major-minor",
+            source_revision: SOURCE,
+            release_version: "0.4.9",
+            default_head: "",
+            remote_tags: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v0.4.9\n\
+                          1111111111111111111111111111111111111111\trefs/tags/v0.4.9^{}\n\
+                          bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: None,
+            expected_error: None,
+        },
+        Case {
+            name: "lightweight_highest_release_tag_fails_closed",
+            alias_kind: "major-minor",
+            source_revision: SOURCE,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "2222222222222222222222222222222222222222\trefs/tags/v0.4.10\n",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("must be annotated"),
+        },
+        Case {
+            name: "malformed_release_namespace_fails_closed",
+            alias_kind: "major-minor",
+            source_revision: SOURCE,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          1111111111111111111111111111111111111111\trefs/tags/v0.4.10^{}\n\
+                          aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v0.4.010\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.010^{}\n",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("non-canonical tag"),
+        },
+        Case {
+            name: "moved_current_release_tag_fails_closed",
+            alias_kind: "major-minor",
+            source_revision: SOURCE,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("does not resolve to the publication source"),
+        },
+        Case {
+            name: "registry_verification_failure_fails_run",
+            alias_kind: "major-minor",
+            source_revision: SOURCE,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          1111111111111111111111111111111111111111\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "",
+            current_alias_digest: "",
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: true,
+            expected_success: false,
+            expected_updated_alias: Some("0.4"),
+            expected_error: Some("mutable alias verification failed"),
+        },
+        Case {
+            name: "deleted_higher_git_tag_cannot_downgrade_registry_alias",
+            alias_kind: "major-minor",
+            source_revision: SOURCE,
+            release_version: "0.4.9",
+            default_head: "",
+            remote_tags: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v0.4.9\n\
+                          1111111111111111111111111111111111111111\trefs/tags/v0.4.9^{}\n",
+            current_alias_version: "0.4.10",
+            current_alias_digest: OTHER_DIGEST,
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: None,
+            expected_error: None,
+        },
+        Case {
+            name: "older_registry_alias_allows_upgrade",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "0.4.9",
+            current_alias_digest: OTHER_DIGEST,
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: Some("0.4"),
+            expected_error: None,
+        },
+        Case {
+            name: "equal_registry_alias_with_different_digest_fails_closed",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "0.4.10",
+            current_alias_digest: OTHER_DIGEST,
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("identity conflict"),
+        },
+        Case {
+            name: "exact_registry_alias_is_an_idempotent_no_op",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "0.4.10",
+            current_alias_digest: DIGEST,
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: true,
+            expected_updated_alias: None,
+            expected_error: None,
+        },
+        Case {
+            name: "invalid_registry_alias_identity_fails_closed",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "latest",
+            current_alias_digest: OTHER_DIGEST,
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("invalid registry alias identity"),
+        },
+        Case {
+            name: "registry_alias_inspection_outage_fails_closed",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "0.4.9",
+            current_alias_digest: OTHER_DIGEST,
+            alias_inspect_error: "authentication credential not found",
+            git_failure: false,
+            verifier_failure: false,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("could not inspect current mutable alias"),
+        },
+        Case {
+            name: "registry_alias_verification_failure_fails_before_mutation",
+            alias_kind: "major-minor",
+            source_revision: NEWER,
+            release_version: "0.4.10",
+            default_head: "",
+            remote_tags: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.4.10\n\
+                          2222222222222222222222222222222222222222\trefs/tags/v0.4.10^{}\n",
+            current_alias_version: "0.4.9",
+            current_alias_digest: OTHER_DIGEST,
+            alias_inspect_error: "",
+            git_failure: false,
+            verifier_failure: true,
+            expected_success: false,
+            expected_updated_alias: None,
+            expected_error: Some("existing mutable alias verification failed"),
+        },
+    ];
+
+    let root = repo_root();
+    let alias_script = root.join("scripts/update-container-alias.sh");
+    for case in cases {
+        let fixture = unique_temp_dir(&format!("container-alias-{}", case.name));
+        let fake_git = fixture.path().join("bin/git");
+        let fake_docker = fixture.path().join("bin/docker");
+        let fake_verifier = fixture.path().join("verify-image.sh");
+        let registry = fixture.path().join("registry.txt");
+        let updates = fixture.path().join("updates.txt");
+        let mut initial_registry =
+            "ghcr.io/example/signal-fish-server:latest sha256:old latest 2222222222222222222222222222222222222222\n"
+                .to_owned();
+        if !case.current_alias_version.is_empty() {
+            initial_registry.push_str(&format!(
+                "ghcr.io/example/signal-fish-server:0.4 {} {} \
+                 2222222222222222222222222222222222222222\n",
+                case.current_alias_digest, case.current_alias_version
+            ));
+        }
+        write_file(&registry, &initial_registry);
+        write_file(&updates, "");
+        write_file(
+            &fake_git,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${MOCK_GIT_FAILURE}" = "true" ] && [ "$3" = "ls-remote" ]; then
+  echo "simulated remote failure" >&2
+  exit 2
+fi
+if [ "$3 $4 $5" = "check-ref-format --branch main" ]; then exit 0; fi
+if [ "$3 $4 $5 $6" = "ls-remote --heads origin refs/heads/main" ]; then
+  if [ -n "$MOCK_DEFAULT_HEAD" ]; then
+    printf '%s\trefs/heads/main\n' "$MOCK_DEFAULT_HEAD"
+  fi
+  exit 0
+fi
+if [ "$3 $4 $5" = "ls-remote --tags origin" ]; then
+  printf '%s' "$MOCK_REMOTE_TAGS"
+  exit 0
+fi
+echo "unexpected git invocation: $*" >&2
+exit 2
+"#,
+        );
+        write_file(
+            &fake_docker,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1 $2 $3 $4" = "buildx imagetools inspect --raw" ]; then
+  reference=$5
+  if [ -n "$MOCK_ALIAS_INSPECT_ERROR" ] && [[ "$reference" == *:0.4 ]]; then
+    printf '%s\n' "$MOCK_ALIAS_INSPECT_ERROR" >&2
+    exit 2
+  fi
+  line=$(awk -v ref="$reference" '$1 == ref { print; exit }' "$MOCK_REGISTRY")
+  if [ -z "$line" ]; then
+    echo "manifest unknown" >&2
+    exit 1
+  fi
+  printf '%s\n' '{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","platform":{"os":"linux","architecture":"amd64"}}]}'
+  exit 0
+fi
+if [ "$1 $2 $3 $4" = "buildx imagetools inspect --format" ]; then
+  line=$(awk '$1 ~ /:0\.4$/ { print; exit }' "$MOCK_REGISTRY")
+  [ -n "$line" ] || exit 2
+  version=$(printf '%s\n' "$line" | awk '{ print $3 }')
+  revision=$(printf '%s\n' "$line" | awk '{ print $4 }')
+  printf '{"config":{"Labels":{"org.opencontainers.image.revision":"%s","org.opencontainers.image.version":"%s"}}}\n' "$revision" "$version"
+  exit 0
+fi
+if [ "$1 $2 $3 $4" = "buildx imagetools create --tag" ]; then
+  target=$5
+  digest=${6#*@}
+  grep -Fv "${target} " "$MOCK_REGISTRY" > "${MOCK_REGISTRY}.next" || true
+  printf '%s %s %s %s\n' "$target" "$digest" "$MOCK_IMAGE_VERSION" "$MOCK_SOURCE_REVISION" >> "${MOCK_REGISTRY}.next"
+  mv "${MOCK_REGISTRY}.next" "$MOCK_REGISTRY"
+  printf '%s\n' "$target" >> "$MOCK_UPDATES"
+  exit 0
+fi
+echo "unexpected docker invocation: $*" >&2
+exit 2
+"#,
+        );
+        write_file(
+            &fake_verifier,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$MOCK_VERIFIER_FAILURE" = "true" ]; then exit 9; fi
+image=$1
+expected_revision=$2
+expected_version=$3
+tag=$4
+line=$(awk -v ref="${image}:${tag}" '$1 == ref { print; exit }' "$MOCK_REGISTRY")
+[ -n "$line" ] || exit 2
+[ "$(printf '%s\n' "$line" | awk '{ print $3 }')" = "$expected_version" ] || exit 3
+[ "$(printf '%s\n' "$line" | awk '{ print $4 }')" = "$expected_revision" ] || exit 4
+printf '%s\n' "$line" | awk '{ print $2 }'
+"#,
+        );
+        for executable in [&fake_git, &fake_docker, &fake_verifier] {
+            let mut permissions = fs::metadata(executable)
+                .expect("mock executable metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(executable, permissions).expect("set mock executable mode");
+        }
+
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![fixture.path().join("bin")];
+        paths.extend(std::env::split_paths(&existing_path));
+        let path = std::env::join_paths(paths).expect("join mock PATH");
+        let image_version = if case.release_version.is_empty() {
+            "0.6.0"
+        } else {
+            case.release_version
+        };
+        let output = bash_command()
+            .arg(&alias_script)
+            .current_dir(&root)
+            .env("PATH", path)
+            .env("ALIAS_KIND", case.alias_kind)
+            .env("IMAGE", "ghcr.io/example/signal-fish-server")
+            .env("DIGEST", DIGEST)
+            .env("SOURCE_REVISION", case.source_revision)
+            .env("IMAGE_VERSION", image_version)
+            .env("SOURCE_DIR", "source")
+            .env("DEFAULT_BRANCH", "main")
+            .env("RELEASE_VERSION", case.release_version)
+            .env(
+                "MAJOR_MINOR",
+                case.release_version.rsplit_once('.').map_or("", |v| v.0),
+            )
+            .env("VERIFY_RELEASE_IMAGE_SCRIPT", &fake_verifier)
+            .env("MOCK_DEFAULT_HEAD", case.default_head)
+            .env("MOCK_REMOTE_TAGS", case.remote_tags)
+            .env("MOCK_ALIAS_INSPECT_ERROR", case.alias_inspect_error)
+            .env("MOCK_GIT_FAILURE", case.git_failure.to_string())
+            .env("MOCK_VERIFIER_FAILURE", case.verifier_failure.to_string())
+            .env("MOCK_REGISTRY", &registry)
+            .env("MOCK_UPDATES", &updates)
+            .env("MOCK_IMAGE_VERSION", image_version)
+            .env("MOCK_SOURCE_REVISION", case.source_revision)
+            .output()
+            .unwrap_or_else(|error| panic!("{} failed to execute: {error}", case.name));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            case.expected_success,
+            "{} exit status; stderr:\n{stderr}",
+            case.name
+        );
+        if let Some(error) = case.expected_error {
+            assert!(
+                stderr.contains(error),
+                "{} must report `{error}`; stderr:\n{stderr}",
                 case.name
             );
         }
-        if case.is_backfill && case.initial_version == "latest" {
-            let sha_line = registry_contents
-                .lines()
-                .find(|line| line.starts_with(&format!("{image}:sha-source ")))
-                .expect("historical SHA must remain present");
-            assert!(
-                sha_line.ends_with(" latest"),
-                "historical SHA must retain version=latest: {sha_line}"
-            );
+        let update_log = read_file(&updates);
+        match case.expected_updated_alias {
+            Some(alias) => assert_eq!(
+                update_log,
+                format!("ghcr.io/example/signal-fish-server:{alias}\n"),
+                "{} mutable update",
+                case.name
+            ),
+            None => assert!(
+                update_log.is_empty(),
+                "{} must not move a mutable alias; updates:\n{update_log}",
+                case.name
+            ),
         }
     }
 }
@@ -17285,6 +18326,7 @@ fn test_release_workflow_requires_preflight() {
     }
 
     let content = read_live_file(&release_yml);
+    let preflight_helper = read_live_file(&root.join("scripts/check-release-preflight.sh"));
 
     // Must have a preflight job
     assert!(
@@ -17326,26 +18368,791 @@ fn test_release_workflow_requires_preflight() {
     // These are the workflows that must pass before a release can proceed.
     for (_workflow_file, workflow_name) in REQUIRED_WORKFLOW_NAMES {
         assert!(
-            content.contains(workflow_name),
-            "release.yml preflight job must reference required workflow '{workflow_name}' \
+            preflight_helper.contains(workflow_name),
+            "The release preflight helper must reference required workflow '{workflow_name}' \
              (from REQUIRED_WORKFLOW_NAMES).\n\
-             The preflight job should verify that '{workflow_name}' has passed on the \
+             It must verify that '{workflow_name}' has passed on the \
              commit being released.\n\
-             File: {}",
-            release_yml.display()
+             Helper:\n{preflight_helper}"
+        );
+    }
+}
+
+#[test]
+fn test_release_preflight_executes_tested_workflow_revision_helper() {
+    let root = repo_root();
+    let helper = root.join("scripts/check-release-preflight.sh");
+    assert!(
+        helper.exists(),
+        "Release preflight policy must live in an executable production helper so tests exercise \
+         the same control flow as GitHub Actions. Missing: {}",
+        helper.display()
+    );
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let preflight = extract_workflow_job_block(&release, "preflight")
+        .expect("release.yml must define preflight");
+
+    for required_permission in ["actions: read", "contents: read"] {
+        assert!(
+            preflight.contains(required_permission),
+            "Release preflight must declare least-privilege `{required_permission}` access.\n\
+             Job:\n{preflight}"
+        );
+    }
+    for forbidden_permission in ["actions: write", "contents: write"] {
+        assert!(
+            !preflight.contains(forbidden_permission),
+            "Release preflight must not receive `{forbidden_permission}`.\nJob:\n{preflight}"
         );
     }
 
-    // Preflight must validate WORKFLOW_ID uniqueness. If multiple workflows
-    // share the same name, the gh API returns multiple IDs and the subsequent
-    // run lookup would query the wrong workflow.
+    let checkout = extract_named_workflow_step(&preflight, "Checkout preflight tooling")
+        .expect("preflight must check out its workflow-revision helper");
+    for required in [
+        "repository: ${{ job.workflow_repository }}",
+        "ref: ${{ job.workflow_sha }}",
+        "path: preflight-tools",
+        "sparse-checkout: scripts/check-release-preflight.sh",
+        "sparse-checkout-cone-mode: false",
+        "persist-credentials: false",
+    ] {
+        assert!(
+            checkout.contains(required),
+            "Preflight tooling checkout must contain `{required}` so retries execute the helper \
+             from the workflow revision rather than historical release source.\nStep:\n{checkout}"
+        );
+    }
+
+    let gate = extract_named_workflow_step(&preflight, "Verify required CI checks passed")
+        .expect("release preflight must execute its tested helper");
+    for required in [
+        "GH_TOKEN: ${{ github.token }}",
+        "RELEASE_REPOSITORY: ${{ github.repository }}",
+        "RELEASE_COMMIT_SHA: ${{ needs.resolve-release.outputs.source_revision }}",
+        "RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+        "run: bash preflight-tools/scripts/check-release-preflight.sh",
+    ] {
+        assert!(
+            gate.contains(required),
+            "Release preflight execution must contain `{required}`.\nStep:\n{gate}"
+        );
+    }
     assert!(
-        content.contains("Multiple workflows found"),
-        "release.yml preflight must check for duplicate WORKFLOW_ID results.\n\
-         If multiple workflows share a name, the gh API returns multiple IDs, \
-         which would cause the preflight to query the wrong workflow run.\n\
-         File: {}",
-        release_yml.display()
+        !gate.contains("gh api") && !gate.contains("REQUIRED_WORKFLOWS=("),
+        "Workflow YAML must not retain an untested inline copy of preflight policy.\nStep:\n{gate}"
+    );
+}
+
+#[test]
+fn test_release_preflight_required_workflow_policy_is_unique() {
+    let gate = read_live_file(&repo_root().join("scripts/check-release-preflight.sh"));
+    let declaration = gate
+        .lines()
+        .find(|line| line.starts_with("REQUIRED_WORKFLOWS=("))
+        .expect("preflight must declare required workflows");
+    let quoted = Regex::new(r#"\"([^\"]+)\""#).expect("valid workflow-name regex");
+    let configured: Vec<String> = quoted
+        .captures_iter(declaration)
+        .map(|capture| capture[1].to_owned())
+        .collect();
+    let unique: BTreeSet<String> = configured.iter().cloned().collect();
+    let expected: BTreeSet<String> = REQUIRED_WORKFLOW_NAMES
+        .iter()
+        .map(|(_, name)| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        configured.len(),
+        unique.len(),
+        "release preflight required-workflow policy must not contain duplicate names"
+    );
+    assert_eq!(
+        unique, expected,
+        "release preflight policy drifted from REQUIRED_WORKFLOW_NAMES"
+    );
+
+    let duplicate_guard = gate
+        .find("UNIQUE_WORKFLOW_COUNT=")
+        .expect("preflight must enforce required-workflow uniqueness");
+    let inventory = gate
+        .find("WORKFLOW_INVENTORY=$(gh api")
+        .expect("preflight must discover workflows");
+    assert!(
+        duplicate_guard < inventory,
+        "Required-workflow uniqueness must fail closed before any API lookup"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_release_preflight_behavior_matrix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const SHA: &str = "1111111111111111111111111111111111111111";
+    let cases = [
+        (
+            "exact_default_branch_push",
+            "normal",
+            "success",
+            "success",
+            true,
+            "All required CI checks passed",
+        ),
+        (
+            "no_run",
+            "normal",
+            "none",
+            "success",
+            false,
+            "No completed default-branch push run",
+        ),
+        (
+            "pull_request_run",
+            "normal",
+            "pull_request",
+            "success",
+            false,
+            "unrelated or malformed run metadata",
+        ),
+        (
+            "schedule_run",
+            "normal",
+            "schedule",
+            "success",
+            false,
+            "unrelated or malformed run metadata",
+        ),
+        (
+            "tag_push_run",
+            "normal",
+            "tag",
+            "success",
+            false,
+            "unrelated or malformed run metadata",
+        ),
+        (
+            "wrong_branch",
+            "normal",
+            "wrong_branch",
+            "success",
+            false,
+            "unrelated or malformed run metadata",
+        ),
+        (
+            "wrong_sha",
+            "normal",
+            "wrong_sha",
+            "success",
+            false,
+            "unrelated or malformed run metadata",
+        ),
+        (
+            "incomplete_run",
+            "normal",
+            "incomplete",
+            "success",
+            false,
+            "unrelated or malformed run metadata",
+        ),
+        (
+            "failed_run",
+            "normal",
+            "failure",
+            "success",
+            false,
+            "conclusion is 'failure'",
+        ),
+        (
+            "workflow_api_failure",
+            "api_failure",
+            "success",
+            "success",
+            false,
+            "Could not retrieve repository workflows",
+        ),
+        (
+            "run_api_failure",
+            "normal",
+            "api_failure",
+            "success",
+            false,
+            "Could not retrieve 'CI' runs",
+        ),
+        (
+            "missing_documentation_run",
+            "normal",
+            "success",
+            "none",
+            false,
+            "No completed default-branch push run found for 'Documentation Validation'",
+        ),
+        (
+            "paginated_workflow_discovery",
+            "paginated",
+            "success",
+            "success",
+            true,
+            "All required CI checks passed",
+        ),
+        (
+            "workflow_not_found",
+            "missing_ci",
+            "success",
+            "success",
+            false,
+            "not found in repository",
+        ),
+        (
+            "duplicate_workflow_name",
+            "duplicate_ci",
+            "success",
+            "success",
+            false,
+            "Multiple workflows found",
+        ),
+    ];
+
+    let root = repo_root();
+    let helper = root.join("scripts/check-release-preflight.sh");
+    for (name, workflow_mode, ci_mode, doc_mode, expected_success, expected) in cases {
+        let fixture = unique_temp_dir(&format!("release-preflight-{name}"));
+        let fake_bin = fixture.path().join("bin");
+        let fake_gh = fake_bin.join("gh");
+        let calls = fixture.path().join("gh-calls.txt");
+        fs::create_dir_all(&fake_bin).expect("create fake gh directory");
+        write_file(&calls, "");
+        write_file(
+            &fake_gh,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_GH_CALLS"
+
+has_arg() {
+  local expected=$1
+  shift
+  local actual
+  for actual in "$@"; do
+    [ "$actual" = "$expected" ] && return 0
+  done
+  return 1
+}
+
+require_arg() {
+  local expected=$1
+  shift
+  if ! has_arg "$expected" "$@"; then
+    echo "fake gh: missing required argument '$expected': $*" >&2
+    exit 90
+  fi
+}
+
+[ "${1:-}" = "api" ] || { echo "fake gh: expected api command" >&2; exit 90; }
+shift
+endpoint=""
+for argument in "$@"; do
+  case "$argument" in
+    repos/*) endpoint=$argument ;;
+  esac
+done
+require_arg --method "$@"
+require_arg GET "$@"
+
+case "$endpoint" in
+  */actions/workflows)
+    require_arg per_page=100 "$@"
+    case "$MOCK_WORKFLOW_MODE" in
+      api_failure) echo "simulated workflow API failure" >&2; exit 70 ;;
+      paginated)
+        if has_arg --paginate "$@"; then
+          printf 'Other\t99\nCI\t101\nDocumentation Validation\t202\n'
+        else
+          printf 'Other\t99\n'
+        fi
+        ;;
+      missing_ci) printf 'Other\t99\nDocumentation Validation\t202\n' ;;
+      duplicate_ci) printf 'CI\t101\nCI\t102\nDocumentation Validation\t202\n' ;;
+      normal) printf 'Other\t99\nCI\t101\nDocumentation Validation\t202\n' ;;
+      *) echo "fake gh: unexpected workflow mode $MOCK_WORKFLOW_MODE" >&2; exit 90 ;;
+    esac
+    ;;
+  */actions/workflows/101/runs|*/actions/workflows/202/runs)
+    require_arg "branch=$MOCK_DEFAULT_BRANCH" "$@"
+    require_arg event=push "$@"
+    require_arg "head_sha=$MOCK_SHA" "$@"
+    require_arg status=completed "$@"
+    require_arg per_page=1 "$@"
+    if [[ "$endpoint" == */101/runs ]]; then mode=$MOCK_CI_RUN_MODE; else mode=$MOCK_DOC_RUN_MODE; fi
+    case "$mode" in
+      success) printf 'push\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+      none) ;;
+      pull_request) printf 'pull_request\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+      schedule) printf 'schedule\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+      tag) printf 'push\tv0.6.0\t%s\tcompleted\tsuccess\n' "$MOCK_SHA" ;;
+      wrong_branch) printf 'push\tfeature\t%s\tcompleted\tsuccess\n' "$MOCK_SHA" ;;
+      wrong_sha) printf 'push\t%s\t0000000000000000000000000000000000000000\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" ;;
+      incomplete) printf 'push\t%s\t%s\tin_progress\t\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+      failure) printf 'push\t%s\t%s\tcompleted\tfailure\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+      api_failure) echo "simulated run API failure" >&2; exit 71 ;;
+      *) echo "fake gh: unexpected run mode $mode" >&2; exit 90 ;;
+    esac
+    ;;
+  *) echo "fake gh: unexpected endpoint '$endpoint'" >&2; exit 90 ;;
+esac
+"#,
+        );
+        let mut permissions = fs::metadata(&fake_gh)
+            .expect("fake gh metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_gh, permissions).expect("make fake gh executable");
+
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![fake_bin];
+        paths.extend(std::env::split_paths(&existing_path));
+        let path = std::env::join_paths(paths).expect("join fake gh PATH");
+        let output = bash_command()
+            .arg(&helper)
+            .current_dir(&root)
+            .env("PATH", path)
+            .env("MOCK_GH_CALLS", &calls)
+            .env("MOCK_WORKFLOW_MODE", workflow_mode)
+            .env("MOCK_CI_RUN_MODE", ci_mode)
+            .env("MOCK_DOC_RUN_MODE", doc_mode)
+            .env("MOCK_DEFAULT_BRANCH", "main")
+            .env("MOCK_SHA", SHA)
+            .env("RELEASE_REPOSITORY", "example/signal-fish-server")
+            .env("RELEASE_COMMIT_SHA", SHA)
+            .env("RELEASE_DEFAULT_BRANCH", "main")
+            .output()
+            .unwrap_or_else(|error| panic!("{name}: execute release preflight: {error}"));
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+        assert_eq!(
+            output.status.success(),
+            expected_success,
+            "{name}: unexpected status\n{combined}\nCalls:\n{}",
+            read_file(&calls)
+        );
+        assert!(
+            combined.contains(expected),
+            "{name}: expected diagnostic `{expected}`\n{combined}\nCalls:\n{}",
+            read_file(&calls)
+        );
+        assert!(
+            !read_file(&calls).contains("/commits/"),
+            "{name}: release preflight must not infer path-filter skips from a single commit"
+        );
+    }
+}
+
+#[test]
+fn test_release_ensure_tag_executes_tested_workflow_revision_helper() {
+    let root = repo_root();
+    let helper = root.join("scripts/ensure-release-tag.sh");
+    assert!(
+        helper.exists(),
+        "Release tag reconciliation must live in an executable production helper so tests exercise \
+         the same mutation and read-back control flow as GitHub Actions. Missing: {}",
+        helper.display()
+    );
+
+    let release = read_live_file(&root.join(".github/workflows/release.yml"));
+    let ensure_tag = extract_workflow_job_block(&release, "ensure-tag")
+        .expect("release.yml must define ensure-tag");
+    let source_checkout = extract_named_workflow_step(&ensure_tag, "Checkout release source")
+        .expect("ensure-tag must check out the immutable release source");
+    for required in [
+        "fetch-depth: 0",
+        "ref: ${{ needs.resolve-release.outputs.source_revision }}",
+        "persist-credentials: false",
+    ] {
+        assert!(
+            source_checkout.contains(required),
+            "Release source checkout must contain `{required}` and must not persist a write token \
+             in local Git configuration.\nStep:\n{source_checkout}"
+        );
+    }
+
+    let tooling_checkout = extract_named_workflow_step(&ensure_tag, "Checkout tag tooling")
+        .expect("ensure-tag must check out its workflow-revision helper");
+    for required in [
+        "repository: ${{ job.workflow_repository }}",
+        "ref: ${{ job.workflow_sha }}",
+        "path: tag-tools",
+        "sparse-checkout: scripts/ensure-release-tag.sh",
+        "sparse-checkout-cone-mode: false",
+        "persist-credentials: false",
+    ] {
+        assert!(
+            tooling_checkout.contains(required),
+            "Tag tooling checkout must contain `{required}` so a historical release executes the \
+             helper from its immutable workflow revision.\nStep:\n{tooling_checkout}"
+        );
+    }
+    let source_index = ensure_tag
+        .find("- name: Checkout release source")
+        .expect("ensure-tag must check out release source");
+    let tooling_index = ensure_tag
+        .find("- name: Checkout tag tooling")
+        .expect("ensure-tag must check out tag tooling");
+    assert!(
+        source_index < tooling_index,
+        "Release source must be checked out before workflow-revision tooling so root checkout \
+         cleaning cannot remove the nested helper.\nJob:\n{ensure_tag}"
+    );
+
+    let reconcile = extract_named_workflow_step(&ensure_tag, "Create or validate annotated tag")
+        .expect("ensure-tag must execute its tested helper");
+    for required in [
+        "GH_TOKEN: ${{ github.token }}",
+        "TAG: ${{ needs.resolve-release.outputs.tag }}",
+        "SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}",
+        "run: bash tag-tools/scripts/ensure-release-tag.sh",
+    ] {
+        assert!(
+            reconcile.contains(required),
+            "Tag reconciliation must contain `{required}`.\nStep:\n{reconcile}"
+        );
+    }
+    assert!(
+        !reconcile.contains("git push") && !reconcile.contains("git ls-remote"),
+        "Workflow YAML must not retain an untested inline copy of tag mutation policy.\n\
+         Step:\n{reconcile}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_release_ensure_tag_behavior_matrix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const SOURCE_SHA: &str = "1111111111111111111111111111111111111111";
+    struct Case {
+        name: &'static str,
+        mode: &'static str,
+        succeeds: bool,
+        diagnostic: &'static str,
+        pushes: usize,
+        readbacks: usize,
+    }
+    let cases = [
+        Case {
+            name: "existing_exact",
+            mode: "existing_exact",
+            succeeds: true,
+            diagnostic: "Reusing immutable annotated tag",
+            pushes: 0,
+            readbacks: 0,
+        },
+        Case {
+            name: "existing_lightweight",
+            mode: "existing_lightweight",
+            succeeds: false,
+            diagnostic: "not an annotated Git tag",
+            pushes: 0,
+            readbacks: 0,
+        },
+        Case {
+            name: "existing_wrong_target",
+            mode: "existing_wrong",
+            succeeds: false,
+            diagnostic: "refusing to move it",
+            pushes: 0,
+            readbacks: 0,
+        },
+        Case {
+            name: "existing_malformed",
+            mode: "existing_malformed",
+            succeeds: false,
+            diagnostic: "malformed metadata",
+            pushes: 0,
+            readbacks: 0,
+        },
+        Case {
+            name: "initial_lookup_failure",
+            mode: "initial_error",
+            succeeds: false,
+            diagnostic: "Failed to inspect remote tag",
+            pushes: 0,
+            readbacks: 0,
+        },
+        Case {
+            name: "create_success",
+            mode: "create_success",
+            succeeds: true,
+            diagnostic: "Created annotated tag",
+            pushes: 1,
+            readbacks: 0,
+        },
+        Case {
+            name: "stale_local_tag_is_replaced",
+            mode: "create_stale",
+            succeeds: true,
+            diagnostic: "Created annotated tag",
+            pushes: 1,
+            readbacks: 0,
+        },
+        Case {
+            name: "ambiguous_push_accepted",
+            mode: "ambiguous_exact",
+            succeeds: true,
+            diagnostic: "exists at the exact expected commit",
+            pushes: 1,
+            readbacks: 1,
+        },
+        Case {
+            name: "visible_on_second_readback",
+            mode: "ambiguous_second",
+            succeeds: true,
+            diagnostic: "exists at the exact expected commit",
+            pushes: 1,
+            readbacks: 2,
+        },
+        Case {
+            name: "eventually_visible",
+            mode: "ambiguous_delayed",
+            succeeds: true,
+            diagnostic: "exists at the exact expected commit",
+            pushes: 1,
+            readbacks: 3,
+        },
+        Case {
+            name: "fetch_recovers",
+            mode: "ambiguous_fetch_recovery",
+            succeeds: true,
+            diagnostic: "exists at the exact expected commit",
+            pushes: 1,
+            readbacks: 3,
+        },
+        Case {
+            name: "fetch_never_recovers",
+            mode: "ambiguous_fetch_exhausted",
+            succeeds: false,
+            diagnostic: "read-backs were inconclusive",
+            pushes: 1,
+            readbacks: 3,
+        },
+        Case {
+            name: "visible_conflict",
+            mode: "ambiguous_wrong",
+            succeeds: false,
+            diagnostic: "refusing to move it",
+            pushes: 1,
+            readbacks: 1,
+        },
+        Case {
+            name: "visible_lightweight",
+            mode: "ambiguous_lightweight",
+            succeeds: false,
+            diagnostic: "not an annotated Git tag",
+            pushes: 1,
+            readbacks: 1,
+        },
+        Case {
+            name: "never_visible",
+            mode: "ambiguous_absent",
+            succeeds: false,
+            diagnostic: "read-backs found no",
+            pushes: 1,
+            readbacks: 3,
+        },
+        Case {
+            name: "readback_errors",
+            mode: "ambiguous_errors",
+            succeeds: false,
+            diagnostic: "All 3 remote tag read-backs failed",
+            pushes: 1,
+            readbacks: 3,
+        },
+        Case {
+            name: "fetched_type_conflict",
+            mode: "ambiguous_bad_type",
+            succeeds: false,
+            diagnostic: "not an annotated Git tag",
+            pushes: 1,
+            readbacks: 1,
+        },
+        Case {
+            name: "fetched_target_conflict",
+            mode: "ambiguous_bad_target",
+            succeeds: false,
+            diagnostic: "refusing to move it",
+            pushes: 1,
+            readbacks: 1,
+        },
+    ];
+
+    let root = repo_root();
+    let helper = root.join("scripts/ensure-release-tag.sh");
+    for case in cases {
+        let fixture = unique_temp_dir(&format!("release-tag-{}", case.name));
+        let fake_bin = fixture.path().join("bin");
+        let fake_git = fake_bin.join("git");
+        let fake_sleep = fake_bin.join("sleep");
+        let calls = fixture.path().join("git-calls.txt");
+        let ls_count = fixture.path().join("ls-count.txt");
+        let fetch_count = fixture.path().join("fetch-count.txt");
+        fs::create_dir_all(&fake_bin).expect("create fake command directory");
+        write_file(&calls, "");
+        write_file(&ls_count, "0\n");
+        write_file(&fetch_count, "0\n");
+        write_file(
+            &fake_git,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_GIT_CALLS"
+if [ "${1:-}" = "-c" ]; then shift 2; fi
+
+exact_listing() {
+  printf '%s\trefs/tags/v1.2.3\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf '%s\trefs/tags/v1.2.3^{}\n' "$MOCK_SOURCE_SHA"
+}
+wrong_listing() {
+  printf '%s\trefs/tags/v1.2.3\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  printf '%s\trefs/tags/v1.2.3^{}\n' 2222222222222222222222222222222222222222
+}
+lightweight_listing() {
+  printf '%s\trefs/tags/v1.2.3\n' "$MOCK_SOURCE_SHA"
+}
+malformed_listing() {
+  printf 'not-a-sha\trefs/tags/v1.2.3\n'
+  printf '%s\trefs/tags/v1.2.3^{}\n' "$MOCK_SOURCE_SHA"
+}
+
+case "${1:-}" in
+  check-ref-format|config|tag) exit 0 ;;
+  show-ref)
+    if [ "$MOCK_MODE" = "create_stale" ]; then exit 0; fi
+    exit 1
+    ;;
+  cat-file)
+    if [ "$MOCK_MODE" = "ambiguous_bad_type" ]; then printf 'commit\n'; else printf 'tag\n'; fi
+    ;;
+  rev-parse)
+    if [ "$MOCK_MODE" = "ambiguous_bad_target" ]; then
+      printf '2222222222222222222222222222222222222222\n'
+    else
+      printf '%s\n' "$MOCK_SOURCE_SHA"
+    fi
+    ;;
+  fetch)
+    count=$(cat "$MOCK_FETCH_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$MOCK_FETCH_COUNT"
+    if { [ "$MOCK_MODE" = "ambiguous_fetch_recovery" ] && [ "$count" -lt 3 ]; } ||
+       [ "$MOCK_MODE" = "ambiguous_fetch_exhausted" ]; then
+      echo "simulated fetch failure" >&2
+      exit 72
+    fi
+    exit 0
+    ;;
+  push)
+    if [ "$MOCK_MODE" = "create_success" ] || [ "$MOCK_MODE" = "create_stale" ]; then exit 0; fi
+    echo "simulated ambiguous push failure" >&2
+    exit 71
+    ;;
+  ls-remote)
+    count=$(cat "$MOCK_LS_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$MOCK_LS_COUNT"
+    case "$MOCK_MODE:$count" in
+      existing_exact:1) exact_listing ;;
+      existing_lightweight:1) lightweight_listing ;;
+      existing_wrong:1) wrong_listing ;;
+      existing_malformed:1) malformed_listing ;;
+      initial_error:1) echo "simulated lookup failure" >&2; exit 70 ;;
+      ambiguous_exact:1|ambiguous_second:1|ambiguous_delayed:1|ambiguous_fetch_recovery:1|ambiguous_fetch_exhausted:1|ambiguous_wrong:1|ambiguous_lightweight:1|ambiguous_absent:*|ambiguous_errors:1|ambiguous_bad_type:1|ambiguous_bad_target:1|create_success:1|create_stale:1) exit 2 ;;
+      ambiguous_exact:*|ambiguous_fetch_recovery:*|ambiguous_fetch_exhausted:*|ambiguous_bad_type:*|ambiguous_bad_target:*) exact_listing ;;
+      ambiguous_second:2) exit 2 ;;
+      ambiguous_second:3) exact_listing ;;
+      ambiguous_delayed:2|ambiguous_delayed:3) exit 2 ;;
+      ambiguous_delayed:4) exact_listing ;;
+      ambiguous_wrong:2) wrong_listing ;;
+      ambiguous_lightweight:2) lightweight_listing ;;
+      ambiguous_errors:*) echo "simulated read-back failure" >&2; exit 70 ;;
+      *) echo "fake git: unexpected ls-remote state $MOCK_MODE:$count" >&2; exit 90 ;;
+    esac
+    ;;
+  *) echo "fake git: unexpected invocation: $*" >&2; exit 90 ;;
+esac
+"#,
+        );
+        write_file(&fake_sleep, "#!/usr/bin/env bash\nexit 0\n");
+        for executable in [&fake_git, &fake_sleep] {
+            let mut permissions = fs::metadata(executable)
+                .expect("fake executable metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(executable, permissions).expect("make fake command executable");
+        }
+
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![fake_bin];
+        paths.extend(std::env::split_paths(&existing_path));
+        let path = std::env::join_paths(paths).expect("join fake command PATH");
+        let output = bash_command()
+            .arg(&helper)
+            .current_dir(&root)
+            .env("PATH", path)
+            .env("GH_TOKEN", "test-token")
+            .env("TAG", "v1.2.3")
+            .env("SOURCE_REVISION", SOURCE_SHA)
+            .env("MOCK_MODE", case.mode)
+            .env("MOCK_SOURCE_SHA", SOURCE_SHA)
+            .env("MOCK_GIT_CALLS", &calls)
+            .env("MOCK_LS_COUNT", &ls_count)
+            .env("MOCK_FETCH_COUNT", &fetch_count)
+            .output()
+            .unwrap_or_else(|error| panic!("{}: execute release tag helper: {error}", case.name));
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        let call_log = read_file(&calls);
+        let pushes = call_log
+            .lines()
+            .filter(|line| line.contains(" push origin refs/tags/v1.2.3"))
+            .count();
+        let remote_queries = call_log
+            .lines()
+            .filter(|line| line.contains(" ls-remote --exit-code --tags origin"))
+            .count();
+
+        assert_eq!(
+            output.status.success(),
+            case.succeeds,
+            "{}: unexpected status\n{combined}\nCalls:\n{call_log}",
+            case.name
+        );
+        assert!(
+            combined.contains(case.diagnostic),
+            "{}: expected diagnostic `{}`\n{combined}\nCalls:\n{call_log}",
+            case.name,
+            case.diagnostic
+        );
+        assert_eq!(
+            pushes, case.pushes,
+            "{}: remote tag mutation count",
+            case.name
+        );
+        assert_eq!(
+            remote_queries.saturating_sub(1),
+            case.readbacks,
+            "{}: bounded post-mutation read-back count\n{call_log}",
+            case.name
+        );
+    }
+
+    let invalid_tag = bash_command()
+        .arg(&helper)
+        .current_dir(&root)
+        .env("GH_TOKEN", "test-token")
+        .env("TAG", "v01.2.3")
+        .env("SOURCE_REVISION", SOURCE_SHA)
+        .output()
+        .expect("execute canonical release-tag guard");
+    assert!(
+        !invalid_tag.status.success()
+            && String::from_utf8_lossy(&invalid_tag.stderr).contains("not canonical vX.Y.Z"),
+        "release tag helper must reject non-canonical numeric tags before Git access"
     );
 }
 
@@ -18587,70 +20394,17 @@ fn test_dependabot_auto_merge_retryable_merge_error_patterns_cover_observed_fail
 }
 
 #[test]
-fn test_release_workflow_handles_path_filtered_workflows() {
-    // This test validates that the release workflow's preflight job handles
-    // path-filtered workflows (like Documentation Validation) that may be
-    // legitimately skipped when the commit does not touch relevant paths.
-    //
-    // Without this handling, releases would be blocked whenever the release
-    // commit did not touch documentation paths, because the preflight job
-    // would find no completed run for "Documentation Validation" and treat
-    // that as an error.
-    //
-    // Checks:
-    //   1. The release.yml contains a PATH_FILTERED_WORKFLOWS declaration
-    //   2. The path-filtered workflow list references each workflow that has
-    //      path filters in REQUIRED_WORKFLOW_NAMES
-    //   3. The preflight logic checks changed files when no run is found
-
+fn test_documentation_validation_runs_for_every_release_introduction() {
     let root = repo_root();
-    let release_yml = root.join(".github/workflows/release.yml");
-
-    if !release_yml.exists() {
-        // Release workflow is optional
-        return;
-    }
-
-    let content = read_live_file(&release_yml);
-
-    // Must declare the PATH_FILTERED_WORKFLOWS associative array
+    let helper_path = root.join("scripts/check-release-preflight.sh");
+    let helper = read_live_file(&helper_path);
     assert!(
-        content.contains("PATH_FILTERED_WORKFLOWS"),
-        "release.yml preflight job must declare PATH_FILTERED_WORKFLOWS to handle \
-         workflows that use path filters and may be legitimately skipped.\n\
-         File: {}",
-        release_yml.display()
+        !helper.contains("/commits/${COMMIT_SHA}")
+            && !helper.contains("commit did not touch relevant paths"),
+        "release preflight must require exact successful runs, not infer a path-filter skip from \
+         the release commit's parent diff.\nFile: {}",
+        helper_path.display()
     );
-
-    // The PATH_FILTERED_WORKFLOWS map must reference "Documentation Validation"
-    // since doc-validation.yml uses path filters.
-    assert!(
-        content.contains("PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"]"),
-        "release.yml PATH_FILTERED_WORKFLOWS must include 'Documentation Validation' \
-         because doc-validation.yml uses path filters.\n\
-         File: {}",
-        release_yml.display()
-    );
-
-    let release_line = content
-        .lines()
-        .find(|line| line.contains("PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"]"))
-        .unwrap_or_else(|| {
-            panic!(
-                "release.yml must define PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"].\n\
-                 File: {}",
-                release_yml.display()
-            )
-        });
-    let (_assignment, release_patterns_value) = release_line
-        .split_once('=')
-        .unwrap_or_else(|| panic!("release preflight path map assignment must contain '='"));
-    let release_patterns: BTreeSet<String> = release_patterns_value
-        .trim()
-        .trim_matches('"')
-        .split_whitespace()
-        .map(ToString::to_string)
-        .collect();
 
     let doc_validation_yml = root.join(".github/workflows/doc-validation.yml");
     let doc_validation_content = read_file(&doc_validation_yml);
@@ -18658,105 +20412,14 @@ fn test_release_workflow_handles_path_filtered_workflows() {
         extract_workflow_event_paths(&doc_validation_content, "push")
             .into_iter()
             .collect();
-    let pull_request_paths: BTreeSet<String> =
-        extract_workflow_event_paths(&doc_validation_content, "pull_request")
-            .into_iter()
-            .collect();
-
-    assert_eq!(
-        push_paths,
-        pull_request_paths,
-        "doc-validation.yml push.paths and pull_request.paths must stay identical so release \
-         preflight can use one Documentation Validation path map.\n\
-         File: {}",
-        doc_validation_yml.display()
-    );
-
-    let expected_release_patterns: BTreeSet<String> = push_paths
-        .iter()
-        .map(|path| release_preflight_pattern_for_doc_path(path))
-        .collect();
-
-    let missing_doc_preflight_patterns: Vec<String> = expected_release_patterns
-        .difference(&release_patterns)
-        .map(|pattern| format!("  - {pattern}"))
-        .collect();
-    let unexpected_doc_preflight_patterns: Vec<String> = release_patterns
-        .difference(&expected_release_patterns)
-        .map(|pattern| format!("  - {pattern}"))
-        .collect();
-
-    assert!(
-        missing_doc_preflight_patterns.is_empty() && unexpected_doc_preflight_patterns.is_empty(),
-        "release.yml Documentation Validation preflight path map drifted from doc-validation.yml.\n\n\
-         Missing patterns:\n{}\n\nUnexpected patterns:\n{}\n\n\
-         Keep PATH_FILTERED_WORKFLOWS[\"Documentation Validation\"] in sync with the \
-         path filters in doc-validation.yml so release preflight fails closed when a \
-         release commit touches files that should have triggered Documentation Validation.\n\
-         File: {}",
-        missing_doc_preflight_patterns.join("\n"),
-        unexpected_doc_preflight_patterns.join("\n"),
-        release_yml.display()
-    );
-
-    // Verify the preflight logic checks changed files for path-filtered workflows
-    assert!(
-        content.contains("commit did not touch relevant paths"),
-        "release.yml preflight job must check whether the commit touched relevant \
-         paths before treating a missing workflow run as an error.\n\
-         File: {}",
-        release_yml.display()
-    );
-
-    // Verify that path-filtered workflows with matching paths still error
-    assert!(
-        content.contains("should have triggered this workflow"),
-        "release.yml preflight job must still error when a path-filtered workflow \
-         has no run but the commit DID touch relevant paths.\n\
-         File: {}",
-        release_yml.display()
-    );
-
-    // Verify fail-closed behavior when CHANGED_FILES cannot be retrieved.
-    // If the GitHub API fails to return changed files, the preflight must
-    // fail (FAILED=1) rather than warn, to prevent releasing without CI
-    // verification.
-    assert!(
-        content.contains("Failing closed"),
-        "release.yml preflight job must fail closed when CHANGED_FILES is empty.\n\
-         If the GitHub API fails to return changed files for the commit, the \
-         preflight must set FAILED=1 rather than warning, to prevent releasing \
-         without CI verification.\n\
-         File: {}",
-        release_yml.display()
-    );
-
-    // Cross-check: every workflow in REQUIRED_WORKFLOW_NAMES that has path
-    // filters in its workflow file should appear in PATH_FILTERED_WORKFLOWS.
-    for (workflow_file, workflow_name) in REQUIRED_WORKFLOW_NAMES {
-        let workflow_path = root.join(".github/workflows").join(workflow_file);
-        if !workflow_path.exists() {
-            continue;
-        }
-        let workflow_content = read_file(&workflow_path);
-
-        // Check if this workflow uses path filters (has a `paths:` key)
-        let has_path_filters = workflow_content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed == "paths:" || trimmed.starts_with("paths:")
-        });
-
-        if has_path_filters {
-            let expected = format!("PATH_FILTERED_WORKFLOWS[\"{workflow_name}\"]");
-            assert!(
-                content.contains(&expected),
-                "Workflow '{workflow_name}' ({workflow_file}) uses path filters but is not \
-                 listed in PATH_FILTERED_WORKFLOWS in release.yml.\n\
-                 Add: {expected}=\"<path patterns>\"\n\
-                 File: {}",
-                release_yml.display()
-            );
-        }
+    for release_file_pattern in ["Cargo.toml", "**/*.md"] {
+        assert!(
+            push_paths.contains(release_file_pattern),
+            "Documentation Validation push.paths must include `{release_file_pattern}` so every \
+             version-introduction commit triggers the exact run required by release preflight.\n\
+             File: {}",
+            doc_validation_yml.display()
+        );
     }
 }
 
