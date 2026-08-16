@@ -52,6 +52,7 @@ permissions:
 
 concurrency:
   group: release-publish
+  queue: max
   cancel-in-progress: false
 
 env:
@@ -88,177 +89,28 @@ jobs:
     needs: [resolve-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
     steps:
+      - name: Checkout preflight tooling
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: preflight-tools
+          sparse-checkout: scripts/check-release-preflight.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Verify required CI checks passed
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          COMMIT_SHA="${{ needs.resolve-release.outputs.source_revision }}"
-          REPO="${{ github.repository }}"
-          echo "Verifying CI status for commit: $COMMIT_SHA"
-
-          # Required workflow runs that must have completed successfully.
-          # These correspond to the REQUIRED_WORKFLOW_NAMES in tests/ci_config_tests.rs.
-          REQUIRED_WORKFLOWS=("CI" "Documentation Validation")
-
-          # Path-filtered workflows and their trigger paths.
-          # These workflows only run when specific files change. If a commit
-          # does not touch any of the listed paths, the workflow is legitimately
-          # skipped and should not block the release.
-          #
-          # NOTE: The path patterns below are simplified equivalents for shell
-          # pattern matching, not literal copies of GitHub Actions glob syntax.
-          # For example, GitHub's "**/*.md" becomes "*.md" here because the
-          # shell case/[[ matching handles it differently.
-          #
-          # The path patterns here must match the `paths:` filters in the
-          # corresponding workflow file. Keep in sync with the `paths:` block
-          # in doc-validation.yml and with REQUIRED_DOC_PATHS in
-          # tests/ci_config_tests.rs.
-          declare -A PATH_FILTERED_WORKFLOWS
-          PATH_FILTERED_WORKFLOWS["Documentation Validation"]="*.md *.rs Cargo.toml Cargo.lock rust-toolchain.toml .lychee.toml docs/ mkdocs.yml requirements-docs.txt scripts/read-toml-string.sh scripts/check-internal-links.sh scripts/download-verified.sh scripts/install-lychee.sh scripts/run-lychee.sh .github/workflows/doc-validation.yml .github/scripts/ .github/test-fixtures/"
-
-          FAILED=0
-          for WORKFLOW_NAME in "${REQUIRED_WORKFLOWS[@]}"; do
-            echo ""
-            echo "Checking workflow: $WORKFLOW_NAME"
-
-            WORKFLOW_ID=$(gh api \
-              "repos/${REPO}/actions/workflows" \
-              --jq ".workflows[] | select(.name == \"${WORKFLOW_NAME}\") | .id" \
-            )
-
-            if [ -z "$WORKFLOW_ID" ]; then
-              echo "ERROR: Workflow '${WORKFLOW_NAME}' not found in repository"
-              FAILED=1
-              continue
-            fi
-
-            # Ensure exactly one workflow matched the name
-            WORKFLOW_ID_COUNT=$(echo "$WORKFLOW_ID" | grep -c .)
-            if [ "$WORKFLOW_ID_COUNT" -gt 1 ]; then
-              echo "ERROR: Multiple workflows found with name '${WORKFLOW_NAME}'"
-              echo "  IDs: $WORKFLOW_ID"
-              FAILED=1
-              continue
-            fi
-
-            # Get the most recent completed run for this workflow on the commit's branch
-            CONCLUSION=$(gh api \
-              "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?head_sha=${COMMIT_SHA}&status=completed&per_page=1" \
-              --jq '.workflow_runs[0].conclusion // empty' \
-            )
-
-            if [ -z "$CONCLUSION" ]; then
-              # No completed run found. For path-filtered workflows this may be
-              # legitimate — the commit may not have touched any of the paths
-              # that trigger the workflow.
-              if [[ -v "PATH_FILTERED_WORKFLOWS[$WORKFLOW_NAME]" ]]; then
-                echo "  No completed run found. Checking if commit touched relevant paths..."
-
-                # Get list of files changed in this commit
-                CHANGED_FILES=$(gh api "repos/${REPO}/commits/${COMMIT_SHA}" \
-                  --jq '.files[].filename' 2>/dev/null || echo "")
-
-                if [ -z "$CHANGED_FILES" ]; then
-                  echo "  ERROR: Could not retrieve changed files for commit ${COMMIT_SHA}"
-                  echo "  Release preflight requires file change data to verify path-filtered workflows."
-                  echo "  This may be caused by GitHub API rate limiting or a transient outage."
-                  echo "  Failing closed to prevent releasing without CI verification."
-                  FAILED=1
-                  continue
-                fi
-
-                # Check if any changed file matches the workflow's path filters
-                PATHS_MATCH=0
-                for pattern in ${PATH_FILTERED_WORKFLOWS[$WORKFLOW_NAME]}; do
-                  while IFS= read -r changed_file; do
-                    [ -z "$changed_file" ] && continue
-                    case "$pattern" in
-                      # Glob patterns with leading ** (e.g., "*.md" matches any .md file)
-                      *\*.md)
-                        if [[ "$changed_file" == *.md ]]; then
-                          PATHS_MATCH=1
-                          echo "  Matched: $changed_file (pattern: $pattern)"
-                        fi
-                        ;;
-                      *\*.rs)
-                        if [[ "$changed_file" == *.rs ]]; then
-                          PATHS_MATCH=1
-                          echo "  Matched: $changed_file (pattern: $pattern)"
-                        fi
-                        ;;
-                      # Exact file match for known filenames — listed explicitly
-                      # for clarity, even though the *) catch-all also does exact
-                      # matching. Separating them documents that these patterns
-                      # use a different matching strategy (literal equality) than
-                      # the extension/directory cases above.
-                      Cargo.toml|Cargo.lock)
-                        if [ "$changed_file" = "$pattern" ]; then
-                          PATHS_MATCH=1
-                          echo "  Matched: $changed_file (pattern: $pattern)"
-                        fi
-                        ;;
-                      # Directory prefix match (e.g., ".github/scripts/")
-                      */)
-                        if [[ "$changed_file" == ${pattern}* ]]; then
-                          PATHS_MATCH=1
-                          echo "  Matched: $changed_file (pattern: $pattern)"
-                        fi
-                        ;;
-                      # Exact file match for anything else
-                      *)
-                        if [ "$changed_file" = "$pattern" ]; then
-                          PATHS_MATCH=1
-                          echo "  Matched: $changed_file (pattern: $pattern)"
-                        fi
-                        ;;
-                    esac
-                    # Break early once we find a match
-                    [ "$PATHS_MATCH" -eq 1 ] && break
-                  done <<< "$CHANGED_FILES"
-                  [ "$PATHS_MATCH" -eq 1 ] && break
-                done
-
-                if [ "$PATHS_MATCH" -eq 0 ]; then
-                  echo "OK: '${WORKFLOW_NAME}' was not triggered (commit did not touch relevant paths)"
-                else
-                  echo "ERROR: No completed run found for '${WORKFLOW_NAME}' on commit ${COMMIT_SHA}"
-                  echo "  The commit touched files that should have triggered this workflow."
-                  echo "  Ensure CI has run and completed on this commit before releasing."
-                  FAILED=1
-                fi
-              else
-                echo "ERROR: No completed run found for '${WORKFLOW_NAME}' on commit ${COMMIT_SHA}"
-                echo "  Ensure CI has run and completed on this commit before releasing."
-                FAILED=1
-              fi
-            elif [ "$CONCLUSION" != "success" ]; then
-              echo "ERROR: '${WORKFLOW_NAME}' conclusion is '${CONCLUSION}' (expected 'success')"
-              echo "  Fix the failing checks before releasing."
-              FAILED=1
-            else
-              echo "OK: '${WORKFLOW_NAME}' passed on commit ${COMMIT_SHA}"
-            fi
-          done
-
-          echo ""
-          if [ $FAILED -ne 0 ]; then
-            echo "=========================================="
-            echo "RELEASE BLOCKED: Required CI checks have not passed."
-            echo ""
-            echo "To fix:"
-            echo "  1. Push the release commit to main and wait for CI to complete"
-            echo "  2. Verify all required checks are green"
-            echo "  3. Then trigger the release workflow again"
-            echo "=========================================="
-            exit 1
-          fi
-
-          echo "All required CI checks passed. Proceeding with release."
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT_SHA: ${{ needs.resolve-release.outputs.source_revision }}
+          RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash preflight-tools/scripts/check-release-preflight.sh
 
   publication-readiness:
     name: Publication readiness
@@ -348,47 +200,25 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ needs.resolve-release.outputs.source_revision }}
+          persist-credentials: false
+
+      - name: Checkout tag tooling
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tag-tools
+          sparse-checkout: scripts/ensure-release-tag.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Create or validate annotated tag
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve-release.outputs.tag }}
           SOURCE_REVISION: ${{ needs.resolve-release.outputs.source_revision }}
-        run: |
-          set -euo pipefail
-
-          validate_tag() {
-            if [ "$(git cat-file -t "refs/tags/${TAG}" 2>/dev/null || true)" != "tag" ]; then
-              echo "ERROR: ${TAG} exists but is not an annotated Git tag." >&2
-              exit 1
-            fi
-            actual_revision=$(git rev-parse "refs/tags/${TAG}^{commit}")
-            if [ "$actual_revision" != "$SOURCE_REVISION" ]; then
-              echo "ERROR: ${TAG} resolves to ${actual_revision}, not ${SOURCE_REVISION}; refusing to move it." >&2
-              exit 1
-            fi
-          }
-
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-            validate_tag
-            echo "Reusing immutable annotated tag ${TAG} at ${SOURCE_REVISION}."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" "$SOURCE_REVISION" -m "Release $TAG"
-          if git push origin "refs/tags/${TAG}"; then
-            echo "Created annotated tag ${TAG} at ${SOURCE_REVISION}."
-            exit 0
-          fi
-
-          # A concurrent retry may have won the create race. Accept only the
-          # exact immutable tag we intended; every other outcome fails closed.
-          git tag -d "$TAG"
-          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-          validate_tag
+        run: bash tag-tools/scripts/ensure-release-tag.sh
 
   publish-container:
     name: Publish versioned container

@@ -2,24 +2,24 @@
 #
 # One implementation serves three entry points:
 #   - pushes to main publish rolling :latest and immutable :sha-* tags;
-#   - direct annotated v* tag pushes publish versioned tags;
 #   - workflow calls from release.yml publish the exact release commit directly,
 #     without relying on a GITHUB_TOKEN-generated tag event;
 #   - manual dispatch with an existing annotated tag backfills historical tags
 #     from that tag's commit.
+# Human tag pushes enter through release.yml so required CI is verified before
+# this workflow is called; Docker Publish has no independent tag-push path.
 #
 # Every release image is one multi-architecture manifest covering linux/amd64,
 # linux/arm64, and linux/arm/v7. Version tags are immutable: retries reuse a
 # verified digest and repair missing aliases, but never move an existing version
-# tag to different bytes.
+# tag to different bytes. Mutable :latest and X.Y aliases are applied only after
+# their immutable digest is verified and their current Git authority is checked.
 
 name: Docker Publish
 
 on:
   push:
     branches: [main]
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -70,7 +70,6 @@ jobs:
       release_version: ${{ steps.identity.outputs.release_version }}
       release_tag: ${{ steps.identity.outputs.release_tag }}
       major_minor: ${{ steps.identity.outputs.major_minor }}
-      short_sha: ${{ steps.identity.outputs.short_sha }}
       is_release: ${{ steps.identity.outputs.is_release }}
       publish_latest: ${{ steps.identity.outputs.publish_latest }}
       image_version: ${{ steps.identity.outputs.image_version }}
@@ -83,6 +82,7 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: publication-tools
           sparse-checkout: |
+            scripts/find-release-version-introduction.sh
             scripts/read-toml-string.sh
             scripts/reuse-verified-image.sh
             scripts/verify-release-image.sh
@@ -93,7 +93,7 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ inputs.source_ref || inputs.release_tag || github.ref }}
+          ref: ${{ inputs.source_ref || inputs.release_tag || github.sha }}
           path: source
 
       - name: Resolve and validate source identity
@@ -103,6 +103,7 @@ jobs:
           CALL_VERSION: ${{ inputs.release_version }}
           CALL_TAG: ${{ inputs.release_tag }}
           CALL_REVISION: ${{ inputs.source_revision }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
 
@@ -129,20 +130,20 @@ jobs:
           else
             case "${{ github.event_name }}" in
               workflow_dispatch)
-              release_tag=$CALL_TAG
-              release_version=${release_tag#v}
+                if [ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+                  echo "ERROR: Docker backfills must be dispatched from ${DEFAULT_BRANCH}; got ${GITHUB_REF}." >&2
+                  exit 1
+                fi
+                release_tag=$CALL_TAG
+                release_version=${release_tag#v}
                 is_backfill=true
                 ;;
               push)
-                if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-                  release_tag=${GITHUB_REF#refs/tags/}
-                  release_version=${release_tag#v}
-                elif [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
-                  publish_latest=true
-                else
+                if [ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]; then
                   echo "ERROR: Unsupported Docker Publish ref: $GITHUB_REF" >&2
                   exit 1
                 fi
+                publish_latest=true
                 ;;
               *)
                 echo "ERROR: Unsupported Docker Publish event: ${{ github.event_name }}" >&2
@@ -156,7 +157,7 @@ jobs:
               echo "ERROR: Release tag ($release_tag), requested version ($release_version), and Cargo.toml ($cargo_version) disagree." >&2
               exit 1
             fi
-            if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ ! "$release_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
               echo "ERROR: Release version is not canonical semantic version text: $release_version" >&2
               exit 1
             fi
@@ -168,6 +169,29 @@ jobs:
             tag_revision=$(git -C source rev-parse "refs/tags/${release_tag}^{commit}")
             if [ "$tag_revision" != "$source_revision" ]; then
               echo "ERROR: $release_tag resolves to $tag_revision, not checked-out commit $source_revision." >&2
+              exit 1
+            fi
+            git -C source fetch --no-tags origin \
+              "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+            if ! git -C source merge-base --is-ancestor \
+              "$source_revision" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+              echo "ERROR: Release source $source_revision is not merged into ${DEFAULT_BRANCH}." >&2
+              exit 1
+            fi
+            if ! first_parent_history=$(git -C source rev-list --first-parent \
+              "refs/remotes/origin/${DEFAULT_BRANCH}" 2>&1); then
+              echo "ERROR: Could not inspect ${DEFAULT_BRANCH} first-parent history: ${first_parent_history}" >&2
+              exit 1
+            fi
+            if ! grep -Fx "$source_revision" <<< "$first_parent_history" >/dev/null; then
+              echo "ERROR: Release source $source_revision is not on the first-parent history of ${DEFAULT_BRANCH}." >&2
+              exit 1
+            fi
+            introduction_revision=$(bash publication-tools/scripts/find-release-version-introduction.sh \
+              source "refs/remotes/origin/${DEFAULT_BRANCH}" "$release_version" \
+              publication-tools/scripts/read-toml-string.sh)
+            if [ "$source_revision" != "$introduction_revision" ]; then
+              echo "ERROR: Release source $source_revision is not the unique first-parent version-introduction commit $introduction_revision for $release_version." >&2
               exit 1
             fi
             escaped_version=${release_version//./\\.}
@@ -187,7 +211,6 @@ jobs:
             echo "release_version=$release_version"
             echo "release_tag=$release_tag"
             echo "major_minor=$major_minor"
-            echo "short_sha=${source_revision:0:7}"
             echo "is_release=$is_release"
             echo "publish_latest=$publish_latest"
             echo "image_version=$cargo_version"
@@ -210,7 +233,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      digest: ${{ steps.verify.outputs.digest || steps.rolling-digest.outputs.digest }}
+      digest: ${{ steps.verify.outputs.digest || steps.rolling-verify.outputs.digest }}
     steps:
       - name: Checkout publication tooling
         uses: actions/checkout@v7.0.1
@@ -221,6 +244,7 @@ jobs:
           sparse-checkout: |
             scripts/read-toml-string.sh
             scripts/reuse-verified-image.sh
+            scripts/update-container-alias.sh
             scripts/verify-release-image.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
@@ -261,7 +285,7 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
           SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
-          SHA_TAG: sha-${{ needs.resolve.outputs.short_sha }}
+          SHA_TAG: sha-${{ needs.resolve.outputs.source_revision }}
           IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}
           IS_RELEASE: ${{ needs.resolve.outputs.is_release }}
           IS_BACKFILL: ${{ needs.resolve.outputs.is_backfill }}
@@ -275,13 +299,10 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.name }}
           SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
-          SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
           IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
-          MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
           IS_RELEASE: ${{ needs.resolve.outputs.is_release }}
-          PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
           PUBLISH_SHA: ${{ steps.existing.outputs.publish_sha }}
         run: |
           set -euo pipefail
@@ -299,17 +320,13 @@ jobs:
           done
 
           tags=()
-          if [ "$PUBLISH_LATEST" = "true" ]; then
-            tags+=("${IMAGE}:latest")
-          fi
           if [ "$PUBLISH_SHA" != "false" ]; then
-            tags+=("${IMAGE}:sha-${SHORT_SHA}")
+            tags+=("${IMAGE}:sha-${SOURCE_REVISION}")
           fi
           if [ "$IS_RELEASE" = "true" ]; then
             tags+=(
               "${IMAGE}:${RELEASE_TAG}"
               "${IMAGE}:${RELEASE_VERSION}"
-              "${IMAGE}:${MAJOR_MINOR}"
             )
           fi
           if [ "${#tags[@]}" -eq 0 ]; then
@@ -360,24 +377,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Update release rolling tag
-        if: needs.resolve.outputs.is_release == 'true' && steps.existing.outputs.reuse == 'true'
-        shell: bash
-        env:
-          IMAGE: ${{ steps.image.outputs.name }}
-          DIGEST: ${{ steps.existing.outputs.digest }}
-          MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
-        run: docker buildx imagetools create --tag "${IMAGE}:${MAJOR_MINOR}" "${IMAGE}@${DIGEST}"
-
-      - name: Update latest from verified immutable digest
-        if: needs.resolve.outputs.is_release != 'true' && steps.existing.outputs.reuse == 'true'
-        shell: bash
-        env:
-          IMAGE: ${{ steps.image.outputs.name }}
-          DIGEST: ${{ steps.existing.outputs.digest }}
-        run: docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}@${DIGEST}"
-
-      - name: Verify versioned tags, platforms, and source labels
+      - name: Verify immutable versioned tags, platforms, and source labels
         id: verify
         if: needs.resolve.outputs.is_release == 'true'
         shell: bash
@@ -385,21 +385,56 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
-          MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
           SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
-          SHA_TAG: sha-${{ needs.resolve.outputs.short_sha }}
+          SHA_TAG: sha-${{ needs.resolve.outputs.source_revision }}
           VERIFY_SHA: ${{ steps.existing.outputs.verify_sha }}
         run: |
           set -euo pipefail
-          tags=("$RELEASE_TAG" "$RELEASE_VERSION" "$MAJOR_MINOR")
+          tags=("$RELEASE_TAG" "$RELEASE_VERSION")
           if [ "$VERIFY_SHA" != "false" ]; then
             tags+=("$SHA_TAG")
           fi
           bash publication-tools/scripts/verify-release-image.sh \
             "$IMAGE" "$SOURCE_REVISION" "$RELEASE_VERSION" "${tags[@]}"
 
-      - name: Record rolling image digest
-        id: rolling-digest
+      - name: Verify immutable rolling tag, platforms, and source labels
+        id: rolling-verify
         if: needs.resolve.outputs.is_release != 'true'
         shell: bash
-        run: echo "digest=${{ steps.existing.outputs.digest || steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          SHA_TAG: sha-${{ needs.resolve.outputs.source_revision }}
+        run: |
+          bash publication-tools/scripts/verify-release-image.sh \
+            "$IMAGE" "$SOURCE_REVISION" "$IMAGE_VERSION" "$SHA_TAG"
+
+      - name: Update eligible release rolling tag
+        if: needs.resolve.outputs.is_release == 'true'
+        shell: bash
+        env:
+          ALIAS_KIND: major-minor
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.verify.outputs.digest }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+          MAJOR_MINOR: ${{ needs.resolve.outputs.major_minor }}
+          SOURCE_DIR: source
+          VERIFY_RELEASE_IMAGE_SCRIPT: ${{ github.workspace }}/publication-tools/scripts/verify-release-image.sh
+        run: bash publication-tools/scripts/update-container-alias.sh
+
+      - name: Update eligible latest tag
+        if: needs.resolve.outputs.publish_latest == 'true'
+        shell: bash
+        env:
+          ALIAS_KIND: latest
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.rolling-verify.outputs.digest }}
+          SOURCE_REVISION: ${{ needs.resolve.outputs.source_revision }}
+          IMAGE_VERSION: ${{ needs.resolve.outputs.image_version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_DIR: source
+          VERIFY_RELEASE_IMAGE_SCRIPT: ${{ github.workspace }}/publication-tools/scripts/verify-release-image.sh
+        run: bash publication-tools/scripts/update-container-alias.sh

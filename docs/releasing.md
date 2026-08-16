@@ -17,13 +17,24 @@ Run the **Prepare Release** workflow from the default branch:
 3. Review and merge the generated `release/vX.Y.Z` pull request only after its
    normal CI and documentation workflows pass on the exact release commit.
 
-The non-dry-run path requires the repository variable
-`AUTO_COMMIT_APP_CLIENT_ID` and secret `AUTO_COMMIT_APP_PRIVATE_KEY`. The
-installed GitHub App needs read/write access
-to repository contents and pull requests. The workflow deliberately uses its
+The non-dry-run path requires the secret `AUTO_COMMIT_APP_PRIVATE_KEY` plus one
+GitHub App identifier. The preferred identifier is the repository variable
+`AUTO_COMMIT_APP_CLIENT_ID`; the existing `AUTO_COMMIT_APP_ID` secret remains a
+compatible fallback, and the client ID takes precedence when both are present.
+To migrate without an outage, add and verify the client-ID variable before
+removing the App-ID secret. The installed GitHub App needs read/write access to
+repository contents and pull requests. The workflow deliberately uses its
 installation token when pushing the branch and opening the pull request so the
-generated `pull_request` event starts normal CI; GitHub suppresses new workflow
-runs for equivalent writes made with the built-in `GITHUB_TOKEN`.
+generated `pull_request` event starts normal CI and avoids the
+`github-actions[bot]` approval hold. Equivalent pull-request events created with
+the built-in `GITHUB_TOKEN` can be left waiting for approval, and most other
+events created by that token do not start new workflow runs.
+
+Preparation pins the exact default-branch dispatch commit before validating App
+credentials. If a later live step fails, recovery capture is attempted only
+from that valid checkout and cannot replace the primary failure with a
+secondary Git error. Credential-free dry runs do not generate an App token or a
+recovery artifact.
 
 For local recovery or troubleshooting, run the same deterministic transformer
 from a clean default-branch checkout, inspect the diff, and open the release PR
@@ -41,10 +52,11 @@ first-parent history and selects the unique commit that introduced that package
 version. This preserves the reviewed release candidate if documentation or
 workflow fixes reach the default branch before publication, and it fails closed
 if history is shallow or a version was reused. If the matching tag already
-exists after a partial run, the workflow requires that it is annotated,
-reachable from the dispatched default-branch commit, and consistent with the
-tagged Cargo and changelog metadata; the retry then publishes that immutable
-source commit.
+exists after a partial run, the workflow requires that it is annotated, on the
+default branch's first-parent history, reachable from the dispatched
+default-branch commit, exactly at the unique commit that introduced the
+version, and consistent with the tagged Cargo and changelog metadata; the retry
+then publishes that immutable source commit.
 
 The release workflow directly calls the reusable container workflow. It does
 not depend on a tag created with `GITHUB_TOKEN` starting a second workflow.
@@ -80,14 +92,35 @@ silently changing the package contents. Never bypass that boundary with
 
 ## Direct Tags and Historical Backfills
 
-A human-pushed annotated `vX.Y.Z` tag remains supported. It must match the
-version in that commit's `Cargo.toml`; the release and container workflows fail
-closed for a lightweight, moved, or mismatched tag.
+A human-pushed annotated `vX.Y.Z` tag remains supported. Its target must be the
+unique commit on the default branch's first-parent history that introduced
+`X.Y.Z` in `Cargo.toml`; a later same-version commit is not a release source. It
+does not have to remain the current default-branch tip, so a queued run remains
+valid if the branch advances. Because that introduction commit necessarily
+touches `Cargo.toml`, both required CI workflows must have an exact successful
+default-branch push run for it that is still retained by GitHub Actions. A
+second-parent pull-request head, a later same-version commit, or a commit whose
+CI run records have expired cannot be published through this path. Human tag
+pushes enter only through the release workflow, which invokes Docker
+publication after CI preflight; Docker Publish does not have a second, ungated
+tag-push trigger. Release publication fails closed for a lightweight, moved,
+mismatched, or unproven tag.
 
 To backfill GHCR tags for a historical release, dispatch **Docker Publish** from
 the default branch with `release_tag=vX.Y.Z`. The workflow checks out that tag,
-validates its annotated source commit, and builds from it. It never aliases a
-historical version to `latest`.
+requires its annotated source commit to remain the unique first-parent commit
+that introduced `X.Y.Z`, and builds from it. It never aliases a
+historical version to `latest`, and it updates the mutable `X.Y` alias only when
+`vX.Y.Z` is the highest canonical annotated patch tag in that release line.
+Older backfills and delayed retries still repair missing immutable `sha-*`,
+`vX.Y.Z`, and `X.Y.Z` aliases without rolling `X.Y` backward. Likewise, a
+delayed default-branch run updates `latest` only while its source revision is
+still the current remote default-branch head. Before moving `X.Y`, the workflow
+also verifies the existing alias's version, source revision, and digest; a
+newer version or conflicting equal-version digest is never overwritten.
+Ambiguous, malformed, moved, or unavailable Git or registry state fails closed
+before a mutable alias is moved, and any update or post-update verification
+failure fails the publication run.
 
 ## Verify the Published Image
 
@@ -99,7 +132,7 @@ VERSION=0.4.0
 TAG="v${VERSION}"
 IMAGE=ghcr.io/ambiguous-interactive/signal-fish-server
 SOURCE_REVISION=$(git rev-list -n 1 "$TAG")
-SHA_TAG="sha-${SOURCE_REVISION:0:7}"
+SHA_TAG="sha-${SOURCE_REVISION}"
 
 bash scripts/verify-release-image.sh \
   "$IMAGE" "$SOURCE_REVISION" "$VERSION" \

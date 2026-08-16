@@ -338,6 +338,58 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
         fixture.tag(true, &release);
         release
     }
+    fn historical_direct_match(fixture: &ReleaseFixture) -> String {
+        let release = fixture.head();
+        fixture.tag(true, &release);
+        fixture.commit("main advanced after tag creation");
+        git(&fixture.root, &["checkout", "--detach", &release]);
+        release
+    }
+    fn manual_non_introduction_tag(fixture: &ReleaseFixture) -> String {
+        fixture.commit("same-version commit after release introduction");
+        let tagged = fixture.head();
+        fixture.tag(true, &tagged);
+        tagged
+    }
+    fn direct_non_introduction_tag(fixture: &ReleaseFixture) -> String {
+        manual_non_introduction_tag(fixture)
+    }
+    fn tag_second_parent(fixture: &ReleaseFixture, checkout_tag: bool) -> String {
+        git(&fixture.root, &["checkout", "-b", "release-side"]);
+        write_file(
+            &fixture.root.join("workflow-marker"),
+            "release candidate on a side parent",
+        );
+        git(&fixture.root, &["add", "workflow-marker"]);
+        git(
+            &fixture.root,
+            &["commit", "-m", "release candidate side parent"],
+        );
+        let release = fixture.head();
+        fixture.tag(true, &release);
+        git(&fixture.root, &["checkout", "main"]);
+        git(
+            &fixture.root,
+            &[
+                "merge",
+                "--no-ff",
+                "release-side",
+                "-m",
+                "merge release candidate",
+            ],
+        );
+        git(&fixture.root, &["push", "origin", "main"]);
+        if checkout_tag {
+            git(&fixture.root, &["checkout", "--detach", &release]);
+        }
+        release
+    }
+    fn manual_second_parent(fixture: &ReleaseFixture) -> String {
+        tag_second_parent(fixture, false)
+    }
+    fn direct_second_parent(fixture: &ReleaseFixture) -> String {
+        tag_second_parent(fixture, true)
+    }
     fn direct_event_mismatch(fixture: &ReleaseFixture) -> String {
         let release = fixture.head();
         fixture.tag(true, &release);
@@ -427,6 +479,15 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
             diagnostic: "",
         },
         Case {
+            name: "manual retry rejects a same-version non-introduction tag",
+            initial_version: "1.2.3",
+            arrange: manual_non_introduction_tag,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: false,
+            diagnostic: "not the unique first-parent version-introduction commit",
+        },
+        Case {
             name: "lightweight tag is rejected",
             initial_version: "1.2.3",
             arrange: lightweight,
@@ -461,6 +522,42 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
             event_ref: "refs/tags/v1.2.3",
             succeeds: true,
             diagnostic: "",
+        },
+        Case {
+            name: "direct historical first-parent tag passes after main advances",
+            initial_version: "1.2.3",
+            arrange: historical_direct_match,
+            event: "push",
+            event_ref: "refs/tags/v1.2.3",
+            succeeds: true,
+            diagnostic: "",
+        },
+        Case {
+            name: "direct tag rejects a same-version non-introduction commit",
+            initial_version: "1.2.3",
+            arrange: direct_non_introduction_tag,
+            event: "push",
+            event_ref: "refs/tags/v1.2.3",
+            succeeds: false,
+            diagnostic: "not the unique first-parent version-introduction commit",
+        },
+        Case {
+            name: "manual retry rejects a tagged second parent",
+            initial_version: "1.2.3",
+            arrange: manual_second_parent,
+            event: "workflow_dispatch",
+            event_ref: "refs/heads/main",
+            succeeds: false,
+            diagnostic: "not on the first-parent history",
+        },
+        Case {
+            name: "direct tag rejects a tagged second parent",
+            initial_version: "1.2.3",
+            arrange: direct_second_parent,
+            event: "push",
+            event_ref: "refs/tags/v1.2.3",
+            succeeds: false,
+            diagnostic: "not on the first-parent history",
         },
         Case {
             name: "direct tag event commit mismatch is rejected",

@@ -22,6 +22,9 @@ else
     cp scripts/read-toml-string.sh "${resolver_scratch}/read-toml-string.sh"
     readonly READ_TOML_SCRIPT="${resolver_scratch}/read-toml-string.sh"
 fi
+finder_source=${FIND_RELEASE_VERSION_INTRODUCTION_SCRIPT:-"$(dirname "${BASH_SOURCE[0]}")/find-release-version-introduction.sh"}
+cp "$finder_source" "${resolver_scratch}/find-release-version-introduction.sh"
+readonly FIND_RELEASE_VERSION_INTRODUCTION_SCRIPT="${resolver_scratch}/find-release-version-introduction.sh"
 
 if [ -z "$EVENT_NAME" ] || [ -z "$DEFAULT_BRANCH" ] || [ -z "$EVENT_REF" ] || [ -z "$OUTPUT_FILE" ]; then
     echo "ERROR: release event, default branch, ref, and output file are required." >&2
@@ -32,52 +35,11 @@ read_cargo_version() {
     bash "$READ_TOML_SCRIPT" Cargo.toml version package 2>/dev/null || true
 }
 
-read_cargo_version_at() {
-    local candidate=$1
-    local manifest="${resolver_scratch}/Cargo.${candidate}.toml"
-    if ! git show "${candidate}:Cargo.toml" > "$manifest" 2>/dev/null; then
-        return 1
-    fi
-    bash "$READ_TOML_SCRIPT" "$manifest" version package 2>/dev/null || true
-}
-
 find_version_introduction() {
-    local dispatch_revision=$1
+    local history_revision=$1
     local expected_version=$2
-    local candidate candidate_version parent parent_version
-    local match_count=0
-    local matched_revision=
-
-    if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
-        echo "ERROR: Release source selection requires complete first-parent history." >&2
-        return 1
-    fi
-
-    while IFS= read -r candidate; do
-        candidate_version=$(read_cargo_version_at "$candidate" || true)
-        [ "$candidate_version" = "$expected_version" ] || continue
-
-        parent=$(git rev-parse "${candidate}^1" 2>/dev/null || true)
-        parent_version=
-        if [ -n "$parent" ]; then
-            parent_version=$(read_cargo_version_at "$parent" || true)
-        fi
-        [ "$parent_version" != "$expected_version" ] || continue
-
-        matched_revision=$candidate
-        match_count=$((match_count + 1))
-    done < <(git rev-list --first-parent "$dispatch_revision" -- Cargo.toml)
-
-    if [ "$match_count" -eq 0 ]; then
-        echo "ERROR: No first-parent commit introduces release version ${expected_version}." >&2
-        return 1
-    fi
-    if [ "$match_count" -ne 1 ]; then
-        echo "ERROR: Release version ${expected_version} has multiple first-parent introduction commits; refusing ambiguous source selection." >&2
-        return 1
-    fi
-
-    printf '%s\n' "$matched_revision"
+    bash "$FIND_RELEASE_VERSION_INTRODUCTION_SCRIPT" "." "$history_revision" \
+        "$expected_version" "$READ_TOML_SCRIPT"
 }
 
 validate_annotated_tag() {
@@ -156,6 +118,14 @@ if ! git merge-base --is-ancestor "$source_revision" "origin/${DEFAULT_BRANCH}";
     echo "ERROR: Release source ${source_revision} is not merged into ${DEFAULT_BRANCH}." >&2
     exit 1
 fi
+if ! first_parent_history=$(git rev-list --first-parent "origin/${DEFAULT_BRANCH}" 2>&1); then
+    echo "ERROR: Could not inspect ${DEFAULT_BRANCH} first-parent history: ${first_parent_history}" >&2
+    exit 1
+fi
+if ! grep -Fx "$source_revision" <<< "$first_parent_history" >/dev/null; then
+    echo "ERROR: Release source ${source_revision} is not on the first-parent history of ${DEFAULT_BRANCH}." >&2
+    exit 1
+fi
 
 git checkout --detach "$source_revision"
 cargo_version=$(read_cargo_version)
@@ -166,6 +136,12 @@ fi
 escaped_version=${version//./\\.}
 if ! grep -Eq "^## \\[${escaped_version}\\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md; then
     echo "ERROR: CHANGELOG.md has no ## [${version}] release section, with or without a date." >&2
+    exit 1
+fi
+
+introduction_revision=$(find_version_introduction "origin/${DEFAULT_BRANCH}" "$version")
+if [ "$source_revision" != "$introduction_revision" ]; then
+    echo "ERROR: Release source ${source_revision} is not the unique first-parent version-introduction commit ${introduction_revision} for ${version}." >&2
     exit 1
 fi
 

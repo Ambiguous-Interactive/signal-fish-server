@@ -1287,8 +1287,20 @@ case "${1:-}" in
         [ "$authenticated" = true ]
         ;;
     rev-parse)
-        [ "$*" = "rev-parse FETCH_HEAD" ]
-        printf '%s\n' "${FETCHED_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
+        case "$*" in
+            "rev-parse --verify HEAD")
+                printf '%s\n' "${BASE_SHA:-dddddddddddddddddddddddddddddddddddddddd}"
+                ;;
+            "rev-parse FETCH_HEAD")
+                printf '%s\n' "${FETCHED_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
+                ;;
+            *) exit 99 ;;
+        esac
+        ;;
+    rev-list)
+        printf '%s %s\n' \
+            "${FETCHED_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" \
+            "${PARENT_SHA:-dddddddddddddddddddddddddddddddddddddddd}"
         ;;
     diff)
         exit "${TREE_STATUS:-0}"
@@ -1417,7 +1429,405 @@ esac
 }
 
 #[test]
+fn prepared_release_resolver_reuses_only_one_direct_non_merge_commit() {
+    struct Case<'a> {
+        description: &'static str,
+        branch_sha: &'a str,
+        expected_success: bool,
+        expected_diagnostic: &'static str,
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = tempfile::tempdir().expect("create resolver graph fixture");
+    let repository = temp.path().join("repository");
+    let remote = temp.path().join("remote.git");
+    fs::create_dir(&repository).expect("create resolver repository");
+
+    let init = git_at(&repository)
+        .args(["init", "--quiet", "--initial-branch=main"])
+        .output()
+        .expect("initialize resolver repository");
+    assert!(init.status.success(), "initialize resolver repository");
+    for (key, value) in [
+        ("user.name", "Release Fixture"),
+        ("user.email", "release-fixture@example.invalid"),
+    ] {
+        assert!(git_at(&repository)
+            .args(["config", key, value])
+            .status()
+            .expect("configure resolver repository")
+            .success());
+    }
+    write(
+        &repository.join("Cargo.toml"),
+        "[package]\nname = \"resolver-fixture\"\nversion = \"1.2.3\"\n",
+    );
+    write(&repository.join("release.txt"), "base\n");
+    assert!(git_at(&repository)
+        .args(["add", "Cargo.toml", "release.txt"])
+        .status()
+        .expect("stage resolver base")
+        .success());
+    assert!(git_at(&repository)
+        .args(["commit", "--quiet", "-m", "base"])
+        .status()
+        .expect("commit resolver base")
+        .success());
+
+    let init_remote = Command::new("git")
+        .args(["init", "--quiet", "--bare"])
+        .arg(&remote)
+        .output()
+        .expect("initialize resolver remote");
+    assert!(init_remote.status.success(), "initialize resolver remote");
+    assert!(git_at(&repository)
+        .args(["remote", "add", "origin"])
+        .arg(&remote)
+        .status()
+        .expect("add resolver remote")
+        .success());
+
+    let git_stdout = |arguments: &[&str]| {
+        let output = git_at(&repository)
+            .args(arguments)
+            .output()
+            .unwrap_or_else(|error| panic!("run git {arguments:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output must be UTF-8")
+            .trim()
+            .to_owned()
+    };
+    let make_commit = |tree: &str, parents: &[&str], message: &str| {
+        let mut command = git_at(&repository);
+        command.args(["commit-tree", tree, "-m", message]);
+        for parent in parents {
+            command.args(["-p", parent]);
+        }
+        let output = command.output().expect("create resolver graph commit");
+        assert!(
+            output.status.success(),
+            "create {message:?} resolver graph commit:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("commit SHA must be UTF-8")
+            .trim()
+            .to_owned()
+    };
+
+    let base_sha = git_stdout(&["rev-parse", "HEAD"]);
+    let base_tree = git_stdout(&["rev-parse", "HEAD^{tree}"]);
+    write(&repository.join("release.txt"), "prepared\n");
+    assert!(git_at(&repository)
+        .args(["add", "release.txt"])
+        .status()
+        .expect("stage prepared resolver tree")
+        .success());
+    let prepared_tree = git_stdout(&["write-tree"]);
+    assert!(git_at(&repository)
+        .args(["reset", "--quiet", "HEAD", "--", "release.txt"])
+        .status()
+        .expect("restore unstaged prepared resolver tree")
+        .success());
+
+    let valid = make_commit(&prepared_tree, &[&base_sha], "valid release");
+    let unrelated_parent = make_commit(&base_tree, &[], "unrelated root");
+    let divergent = make_commit(&prepared_tree, &[&unrelated_parent], "divergent release");
+    let orphan = make_commit(&prepared_tree, &[], "orphan release");
+    let intermediate = make_commit(&base_tree, &[&base_sha], "intermediate release");
+    let multi_commit = make_commit(&prepared_tree, &[&intermediate], "multi-commit release");
+    let merge_side = make_commit(&base_tree, &[&base_sha], "merge side");
+    let merge = make_commit(&prepared_tree, &[&base_sha, &merge_side], "merge release");
+
+    for case in [
+        Case {
+            description: "valid direct commit",
+            branch_sha: &valid,
+            expected_success: true,
+            expected_diagnostic: "branch_exists=true",
+        },
+        Case {
+            description: "divergent commit",
+            branch_sha: &divergent,
+            expected_success: false,
+            expected_diagnostic: "sole parent is local HEAD",
+        },
+        Case {
+            description: "orphan commit",
+            branch_sha: &orphan,
+            expected_success: false,
+            expected_diagnostic: "exactly one non-merge commit",
+        },
+        Case {
+            description: "multi-commit branch",
+            branch_sha: &multi_commit,
+            expected_success: false,
+            expected_diagnostic: "sole parent is local HEAD",
+        },
+        Case {
+            description: "merge commit",
+            branch_sha: &merge,
+            expected_success: false,
+            expected_diagnostic: "exactly one non-merge commit",
+        },
+    ] {
+        let branch_refspec = format!("{}:refs/heads/release/v1.2.3", case.branch_sha);
+        let update_ref = git_at(&repository)
+            .args(["push", "--quiet", "--force", "origin", &branch_refspec])
+            .output()
+            .unwrap_or_else(|error| panic!("publish {} fixture: {error}", case.description));
+        assert!(
+            update_ref.status.success(),
+            "publish {} fixture",
+            case.description
+        );
+
+        let github_output = temp.path().join(format!("{}.output", case.description));
+        let output = Command::new("bash")
+            .arg(root.join("scripts/resolve-prepared-release.sh"))
+            .current_dir(&repository)
+            .env("GH_TOKEN", "test-token")
+            .env("GITHUB_OUTPUT", &github_output)
+            .output()
+            .unwrap_or_else(|error| panic!("run {} resolver fixture: {error}", case.description));
+        assert_eq!(
+            output.status.success(),
+            case.expected_success,
+            "{}:\nstdout:\n{}\nstderr:\n{}",
+            case.description,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let evidence = if case.expected_success {
+            read(&github_output)
+        } else {
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        };
+        assert!(
+            evidence.contains(case.expected_diagnostic),
+            "{} did not report {:?}:\n{}",
+            case.description,
+            case.expected_diagnostic,
+            evidence
+        );
+    }
+}
+
+#[test]
+fn release_branch_push_reconciles_ambiguous_failures_with_bounded_readbacks() {
+    struct Case {
+        description: &'static str,
+        push_status: &'static str,
+        remote_statuses: &'static str,
+        remote_sha: &'static str,
+        expected_success: bool,
+        expected_readbacks: usize,
+        expected_diagnostic: Option<&'static str>,
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = tempfile::tempdir().expect("create branch push helper test directory");
+    let fake_git = temp.path().join("git");
+    write(
+        &fake_git,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+authenticated=false
+if [ "${1:-}" = "-c" ]; then
+    [[ "${2:-}" == http.https://github.com/.extraheader=AUTHORIZATION:* ]]
+    authenticated=true
+    shift 2
+fi
+printf '%s\n' "$*" >> "$GIT_LOG"
+case "${1:-}" in
+    push)
+        [ "$authenticated" = true ]
+        [ "${PUSH_STATUS:-0}" -eq 0 ] || {
+            echo "simulated push mutation failure" >&2
+            exit "$PUSH_STATUS"
+        }
+        ;;
+    ls-remote)
+        [ "$authenticated" = true ]
+        count=0
+        [ ! -f "$READBACK_COUNT" ] || read -r count < "$READBACK_COUNT"
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$READBACK_COUNT"
+        IFS=, read -r -a statuses <<< "${REMOTE_STATUSES:-0}"
+        index=$((count - 1))
+        if [ "$index" -ge "${#statuses[@]}" ]; then
+            index=$((${#statuses[@]} - 1))
+        fi
+        status=${statuses[$index]}
+        if [ "$status" -eq 0 ]; then
+            printf '%s\t%s\n' "${REMOTE_SHA:-}" "refs/heads/release/v0.5.2"
+        else
+            echo "simulated branch read-back failure" >&2
+        fi
+        exit "$status"
+        ;;
+    *)
+        echo "unexpected fake git invocation: $*" >&2
+        exit 99
+        ;;
+esac
+"#,
+    );
+    let mut permissions = fs::metadata(&fake_git)
+        .expect("read fake git metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
+    let fake_sleep = temp.path().join("sleep");
+    write(&fake_sleep, "#!/usr/bin/env bash\nexit 0\n");
+    let mut permissions = fs::metadata(&fake_sleep)
+        .expect("read fake sleep metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_sleep, permissions).expect("make fake sleep executable");
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").expect("PATH must be set")
+    );
+    let helper = root.join("scripts/push-release-branch.sh");
+    let expected_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    for case in [
+        Case {
+            description: "successful push",
+            push_status: "0",
+            remote_statuses: "0",
+            remote_sha: expected_sha,
+            expected_success: true,
+            expected_readbacks: 0,
+            expected_diagnostic: None,
+        },
+        Case {
+            description: "ambiguous push created exact branch",
+            push_status: "1",
+            remote_statuses: "0",
+            remote_sha: expected_sha,
+            expected_success: true,
+            expected_readbacks: 1,
+            expected_diagnostic: Some("exact expected commit"),
+        },
+        Case {
+            description: "ambiguous push appears on second readback",
+            push_status: "1",
+            remote_statuses: "2,0",
+            remote_sha: expected_sha,
+            expected_success: true,
+            expected_readbacks: 2,
+            expected_diagnostic: Some("exact expected commit"),
+        },
+        Case {
+            description: "ambiguous push created wrong branch",
+            push_status: "1",
+            remote_statuses: "0",
+            remote_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            expected_success: false,
+            expected_readbacks: 1,
+            expected_diagnostic: Some("expected bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        },
+        Case {
+            description: "failed push left branch absent",
+            push_status: "1",
+            remote_statuses: "2,2,2",
+            remote_sha: "",
+            expected_success: false,
+            expected_readbacks: 3,
+            expected_diagnostic: Some("simulated push mutation failure"),
+        },
+        Case {
+            description: "failed push and failed readback",
+            push_status: "1",
+            remote_statuses: "128,128,128",
+            remote_sha: "",
+            expected_success: false,
+            expected_readbacks: 3,
+            expected_diagnostic: Some("simulated branch read-back failure"),
+        },
+    ] {
+        let log = temp.path().join(format!("{}.log", case.description));
+        let readback_count = temp.path().join(format!("{}.count", case.description));
+        let output = Command::new("bash")
+            .arg(&helper)
+            .args(["release/v0.5.2", expected_sha])
+            .env("PATH", &path)
+            .env("GH_TOKEN", "test-token")
+            .env("GIT_LOG", &log)
+            .env("PUSH_STATUS", case.push_status)
+            .env("REMOTE_STATUSES", case.remote_statuses)
+            .env("REMOTE_SHA", case.remote_sha)
+            .env("READBACK_COUNT", &readback_count)
+            .output()
+            .unwrap_or_else(|error| panic!("run {} push helper case: {error}", case.description));
+        assert_eq!(
+            output.status.success(),
+            case.expected_success,
+            "{}:\nstdout:\n{}\nstderr:\n{}",
+            case.description,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let log = read(&log);
+        assert_eq!(
+            log.lines()
+                .filter(|line| *line == "push origin HEAD:refs/heads/release/v0.5.2")
+                .count(),
+            1,
+            "{} must attempt the exact branch push exactly once:\n{}",
+            case.description,
+            log,
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("ls-remote "))
+                .count(),
+            case.expected_readbacks,
+            "{} must perform exactly the required number of read-backs:\n{}",
+            case.description,
+            log
+        );
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if let Some(expected_diagnostic) = case.expected_diagnostic {
+            assert!(
+                diagnostics.contains(expected_diagnostic),
+                "{} did not report {expected_diagnostic:?}:\n{}",
+                case.description,
+                diagnostics
+            );
+        }
+    }
+}
+
+#[test]
 fn release_pr_helper_reuses_creates_and_fails_closed() {
+    struct Case {
+        description: &'static str,
+        number: &'static str,
+        created_number: &'static str,
+        head_sha: &'static str,
+        initial_list_status: &'static str,
+        readback_statuses: &'static str,
+        available_after: &'static str,
+        create_status: &'static str,
+        expected_success: bool,
+        expected_create: bool,
+        expected_readbacks: usize,
+        expected_diagnostic: Option<&'static str>,
+    }
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::tempdir().expect("create PR helper test directory");
     let fake_gh = temp.path().join("gh");
@@ -1428,15 +1838,33 @@ set -euo pipefail
 printf '%s\n' "$*" >> "$GH_LOG"
 case "${1:-} ${2:-}" in
     "api --method")
-        [ "${PR_LIST_STATUS:-0}" -eq 0 ] || exit "$PR_LIST_STATUS"
         if [[ "$*" == *"head.sha"* ]]; then
-            number=${PR_NUMBER:-${CREATED_NUMBER:-}}
+            count=0
+            [ ! -f "$READBACK_COUNT" ] || read -r count < "$READBACK_COUNT"
+            count=$((count + 1))
+            printf '%s\n' "$count" > "$READBACK_COUNT"
+            IFS=, read -r -a statuses <<< "${READBACK_STATUSES:-0}"
+            index=$((count - 1))
+            if [ "$index" -ge "${#statuses[@]}" ]; then
+                index=$((${#statuses[@]} - 1))
+            fi
+            status=${statuses[$index]}
+            [ "$status" -eq 0 ] || exit "$status"
+            number=""
+            if [ "$count" -ge "${AVAILABLE_AFTER:-1}" ]; then
+                number=${PR_NUMBER:-${CREATED_NUMBER:-}}
+            fi
             [ -z "$number" ] || printf '%s\t%s\n' "$number" "${PR_HEAD_SHA:-}"
         else
+            [ "${INITIAL_LIST_STATUS:-0}" -eq 0 ] || exit "$INITIAL_LIST_STATUS"
             printf '%s\n' "${PR_NUMBER:-}"
         fi
         ;;
     "pr create")
+        [ "${PR_CREATE_STATUS:-0}" -eq 0 ] || {
+            echo "simulated PR creation mutation failure" >&2
+            exit "$PR_CREATE_STATUS"
+        }
         echo "https://example.invalid/pull/1"
         ;;
     *) exit 99 ;;
@@ -1448,6 +1876,13 @@ esac
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&fake_gh, permissions).expect("make fake gh executable");
+    let fake_sleep = temp.path().join("sleep");
+    write(&fake_sleep, "#!/usr/bin/env bash\nexit 0\n");
+    let mut permissions = fs::metadata(&fake_sleep)
+        .expect("read fake sleep metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_sleep, permissions).expect("make fake sleep executable");
     let path = format!(
         "{}:{}",
         temp.path().display(),
@@ -1457,37 +1892,108 @@ esac
     let body = temp.path().join("body.md");
     write(&body, "release body\n");
 
-    for (description, number, created, head_sha, list_status, success, creates) in [
-        (
-            "existing PR",
-            "42",
-            "",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "0",
-            true,
-            false,
-        ),
-        (
-            "missing PR",
-            "",
-            "43",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "0",
-            true,
-            true,
-        ),
-        (
-            "mismatched head",
-            "42",
-            "",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "0",
-            false,
-            false,
-        ),
-        ("PR API failure", "", "", "", "1", false, false),
+    for case in [
+        Case {
+            description: "existing PR",
+            number: "42",
+            created_number: "",
+            head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            initial_list_status: "0",
+            readback_statuses: "0",
+            available_after: "1",
+            create_status: "0",
+            expected_success: true,
+            expected_create: false,
+            expected_readbacks: 1,
+            expected_diagnostic: Some("Reusing open release PR #42"),
+        },
+        Case {
+            description: "missing PR",
+            number: "",
+            created_number: "43",
+            head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            initial_list_status: "0",
+            readback_statuses: "0",
+            available_after: "1",
+            create_status: "0",
+            expected_success: true,
+            expected_create: true,
+            expected_readbacks: 1,
+            expected_diagnostic: Some("Release v0.5.2 is represented"),
+        },
+        Case {
+            description: "ambiguous creation created exact PR",
+            number: "",
+            created_number: "43",
+            head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            initial_list_status: "0",
+            readback_statuses: "0",
+            available_after: "1",
+            create_status: "1",
+            expected_success: true,
+            expected_create: true,
+            expected_readbacks: 1,
+            expected_diagnostic: Some("exact expected head"),
+        },
+        Case {
+            description: "ambiguous creation appears on third readback",
+            number: "",
+            created_number: "43",
+            head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            initial_list_status: "0",
+            readback_statuses: "0",
+            available_after: "3",
+            create_status: "1",
+            expected_success: true,
+            expected_create: true,
+            expected_readbacks: 3,
+            expected_diagnostic: Some("exact expected head"),
+        },
+        Case {
+            description: "ambiguous creation left PR absent",
+            number: "",
+            created_number: "",
+            head_sha: "",
+            initial_list_status: "0",
+            readback_statuses: "0",
+            available_after: "99",
+            create_status: "1",
+            expected_success: false,
+            expected_create: true,
+            expected_readbacks: 3,
+            expected_diagnostic: Some("simulated PR creation mutation failure"),
+        },
+        Case {
+            description: "mismatched head",
+            number: "42",
+            created_number: "",
+            head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            initial_list_status: "0",
+            readback_statuses: "0",
+            available_after: "1",
+            create_status: "0",
+            expected_success: false,
+            expected_create: false,
+            expected_readbacks: 1,
+            expected_diagnostic: Some("expected bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        },
+        Case {
+            description: "PR API failure",
+            number: "",
+            created_number: "",
+            head_sha: "",
+            initial_list_status: "1",
+            readback_statuses: "0",
+            available_after: "1",
+            create_status: "0",
+            expected_success: false,
+            expected_create: false,
+            expected_readbacks: 0,
+            expected_diagnostic: Some("Failed to list open release PRs"),
+        },
     ] {
-        let log = temp.path().join(format!("{description}.log"));
+        let log = temp.path().join(format!("{}.log", case.description));
+        let readback_count = temp.path().join(format!("{}.count", case.description));
         let output = Command::new("bash")
             .arg(&helper)
             .args(["main", "release/v0.5.2", "0.5.2", "v0.5.2"])
@@ -1497,21 +2003,61 @@ esac
             .env("GH_TOKEN", "test-token")
             .env("GITHUB_REPOSITORY", "owner/repo")
             .env("GH_LOG", &log)
-            .env("PR_NUMBER", number)
-            .env("CREATED_NUMBER", created)
-            .env("PR_HEAD_SHA", head_sha)
-            .env("PR_LIST_STATUS", list_status)
+            .env("PR_NUMBER", case.number)
+            .env("CREATED_NUMBER", case.created_number)
+            .env("PR_HEAD_SHA", case.head_sha)
+            .env("INITIAL_LIST_STATUS", case.initial_list_status)
+            .env("READBACK_STATUSES", case.readback_statuses)
+            .env("AVAILABLE_AFTER", case.available_after)
+            .env("READBACK_COUNT", &readback_count)
+            .env("PR_CREATE_STATUS", case.create_status)
             .output()
-            .unwrap_or_else(|error| panic!("run {description} helper case: {error}"));
-        assert_eq!(output.status.success(), success, "{description}");
+            .unwrap_or_else(|error| panic!("run {} helper case: {error}", case.description));
+        assert_eq!(
+            output.status.success(),
+            case.expected_success,
+            "{}:\nstdout:\n{}\nstderr:\n{}",
+            case.description,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         let log = read(&log);
         assert!(
             log.contains(
                 "api --method GET repos/owner/repo/pulls -f state=open -f base=main \
                  -f head=owner:release/v0.5.2"
             ),
-            "{description}: {log}"
+            "{}: {log}",
+            case.description
         );
-        assert_eq!(log.contains("pr create"), creates, "{description}");
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("pr create "))
+                .count(),
+            usize::from(case.expected_create),
+            "{} must perform exactly the expected number of PR creation mutations:\n{}",
+            case.description,
+            log
+        );
+        assert_eq!(
+            log.lines().filter(|line| line.contains("head.sha")).count(),
+            case.expected_readbacks,
+            "{} must perform exactly the required number of exact PR read-backs:\n{}",
+            case.description,
+            log
+        );
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if let Some(expected_diagnostic) = case.expected_diagnostic {
+            assert!(
+                diagnostics.contains(expected_diagnostic),
+                "{} did not report {expected_diagnostic:?}:\n{}",
+                case.description,
+                diagnostics
+            );
+        }
     }
 }
