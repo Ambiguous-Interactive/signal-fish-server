@@ -37,6 +37,13 @@ chrono = { version = "0.4", features = ["serde"] }
 
 Establish a WebSocket connection to the server's v2 endpoint.
 
+First fetch `GET http://localhost:3536/v2/client-config` (or the v3 companion)
+and configure tungstenite's `WebSocketConfig::max_message_size` to at least the
+returned `max_outbound_message_size` before opening the socket. The value is
+also present in the successful upgrade response header
+`x-signal-fish-max-outbound-message-size`, but pre-connect metadata is what
+lets the receive allocation limit be correct on the first connection.
+
 ```rust
 use tokio_tungstenite::connect_async;
 use url::Url;
@@ -261,6 +268,8 @@ pub struct ProtocolInfoPayload {
     pub max_protocol_version: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transports: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_outbound_message_size: Option<usize>,
 }
 
 /// Messages sent from the server to the client.
@@ -1401,6 +1410,8 @@ pub struct ProtocolInfoPayload {
     pub max_protocol_version: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transports: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_outbound_message_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

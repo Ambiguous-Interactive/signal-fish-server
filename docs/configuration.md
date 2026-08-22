@@ -154,7 +154,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST` | `security.enforce_app_id_allowlist` | `true` | Require the public client app ID to appear in `allowed_apps` |
 | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH` | `security.require_metrics_auth` | `true` | Require auth token for metrics endpoints |
 | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN` | `security.metrics_auth_token` | `null` | Bearer token for metrics endpoints |
-| `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE` | `security.max_message_size` | `65536` | Max WebSocket message size in bytes |
+| `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE` | `security.max_message_size` | `65536` | Max inbound WebSocket message size in bytes |
+| `SIGNAL_FISH__SECURITY__MAX_OUTBOUND_MESSAGE_SIZE` | `security.max_outbound_message_size` | `8388608` | Max aggregate encoded server WebSocket application payload in bytes (`1..=67108864`); oversized messages close the affected connection with code `1009` |
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES` | `security.max_signal_bytes` | `16384` | Max serialized size in bytes of a v3 `Signal` payload (must be > 0 and ≤ `max_message_size`) |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `24` | Max concurrent connections from one IP (covers a 16-player NAT/LAN session plus spectators and reconnect churn) |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED` | `security.transport.tls.enabled` | `false` | Enable built-in TLS listener |

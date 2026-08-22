@@ -27,6 +27,13 @@ pub const WEBSOCKET_REQUEST_ID_HEADER: &str = "x-signal-fish-request-id";
 /// response headers. Correlate it with listener and reverse-proxy evidence.
 pub const WEBSOCKET_UPGRADE_OUTCOME_HEADER: &str = "x-signal-fish-upgrade-outcome";
 
+/// Maximum aggregate server-to-client WebSocket application payload, in
+/// bytes, for this deployment. Native clients can discover the limit from the
+/// HTTP upgrade response; protocol-v3 clients also receive it in
+/// `ProtocolInfo` for browser compatibility.
+pub const WEBSOCKET_MAX_OUTBOUND_MESSAGE_SIZE_HEADER: &str =
+    "x-signal-fish-max-outbound-message-size";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpgradeOutcome {
     Accepted,
@@ -301,6 +308,14 @@ fn finish_upgrade_response(
         HeaderName::from_static(WEBSOCKET_UPGRADE_OUTCOME_HEADER),
         HeaderValue::from_static(outcome.header_value()),
     );
+    if let Ok(max_outbound_message_size) =
+        HeaderValue::from_str(&server.config().max_outbound_message_size.to_string())
+    {
+        response.headers_mut().insert(
+            HeaderName::from_static(WEBSOCKET_MAX_OUTBOUND_MESSAGE_SIZE_HEADER),
+            max_outbound_message_size,
+        );
+    }
 
     if outcome == UpgradeOutcome::Accepted {
         tracing::info!(
@@ -333,6 +348,44 @@ fn rejects_unsupported_token_binding_offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn every_handled_upgrade_response_advertises_the_configured_outbound_limit() {
+        let config = crate::server::ServerConfig {
+            max_outbound_message_size: 12_345,
+            ..crate::server::ServerConfig::default()
+        };
+        let server = EnhancedGameServer::new(
+            config,
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct header test server");
+
+        let response = finish_upgrade_response(
+            &server,
+            "127.0.0.1:3536".parse().expect("test address parses"),
+            "00000000-0000-4000-8000-000000000001",
+            UpgradeOutcome::RejectedDraining,
+            StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        );
+
+        assert_eq!(
+            response
+                .headers()
+                .get(WEBSOCKET_MAX_OUTBOUND_MESSAGE_SIZE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("12345")
+        );
+    }
 
     #[test]
     fn reserved_token_binding_versions_only_fail_closed_when_binding_is_enabled() {

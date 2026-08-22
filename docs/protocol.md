@@ -427,6 +427,36 @@ SDK/protocol compatibility details advertised after the app-ID handshake.
 
 ```
 
+Negotiated-v3 responses also include `max_outbound_message_size`, the maximum
+aggregate encoded application payload the deployment will send in one
+WebSocket message. Native clients can read the same decimal byte value from
+the `x-signal-fish-max-outbound-message-size` HTTP upgrade response header.
+The field remains absent from negotiated-v2 `ProtocolInfo` to preserve its
+frozen wire shape.
+
+Every client, including browser and negotiated-v2 clients, can fetch the same
+version-neutral JSON before opening a socket: replace the endpoint's `/ws`
+suffix with `/client-config` (`GET /v2/client-config` or
+`GET /v3/client-config`). The endpoint is governed by the deployment's normal
+HTTP CORS policy and returns
+`{"max_outbound_message_size":8388608}`. Configure the WebSocket receive limit
+to at least that value before connecting. Valid deployment values are
+`1..=67108864`, an exact portable range for JavaScript and 32-bit clients.
+
+The limit counts the complete JSON UTF-8 text payload or MessagePack binary
+payload after Signal Fish protocol encoding and before WebSocket framing.
+Signal Fish serializes through a fallible bounded writer and checks the encoded
+payload before handing it to the WebSocket sink, so allocation growth and a
+fragmented transport message cannot bypass the cap.
+If a roster, reconnect replay, spectator snapshot, custom ICE/TURN data, or
+other legal aggregate exceeds the limit, the server writes none of that
+application message, abandons later queued messages for the affected client,
+and closes it with `1009 outbound_message_too_large`. Protocol data is never
+silently truncated.
+If the connection was already closing for a distinct operational cause such as
+shutdown or slow-consumer eviction, that earlier causal close code remains
+authoritative and an oversized best-effort farewell is simply omitted.
+
 ### AuthenticationError
 
 The app-ID handshake was rejected. This frozen legacy message name does not
@@ -782,9 +812,9 @@ socket-progress deadline rather than inheriting unresolved reliable queue age.
 Farewell `Error` frames are best-effort: on the congested socket a
 slow-consumer eviction escapes, they frequently cannot be delivered at all.
 The WebSocket close frame's code travels in the closing handshake itself, so
-it is the one attribution signal a client can always read. The server closes
-with RFC 6455 private-range codes (these assignments are stable protocol
-surface and are never renumbered):
+it is the one attribution signal a client can always read. The server uses
+the standard RFC 6455 `1000` and `1009` codes plus stable private-range
+assignments that are never renumbered:
 
 | Code | Reason string | Meaning |
 | ---- | ------------- | ------- |
@@ -795,6 +825,7 @@ surface and are never renumbered):
 | `4004` | `idle_timeout` | No inbound frame was observed strictly before the `websocket.idle_timeout_secs` deadline |
 | `4005` | `room_inactive` | The assigned room exceeded `server.inactive_room_timeout` and was deleted; the client must join or create a new room |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
+| `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |
 
 During a shutdown drain the process stops accepting new WebSocket upgrades,
 rejects new room creation with `SERVER_DRAINING`, sends v3 clients a best-effort
@@ -1307,7 +1338,8 @@ The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 field
     "protocol_version": 3,
     "min_protocol_version": 2,
     "max_protocol_version": 3,
-    "transports": ["websocket"]
+    "transports": ["websocket"],
+    "max_outbound_message_size": 8388608
   }
 }
 ```
@@ -1316,10 +1348,15 @@ These v3-only fields are omitted from the wire for a negotiated v2 connection, s
 byte-identical. `ProtocolInfo.transports` names the server message lanes available to the connection; today it is
 always `["websocket"]` for negotiated v3 and reserves a future advertisement point for another server relay lane. It
 does not participate in the `Authenticate.supported_transports` data-path negotiation above.
+`ProtocolInfo.max_outbound_message_size` is the deployment's exact aggregate
+encoded WebSocket application-payload ceiling; clients should configure their
+receive limit to at least this value. Browser and v2 clients obtain the same
+value before connecting from `/v2/client-config` or `/v3/client-config`.
 The reserved `room_operation_ids` token is absent unless explicitly requested and successfully negotiated;
 SDK-compatibility capability tokens may appear alongside it.
 
-**Endpoints.** `/v2/ws` and `/v3/ws` share the same handler. `/v3/ws` only changes the _default_ protocol version
+**Endpoints.** `/v2/ws` and `/v3/ws` share the same handler, and their version-neutral
+`/v2/client-config` and `/v3/client-config` companions return the current receive-limit metadata. `/v3/ws` only changes the _default_ protocol version
 to 3 when the client omits `protocol_version`; an explicit `protocol_version` in `Authenticate` always wins (then
 capped downward at the server maximum, or rejected below its minimum). `/v2/ws` behavior is unchanged.
 

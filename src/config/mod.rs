@@ -103,6 +103,7 @@ mod tests {
         assert_eq!(config.protocol.room_code_length, 6);
         assert_eq!(config.protocol.max_player_name_length, 32);
         assert_eq!(config.protocol.max_players_limit, 100);
+        assert_eq!(config.security.max_outbound_message_size, 8 * 1024 * 1024);
 
         assert_eq!(config.logging.dir, "logs");
         assert_eq!(config.logging.filename, "server.log");

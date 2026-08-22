@@ -115,6 +115,9 @@ pub mod allocation_benchmark {
             }
             GameDataMaterializationError::Serialization(error)
             | GameDataMaterializationError::Undeliverable(error) => error,
+            GameDataMaterializationError::MessageTooLarge { size, max } => {
+                format!("encoded game-data frame is at least {size} bytes, limit is {max}")
+            }
         })?;
         Ok(MaterializedFrame {
             frame: materialized.frame,
@@ -127,16 +130,17 @@ pub mod allocation_benchmark {
 
 // Re-export public API to maintain backward compatibility
 pub use handler::{
-    websocket_handler, websocket_handler_v3, WEBSOCKET_REQUEST_ID_HEADER,
-    WEBSOCKET_UPGRADE_OUTCOME_HEADER,
+    websocket_handler, websocket_handler_v3, WEBSOCKET_MAX_OUTBOUND_MESSAGE_SIZE_HEADER,
+    WEBSOCKET_REQUEST_ID_HEADER, WEBSOCKET_UPGRADE_OUTCOME_HEADER,
 };
 pub use metrics::{metrics_handler, prometheus_metrics_handler, MetricsQuery};
 #[cfg(feature = "tls")]
 pub use routes::ConfiguredAcceptor;
 pub use routes::{
-    bind_serve_listener, bind_tcp_listener, create_router, create_router_with_origin_policy,
-    create_standalone_router, create_standalone_router_with_origin_policy, run_server,
-    try_create_router, try_create_standalone_router, try_websocket_route_v3, websocket_route_v3,
+    bind_serve_listener, bind_tcp_listener, client_config_route, create_router,
+    create_router_with_origin_policy, create_standalone_router,
+    create_standalone_router_with_origin_policy, run_server, try_create_router,
+    try_create_standalone_router, try_websocket_route_v3, websocket_route_v3,
     websocket_route_v3_with_origin_policy,
 };
 

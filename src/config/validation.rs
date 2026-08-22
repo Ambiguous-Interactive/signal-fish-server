@@ -153,6 +153,21 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         );
     }
 
+    if config.security.max_outbound_message_size == 0 {
+        anyhow::bail!(
+            "security.max_outbound_message_size must be greater than 0: a zero cap rejects every server message"
+        );
+    }
+    if config.security.max_outbound_message_size
+        > crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE
+    {
+        anyhow::bail!(
+            "security.max_outbound_message_size ({}) must not exceed the portable protocol maximum ({})",
+            config.security.max_outbound_message_size,
+            crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
+        );
+    }
+
     // Signal payload cap validation. `max_signal_bytes` larger than
     // `max_message_size` is rejected (not just warned about) because it is
     // contradictory dead config: a frame that large is rejected by the

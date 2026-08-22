@@ -23,13 +23,35 @@ use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
-use super::sending::{send_immediate_server_message, write_pending_unsupported_report};
+use super::sending::{
+    send_immediate_server_message, write_pending_unsupported_report, ImmediateSendError,
+};
 use super::token_binding::{parse_binary_message, parse_client_message, TokenBindingHandshake};
 use super::{
     complete_before_deadline, deadline_after, CONNECTION_CLOSE_WRITE_TIMEOUT as CLOSE_WRITE_TIMEOUT,
 };
 
 const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+async fn send_outbound_too_large_close(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) {
+    let reason = CloseReason::OutboundMessageTooLarge;
+    let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: reason.websocket_close_code(),
+        reason: reason.close_frame_reason().into(),
+    }));
+    let _ = tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.send(close_frame)).await;
+}
+
+async fn handle_immediate_send_error(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    error: &ImmediateSendError,
+) {
+    if matches!(error, ImmediateSendError::MessageTooLarge { .. }) {
+        send_outbound_too_large_close(sender).await;
+    }
+}
 
 fn checked_deadline(start: Instant, duration: Duration) -> Instant {
     start.checked_add(duration).unwrap_or(start)
@@ -49,6 +71,7 @@ async fn send_token_binding_challenge(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     binding: Option<&TokenBindingHandshake>,
     addr: SocketAddr,
+    max_outbound_message_size: usize,
 ) -> bool {
     let Some(binding) = binding else {
         return true;
@@ -57,9 +80,20 @@ async fn send_token_binding_challenge(
         "type": "TokenBindingChallenge",
         "data": binding.challenge,
     });
+    let challenge = challenge.to_string();
+    if challenge.len() > max_outbound_message_size {
+        tracing::error!(
+            client_addr = %addr,
+            size = challenge.len(),
+            max = max_outbound_message_size,
+            "Token-binding challenge exceeds outbound message-size limit"
+        );
+        send_outbound_too_large_close(sender).await;
+        return false;
+    }
     match tokio::time::timeout(
         CLOSE_WRITE_TIMEOUT,
-        sender.send(Message::Text(challenge.to_string().into())),
+        sender.send(Message::Text(challenge.into())),
     )
     .await
     {
@@ -625,9 +659,10 @@ async fn flush_pending_unsupported_report(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     rx: &OutboundReceiver,
     player_id: &PlayerId,
-) {
+    max_outbound_message_size: usize,
+) -> bool {
     let Some(report) = rx.pending_unsupported_report() else {
-        return;
+        return false;
     };
     // Counted as its own step in `RegisteredConnectionCloseStep`, so the derived
     // shutdown settle timeout covers this budget too. The ranges are retired
@@ -638,17 +673,33 @@ async fn flush_pending_unsupported_report(
         send_immediate_server_message(
             sender,
             &ServerMessage::DeliveryReport(Box::new(report.clone())),
+            max_outbound_message_size,
         ),
     )
     .await
     {
-        Ok(Ok(())) => rx.commit_pending_unsupported_report(&report),
+        Ok(Ok(())) => {
+            rx.commit_pending_unsupported_report(&report);
+            false
+        }
+        Ok(Err(ImmediateSendError::MessageTooLarge { size, max })) => {
+            tracing::warn!(%player_id, size, max, "Final delivery report exceeds outbound message-size limit");
+            true
+        }
         Ok(Err(err)) => {
             tracing::debug!(%player_id, error = %err, "Failed to flush final delivery report");
+            false
         }
         Err(_elapsed) => {
             tracing::debug!(%player_id, "Timed out flushing final delivery report");
+            false
         }
+    }
+}
+
+fn promote_normal_close_to_outbound_too_large(reason: &mut Option<CloseReason>) {
+    if matches!(reason, None | Some(CloseReason::Unregistered)) {
+        *reason = Some(CloseReason::OutboundMessageTooLarge);
     }
 }
 
@@ -671,6 +722,7 @@ async fn finalize_closed_connection(
     ping_probe_state: &watch::Sender<PingProbeState>,
     max_sojourn: Duration,
 ) {
+    let mut terminal_reason = reason;
     #[cfg(feature = "trace-validation")]
     if reason.is_none() {
         // Dropping every delivery handle closes the receiver without an
@@ -694,7 +746,13 @@ async fn finalize_closed_connection(
             // Nothing more will be written from the queue on this path — it is
             // abandoned below — so the coalesced omissions are flushed here,
             // before the counters that make the farewell terminal.
-            flush_pending_unsupported_report(sender, rx, player_id).await;
+            flush_pending_unsupported_report(
+                sender,
+                rx,
+                player_id,
+                server.config().max_outbound_message_size,
+            )
+            .await;
             // `send_batch` pops messages one at a time, so a cancelled
             // in-flight write leaves everything unsent inside the batcher;
             // the count below misses at most the single message that was
@@ -721,7 +779,11 @@ async fn finalize_closed_connection(
             };
             match tokio::time::timeout(
                 CLOSE_WRITE_TIMEOUT,
-                send_immediate_server_message(sender, &farewell),
+                send_immediate_server_message(
+                    sender,
+                    &farewell,
+                    server.config().max_outbound_message_size,
+                ),
             )
             .await
             {
@@ -733,6 +795,21 @@ async fn finalize_closed_connection(
                     tracing::debug!(%player_id, "Timed out writing slow-consumer farewell frame");
                 }
             }
+        }
+        Some(CloseReason::OutboundMessageTooLarge) => {
+            // The triggering application message was rejected before any
+            // socket write. Later queued messages belong to state after a gap
+            // the client cannot observe, so abandon them and close with 1009.
+            let abandoned = rx.len().saturating_add(batcher.len());
+            record_abandoned_by_class(rx, batcher);
+            server
+                .metrics()
+                .add_websocket_messages_dropped(abandoned as u64);
+            tracing::warn!(
+                %player_id,
+                abandoned_messages = abandoned,
+                "Closing after oversized outbound message; abandoning later queued messages"
+            );
         }
         Some(
             CloseReason::Shutdown
@@ -769,7 +846,13 @@ async fn finalize_closed_connection(
             // this recipient already saw skipped, so they are written after the
             // abandonment snapshot above — a report never advances the data
             // sequence and so can never open a hole of its own.
-            flush_pending_unsupported_report(sender, rx, player_id).await;
+            flush_pending_unsupported_report(
+                sender,
+                rx,
+                player_id,
+                server.config().max_outbound_message_size,
+            )
+            .await;
         }
         Some(
             CloseReason::Shutdown
@@ -836,6 +919,9 @@ async fn finalize_closed_connection(
             )
             .await;
             let flush_timed_out = flush.is_err();
+            if matches!(&flush, Ok(Err(QueueWriteError::OutboundMessageTooLarge))) {
+                promote_normal_close_to_outbound_too_large(&mut terminal_reason);
+            }
             match flush {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) | Err(_) => {
@@ -860,7 +946,16 @@ async fn finalize_closed_connection(
             // items and can discover further undeliverable payloads, and a
             // suppressed advisory leaves those coalesced. Flushing first would
             // leave exactly the tail this change exists to preserve unreported.
-            flush_pending_unsupported_report(sender, rx, player_id).await;
+            if flush_pending_unsupported_report(
+                sender,
+                rx,
+                player_id,
+                server.config().max_outbound_message_size,
+            )
+            .await
+            {
+                promote_normal_close_to_outbound_too_large(&mut terminal_reason);
+            }
         }
     }
 
@@ -869,13 +964,14 @@ async fn finalize_closed_connection(
     // the close frame's code travels in the closing handshake itself, so a
     // client that observes only the stream termination can still attribute
     // it (4000 shutdown, 4001 auth timeout, 4002 slow consumer, 4003
-    // activity timeout, 4004 idle timeout, 4005 inactive-room cleanup; plain
-    // unregistration closes with a normal 1000).
+    // activity timeout, 4004 idle timeout, 4005 inactive-room cleanup, or
+    // standard 1009 for an oversized outbound message; plain unregistration
+    // closes with a normal 1000).
     // A `None` reason — every close signal clone dropped without an explicit
     // request, i.e. the connection was simply unregistered everywhere — is
     // the same normal closure, so the coded frame is TOTAL over server-side
     // teardowns: no path falls back to a bare, code-less close.
-    let reason = close_frame_reason_for_server(reason, server);
+    let reason = close_frame_reason_for_server(terminal_reason, server);
     let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
         code: reason.websocket_close_code(),
         reason: reason.close_frame_reason().into(),
@@ -1086,7 +1182,14 @@ pub(super) async fn handle_socket(
             player_id
         }
         Err(RegisterClientError::IpLimitExceeded { current, limit }) => {
-            if !send_token_binding_challenge(&mut sender, token_binding.as_ref(), addr).await {
+            if !send_token_binding_challenge(
+                &mut sender,
+                token_binding.as_ref(),
+                addr,
+                server.config().max_outbound_message_size,
+            )
+            .await
+            {
                 return;
             }
             let error_message = ServerMessage::Error {
@@ -1095,12 +1198,17 @@ pub(super) async fn handle_socket(
             };
             match tokio::time::timeout(
                 CLOSE_WRITE_TIMEOUT,
-                send_immediate_server_message(&mut sender, &error_message),
+                send_immediate_server_message(
+                    &mut sender,
+                    &error_message,
+                    server.config().max_outbound_message_size,
+                ),
             )
             .await
             {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
+                    handle_immediate_send_error(&mut sender, &err).await;
                     tracing::debug!(
                         client_addr = %addr,
                         error = %err,
@@ -1174,7 +1282,14 @@ pub(super) async fn handle_socket(
     };
     // Registration remains the admission boundary, but a token-bound client
     // still receives the challenge before every application message or error.
-    if !send_token_binding_challenge(&mut sender, token_binding.as_ref(), addr).await {
+    if !send_token_binding_challenge(
+        &mut sender,
+        token_binding.as_ref(),
+        addr,
+        server.config().max_outbound_message_size,
+    )
+    .await
+    {
         server.unregister_client(&player_id).await;
         return;
     }
@@ -1198,11 +1313,18 @@ pub(super) async fn handle_socket(
             ),
             error_code: ErrorCode::UnsupportedProtocolVersion,
         };
-        let _ = tokio::time::timeout(
+        let send_result = tokio::time::timeout(
             CLOSE_WRITE_TIMEOUT,
-            send_immediate_server_message(&mut sender, &error),
+            send_immediate_server_message(
+                &mut sender,
+                &error,
+                server.config().max_outbound_message_size,
+            ),
         )
         .await;
+        if let Ok(Err(error)) = &send_result {
+            handle_immediate_send_error(&mut sender, error).await;
+        }
         let _ = tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await;
         server.unregister_client(&player_id).await;
         return;
@@ -1629,6 +1751,7 @@ pub(super) async fn handle_socket(
                             &mut sender,
                             &rx,
                             &current_player_id,
+                            server_clone.config().max_outbound_message_size,
                         )
                         .await
                         {
@@ -1639,7 +1762,23 @@ pub(super) async fn handle_socket(
                                 );
                             }
                             Ok(false) => {}
-                            Err(()) => break,
+                            Err(error) => {
+                                if let super::sending::SendMessageError::MessageTooLarge {
+                                    size,
+                                    max,
+                                } = error
+                                {
+                                    tracing::warn!(
+                                        %current_player_id,
+                                        size,
+                                        max,
+                                        "Pending delivery report exceeds outbound message-size limit"
+                                    );
+                                    send_task_close_signal
+                                        .request_close(CloseReason::OutboundMessageTooLarge);
+                                }
+                                break;
+                            }
                         }
                         continue;
                     }
@@ -2172,6 +2311,10 @@ pub(super) async fn handle_socket(
                                             min_protocol_version: response_min_protocol_version,
                                             max_protocol_version: response_max_protocol_version,
                                             transports: response_transports,
+                                            max_outbound_message_size: (negotiated_version >= 3)
+                                                .then_some(
+                                                    server_clone.config().max_outbound_message_size,
+                                                ),
                                         });
 
                                     let auth_response_queued = enqueue_connection_message(
@@ -2496,8 +2639,12 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     async fn test_server() -> Arc<EnhancedGameServer> {
+        test_server_with_config(ServerConfig::default()).await
+    }
+
+    async fn test_server_with_config(config: ServerConfig) -> Arc<EnhancedGameServer> {
         EnhancedGameServer::new(
-            ServerConfig::default(),
+            config,
             crate::config::ProtocolConfig::default(),
             crate::config::RelayTypeConfig::default(),
             crate::config::SessionConfig::default(),
@@ -3430,6 +3577,18 @@ mod tests {
             written
         }
 
+        async fn read_exact_close(&mut self) -> (u16, String) {
+            match tokio::time::timeout(Duration::from_secs(10), self.client.next()).await {
+                Ok(Some(Ok(TungsteniteMessage::Close(Some(frame))))) => {
+                    (frame.code.into(), frame.reason.to_string())
+                }
+                Ok(Some(Ok(frame))) => panic!("application frame leaked before close: {frame:?}"),
+                Ok(Some(Err(error))) => panic!("transport error before close: {error}"),
+                Ok(None) => panic!("socket ended without a close frame"),
+                Err(_elapsed) => panic!("timed out waiting for close frame"),
+            }
+        }
+
         async fn shutdown(self) {
             self.serve_task.abort();
             let _ = self.serve_task.await;
@@ -3543,5 +3702,69 @@ mod tests {
             );
             pair.shutdown().await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn oversized_message_discovered_during_normal_close_flush_promotes_close_to_1009() {
+        let server = test_server_with_config(ServerConfig {
+            max_outbound_message_size: 128,
+            ..ServerConfig::default()
+        })
+        .await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, mut rx) = crate::coordination::outbound_queue::channel(4, 4);
+        let from_player = PlayerId::from_u128(10);
+        tx.try_enqueue_data(crate::coordination::outbound_queue::OutboundData::new(
+            Arc::new(ServerMessage::GameData {
+                from_player,
+                data: serde_json::json!({"blob": "x".repeat(512)}),
+                seq: Some(1),
+                epoch: Some(1),
+                class: Some(crate::protocol::DeliveryClass::Reliable),
+                key: None,
+            }),
+            crate::coordination::outbound_queue::DataDeliveryMetadata {
+                class: crate::protocol::DeliveryClass::Reliable,
+                key: None,
+                from_player,
+                room_id: crate::protocol::RoomId::from_u128(11),
+                epoch: 1,
+                seq: 1,
+            },
+        ))
+        .expect("enqueue oversized close-flush message");
+        drop(tx);
+
+        let (close_signal, _listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let mut pair = UpgradedSocketPair::connect().await;
+        let mut batcher = MessageBatcher::new(1, 1);
+        finalize_closed_connection(
+            &mut pair.server_sink,
+            &mut rx,
+            &mut batcher,
+            None,
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(
+            pair.read_exact_close().await,
+            (1009, "outbound_message_too_large".to_string())
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_messages_dropped
+                .load(Ordering::Relaxed),
+            1,
+            "the rejected queued item must be counted exactly once"
+        );
+        pair.shutdown().await;
     }
 }

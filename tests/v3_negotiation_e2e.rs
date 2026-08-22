@@ -174,6 +174,10 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
                 info.transports,
                 Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
             );
+            assert_eq!(
+                info.max_outbound_message_size,
+                Some(test_server_config().max_outbound_message_size)
+            );
             assert!(
                 !info
                     .capabilities
@@ -373,6 +377,7 @@ async fn v2_client_stays_v2_on_default_server() {
             assert_eq!(info.min_protocol_version, None);
             assert_eq!(info.max_protocol_version, None);
             assert_eq!(info.transports, None);
+            assert_eq!(info.max_outbound_message_size, None);
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }

@@ -96,6 +96,7 @@ pub(super) enum GameDataMaterializationError {
     InvalidV3Stamp,
     Serialization(String),
     Undeliverable(String),
+    MessageTooLarge { size: usize, max: usize },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,6 +218,24 @@ pub(super) fn materialize_game_data_frame(
     fallback_preflight: BinaryFallbackPreflight,
     relay_cache: Option<&RelayFrameCache>,
 ) -> Result<MaterializedFrame, GameDataMaterializationError> {
+    materialize_game_data_frame_limited(
+        message,
+        recipient_supports_v3,
+        recipient_format,
+        fallback_preflight,
+        relay_cache,
+        crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
+    )
+}
+
+fn materialize_game_data_frame_limited(
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+    recipient_format: GameDataEncoding,
+    fallback_preflight: BinaryFallbackPreflight,
+    relay_cache: Option<&RelayFrameCache>,
+    max_outbound_message_size: usize,
+) -> Result<MaterializedFrame, GameDataMaterializationError> {
     let cohort = match message {
         ServerMessage::GameData { .. } if recipient_supports_v3 => RelayFrameCohort::TextV3,
         ServerMessage::GameData { .. } => RelayFrameCohort::TextV2,
@@ -245,6 +264,7 @@ pub(super) fn materialize_game_data_frame(
                 recipient_supports_v3,
                 recipient_format,
                 fallback_preflight,
+                max_outbound_message_size,
             )
         });
     }
@@ -253,6 +273,7 @@ pub(super) fn materialize_game_data_frame(
         recipient_supports_v3,
         recipient_format,
         fallback_preflight,
+        max_outbound_message_size,
     )
 }
 
@@ -261,6 +282,7 @@ fn materialize_game_data_frame_uncached(
     recipient_supports_v3: bool,
     recipient_format: GameDataEncoding,
     fallback_preflight: BinaryFallbackPreflight,
+    max_outbound_message_size: usize,
 ) -> Result<MaterializedFrame, GameDataMaterializationError> {
     match message {
         ServerMessage::GameData {
@@ -274,11 +296,14 @@ fn materialize_game_data_frame_uncached(
             let frame = if !recipient_supports_v3
                 && (seq.is_some() || epoch.is_some() || class.is_some() || key.is_some())
             {
-                serialize_json_relay_frame(&LegacyGameDataEnvelope::new(*from_player, data), data)
+                serialize_json_relay_frame_limited(
+                    &LegacyGameDataEnvelope::new(*from_player, data),
+                    data,
+                    max_outbound_message_size,
+                )
             } else {
-                serialize_json_relay_frame(message, data)
-            }
-            .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
+                serialize_json_relay_frame_limited(message, data, max_outbound_message_size)
+            }?;
             Ok(MaterializedFrame {
                 frame,
                 work: SerializationWork {
@@ -305,7 +330,14 @@ fn materialize_game_data_frame_uncached(
             };
 
             let binary_encode_error = if recipient_format == *encoding {
-                match encode_binary_game_data(*from_player, *encoding, payload, seq, epoch) {
+                match encode_binary_game_data_limited(
+                    *from_player,
+                    *encoding,
+                    payload,
+                    seq,
+                    epoch,
+                    max_outbound_message_size,
+                ) {
                     Ok(frame_bytes) => {
                         return Ok(MaterializedFrame {
                             frame: Message::Binary(frame_bytes),
@@ -318,7 +350,18 @@ fn materialize_game_data_frame_uncached(
                             binary_encode_error: None,
                         });
                     }
-                    Err(error) => Some(error),
+                    Err(GameDataMaterializationError::Serialization(error)) => Some(error),
+                    Err(error @ GameDataMaterializationError::MessageTooLarge { .. }) => {
+                        return Err(error);
+                    }
+                    Err(
+                        GameDataMaterializationError::InvalidV3Stamp
+                        | GameDataMaterializationError::Undeliverable(_),
+                    ) => {
+                        return Err(GameDataMaterializationError::Serialization(
+                            "binary encoder returned an invalid error class".to_string(),
+                        ));
+                    }
                 }
             } else {
                 None
@@ -340,8 +383,11 @@ fn materialize_game_data_frame_uncached(
                 }
             };
             let fallback = BorrowedGameDataEnvelope::new(*from_player, data.as_ref(), seq, epoch);
-            let frame = serialize_json_fallback_frame(&fallback, payload.len())
-                .map_err(GameDataMaterializationError::Serialization)?;
+            let frame = serialize_json_fallback_frame_limited(
+                &fallback,
+                payload.len(),
+                max_outbound_message_size,
+            )?;
             Ok(MaterializedFrame {
                 frame,
                 work: SerializationWork {
@@ -364,17 +410,28 @@ pub(super) enum ImmediateSendError {
     Serialization(#[source] serde_json::Error),
     #[error("failed to write server message: {0}")]
     Socket(#[source] axum::Error),
+    #[error("encoded server message is {size} bytes, exceeding the outbound limit of {max} bytes")]
+    MessageTooLarge { size: usize, max: usize },
 }
 
 pub(super) async fn send_immediate_server_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: &ServerMessage,
+    max_outbound_message_size: usize,
 ) -> Result<(), ImmediateSendError> {
-    let payload = serialize_json_text(message).map_err(|err| {
-        tracing::error!(error = %err, "Failed to serialize server message");
-        ImmediateSendError::Serialization(err)
-    })?;
+    let payload = serialize_json_text_limited(message, max_outbound_message_size, 256, "JSON")
+        .map_err(|error| match error {
+            BoundedSerializationError::MessageTooLarge { size, max } => {
+                ImmediateSendError::MessageTooLarge { size, max }
+            }
+            BoundedSerializationError::Serialization(message) => {
+                let err = serde_json::Error::io(std::io::Error::other(message));
+                tracing::error!(error = %err, "Failed to serialize server message");
+                ImmediateSendError::Serialization(err)
+            }
+        })?;
 
+    debug_assert!(payload.len() <= max_outbound_message_size);
     sender
         .send(Message::Text(payload.into()))
         .await
@@ -391,7 +448,7 @@ pub(super) async fn send_single_message(
     fallback_preflight: BinaryFallbackPreflight,
     metadata: Option<DataDeliveryMetadata>,
     accounting: &mut SendAccounting<'_>,
-) -> Result<SendDisposition, ()> {
+) -> Result<SendDisposition, SendMessageError> {
     send_single_message_ref(
         sender,
         message.as_ref(),
@@ -416,7 +473,8 @@ pub(super) async fn send_single_message_ref(
     fallback_preflight: BinaryFallbackPreflight,
     metadata: Option<DataDeliveryMetadata>,
     accounting: &mut SendAccounting<'_>,
-) -> Result<SendDisposition, ()> {
+) -> Result<SendDisposition, SendMessageError> {
+    let max_outbound_message_size = accounting.server.config().max_outbound_message_size;
     let mut disposition = SendDisposition::Written;
     match message {
         ServerMessage::GameDataBinary {
@@ -426,12 +484,13 @@ pub(super) async fn send_single_message_ref(
             epoch,
             ..
         } => {
-            match materialize_game_data_frame(
+            match materialize_game_data_frame_limited(
                 message,
                 recipient_supports_v3,
                 recipient_format,
                 fallback_preflight,
                 relay_cache,
+                max_outbound_message_size,
             ) {
                 Ok(materialized) => {
                     if let Some(error) = materialized.binary_encode_error {
@@ -443,13 +502,13 @@ pub(super) async fn send_single_message_ref(
                             "Failed to encode binary game data; attempting JSON fallback"
                         );
                     }
-                    if sender.send(materialized.frame).await.is_err() {
-                        tracing::warn!(
-                            %player_id,
-                            "Failed to send binary game data, connection closed"
-                        );
-                        return Err(());
-                    }
+                    send_materialized_frame(
+                        sender,
+                        materialized.frame,
+                        player_id,
+                        max_outbound_message_size,
+                    )
+                    .await?;
                 }
                 Err(GameDataMaterializationError::InvalidV3Stamp) => {
                     tracing::error!(
@@ -459,7 +518,7 @@ pub(super) async fn send_single_message_ref(
                         epoch = ?epoch,
                         "Protocol-v3 binary game data lacked a complete delivery stamp; closing fail-closed"
                     );
-                    return Err(());
+                    return Err(SendMessageError::Materialization);
                 }
                 Err(GameDataMaterializationError::Serialization(error)) => {
                     tracing::error!(
@@ -469,7 +528,7 @@ pub(super) async fn send_single_message_ref(
                         %error,
                         "Failed to serialize binary game data fallback"
                     );
-                    return Err(());
+                    return Err(SendMessageError::Materialization);
                 }
                 Err(GameDataMaterializationError::Undeliverable(reason)) => {
                     disposition = notify_on_undeliverable(
@@ -484,23 +543,36 @@ pub(super) async fn send_single_message_ref(
                     )
                     .await?;
                 }
+                Err(GameDataMaterializationError::MessageTooLarge { size, max }) => {
+                    return Err(SendMessageError::MessageTooLarge { size, max });
+                }
             }
         }
         ServerMessage::GameData { .. } => {
-            let materialized = materialize_game_data_frame(
+            let materialized = materialize_game_data_frame_limited(
                 message,
                 recipient_supports_v3,
                 recipient_format,
                 fallback_preflight,
                 relay_cache,
+                max_outbound_message_size,
             )
             .map_err(|error| {
                 tracing::error!(%player_id, ?error, "Failed to serialize game data");
+                match error {
+                    GameDataMaterializationError::MessageTooLarge { size, max } => {
+                        SendMessageError::MessageTooLarge { size, max }
+                    }
+                    _ => SendMessageError::Materialization,
+                }
             })?;
-            if sender.send(materialized.frame).await.is_err() {
-                tracing::warn!(%player_id, "Failed to send message, connection closed");
-                return Err(());
-            }
+            send_materialized_frame(
+                sender,
+                materialized.frame,
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
         }
         // Broadcast room-snapshot frames carry a v3 incarnation `epoch` that
         // must never reach a pre-v3 (v2) recipient (their bytes stay
@@ -512,7 +584,13 @@ pub(super) async fn send_single_message_ref(
             let mut player = player.clone();
             player.epoch = None;
             player.seq = None;
-            send_text_message(sender, &ServerMessage::PlayerJoined { player }, player_id).await?;
+            send_text_message(
+                sender,
+                &ServerMessage::PlayerJoined { player },
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
         }
         ServerMessage::PlayerReconnected {
             player_id: reconnected,
@@ -522,7 +600,7 @@ pub(super) async fn send_single_message_ref(
                 player_id: *reconnected,
                 epoch: None,
             };
-            send_text_message(sender, &stripped, player_id).await?;
+            send_text_message(sender, &stripped, player_id, max_outbound_message_size).await?;
         }
         ServerMessage::PlayerLeft {
             player_id: departed,
@@ -534,7 +612,7 @@ pub(super) async fn send_single_message_ref(
                 epoch: None,
                 final_seq: None,
             };
-            send_text_message(sender, &stripped, player_id).await?;
+            send_text_message(sender, &stripped, player_id, max_outbound_message_size).await?;
         }
         ServerMessage::SpectatorJoined(payload)
             if payload
@@ -552,11 +630,12 @@ pub(super) async fn send_single_message_ref(
                 sender,
                 &ServerMessage::SpectatorJoined(Box::new(payload)),
                 player_id,
+                max_outbound_message_size,
             )
             .await?;
         }
         other => {
-            send_text_message(sender, other, player_id).await?;
+            send_text_message(sender, other, player_id, max_outbound_message_size).await?;
         }
     }
 
@@ -567,6 +646,61 @@ pub(super) async fn send_single_message_ref(
 pub(super) enum SendDisposition {
     Written,
     AccountedDrop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SendMessageError {
+    SocketClosed,
+    Materialization,
+    MessageTooLarge { size: usize, max: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutboundSizeError {
+    size: usize,
+    max: usize,
+}
+
+fn enforce_outbound_payload_size(size: usize, max: usize) -> Result<(), OutboundSizeError> {
+    if size <= max {
+        Ok(())
+    } else {
+        Err(OutboundSizeError { size, max })
+    }
+}
+
+fn application_payload_len(frame: &Message) -> Option<usize> {
+    match frame {
+        Message::Text(payload) => Some(payload.len()),
+        Message::Binary(payload) => Some(payload.len()),
+        Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
+    }
+}
+
+async fn send_materialized_frame(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    frame: Message,
+    player_id: &PlayerId,
+    max_outbound_message_size: usize,
+) -> Result<(), SendMessageError> {
+    if let Some(size) = application_payload_len(&frame) {
+        enforce_outbound_payload_size(size, max_outbound_message_size).map_err(|error| {
+            tracing::warn!(
+                %player_id,
+                size = error.size,
+                max = error.max,
+                "Encoded outbound message exceeds aggregate payload limit; closing without writing it"
+            );
+            SendMessageError::MessageTooLarge {
+                size: error.size,
+                max: error.max,
+            }
+        })?;
+    }
+    sender.send(frame).await.map_err(|error| {
+        tracing::warn!(%player_id, %error, "Failed to send message, connection closed");
+        SendMessageError::SocketClosed
+    })
 }
 
 /// Cancellation-safe terminal accounting for the one queue item actively
@@ -610,9 +744,28 @@ impl<'a> SendAccounting<'a> {
     }
 
     pub(super) fn complete_written(&mut self) {
+        if self.resolved {
+            return;
+        }
         if let Some(class) = self.class {
             self.receiver.record_written(class);
         }
+        self.resolved = true;
+    }
+
+    /// Resolve a payload rejected by the encoded outbound-size preflight.
+    /// Unlike cancellation of a socket write, this is known not to have handed
+    /// any bytes to the sink, so it must not set the unknown-wire-position
+    /// fence. The connection still closes because no successor can be exposed
+    /// after the missing authoritative message.
+    pub(super) fn complete_rejected_before_write(&mut self) {
+        if self.resolved {
+            return;
+        }
+        if let Some(class) = self.class {
+            self.receiver.record_abandoned(class, 1);
+        }
+        self.record_drop_metrics();
         self.resolved = true;
     }
 
@@ -621,6 +774,9 @@ impl<'a> SendAccounting<'a> {
     /// (see [`Self::hold_unsupported`]); the omission itself is counted either
     /// way.
     fn complete_unsupported(&mut self, metadata: Option<DataDeliveryMetadata>) -> bool {
+        if self.resolved {
+            return true;
+        }
         let coalesced =
             metadata.is_none_or(|metadata| self.receiver.record_unsupported_format(metadata));
         if metadata.is_none() {
@@ -632,6 +788,10 @@ impl<'a> SendAccounting<'a> {
         self.resolved = true;
         self.unheld_omission = !coalesced;
         coalesced
+    }
+
+    pub(super) const fn is_resolved(&self) -> bool {
+        self.resolved
     }
 
     /// Hold an omission whose range only fits once the pending report is written.
@@ -710,7 +870,7 @@ async fn notify_on_undeliverable(
     recipient_supports_v3: bool,
     metadata: Option<DataDeliveryMetadata>,
     accounting: &mut SendAccounting<'_>,
-) -> Result<SendDisposition, ()> {
+) -> Result<SendDisposition, SendMessageError> {
     tracing::warn!(
         %player_id,
         %from_player,
@@ -725,14 +885,21 @@ async fn notify_on_undeliverable(
             %from_player,
             "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
         );
-        return Err(());
+        return Err(SendMessageError::Materialization);
     }
     if !coalesced {
         // The pending report is full, or this range cannot join it:
         // write what is pending, then hold this range in the emptied
         // report. Holding only after the write keeps the two sets
         // disjoint if the write is cancelled.
-        if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
+        if write_pending_unsupported_report(
+            sender,
+            accounting.receiver,
+            player_id,
+            accounting.server.config().max_outbound_message_size,
+        )
+        .await?
+        {
             accounting.record_outbound_progress();
         }
         accounting.hold_unsupported(metadata);
@@ -742,7 +909,14 @@ async fn notify_on_undeliverable(
         // explains it, so the rate-limited notice is also the pending
         // report's flush cadence: at most one report per sender per
         // second instead of one per omitted message.
-        if write_pending_unsupported_report(sender, accounting.receiver, player_id).await? {
+        if write_pending_unsupported_report(
+            sender,
+            accounting.receiver,
+            player_id,
+            accounting.server.config().max_outbound_message_size,
+        )
+        .await?
+        {
             accounting.record_outbound_progress();
         }
         let suppressed = if suppressed == 0 {
@@ -758,7 +932,13 @@ async fn notify_on_undeliverable(
             ),
             error_code: Some(ErrorCode::UnsupportedGameDataFormat),
         };
-        send_text_message(sender, &notice, player_id).await?;
+        send_text_message(
+            sender,
+            &notice,
+            player_id,
+            accounting.server.config().max_outbound_message_size,
+        )
+        .await?;
         accounting.record_outbound_progress();
     }
     Ok(SendDisposition::AccountedDrop)
@@ -776,7 +956,8 @@ pub(super) async fn write_pending_unsupported_report(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     receiver: &OutboundReceiver,
     player_id: &PlayerId,
-) -> Result<bool, ()> {
+    max_outbound_message_size: usize,
+) -> Result<bool, SendMessageError> {
     let Some(report) = receiver.pending_unsupported_report() else {
         return Ok(false);
     };
@@ -784,6 +965,7 @@ pub(super) async fn write_pending_unsupported_report(
         sender,
         &ServerMessage::DeliveryReport(Box::new(report.clone())),
         player_id,
+        max_outbound_message_size,
     )
     .await?;
     receiver.commit_pending_unsupported_report(&report);
@@ -794,8 +976,9 @@ pub(super) async fn send_text_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: &ServerMessage,
     player_id: &PlayerId,
-) -> Result<(), ()> {
-    send_serialized_text(sender, message, player_id).await
+    max_outbound_message_size: usize,
+) -> Result<(), SendMessageError> {
+    send_serialized_text(sender, message, player_id, max_outbound_message_size).await
 }
 
 /// Serialize any wire-shaped value to a JSON text frame and send it. Shared by
@@ -806,29 +989,66 @@ async fn send_serialized_text<T: Serialize>(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: &T,
     player_id: &PlayerId,
-) -> Result<(), ()> {
-    let json_message = match serialize_json_text(message) {
-        Ok(json) => json,
-        Err(e) => {
-            tracing::error!(%player_id, "Failed to serialize message: {}", e);
-            return Err(());
-        }
-    };
-
-    if sender
-        .send(Message::Text(json_message.into()))
-        .await
-        .is_err()
-    {
-        tracing::warn!(%player_id, "Failed to send message, connection closed");
-        return Err(());
-    }
-
-    Ok(())
+    max_outbound_message_size: usize,
+) -> Result<(), SendMessageError> {
+    let json_message =
+        match serialize_json_text_limited(message, max_outbound_message_size, 256, "JSON") {
+            Ok(json) => json,
+            Err(BoundedSerializationError::MessageTooLarge { size, max }) => {
+                return Err(SendMessageError::MessageTooLarge { size, max });
+            }
+            Err(BoundedSerializationError::Serialization(error)) => {
+                tracing::error!(%player_id, %error, "Failed to serialize message");
+                return Err(SendMessageError::Materialization);
+            }
+        };
+    send_materialized_frame(
+        sender,
+        Message::Text(json_message.into()),
+        player_id,
+        max_outbound_message_size,
+    )
+    .await
 }
 
+#[cfg(test)]
 fn serialize_json_text<T: Serialize>(message: &T) -> Result<String, serde_json::Error> {
     serde_json::to_string(message)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BoundedSerializationError {
+    MessageTooLarge { size: usize, max: usize },
+    Serialization(String),
+}
+
+fn serialize_json_text_limited<T: Serialize>(
+    message: &T,
+    max: usize,
+    initial_capacity: usize,
+    frame_kind: &'static str,
+) -> Result<String, BoundedSerializationError> {
+    let mut bytes = Vec::new();
+    let capacity = initial_capacity.min(max);
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        BoundedSerializationError::Serialization(format!(
+            "failed to reserve {frame_kind} frame capacity: {error}"
+        ))
+    })?;
+    let (result, exceeded_len) = {
+        let mut writer = FallibleVecWriter::with_limit(&mut bytes, frame_kind, max);
+        let result = serde_json::to_writer(&mut writer, message);
+        (result, writer.exceeded_len)
+    };
+    if let Some(size) = exceeded_len {
+        return Err(BoundedSerializationError::MessageTooLarge { size, max });
+    }
+    result.map_err(|error| BoundedSerializationError::Serialization(error.to_string()))?;
+    String::from_utf8(bytes).map_err(|error| {
+        BoundedSerializationError::Serialization(format!(
+            "JSON serializer emitted invalid UTF-8: {error}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -853,34 +1073,36 @@ const JSON_ESTIMATE_WORK_BUDGET: usize = 256;
 // grow/compact cycle costs more than the allocation it was meant to avoid.
 const JSON_FLOAT_ESTIMATE_UNCERTAINTY: usize = 23;
 
+#[cfg(test)]
 fn serialize_json_relay_frame<T: Serialize>(
     message: &T,
     data: &serde_json::Value,
 ) -> Result<Message, String> {
+    serialize_json_relay_frame_limited(
+        message,
+        data,
+        crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
+    )
+    .map_err(|error| format!("{error:?}"))
+}
+
+fn serialize_json_relay_frame_limited<T: Serialize>(
+    message: &T,
+    data: &serde_json::Value,
+    max: usize,
+) -> Result<Message, GameDataMaterializationError> {
     let Some(estimated_value_len) = estimated_json_value_len(data) else {
-        return serialize_json_text(message)
-            .map(|json| Message::Text(json.into()))
-            .map_err(|error| error.to_string());
+        return bounded_json_frame(message, max, 256, "JSON relay");
     };
     let capacity = estimated_value_len
         .checked_add(JSON_RELAY_HEADROOM)
         .filter(|capacity| *capacity <= isize::MAX as usize)
-        .ok_or_else(|| "JSON relay frame capacity overflow".to_string())?;
-    // The old `serde_json::to_string` path was already infallible on allocator
-    // exhaustion. Keep Vec's direct `Write` implementation here: wrapping
-    // every serializer write in a fallibility check costs more than the three
-    // growth reallocations this path removes. Any underestimated growth keeps
-    // those same allocator-abort semantics; the fallback converter below has
-    // a separate explicit fallible allocation contract.
-    let mut bytes = Vec::with_capacity(capacity);
-    serde_json::to_writer(&mut bytes, message).map_err(|error| error.to_string())?;
-    let maximum_retained_capacity = bytes.len().saturating_add(JSON_RELAY_HEADROOM);
-    if bytes.capacity() > capacity && bytes.capacity() > maximum_retained_capacity {
-        bytes.shrink_to(maximum_retained_capacity);
-    }
-    String::from_utf8(bytes)
-        .map(|json| Message::Text(json.into()))
-        .map_err(|error| format!("JSON serializer emitted invalid UTF-8: {error}"))
+        .ok_or_else(|| {
+            GameDataMaterializationError::Serialization(
+                "JSON relay frame capacity overflow".to_string(),
+            )
+        })?;
+    bounded_json_frame(message, max, capacity, "JSON relay")
 }
 
 /// Lower-bound serialized length that is cheap to derive from an existing
@@ -961,6 +1183,7 @@ fn decimal_digit_count(value: u64) -> usize {
 /// payload length is a useful lower bound; fixed headroom covers the relay
 /// envelope and common representation expansion. Unusually compact inputs can
 /// still grow through the fallible writer without changing wire bytes.
+#[cfg(test)]
 fn serialize_json_fallback_frame<T: Serialize>(
     message: &T,
     payload_len: usize,
@@ -974,6 +1197,42 @@ fn serialize_json_fallback_frame<T: Serialize>(
     serialize_json_frame_with_capacity(message, capacity, "JSON fallback")
 }
 
+fn serialize_json_fallback_frame_limited<T: Serialize>(
+    message: &T,
+    payload_len: usize,
+    max: usize,
+) -> Result<Message, GameDataMaterializationError> {
+    const JSON_FALLBACK_HEADROOM: usize = 256;
+    let capacity = payload_len
+        .checked_add(JSON_FALLBACK_HEADROOM)
+        .filter(|capacity| *capacity <= isize::MAX as usize)
+        .ok_or_else(|| {
+            GameDataMaterializationError::Serialization(
+                "JSON fallback frame capacity overflow".to_string(),
+            )
+        })?;
+    bounded_json_frame(message, max, capacity, "JSON fallback")
+}
+
+fn bounded_json_frame<T: Serialize>(
+    message: &T,
+    max: usize,
+    initial_capacity: usize,
+    frame_kind: &'static str,
+) -> Result<Message, GameDataMaterializationError> {
+    serialize_json_text_limited(message, max, initial_capacity, frame_kind)
+        .map(|json| Message::Text(json.into()))
+        .map_err(|error| match error {
+            BoundedSerializationError::MessageTooLarge { size, max } => {
+                GameDataMaterializationError::MessageTooLarge { size, max }
+            }
+            BoundedSerializationError::Serialization(error) => {
+                GameDataMaterializationError::Serialization(error)
+            }
+        })
+}
+
+#[cfg(test)]
 fn serialize_json_frame_with_capacity<T: Serialize>(
     message: &T,
     capacity: usize,
@@ -1102,6 +1361,7 @@ struct V3BinaryGameDataFrame<'a> {
 /// `payload` opaque. V2 retains its historical representation byte-for-byte:
 /// the legacy MessagePack envelope or raw JSON/rkyv passthrough. Raw passthrough
 /// clones the shared `Bytes` handle, not the payload buffer.
+#[cfg(test)]
 pub(super) fn encode_binary_game_data(
     from_player: PlayerId,
     encoding: GameDataEncoding,
@@ -1139,10 +1399,62 @@ pub(super) fn encode_binary_game_data(
     }
 }
 
+fn encode_binary_game_data_limited(
+    from_player: PlayerId,
+    encoding: GameDataEncoding,
+    payload: &Bytes,
+    seq: Option<u64>,
+    epoch: Option<u32>,
+    max: usize,
+) -> Result<Bytes, GameDataMaterializationError> {
+    match (seq, epoch) {
+        (Some(seq), Some(epoch)) => {
+            if seq == 0 || epoch == 0 {
+                return Err(GameDataMaterializationError::Serialization(
+                    "protocol-v3 binary delivery stamps must be non-zero".to_string(),
+                ));
+            }
+            let frame = V3BinaryGameDataFrame {
+                from_player,
+                encoding,
+                payload,
+                seq,
+                epoch,
+            };
+            encode_named_binary_frame_limited(&frame, payload.len(), max).map(Bytes::from)
+        }
+        (None, None) => match encoding {
+            GameDataEncoding::MessagePack => encode_named_binary_frame_limited(
+                &LegacyBinaryGameDataFrame {
+                    from_player,
+                    encoding,
+                    payload,
+                },
+                payload.len(),
+                max,
+            )
+            .map(Bytes::from),
+            GameDataEncoding::Json | GameDataEncoding::Rkyv => {
+                enforce_outbound_payload_size(payload.len(), max).map_err(|error| {
+                    GameDataMaterializationError::MessageTooLarge {
+                        size: error.size,
+                        max: error.max,
+                    }
+                })?;
+                Ok(payload.clone())
+            }
+        },
+        _ => Err(GameDataMaterializationError::Serialization(
+            "binary delivery seq and epoch must be present or absent together".to_string(),
+        )),
+    }
+}
+
 /// Encode a named MessagePack envelope without repeatedly growing its output
 /// buffer. The opaque payload length is known and dominates relay frame size;
 /// 128 bytes covers the fixed field names, UUID, encoding, stamps, and
 /// MessagePack container headers.
+#[cfg(test)]
 fn encode_named_binary_frame<T: Serialize>(
     frame: &T,
     payload_len: usize,
@@ -1162,6 +1474,46 @@ fn encode_named_binary_frame<T: Serialize>(
     Ok(bytes)
 }
 
+fn encode_named_binary_frame_limited<T: Serialize>(
+    frame: &T,
+    payload_len: usize,
+    max: usize,
+) -> Result<Vec<u8>, GameDataMaterializationError> {
+    const BINARY_ENVELOPE_HEADROOM: usize = 128;
+    if payload_len > max {
+        return Err(GameDataMaterializationError::MessageTooLarge {
+            size: payload_len,
+            max,
+        });
+    }
+    let capacity = payload_len
+        .checked_add(BINARY_ENVELOPE_HEADROOM)
+        .filter(|capacity| *capacity <= isize::MAX as usize)
+        .ok_or_else(|| {
+            GameDataMaterializationError::Serialization(
+                "binary frame capacity overflow".to_string(),
+            )
+        })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity.min(max))
+        .map_err(|error| {
+            GameDataMaterializationError::Serialization(format!(
+                "failed to reserve binary frame capacity: {error}"
+            ))
+        })?;
+    let (result, exceeded_len) = {
+        let mut writer = FallibleVecWriter::with_limit(&mut bytes, "binary", max);
+        let result = write_named(&mut writer, frame);
+        (result, writer.exceeded_len)
+    };
+    if let Some(size) = exceeded_len {
+        return Err(GameDataMaterializationError::MessageTooLarge { size, max });
+    }
+    result.map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
+    Ok(bytes)
+}
+
 /// Preserve rmp-serde's fallible allocation behavior while supplying a
 /// pre-sized output vector. Writing directly to `Vec<u8>` would use its
 /// infallible `Write` implementation if fixed envelope headroom ever became
@@ -1169,11 +1521,32 @@ fn encode_named_binary_frame<T: Serialize>(
 struct FallibleVecWriter<'a> {
     bytes: &'a mut Vec<u8>,
     frame_kind: &'static str,
+    max_len: Option<usize>,
+    exceeded_len: Option<usize>,
 }
 
 impl FallibleVecWriter<'_> {
+    #[cfg(test)]
     fn new<'a>(bytes: &'a mut Vec<u8>, frame_kind: &'static str) -> FallibleVecWriter<'a> {
-        FallibleVecWriter { bytes, frame_kind }
+        FallibleVecWriter {
+            bytes,
+            frame_kind,
+            max_len: None,
+            exceeded_len: None,
+        }
+    }
+
+    fn with_limit<'a>(
+        bytes: &'a mut Vec<u8>,
+        frame_kind: &'static str,
+        max_len: usize,
+    ) -> FallibleVecWriter<'a> {
+        FallibleVecWriter {
+            bytes,
+            frame_kind,
+            max_len: Some(max_len),
+            exceeded_len: None,
+        }
     }
 
     fn reserve_for_write(&mut self, additional_len: usize) -> std::io::Result<()> {
@@ -1188,6 +1561,13 @@ impl FallibleVecWriter<'_> {
                     format!("{} frame capacity overflow", self.frame_kind),
                 )
             })?;
+        if self.max_len.is_some_and(|max_len| required_len > max_len) {
+            self.exceeded_len = Some(required_len);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} frame exceeds configured payload limit", self.frame_kind),
+            ));
+        }
         if required_len > self.bytes.capacity() {
             self.bytes
                 .try_reserve_exact(additional_len)
@@ -1239,8 +1619,11 @@ fn decode_binary_to_json(
 mod tests {
     use super::*;
     use crate::protocol::{
-        decode_v3_binary_game_data, V3BinaryGameDataFrame as DecodedV3BinaryGameDataFrame,
+        decode_v3_binary_game_data, ConnectionInfo, LobbyState, PlayerInfo, ReconnectedPayload,
+        ReplayStatus, RoomId, ServerMessage, SpectatorInfo, SpectatorJoinedPayload,
+        V3BinaryGameDataFrame as DecodedV3BinaryGameDataFrame,
     };
+    use chrono::Utc;
     use serde::{Deserialize, Serializer};
     use uuid::Uuid;
 
@@ -1248,6 +1631,167 @@ mod tests {
 
     fn player_a() -> Uuid {
         Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff)
+    }
+
+    #[test]
+    fn outbound_payload_limit_accepts_boundary_and_rejects_limit_plus_one_for_both_encodings() {
+        let text_message = ServerMessage::Error {
+            message: "four-byte UTF-8: 🐟".to_string(),
+            error_code: None,
+        };
+        let text_size = serialize_json_text(&text_message)
+            .expect("text fixture serializes")
+            .len();
+        let exact_text = serialize_json_text_limited(&text_message, text_size, 0, "test")
+            .expect("text exact boundary is accepted");
+        assert_eq!(exact_text.len(), text_size);
+        assert!(matches!(
+            serialize_json_text_limited(&text_message, text_size - 1, 0, "test"),
+            Err(BoundedSerializationError::MessageTooLarge { size, max })
+                if size > max && max == text_size - 1
+        ));
+
+        let binary_message = ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: Bytes::from(vec![7_u8; 512]),
+            seq: Some(1),
+            epoch: Some(1),
+        };
+        let binary_size = application_payload_len(
+            &materialize_game_data_frame_limited(
+                &binary_message,
+                true,
+                GameDataEncoding::MessagePack,
+                BinaryFallbackPreflight::NotNeeded,
+                None,
+                crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
+            )
+            .expect("binary fixture materializes")
+            .frame,
+        )
+        .expect("binary fixture has application payload");
+        let exact_binary = materialize_game_data_frame_limited(
+            &binary_message,
+            true,
+            GameDataEncoding::MessagePack,
+            BinaryFallbackPreflight::NotNeeded,
+            None,
+            binary_size,
+        )
+        .expect("binary exact boundary is accepted");
+        assert_eq!(
+            application_payload_len(&exact_binary.frame),
+            Some(binary_size)
+        );
+        assert!(matches!(
+            materialize_game_data_frame_limited(
+                &binary_message,
+                true,
+                GameDataEncoding::MessagePack,
+                BinaryFallbackPreflight::NotNeeded,
+                None,
+                binary_size - 1,
+            ),
+            Err(GameDataMaterializationError::MessageTooLarge { size, max })
+                if size > max && max == binary_size - 1
+        ));
+    }
+
+    #[test]
+    fn aggregate_reconnect_snapshot_and_replay_obey_the_encoded_message_limit() {
+        let player = PlayerInfo {
+            id: player_a(),
+            name: "aggregate-player".to_string(),
+            is_authority: true,
+            is_ready: false,
+            connected_at: Utc::now(),
+            connection_info: Some(ConnectionInfo::WebRTC {
+                sdp: Some("s".repeat(512)),
+                ice_candidates: vec!["candidate".repeat(32)],
+            }),
+            epoch: Some(1),
+            seq: Some(7),
+            region_id: "test".to_string(),
+        };
+        let replay_event = ServerMessage::PlayerJoined {
+            player: player.clone(),
+        };
+        let aggregate = ServerMessage::Reconnected(Box::new(ReconnectedPayload {
+            room_id: RoomId::from_u128(2),
+            room_code: "LIMIT1".to_string(),
+            player_id: player.id,
+            game_name: "aggregate-limit".to_string(),
+            max_players: 100,
+            supports_authority: true,
+            current_players: vec![player.clone(); 4],
+            is_authority: true,
+            lobby_state: LobbyState::Lobby,
+            ready_players: Vec::new(),
+            relay_type: "matchbox".to_string(),
+            current_spectators: Vec::new(),
+            ice_servers: Vec::new(),
+            missed_events: vec![replay_event.clone(); 4],
+            replay: Some(ReplayStatus::Complete),
+            sender_watermarks: Vec::new(),
+            reconnection_token: Some("r".repeat(64)),
+        }));
+
+        let event_size = serialize_json_text(&replay_event)
+            .expect("replay event serializes")
+            .len();
+        let aggregate_size = serialize_json_text(&aggregate)
+            .expect("aggregate reconnect serializes")
+            .len();
+        assert!(
+            aggregate_size > event_size.saturating_mul(4),
+            "fixture must exercise roster plus replay aggregation: event={event_size}, aggregate={aggregate_size}"
+        );
+        assert_eq!(
+            serialize_json_text_limited(&aggregate, aggregate_size, 0, "aggregate")
+                .expect("complete aggregate is accepted at exact boundary")
+                .len(),
+            aggregate_size
+        );
+        assert!(matches!(
+            serialize_json_text_limited(&aggregate, aggregate_size - 1, 0, "aggregate"),
+            Err(BoundedSerializationError::MessageTooLarge { size, max })
+                if size > max && max == aggregate_size - 1
+        ));
+    }
+
+    #[test]
+    fn spectator_snapshot_obeys_the_complete_encoded_message_limit() {
+        let spectator = SpectatorInfo {
+            id: player_a(),
+            name: "spectator".repeat(8),
+            connected_at: Utc::now(),
+        };
+        let message = ServerMessage::SpectatorJoined(Box::new(SpectatorJoinedPayload {
+            room_id: RoomId::from_u128(3),
+            room_code: "WATCH1".to_string(),
+            spectator_id: spectator.id,
+            game_name: "spectator-limit".to_string(),
+            current_players: Vec::new(),
+            current_spectators: vec![spectator; 16],
+            lobby_state: LobbyState::Lobby,
+            reason: None,
+        }));
+        let size = serialize_json_text(&message)
+            .expect("spectator snapshot serializes")
+            .len();
+
+        assert_eq!(
+            serialize_json_text_limited(&message, size, 0, "spectator")
+                .expect("snapshot exact boundary is accepted")
+                .len(),
+            size
+        );
+        assert!(matches!(
+            serialize_json_text_limited(&message, size - 1, 0, "spectator"),
+            Err(BoundedSerializationError::MessageTooLarge { size: attempted, max })
+                if attempted > max && max == size - 1
+        ));
     }
 
     /// Issue #274: only an unresolved socket write fences the queue behind it.
@@ -1267,12 +1811,14 @@ mod tests {
         enum Resolution {
             Written,
             UnsupportedFormat,
+            RejectedBeforeWrite,
             AbandonedInFlight,
         }
 
         for (resolution, expected_fence) in [
             (Resolution::Written, false),
             (Resolution::UnsupportedFormat, false),
+            (Resolution::RejectedBeforeWrite, false),
             (Resolution::AbandonedInFlight, true),
         ] {
             let server = EnhancedGameServer::new(
@@ -1314,6 +1860,10 @@ mod tests {
                     Resolution::UnsupportedFormat => {
                         let _coalesced = accounting.complete_unsupported(Some(metadata));
                     }
+                    Resolution::RejectedBeforeWrite => {
+                        accounting.complete_rejected_before_write();
+                        accounting.complete_rejected_before_write();
+                    }
                     Resolution::AbandonedInFlight => {}
                 }
             }
@@ -1322,6 +1872,14 @@ mod tests {
                 rx.abandoned_in_flight_write(),
                 expected_fence,
                 "{resolution:?}: the teardown fence must reflect exactly this terminal state"
+            );
+            assert_eq!(
+                server
+                    .metrics()
+                    .websocket_messages_dropped
+                    .load(Ordering::Relaxed),
+                u64::from(!matches!(resolution, Resolution::Written)),
+                "{resolution:?}: terminal accounting must be idempotent"
             );
         }
     }
