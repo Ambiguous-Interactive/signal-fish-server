@@ -87,6 +87,7 @@ pub async fn authenticate_with_encoding(
             protocol_version: Some(protocol_version),
             supported_transports: None,
             supported_topologies: None,
+            requested_capabilities: None,
         },
     )
     .await;

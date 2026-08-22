@@ -722,6 +722,96 @@ fn connection_info_schema_is_an_exact_union_of_rust_wire_shapes() {
 }
 
 #[test]
+fn legacy_relay_metadata_has_one_informational_untrusted_contract() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    let relay_label_description = mapping_path(
+        root,
+        &["components", "schemas", "RelayTypeLabel", "description"],
+    )
+    .and_then(Yaml::as_str)
+    .expect("RelayTypeLabel must document its semantics");
+    for phrase in ["Informational only", "does not select", "SessionPlan"] {
+        assert!(
+            relay_label_description.contains(phrase),
+            "RelayTypeLabel must preserve the `{phrase}` trust-boundary wording"
+        );
+    }
+
+    assert_eq!(
+        mapping_path(
+            root,
+            &[
+                "components",
+                "schemas",
+                "PeerConnectionInfo",
+                "properties",
+                "relay_type",
+                "$ref",
+            ],
+        )
+        .and_then(Yaml::as_str),
+        Some("#/components/schemas/RelayTypeLabel")
+    );
+    for schema in [
+        "V2RoomJoined",
+        "V3RoomJoined",
+        "V2Reconnected",
+        "V3Reconnected",
+    ] {
+        assert_eq!(
+            mapping_path(
+                root,
+                &[
+                    "components",
+                    "schemas",
+                    schema,
+                    "properties",
+                    "data",
+                    "properties",
+                    "relay_type",
+                    "$ref",
+                ],
+            )
+            .and_then(Yaml::as_str),
+            Some("#/components/schemas/RelayTypeLabel"),
+            "{schema}.relay_type must reuse the shared informational label contract"
+        );
+    }
+
+    let branches = mapping_path(root, &["components", "schemas", "ConnectionInfo", "oneOf"])
+        .and_then(Yaml::as_sequence)
+        .expect("ConnectionInfo must be an exact oneOf");
+    let relay = branches
+        .iter()
+        .find(|branch| {
+            mapping_path(branch, &["properties", "type", "const"]).and_then(Yaml::as_str)
+                == Some("relay")
+        })
+        .expect("ConnectionInfo.relay branch");
+    let relay_description = relay
+        .as_mapping_get("description")
+        .and_then(Yaml::as_str)
+        .expect("ConnectionInfo.relay must document its trust boundary");
+    for phrase in [
+        "client-supplied",
+        "does not resolve",
+        "authenticate",
+        "source-identity",
+    ] {
+        assert!(
+            relay_description.contains(phrase),
+            "ConnectionInfo.relay must preserve the `{phrase}` trust-boundary wording"
+        );
+    }
+}
+
+#[test]
 fn authority_option_fields_are_required_but_nullable_on_the_wire() {
     let text = spec_text();
     let docs = Yaml::load_from_str(&text)
@@ -1803,6 +1893,77 @@ fn spec_documents_every_wire_token_enum_variant() {
             Direct { .. } | UnityRelay { .. } | Relay { .. } | WebRTC { .. } | Custom { .. } => {}
         };
     }
+}
+
+#[test]
+fn room_operation_schema_matches_canonical_uuid_and_additive_serde_boundaries() {
+    const CANONICAL_UUID_PATTERN: &str =
+        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
+    let root = docs
+        .first()
+        .expect("protocol spec must contain one document");
+
+    let operation_id = mapping_path(root, &["components", "schemas", "RoomOperationId"])
+        .expect("spec must define RoomOperationId");
+    assert_eq!(
+        operation_id.as_mapping_get("format").and_then(Yaml::as_str),
+        Some("uuid")
+    );
+    assert_eq!(
+        operation_id
+            .as_mapping_get("pattern")
+            .and_then(Yaml::as_str),
+        Some(CANONICAL_UUID_PATTERN),
+        "RoomOperationId must require lowercase canonical hyphenated UUID text"
+    );
+
+    for envelope_name in ["RoomOperation", "RoomOperationResult"] {
+        let envelope = mapping_path(root, &["components", "schemas", envelope_name])
+            .unwrap_or_else(|| panic!("spec must define {envelope_name}"));
+        assert_ne!(
+            envelope
+                .as_mapping_get("additionalProperties")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{envelope_name} must match serde's additive outer-envelope boundary"
+        );
+        let data = mapping_path(envelope, &["properties", "data"])
+            .unwrap_or_else(|| panic!("{envelope_name} must define data"));
+        assert_ne!(
+            data.as_mapping_get("additionalProperties")
+                .and_then(Yaml::as_bool),
+            Some(false),
+            "{envelope_name}.data must match serde's additive field boundary"
+        );
+        assert_eq!(
+            mapping_path(data, &["properties", "operation_id", "$ref"]).and_then(Yaml::as_str),
+            Some("#/components/schemas/RoomOperationId"),
+            "{envelope_name}.operation_id must share the canonical UUID schema"
+        );
+    }
+
+    let operation_failed = mapping_path(root, &["components", "schemas", "OperationFailed"])
+        .expect("spec must define OperationFailed");
+    assert_ne!(
+        operation_failed
+            .as_mapping_get("additionalProperties")
+            .and_then(Yaml::as_bool),
+        Some(false),
+        "OperationFailed must match serde's additive outer-result boundary"
+    );
+    assert_ne!(
+        mapping_path(
+            operation_failed,
+            &["properties", "data", "additionalProperties"]
+        )
+        .and_then(Yaml::as_bool),
+        Some(false),
+        "OperationFailed.data must match serde's additive field boundary"
+    );
 }
 
 /// Serialize a wire-enum variant and assert its serde token is declared as a

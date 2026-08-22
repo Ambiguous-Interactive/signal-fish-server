@@ -157,6 +157,7 @@ async fn authenticate(ws: &mut WsStream, protocol_version: Option<u16>) {
             protocol_version,
             supported_transports: None,
             supported_topologies: None,
+            requested_capabilities: None,
         },
     )
     .await;

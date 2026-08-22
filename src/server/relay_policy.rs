@@ -3,8 +3,11 @@ use crate::auth::AppContext;
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
-    /// Determine whether the client should use relay based on configuration.
-    /// Note: signal-fish-server does not include relay servers - this always returns false.
+    /// Determine whether an external relay integration should be selected.
+    ///
+    /// Signal Fish does not include such an external relay service, so this is
+    /// always false. The authenticated WebSocket game-data fan-out remains the
+    /// universal relay floor and is independent of legacy relay labels.
     pub fn should_use_relay(&self, _relay_type: &str) -> bool {
         false // No relay server in signal-fish-server
     }
@@ -15,8 +18,10 @@ impl EnhancedGameServer {
         // No-op: no relay server in signal-fish-server
     }
 
-    /// Resolve the relay type for a game based on configuration.
-    /// This is used for protocol labeling even without a relay server.
+    /// Resolve the legacy integration label emitted for a game.
+    ///
+    /// This is protocol metadata only; it does not select, open, authenticate,
+    /// or prove an active physical transport.
     pub(crate) fn resolve_relay_type(&self, game_name: &str) -> String {
         self.relay_type_config
             .game_relay_mappings

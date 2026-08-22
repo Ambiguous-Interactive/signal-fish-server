@@ -159,6 +159,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         fail_retain_room_publication_snapshot: AtomicBool::new(false),
         reconnect_teardown_test_gate: StdMutex::new(None),
         scripted_room_codes: StdMutex::new(std::collections::VecDeque::new()),
+        owned_room_operation_panic: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         spectator_service,
         transport_security: TransportSecurityConfig::default(),
         dashboard_metrics_cache,
@@ -959,6 +960,7 @@ enum DrainTrigger {
     FirstFarewellTrySend,
     MissingTerminalTail,
     SpectatorRoutingLookupFailure,
+    AuthorityBroadcastFailure,
 }
 
 struct DrainTriggerCoordinator {
@@ -969,6 +971,12 @@ struct DrainTriggerCoordinator {
     try_send_calls: AtomicUsize,
     room_left_send_calls: AtomicUsize,
     player_left_broadcast_calls: AtomicUsize,
+    fail_next_room_event_completion: AtomicBool,
+    room_event_guard_released: Arc<Notify>,
+    resume_failed_room_event: Arc<Notify>,
+    pause_next_player_left_broadcast: AtomicBool,
+    player_left_broadcast_started: Arc<Notify>,
+    resume_player_left_broadcast: Arc<Notify>,
     clients: RwLock<HashMap<PlayerId, ClientDeliveryHandle>>,
     room_players: RwLock<HashMap<RoomId, HashSet<PlayerId>>>,
 }
@@ -983,6 +991,12 @@ impl DrainTriggerCoordinator {
             try_send_calls: AtomicUsize::new(0),
             room_left_send_calls: AtomicUsize::new(0),
             player_left_broadcast_calls: AtomicUsize::new(0),
+            fail_next_room_event_completion: AtomicBool::new(false),
+            room_event_guard_released: Arc::new(Notify::new()),
+            resume_failed_room_event: Arc::new(Notify::new()),
+            pause_next_player_left_broadcast: AtomicBool::new(false),
+            player_left_broadcast_started: Arc::new(Notify::new()),
+            resume_player_left_broadcast: Arc::new(Notify::new()),
             clients: RwLock::new(HashMap::new()),
             room_players: RwLock::new(HashMap::new()),
         }
@@ -1048,6 +1062,19 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         mutation_guard: RoomEventMutationGuard,
         job: RoomEventJob,
     ) -> RoomEventCompletion {
+        if self
+            .fail_next_room_event_completion
+            .swap(false, Ordering::AcqRel)
+        {
+            let guard_released = Arc::clone(&self.room_event_guard_released);
+            let resume = Arc::clone(&self.resume_failed_room_event);
+            return Box::pin(async move {
+                drop(mutation_guard);
+                guard_released.notify_one();
+                resume.notified().await;
+                anyhow::bail!("injected room-event completion failure")
+            });
+        }
         self.room_events.enqueue(mutation_guard, job)
     }
 
@@ -1132,10 +1159,24 @@ impl MessageCoordinator for DrainTriggerCoordinator {
                 + 'a,
         >,
     ) -> anyhow::Result<bool> {
+        if self.trigger == DrainTrigger::AuthorityBroadcastFailure
+            && matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. })
+            && !self.triggered.swap(true, Ordering::AcqRel)
+        {
+            anyhow::bail!("injected authority broadcast failure");
+        }
         if self.trigger == DrainTrigger::PlayerLeftBroadcast
             && matches!(message.as_ref(), ServerMessage::PlayerLeft { .. })
         {
             self.begin_drain_once();
+        }
+        if matches!(message.as_ref(), ServerMessage::PlayerLeft { .. })
+            && self
+                .pause_next_player_left_broadcast
+                .swap(false, Ordering::AcqRel)
+        {
+            self.player_left_broadcast_started.notify_one();
+            self.resume_player_left_broadcast.notified().await;
         }
         if *drain.borrow() || !should_send() {
             return Ok(false);
@@ -1953,6 +1994,1099 @@ async fn aborting_join_while_baseline_is_backpressured_still_completes_admission
             .is_some_and(|room| room.players.contains_key(&player_id)),
         "owned join publishes one coherent DB and routing membership"
     );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_join_baseline_failure_rolls_back_and_returns_terminal_failure() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database
+        .initialize()
+        .await
+        .expect("initialize join rollback database");
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:47993".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x47993);
+    database.fail_get_room_players_for_test(true);
+
+    server
+        .handle_join_room_operation(
+            &player_id,
+            Some(operation_id),
+            "baseline-failure".to_string(),
+            None,
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(matches!(
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("correlated terminal response should arrive")
+            .as_deref(),
+        Some(ServerMessage::RoomOperationResult { operation_id: received, result })
+            if *received == operation_id
+                && matches!(
+                    result.as_ref(),
+                    crate::protocol::RoomOperationResult::OperationFailed {
+                        error_code: Some(ErrorCode::StorageError),
+                        ..
+                    }
+                )
+    ));
+    assert_eq!(server.get_client_room(&player_id).await, None);
+    assert_eq!(
+        server
+            .metrics
+            .players_joined
+            .load(Ordering::Relaxed)
+            .saturating_sub(server.metrics.players_left.load(Ordering::Relaxed)),
+        0,
+        "failed baseline must balance the provisional admission"
+    );
+}
+
+async fn expect_correlated_internal_operation_failure(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    operation_id: crate::protocol::RoomOperationId,
+    context: &str,
+) {
+    let result = expect_correlated_terminal_operation_result(receiver, operation_id, context).await;
+    assert!(matches!(
+        result.as_ref(),
+        crate::protocol::RoomOperationResult::OperationFailed {
+            error_code: Some(ErrorCode::InternalError),
+            ..
+        }
+    ));
+}
+
+async fn expect_correlated_terminal_operation_result(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    operation_id: crate::protocol::RoomOperationId,
+    context: &str,
+) -> Box<crate::protocol::RoomOperationResult> {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let message = receiver
+                .recv()
+                .await
+                .unwrap_or_else(|| panic!("{context}: response channel closed"));
+            if let ServerMessage::RoomOperationResult {
+                operation_id: received,
+                result,
+            } = message.as_ref()
+            {
+                if *received == operation_id {
+                    return result.clone();
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{context}: correlated terminal response timed out"))
+}
+
+async fn assert_no_second_terminal_response(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    operation_id: crate::protocol::RoomOperationId,
+    context: &str,
+) {
+    loop {
+        match timeout(Duration::from_millis(50), receiver.recv()).await {
+            Err(_) | Ok(None) => return,
+            Ok(Some(message)) => {
+                assert!(
+                    !matches!(
+                        message.as_ref(),
+                        ServerMessage::RoomOperationResult {
+                            operation_id: received,
+                            ..
+                        } if *received == operation_id
+                    ),
+                    "{context}: received a duplicate terminal response: {message:?}"
+                );
+            }
+        }
+    }
+}
+
+struct CorrelatedReconnectPanicFixture {
+    server: Arc<EnhancedGameServer>,
+    current_player_id: PlayerId,
+    reconnect_player_id: PlayerId,
+    room_id: RoomId,
+    token: String,
+    effective_player_id: Arc<RwLock<PlayerId>>,
+    receiver: mpsc::Receiver<Arc<ServerMessage>>,
+    peer_receiver: mpsc::Receiver<Arc<ServerMessage>>,
+}
+
+async fn correlated_reconnect_panic_fixture() -> CorrelatedReconnectPanicFixture {
+    let server = create_test_server().await;
+    let (reconnect_player_id, _old_receiver) =
+        register_client(&server, "127.0.0.1:47997".parse().unwrap()).await;
+    let (current_player_id, receiver) =
+        register_client(&server, "127.0.0.1:47998".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "panic-reconnect".to_string(),
+            Some("PNCRC1".to_string()),
+            4,
+            true,
+            reconnect_player_id,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("reconnect fixture room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnect_player_id, room.id)
+        .await;
+    let (peer_player_id, mut peer_receiver) =
+        register_client(&server, "127.0.0.1:48003".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &peer_player_id,
+            "panic-reconnect".to_string(),
+            Some("PNCRC1".to_string()),
+            "peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
+        .await
+        .expect("peer join baseline arrives")
+        .expect("peer join baseline channel remains open");
+    assert!(matches!(
+        peer_baseline.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    let reconnecting_info = room
+        .players
+        .get(&reconnect_player_id)
+        .cloned()
+        .expect("room creator is present");
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection is enabled")
+        .register_disconnection(
+            reconnect_player_id,
+            room.id,
+            false,
+            Some(reconnecting_info),
+            server
+                .connection_manager
+                .game_data_epoch(&reconnect_player_id)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room.id, &reconnect_player_id)
+        .await
+        .expect("disconnect removes database membership");
+    server
+        .connection_manager
+        .remove_client(&reconnect_player_id);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnect_player_id)
+        .await
+        .expect("disconnect removes coordinator route");
+
+    CorrelatedReconnectPanicFixture {
+        server,
+        current_player_id,
+        reconnect_player_id,
+        room_id: room.id,
+        token,
+        effective_player_id: Arc::new(RwLock::new(current_player_id)),
+        receiver,
+        peer_receiver,
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_join_panic_returns_terminal_internal_failure() {
+    let server = create_test_server().await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:47994".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x47994);
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::JoinBeforeTerminal);
+
+    server
+        .handle_join_room_operation(
+            &player_id,
+            Some(operation_id),
+            "panic-join".to_string(),
+            None,
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    expect_correlated_internal_operation_failure(&mut receiver, operation_id, "join panic").await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generation() {
+    let server = create_test_server().await;
+    let (creator_id, mut creator_receiver) =
+        register_client(&server, "127.0.0.1:48008".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator_id,
+            "panic-join-admission".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let creator_baseline = timeout(Duration::from_secs(1), creator_receiver.recv())
+        .await
+        .expect("creator baseline arrives")
+        .expect("creator channel remains open");
+    let (room_id, room_code) = match creator_baseline.as_ref() {
+        ServerMessage::RoomJoined(payload) => (payload.room_id, payload.room_code.clone()),
+        other => panic!("expected creator RoomJoined, got {other:?}"),
+    };
+
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48009".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x48009);
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::JoinAfterAdmission);
+    server
+        .handle_join_room_operation(
+            &player_id,
+            Some(operation_id),
+            "panic-join-admission".to_string(),
+            Some(room_code),
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    expect_correlated_internal_operation_failure(
+        &mut receiver,
+        operation_id,
+        "join admission panic",
+    )
+    .await;
+    assert_eq!(server.get_client_room(&player_id).await, None);
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("rollback room lookup succeeds")
+        .expect("incumbent room remains present");
+    assert_eq!(room.players.len(), 1);
+    assert!(room.players.contains_key(&creator_id));
+    assert!(!room.players.contains_key(&player_id));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_leave_panic_returns_terminal_internal_failure() {
+    let server = create_test_server().await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:47995".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x47995);
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::LeaveBeforeTerminal);
+
+    server
+        .leave_room_operation(&player_id, Some(operation_id))
+        .await;
+
+    expect_correlated_internal_operation_failure(&mut receiver, operation_id, "leave panic").await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_leave_event_panic_with_fallback_failure_has_one_terminal_and_lifecycle() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::AuthorityBroadcastFailure,
+    ));
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig::default(),
+        Arc::clone(&coordinator) as Arc<dyn MessageCoordinator>,
+    )
+    .await;
+    coordinator.attach_server(&server);
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48004".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &player_id,
+            "panic-leave-event".to_string(),
+            None,
+            "leaver".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let join_baseline = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("join baseline arrives")
+        .expect("join baseline channel remains open");
+    let room_code = match join_baseline.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("expected leaver RoomJoined, got {other:?}"),
+    };
+    let (peer_id, mut peer_receiver) =
+        register_client(&server, "127.0.0.1:48006".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &peer_id,
+            "panic-leave-event".to_string(),
+            Some(room_code),
+            "peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
+        .await
+        .expect("peer baseline arrives")
+        .expect("peer channel remains open");
+    assert!(matches!(
+        peer_baseline.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    let operation_id = uuid::Uuid::from_u128(0x48004);
+    server
+        .panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::LeaveJobBeforeTerminal);
+    server
+        .leave_room_operation(&player_id, Some(operation_id))
+        .await;
+
+    expect_correlated_internal_operation_failure(
+        &mut receiver,
+        operation_id,
+        "leave event-job panic",
+    )
+    .await;
+    let mut saw_left = false;
+    let mut saw_authority = false;
+    timeout(Duration::from_secs(1), async {
+        while !saw_left || !saw_authority {
+            let message = peer_receiver
+                .recv()
+                .await
+                .expect("peer channel remains open");
+            match message.as_ref() {
+                ServerMessage::PlayerLeft {
+                    player_id: departed,
+                    ..
+                } if *departed == player_id => saw_left = true,
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                } => {
+                    assert!(saw_left, "authority clear must follow PlayerLeft");
+                    saw_authority = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("peer observes repaired leave lifecycle");
+    assert_eq!(
+        coordinator
+            .player_left_broadcast_calls
+            .load(Ordering::Acquire),
+        1,
+        "outer recovery must resume after the committed PlayerLeft stage"
+    );
+    assert_no_second_terminal_response(&mut receiver, operation_id, "leave fallback failure").await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_leave_repairs_an_ordinary_authority_publication_failure_in_lane() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::AuthorityBroadcastFailure,
+    ));
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig::default(),
+        Arc::clone(&coordinator) as Arc<dyn MessageCoordinator>,
+    )
+    .await;
+    coordinator.attach_server(&server);
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48010".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &player_id,
+            "authority-leave-failure".to_string(),
+            None,
+            "leaver".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let room_code = match timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("leaver baseline arrives")
+        .expect("leaver channel remains open")
+        .as_ref()
+    {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("expected leaver RoomJoined, got {other:?}"),
+    };
+    let (peer_id, mut peer_receiver) =
+        register_client(&server, "127.0.0.1:48011".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &peer_id,
+            "authority-leave-failure".to_string(),
+            Some(room_code),
+            "peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
+        .await
+        .expect("peer baseline arrives")
+        .expect("peer channel remains open");
+    assert!(matches!(
+        peer_baseline.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    let operation_id = uuid::Uuid::from_u128(0x48010);
+    server
+        .leave_room_operation(&player_id, Some(operation_id))
+        .await;
+    let result = expect_correlated_terminal_operation_result(
+        &mut receiver,
+        operation_id,
+        "ordinary authority publication failure",
+    )
+    .await;
+    assert!(matches!(
+        result.as_ref(),
+        crate::protocol::RoomOperationResult::RoomLeft
+    ));
+    let mut saw_left = false;
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let message = peer_receiver
+                .recv()
+                .await
+                .expect("peer channel remains open");
+            match message.as_ref() {
+                ServerMessage::PlayerLeft {
+                    player_id: departed,
+                    ..
+                } if *departed == player_id => saw_left = true,
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                } => {
+                    assert!(saw_left, "authority clear must follow PlayerLeft");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("peer observes recovered authority lifecycle");
+    assert_eq!(
+        coordinator
+            .player_left_broadcast_calls
+            .load(Ordering::Acquire),
+        1
+    );
+    assert_no_second_terminal_response(&mut receiver, operation_id, "authority recovery").await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_reconnect_panic_returns_terminal_internal_failure() {
+    let server = create_test_server().await;
+    let (current_player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:47996".parse().unwrap()).await;
+    let reconnect_player_id = PlayerId::new_v4();
+    let room_id = RoomId::new_v4();
+    let operation_id = uuid::Uuid::from_u128(0x47996);
+    let effective_player_id = Arc::new(RwLock::new(current_player_id));
+    server.panic_owned_room_operation_for_test(
+        OwnedRoomOperationPanicPoint::ReconnectBeforeReassignment,
+    );
+
+    assert!(
+        !server
+            .handle_reconnect_with_identity_operation(
+                &current_player_id,
+                &reconnect_player_id,
+                &room_id,
+                "unused-test-token",
+                effective_player_id,
+                Some(operation_id),
+            )
+            .await
+    );
+
+    expect_correlated_internal_operation_failure(&mut receiver, operation_id, "reconnect panic")
+        .await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_reconnect_panic_after_identity_move_uses_the_still_routed_identity() {
+    let mut fixture = correlated_reconnect_panic_fixture().await;
+    let operation_id = uuid::Uuid::from_u128(0x47999);
+    fixture.server.panic_owned_room_operation_for_test(
+        OwnedRoomOperationPanicPoint::ReconnectAfterReassignment,
+    );
+
+    assert!(
+        !fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                Arc::clone(&fixture.effective_player_id),
+                Some(operation_id),
+            )
+            .await
+    );
+    assert_eq!(
+        *fixture.effective_player_id.read().await,
+        fixture.current_player_id,
+        "panic recovery must restore the websocket's transient identity"
+    );
+    assert!(fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.current_player_id));
+    assert!(!fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.reconnect_player_id));
+    let room = fixture
+        .server
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .expect("rollback room lookup succeeds")
+        .expect("rollback room remains present");
+    assert!(!room.players.contains_key(&fixture.reconnect_player_id));
+    let reconnection_manager = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection is enabled");
+    assert!(
+        reconnection_manager
+            .has_pending_reconnection(&fixture.reconnect_player_id)
+            .await
+    );
+    let retry_claim = reconnection_manager
+        .claim_reconnection(
+            &PlayerId::new_v4(),
+            &fixture.reconnect_player_id,
+            &fixture.room_id,
+            &fixture.token,
+        )
+        .await
+        .expect("panic rollback releases the claim for a fresh retry");
+    assert!(
+        reconnection_manager
+            .release_reconnection_claim(&retry_claim)
+            .await
+    );
+    expect_correlated_internal_operation_failure(
+        &mut fixture.receiver,
+        operation_id,
+        "mid-reassignment reconnect panic",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::SpectatorLeftSend,
+    ));
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig::default(),
+        Arc::clone(&coordinator) as Arc<dyn MessageCoordinator>,
+    )
+    .await;
+    coordinator.attach_server(&server);
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48013".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &player_id,
+            "outer-leave-failure".to_string(),
+            None,
+            "leaver".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let room_code = match timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("leaver baseline arrives")
+        .expect("leaver channel remains open")
+        .as_ref()
+    {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("expected leaver RoomJoined, got {other:?}"),
+    };
+    let room_id = server
+        .get_client_room(&player_id)
+        .await
+        .expect("leaver is routed to the room");
+    let (peer_id, mut peer_receiver) =
+        register_client(&server, "127.0.0.1:48014".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &peer_id,
+            "outer-leave-failure".to_string(),
+            Some(room_code),
+            "peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
+        .await
+        .expect("peer baseline arrives")
+        .expect("peer channel remains open");
+    assert!(matches!(
+        peer_baseline.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    coordinator
+        .fail_next_room_event_completion
+        .store(true, Ordering::Release);
+    coordinator
+        .pause_next_player_left_broadcast
+        .store(true, Ordering::Release);
+    let operation_id = uuid::Uuid::from_u128(0x48013);
+    let mut leave = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .leave_room_operation(&player_id, Some(operation_id))
+                .await;
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        coordinator.room_event_guard_released.notified(),
+    )
+    .await
+    .expect("injected completion drops the FIFO job's guard");
+
+    let sequencer = Arc::clone(&coordinator.room_events);
+    let mut waiting_mutation = tokio::spawn(async move { sequencer.lock(room_id).await });
+    assert!(
+        timeout(Duration::from_millis(25), &mut waiting_mutation)
+            .await
+            .is_err(),
+        "outer leave recovery must retain the exact room gate"
+    );
+
+    coordinator.resume_failed_room_event.notify_one();
+    timeout(
+        Duration::from_secs(1),
+        coordinator.player_left_broadcast_started.notified(),
+    )
+    .await
+    .expect("outer recovery reaches the PlayerLeft fallback");
+    assert!(
+        timeout(Duration::from_millis(25), &mut waiting_mutation)
+            .await
+            .is_err(),
+        "outer leave recovery must retain the room gate through fallback publication"
+    );
+    coordinator.resume_player_left_broadcast.notify_one();
+    let acquired = timeout(Duration::from_secs(1), waiting_mutation)
+        .await
+        .expect("later mutation acquires after recovery")
+        .expect("later mutation task remains healthy");
+    drop(acquired);
+    timeout(Duration::from_secs(1), &mut leave)
+        .await
+        .expect("leave recovery completes")
+        .expect("leave task remains healthy");
+
+    expect_correlated_internal_operation_failure(
+        &mut receiver,
+        operation_id,
+        "outer leave completion failure",
+    )
+    .await;
+    let mut saw_left = false;
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let message = peer_receiver
+                .recv()
+                .await
+                .expect("peer channel remains open");
+            match message.as_ref() {
+                ServerMessage::PlayerLeft {
+                    player_id: departed,
+                    ..
+                } if *departed == player_id => saw_left = true,
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                } => {
+                    assert!(saw_left, "authority clear must follow PlayerLeft");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("peer observes leave recovery before the room gate opens");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_join_panic_after_terminal_does_not_send_a_second_result() {
+    let server = create_test_server().await;
+    let (creator_id, mut creator_receiver) =
+        register_client(&server, "127.0.0.1:48005".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator_id,
+            "post-terminal-join".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let creator_baseline = timeout(Duration::from_secs(1), creator_receiver.recv())
+        .await
+        .expect("creator baseline arrives")
+        .expect("creator channel remains open");
+    let room_code = match creator_baseline.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("expected creator RoomJoined, got {other:?}"),
+    };
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48000".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x48000);
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::JoinAfterTerminal);
+
+    server
+        .handle_join_room_operation(
+            &player_id,
+            Some(operation_id),
+            "post-terminal-join".to_string(),
+            Some(room_code),
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let result = expect_correlated_terminal_operation_result(
+        &mut receiver,
+        operation_id,
+        "post-terminal join panic",
+    )
+    .await;
+    let room_id = match result.as_ref() {
+        crate::protocol::RoomOperationResult::RoomJoined(payload) => payload.room_id,
+        other => panic!("expected RoomJoined, got {other:?}"),
+    };
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("repaired join room lookup succeeds")
+        .expect("repaired join room remains present");
+    assert!(
+        !room.players.contains_key(&player_id),
+        "a panic before lifecycle publication must terminate the partial generation"
+    );
+    let mut saw_joined = false;
+    let mut saw_left = false;
+    timeout(Duration::from_secs(1), async {
+        while !saw_joined || !saw_left {
+            let message = creator_receiver
+                .recv()
+                .await
+                .expect("creator channel remains open");
+            match message.as_ref() {
+                ServerMessage::PlayerJoined { player } if player.id == player_id => {
+                    saw_joined = true;
+                }
+                ServerMessage::PlayerLeft {
+                    player_id: departed,
+                    ..
+                } if *departed == player_id => {
+                    assert!(
+                        saw_joined,
+                        "repair must publish opening before terminal lifecycle"
+                    );
+                    saw_left = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("incumbent observes repaired join lifecycle");
+    assert_no_second_terminal_response(&mut receiver, operation_id, "post-terminal join panic")
+        .await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_leave_panic_after_terminal_does_not_send_a_second_result() {
+    let server = create_test_server().await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48001".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &player_id,
+            "post-terminal-leave".to_string(),
+            None,
+            "leaver".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let join_baseline = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("join baseline arrives")
+        .expect("join baseline channel remains open");
+    let room_code = match join_baseline.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("expected leaver RoomJoined, got {other:?}"),
+    };
+    let (peer_id, mut peer_receiver) =
+        register_client(&server, "127.0.0.1:48007".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &peer_id,
+            "post-terminal-leave".to_string(),
+            Some(room_code),
+            "peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
+        .await
+        .expect("peer baseline arrives")
+        .expect("peer channel remains open");
+    assert!(matches!(
+        peer_baseline.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    let operation_id = uuid::Uuid::from_u128(0x48001);
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::LeaveJobAfterTerminal);
+    server
+        .leave_room_operation(&player_id, Some(operation_id))
+        .await;
+
+    let result = expect_correlated_terminal_operation_result(
+        &mut receiver,
+        operation_id,
+        "post-terminal leave panic",
+    )
+    .await;
+    assert!(matches!(
+        result.as_ref(),
+        crate::protocol::RoomOperationResult::RoomLeft
+    ));
+    let mut saw_left = false;
+    let mut saw_authority = false;
+    timeout(Duration::from_secs(1), async {
+        while !saw_left || !saw_authority {
+            let message = peer_receiver
+                .recv()
+                .await
+                .expect("peer channel remains open");
+            match message.as_ref() {
+                ServerMessage::PlayerLeft {
+                    player_id: departed,
+                    ..
+                } if *departed == player_id => saw_left = true,
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                } => {
+                    assert!(saw_left, "authority clear must follow PlayerLeft");
+                    saw_authority = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("peer observes repaired leave lifecycle");
+    assert_no_second_terminal_response(&mut receiver, operation_id, "post-terminal leave panic")
+        .await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_reconnect_panic_after_terminal_does_not_send_a_second_result() {
+    let mut fixture = correlated_reconnect_panic_fixture().await;
+    let operation_id = uuid::Uuid::from_u128(0x48002);
+    fixture
+        .server
+        .panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::ReconnectAfterTerminal);
+
+    let effective_player_id = Arc::clone(&fixture.effective_player_id);
+    assert!(
+        fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                Arc::clone(&effective_player_id),
+                Some(operation_id),
+            )
+            .await
+    );
+    assert_eq!(
+        *effective_player_id.read().await,
+        fixture.reconnect_player_id,
+        "a delivered reconnect remains the websocket's active identity"
+    );
+    assert!(
+        fixture
+            .server
+            .reconnection_manager()
+            .expect("reconnection is enabled")
+            .validate_reconnection(
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+            )
+            .await
+            .is_err(),
+        "a delivered reconnect must consume the token used by its claim"
+    );
+    assert!(!fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.current_player_id));
+    assert!(
+        !fixture
+            .server
+            .connection_manager
+            .has_client(&fixture.reconnect_player_id),
+        "publication repair terminates the incomplete reconnect generation"
+    );
+    let room = fixture
+        .server
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .expect("repaired reconnect room lookup succeeds")
+        .expect("repaired reconnect room remains present");
+    assert!(
+        !room.players.contains_key(&fixture.reconnect_player_id),
+        "a panic before peer publication must terminate the partial generation"
+    );
+    let mut saw_reconnected = false;
+    let mut saw_left = false;
+    timeout(Duration::from_secs(1), async {
+        while !saw_reconnected || !saw_left {
+            let message = fixture
+                .peer_receiver
+                .recv()
+                .await
+                .expect("peer channel remains open");
+            match message.as_ref() {
+                ServerMessage::PlayerReconnected { player_id, .. }
+                    if *player_id == fixture.reconnect_player_id =>
+                {
+                    saw_reconnected = true;
+                }
+                ServerMessage::PlayerLeft {
+                    player_id: departed,
+                    ..
+                } if *departed == fixture.reconnect_player_id => {
+                    assert!(
+                        saw_reconnected,
+                        "repair must publish PlayerReconnected before PlayerLeft"
+                    );
+                    saw_left = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("peer observes the completed reconnect lifecycle");
+    let result = expect_correlated_terminal_operation_result(
+        &mut fixture.receiver,
+        operation_id,
+        "post-terminal reconnect panic",
+    )
+    .await;
+    assert!(matches!(
+        result.as_ref(),
+        crate::protocol::RoomOperationResult::Reconnected(_)
+    ));
+    assert_no_second_terminal_response(
+        &mut fixture.receiver,
+        operation_id,
+        "post-terminal reconnect panic",
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -4991,7 +6125,7 @@ async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
 async fn draining_server_allows_existing_room_join() {
     let server = create_test_server().await;
     let (creator, _creator_rx) = register_client(&server, "127.0.0.1:48011".parse().unwrap()).await;
-    server
+    let room = server
         .database
         .create_room(
             "test-game".to_string(),
@@ -5037,6 +6171,26 @@ async fn draining_server_allows_existing_room_join() {
         }
         other => panic!("expected RoomJoined, got {other:?}"),
     }
+    let authoritative = server
+        .database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("joined room lookup succeeds")
+        .expect("joined room remains present");
+    assert!(
+        authoritative.players.contains_key(&joiner),
+        "drain-canceled peer publication must retain the accepted membership"
+    );
+    assert_eq!(
+        server.get_client_room(&joiner).await,
+        Some(room.id),
+        "drain-canceled peer publication must retain the accepted route"
+    );
+    assert_eq!(
+        authoritative.lobby_state,
+        LobbyState::Lobby,
+        "drain-canceled peer publication must still run the join success epilogue"
+    );
 }
 
 #[tokio::test]

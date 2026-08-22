@@ -99,6 +99,7 @@ async fn authenticate(ws: &mut WsStream) {
         protocol_version: Some(2),
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     let json = serde_json::to_string(&auth).expect("serialize Authenticate");
     ws.send(Message::Text(json.into()))
@@ -115,6 +116,7 @@ async fn authenticate_v3(ws: &mut WsStream) {
         protocol_version: Some(3),
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     let json = serde_json::to_string(&auth).expect("serialize Authenticate");
     ws.send(Message::Text(json.into()))

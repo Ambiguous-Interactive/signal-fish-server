@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add negotiated protocol-v3 room-operation correlation. Clients that request
+  and receive the `room_operation_ids` capability can wrap join, leave,
+  reconnect, spectator-join, and spectator-leave commands with a UUID and
+  receive exactly matched terminal results without changing legacy v2/0.4/0.7
+  wire shapes. Unexpected owned-task failures also return a correlated internal
+  failure while the connection remains deliverable (issue #395).
+
+### Changed
+
+- **Breaking:** Add `requested_capabilities` to the public Rust
+  `ClientMessage::Authenticate` variant and correlated room-operation variants
+  to the public client/server message enums. Downstream struct-variant
+  constructors and exhaustive matches must handle the new fields and variants.
+- Refresh compatible Rust dependencies across the server, fuzz, and native
+  reference-client lockfiles, including `uuid` 1.24.1, `saphyr` 0.0.12, and
+  `webrtc`/`rtc` 0.20.3, and update `taiki-e/install-action` to 2.85.13.
+
+### Fixed
+
+- Correct the protocol contract for `JoinRoom.relay_transport`: it is a
+  compatibility-only hint that the server ignores, so every accepted value and
+  omission retain the same authenticated WebSocket relay path. New clients
+  should omit it; removal is reserved for a future breaking protocol version.
+  Also clarify that `relay_type` and `ConnectionInfo.relay` are informational,
+  client-untrusted legacy metadata rather than routing authority (issue #393).
+
+### Security
+
+- Update `h2` to 0.4.16 to address RUSTSEC-2026-0258.
+
 ## [0.7.0] - 2026-08-16
 
 ### Added

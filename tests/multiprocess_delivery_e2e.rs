@@ -252,6 +252,7 @@ async fn authenticate_raw_v3(sink: &mut WsSink, receiver: &mut WsReceiver) {
             protocol_version: Some(3),
             supported_transports: Some(vec![Transport::Relay]),
             supported_topologies: Some(vec![Topology::Relay]),
+            requested_capabilities: None,
         },
     )
     .await;

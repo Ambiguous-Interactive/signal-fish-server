@@ -105,6 +105,7 @@ pub enum ClientMessage {
         max_players: Option<u8>,
         #[serde(skip_serializing_if = "Option::is_none")]
         supports_authority: Option<bool>,
+        /// Reserved compatibility hint; omit it because the server ignores it.
         #[serde(skip_serializing_if = "Option::is_none")]
         relay_transport: Option<String>,
     },
@@ -191,6 +192,7 @@ pub struct PeerConnectionInfo {
     pub player_id: PlayerId,
     pub player_name: String,
     pub is_authority: bool,
+    /// Informational deployment label; never use this for routing.
     pub relay_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<serde_json::Value>,
@@ -291,6 +293,7 @@ pub enum ServerMessage {
         is_authority: bool,
         lobby_state: String,
         ready_players: Vec<PlayerId>,
+        /// Informational deployment label; never use this for routing.
         relay_type: String,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
@@ -353,6 +356,7 @@ pub enum ServerMessage {
         is_authority: bool,
         lobby_state: String,
         ready_players: Vec<PlayerId>,
+        /// Informational deployment label; never use this for routing.
         relay_type: String,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
@@ -1276,6 +1280,7 @@ pub enum ClientMessage {
         max_players: Option<u8>,
         #[serde(skip_serializing_if = "Option::is_none")]
         supports_authority: Option<bool>,
+        /// Reserved compatibility hint; omit it because the server ignores it.
         #[serde(skip_serializing_if = "Option::is_none")]
         relay_transport: Option<String>,
     },
@@ -1337,6 +1342,7 @@ pub struct PeerConnectionInfo {
     pub player_id: PlayerId,
     pub player_name: String,
     pub is_authority: bool,
+    /// Informational deployment label; never use this for routing.
     pub relay_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<serde_json::Value>,
@@ -1422,6 +1428,7 @@ pub enum ServerMessage {
         is_authority: bool,
         lobby_state: String,
         ready_players: Vec<PlayerId>,
+        /// Informational deployment label; never use this for routing.
         relay_type: String,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
@@ -1473,6 +1480,7 @@ pub enum ServerMessage {
         is_authority: bool,
         lobby_state: String,
         ready_players: Vec<PlayerId>,
+        /// Informational deployment label; never use this for routing.
         relay_type: String,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,

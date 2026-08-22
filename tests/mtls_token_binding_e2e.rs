@@ -413,6 +413,7 @@ async fn authenticate(
         protocol_version: Some(3),
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     socket
         .send(Message::Text(
@@ -577,6 +578,7 @@ async fn required_mtls_without_token_binding_keeps_unsigned_json_and_binary_path
         protocol_version: Some(3),
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     socket
         .send(Message::Text(
@@ -972,6 +974,7 @@ async fn fingerprint_bound_authentication_advertises_signed_messagepack() {
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     send_signed(&mut socket, &mut binding, &message, Some(&fingerprint)).await;
 

@@ -222,6 +222,7 @@ async fn authenticate_for_message_pack(
         protocol_version,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
 
     let json = serde_json::to_string(&auth).expect("auth serializes");
@@ -260,6 +261,7 @@ async fn test_rkyv_game_data_format_request_falls_back_to_json_and_is_not_advert
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
 
     sender
@@ -537,7 +539,7 @@ async fn test_room_creation_and_joining() {
 }
 
 #[tokio::test]
-async fn test_game_data_broadcasting() {
+async fn relay_transport_hint_does_not_change_websocket_game_data_fanout() {
     // Keep the server handle's metrics so the relay's delivery-conservation
     // law can be asserted once the broadcast has been observed.
     let game_server = create_test_server().await;
@@ -545,68 +547,96 @@ async fn test_game_data_broadcasting() {
     let running_server = start_server_with_instance(game_server).await;
     let addr = running_server.addr();
 
-    let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
-    let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
+    let cases = [
+        ("omitted", None),
+        ("tcp", Some("tcp")),
+        ("udp", Some("udp")),
+        ("websocket", Some("websocket")),
+        ("auto", Some("auto")),
+    ];
 
-    // Both players join the same room
-    let join_msg = ClientMessage::JoinRoom {
-        game_name: "data_test".to_string(),
-        room_code: Some("DTA123".to_string()),
-        player_name: "Player1".to_string(),
-        max_players: Some(2),
-        supports_authority: Some(true),
-        relay_transport: None,
-    };
-    let _ = send_and_receive(&mut sender1, &mut receiver1, join_msg)
-        .await
-        .unwrap();
-
-    let join_msg2 = ClientMessage::JoinRoom {
-        game_name: "data_test".to_string(),
-        room_code: Some("DTA123".to_string()),
-        player_name: "Player2".to_string(),
-        max_players: Some(2),
-        supports_authority: Some(true),
-        relay_transport: None,
-    };
-    let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
-        .await
-        .unwrap();
-
-    // The room enters the lobby EXACTLY ONCE, as soon as player 1 joins
-    // (`max_players` is a ceiling, not a required count). Player 1 sees its
-    // own-join lobby update, then a PlayerJoined when player 2 joins. Player 2
-    // joins an already-Lobby room, so its `RoomJoined` already carries
-    // `lobby_state: Lobby` and no further LobbyStateChanged is broadcast.
-    expect_lobby_state_changed_notification(&mut receiver1, "player 1 game-data own-join update")
-        .await;
-    expect_player_joined_notification(&mut receiver1, "player 1 game-data join notification").await;
-
-    // Player 1 sends game data
-    let game_data = serde_json::json!({"action": "move", "x": 100, "y": 200});
-    let data_msg = ClientMessage::GameData {
-        class: None,
-        key: None,
-        data: game_data.clone(),
-    };
-
-    let json = serde_json::to_string(&data_msg).unwrap();
-    sender1.send(Message::Text(json.into())).await.unwrap();
-
-    // Player 2 should receive the game data
-    match tokio::time::timeout(tokio::time::Duration::from_secs(2), receiver2.next()).await {
-        Ok(Some(msg)) => {
-            let text = msg.unwrap().into_text().unwrap();
-            let received: ServerMessage = serde_json::from_str(&text).unwrap();
-            match received {
-                ServerMessage::GameData { data, .. } => {
-                    assert_eq!(data, game_data);
-                }
-                _ => panic!("Expected GameData, got {received:?}"),
+    for (index, (label, relay_transport)) in cases.into_iter().enumerate() {
+        let room_code = format!("RH{index:04}");
+        let game_name = format!("relay-hint-{label}");
+        let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
+        let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
+        let join_wire = |player_name: &str| {
+            let mut data = serde_json::json!({
+                "game_name": game_name.clone(),
+                "room_code": room_code.clone(),
+                "player_name": player_name,
+                "max_players": 2,
+                "supports_authority": true
+            });
+            if let Some(token) = relay_transport {
+                data["relay_transport"] = serde_json::Value::String(token.to_string());
             }
+            Message::Text(
+                serde_json::json!({ "type": "JoinRoom", "data": data })
+                    .to_string()
+                    .into(),
+            )
+        };
+
+        // Send raw wire JSON so the first case proves true field omission,
+        // rather than serializing `Option::None` as an explicit null.
+        sender1.send(join_wire("Player1")).await.unwrap();
+        let joined1 = receive_server_message(&mut receiver1).await;
+        sender2.send(join_wire("Player2")).await.unwrap();
+        let joined2 = receive_server_message(&mut receiver2).await;
+
+        for joined in [joined1, joined2] {
+            let ServerMessage::RoomJoined(payload) = joined else {
+                panic!("expected RoomJoined for {label}, got {joined:?}");
+            };
+            assert_eq!(
+                payload.relay_type, "matchbox",
+                "{label} hint changed the deployment-defined legacy label"
+            );
         }
-        Ok(None) => panic!("Connection closed while waiting for game data"),
-        Err(_) => panic!("Timeout waiting for game data"),
+
+        // The creator sees the lobby transition and then the joining peer.
+        // Draining both proves the subsequent frame is the data-path result.
+        expect_lobby_state_changed_notification(
+            &mut receiver1,
+            &format!("{label} creator own-join update"),
+        )
+        .await;
+        expect_player_joined_notification(
+            &mut receiver1,
+            &format!("{label} creator join notification"),
+        )
+        .await;
+
+        let game_data = serde_json::json!({"case": label, "sequence": index});
+        let data_msg = ClientMessage::GameData {
+            class: None,
+            key: None,
+            data: game_data.clone(),
+        };
+        sender1
+            .send(Message::Text(
+                serde_json::to_string(&data_msg).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        let frame = tokio::time::timeout(tokio::time::Duration::from_secs(2), receiver2.next())
+            .await
+            .unwrap_or_else(|_| panic!("timeout waiting for {label} game data"))
+            .unwrap_or_else(|| panic!("connection closed waiting for {label} game data"))
+            .unwrap();
+        let Message::Text(text) = frame else {
+            panic!("{label} GameData was not delivered on a WebSocket text frame");
+        };
+        let received: ServerMessage = serde_json::from_str(&text).unwrap();
+        let ServerMessage::GameData { data, .. } = received else {
+            panic!("expected GameData for {label}, got {received:?}");
+        };
+        assert_eq!(data, game_data, "{label} changed the relayed payload");
+
+        sender1.close().await.unwrap();
+        sender2.close().await.unwrap();
     }
 
     // The relayed payload has been observed end to end, so every delivery in

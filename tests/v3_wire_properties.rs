@@ -408,6 +408,7 @@ fn arb_authenticate() -> impl Strategy<Value = ClientMessage> {
         proptest::option::of(2u16..=4u16),
         proptest::option::of(proptest::collection::vec(arb_transport(), 0..4)),
         proptest::option::of(proptest::collection::vec(arb_topology(), 0..4)),
+        proptest::option::of(proptest::collection::vec("[a-z_]{1,24}", 0..4)),
     )
         .prop_map(
             |(
@@ -418,6 +419,7 @@ fn arb_authenticate() -> impl Strategy<Value = ClientMessage> {
                 protocol_version,
                 supported_transports,
                 supported_topologies,
+                requested_capabilities,
             )| ClientMessage::Authenticate {
                 app_id,
                 sdk_version,
@@ -426,6 +428,7 @@ fn arb_authenticate() -> impl Strategy<Value = ClientMessage> {
                 protocol_version,
                 supported_transports,
                 supported_topologies,
+                requested_capabilities,
             },
         )
 }
@@ -453,6 +456,7 @@ proptest! {
             protocol_version,
             supported_transports,
             supported_topologies,
+            requested_capabilities,
             ..
         } = &message
         else {
@@ -471,6 +475,10 @@ proptest! {
         prop_assert_eq!(
             data.contains_key("supported_topologies"),
             supported_topologies.is_some()
+        );
+        prop_assert_eq!(
+            data.contains_key("requested_capabilities"),
+            requested_capabilities.is_some()
         );
     }
 }

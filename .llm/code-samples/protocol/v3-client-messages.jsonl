@@ -1,4 +1,5 @@
-{"type": "Authenticate", "data": {"app_id": "mb_app_abc123", "sdk_version": "1.2.3", "platform": "unity", "protocol_version": 3, "supported_transports": ["relay", "direct", "webrtc"], "supported_topologies": ["relay", "host", "mesh"]}}
+{"type": "Authenticate", "data": {"app_id": "mb_app_abc123", "sdk_version": "1.2.3", "platform": "unity", "protocol_version": 3, "supported_transports": ["relay", "direct", "webrtc"], "supported_topologies": ["relay", "host", "mesh"], "requested_capabilities": ["room_operation_ids"]}}
+{"type": "RoomOperation", "data": {"operation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "operation": {"type": "LeaveRoom"}}}
 {"type": "GameData", "data": {"data": {"position": {"x": 12, "y": 34}}, "class": "latest", "key": 7}}
 {"type": "GameData", "data": {"data": {"effect": "footstep"}, "class": "volatile"}}
 {"type": "Signal", "data": {"to": "00000000-0000-0000-0000-00000000000b", "generation": "00000000-0000-0000-0000-00000000000c", "signal": {"Offer": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n..."}}}

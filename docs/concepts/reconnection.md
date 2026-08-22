@@ -51,6 +51,10 @@ reconnect later.
 }
 ```
 
+The `relay_type` returned here and by `Reconnected` is an informational legacy
+integration label, not a transport selector or reachability proof. Reconnect
+the authenticated WebSocket first, then follow any negotiated v3 `SessionPlan`.
+
 The reconnection token (a server-generated UUID bound to your player ID
 and room ID) arrives ON THE WIRE at join time: v3+ clients read it from
 `RoomJoined.reconnection_token` and store it before anything can go

@@ -373,7 +373,7 @@ pub const fn default_membership_snapshot_interval_secs() -> u64 {
 // =============================================================================
 
 pub fn default_relay_type() -> String {
-    "matchbox".to_string() // Default to matchbox WebRTC signaling
+    "matchbox".to_string() // Legacy integration label; not a transport selector.
 }
 
 // =============================================================================

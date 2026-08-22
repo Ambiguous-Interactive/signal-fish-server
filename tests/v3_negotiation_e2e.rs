@@ -10,7 +10,8 @@ mod websocket_test_helpers;
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::AppRegistrationEntry;
 use signal_fish_server::protocol::{
-    ClientMessage, ErrorCode, ServerMessage, Topology, Transport, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
+    ClientMessage, ErrorCode, RoomOperationRequest, ServerMessage, Topology, Transport,
+    PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_route_v3};
@@ -157,6 +158,7 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
         protocol_version: Some(3),
         supported_transports: Some(vec![Transport::Relay, Transport::WebRtc]),
         supported_topologies: Some(vec![Topology::Relay, Topology::Mesh]),
+        requested_capabilities: None,
     };
 
     match authenticate(&mut ws, auth).await {
@@ -171,6 +173,13 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
             assert_eq!(
                 info.transports,
                 Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
+            );
+            assert!(
+                !info
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY),
+                "v3 alone must not enable an unrequested wire extension"
             );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
@@ -285,6 +294,7 @@ fn version_only_auth(protocol_version: Option<u16>) -> ClientMessage {
         protocol_version,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     }
 }
 
@@ -302,6 +312,13 @@ async fn v3_client_negotiates_v3_on_default_server() {
             assert_eq!(
                 info.transports,
                 Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
+            );
+            assert!(
+                !info
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY),
+                "an explicit v3 version still requires an explicit capability request"
             );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
@@ -481,6 +498,7 @@ async fn v2_client_omitting_fields_is_recorded_as_v2() {
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
 
     match authenticate(&mut ws, auth).await {
@@ -518,6 +536,7 @@ async fn v3_ws_alias_defaults_to_v3_when_client_omits_version() {
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
 
     match authenticate(&mut ws, auth).await {
@@ -553,6 +572,7 @@ async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
         protocol_version: Some(2),
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
 
     match authenticate(&mut ws, auth).await {
@@ -584,6 +604,7 @@ async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
 
     match authenticate(&mut ws, auth).await {
@@ -610,6 +631,7 @@ async fn allowlist_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
         protocol_version: None,
         supported_transports: Some(vec![Transport::Relay, Transport::WebRtc]),
         supported_topologies: Some(vec![Topology::Relay, Topology::Mesh]),
+        requested_capabilities: None,
     };
 
     match authenticate(&mut ws, auth).await {
@@ -622,6 +644,13 @@ async fn allowlist_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
             assert_eq!(
                 info.transports,
                 Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()])
+            );
+            assert!(
+                !info
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY),
+                "open-policy authentication still requires an explicit capability request"
             );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
@@ -643,6 +672,7 @@ async fn open_policy_v3_ws_respects_explicit_v2_without_version_fields() {
         protocol_version: Some(2),
         supported_transports: Some(vec![Transport::Relay, Transport::WebRtc]),
         supported_topologies: Some(vec![Topology::Relay, Topology::Mesh]),
+        requested_capabilities: None,
     };
 
     match authenticate(&mut ws, auth).await {
@@ -654,5 +684,90 @@ async fn open_policy_v3_ws_respects_explicit_v2_without_version_fields() {
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    running_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn v2_downgrade_does_not_enable_room_operation_envelopes() {
+    let running_server = start_allowlist_server().await;
+    let mut ws = connect(running_server.addr(), "/v2/ws").await;
+    let mut auth = version_only_auth(Some(2));
+    let ClientMessage::Authenticate {
+        requested_capabilities,
+        ..
+    } = &mut auth
+    else {
+        unreachable!("version_only_auth returns Authenticate")
+    };
+    *requested_capabilities = Some(vec![ROOM_OPERATION_IDS_CAPABILITY.to_string()]);
+
+    let info = authenticate(&mut ws, auth).await;
+    let ServerMessage::ProtocolInfo(info) = info else {
+        panic!("expected ProtocolInfo, got {info:?}");
+    };
+    assert!(
+        !info
+            .capabilities
+            .iter()
+            .any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY),
+        "a v2 connection cannot negotiate the additive operation envelope"
+    );
+
+    let message = ClientMessage::RoomOperation {
+        operation_id: uuid::Uuid::from_u128(1),
+        operation: Box::new(RoomOperationRequest::LeaveRoom),
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&message)
+            .expect("serialize RoomOperation")
+            .into(),
+    ))
+    .await
+    .expect("send RoomOperation");
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::UnsupportedProtocolVersion),
+            ..
+        }
+    ));
+    running_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_room_operation_error_is_explicitly_uncorrelated() {
+    let running_server = start_allowlist_server().await;
+    let mut ws = connect(running_server.addr(), "/v2/ws").await;
+    let mut auth = version_only_auth(Some(3));
+    let ClientMessage::Authenticate {
+        requested_capabilities,
+        ..
+    } = &mut auth
+    else {
+        unreachable!("version_only_auth returns Authenticate")
+    };
+    *requested_capabilities = Some(vec![ROOM_OPERATION_IDS_CAPABILITY.to_string()]);
+    let info = authenticate(&mut ws, auth).await;
+    let ServerMessage::ProtocolInfo(info) = info else {
+        panic!("expected ProtocolInfo, got {info:?}");
+    };
+    assert!(info
+        .capabilities
+        .iter()
+        .any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY));
+
+    ws.send(Message::Text(
+        r#"{"type":"RoomOperation","data":{"operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","operation":{"type":"UnknownOperation"}}}"#
+            .into(),
+    ))
+    .await
+    .expect("send malformed inner operation");
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::InvalidInput),
+            ..
+        }
+    ));
     running_server.shutdown().await;
 }

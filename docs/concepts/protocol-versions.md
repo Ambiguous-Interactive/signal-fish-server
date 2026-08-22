@@ -20,8 +20,8 @@ transports and topologies it supports, and the server can _upgrade_ a room from 
 `host` or `mesh` topology over the `direct` or `webrtc` transport — when (and only when) every member supports
 it. The v2 shapes and default reliable behavior remain byte-for-byte; v3 adds optional `Authenticate` fields,
 v3-only messages (`SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, `PeerTransportStatus`, `DeliveryReport`,
-`GoingAway`, plus opt-in `RelayStats`), classified JSON delivery, and optional v3 fields such as ICE lists and
-relay sequence metadata. The relay floor is always
+`GoingAway`, opt-in `RelayStats`, and opt-in correlated room-operation envelopes), classified JSON delivery, and
+optional v3 fields such as ICE lists and relay sequence metadata. The relay floor is always
 present underneath, and any peer that cannot establish (or loses) its P2P path falls back to it. A v2 client on a
 v3 server observes pure v2 behavior.
 
@@ -30,8 +30,8 @@ v3 server observes pure v2 behavior.
 | Dimension | v2 | v3 |
 | --- | --- | --- |
 | Endpoint | `/v2/ws` (default protocol version 2) | `/v3/ws` (default protocol version 3); same handler as `/v2/ws` |
-| `Authenticate` fields | `app_id` (+ optional `sdk_version`, `platform`, `game_data_format`) | v2 fields **plus** optional `protocol_version`, `supported_transports`, `supported_topologies` |
-| Message set | v2 messages (incl. `StartGame` to finalize the lobby) | v2 messages **plus** `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, `PeerTransportStatus`, `DeliveryReport`, `GoingAway`, and opt-in `RelayStats` |
+| `Authenticate` fields | `app_id` (+ optional `sdk_version`, `platform`, `game_data_format`) | v2 fields **plus** optional `protocol_version`, `supported_transports`, `supported_topologies`, `requested_capabilities` |
+| Message set | v2 messages (incl. `StartGame` to finalize the lobby) | v2 messages **plus** `SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, `PeerTransportStatus`, `DeliveryReport`, `GoingAway`, opt-in `RelayStats`, and opt-in `RoomOperation` / `RoomOperationResult` |
 | Topologies | `relay` only | `relay`, `host`, `mesh` (room-wide, chosen at finalization) |
 | Transports | `relay` only | `relay`, `direct`, `webrtc` |
 | Relay delivery | Reliable FIFO; raw binary is reliable | Default/reliable unchanged; JSON also supports keyed `latest` and `volatile`; raw binary remains reliable |
@@ -87,7 +87,7 @@ take these steps.
 
 ### 1. Add the capability fields to `Authenticate`
 
-Connect to `/v3/ws` and add three optional fields to your first `Authenticate` message:
+Connect to `/v3/ws` and add the optional fields your client supports to its first `Authenticate` message:
 
 ```json
 {
@@ -96,7 +96,8 @@ Connect to `/v3/ws` and add three optional fields to your first `Authenticate` m
     "app_id": "my-game",
     "protocol_version": 3,
     "supported_transports": ["relay", "direct", "webrtc"],
-    "supported_topologies": ["relay", "host", "mesh"]
+    "supported_topologies": ["relay", "host", "mesh"],
+    "requested_capabilities": ["room_operation_ids"]
   }
 }
 ```
@@ -106,11 +107,15 @@ Connect to `/v3/ws` and add three optional fields to your first `Authenticate` m
 - `supported_transports` — tokens from `relay`, `direct`, `webrtc`. **Absent means relay-only**, even on
   `/v3/ws`.
 - `supported_topologies` — tokens from `relay`, `host`, `mesh`. **Absent means relay-only**, even on `/v3/ws`.
+- `requested_capabilities` — additive extension tokens. Request `room_operation_ids` to remove response ambiguity
+  from room-membership commands. Unknown tokens are ignored.
 
 Advertise only what you can actually run. Always include `relay` so you remain a valid floor member. The
 negotiated result comes back in the extended `ProtocolInfo` (`protocol_version`, `min_protocol_version`,
 `max_protocol_version`, `transports`). For negotiated v3, `transports` currently advertises `["websocket"]`; it is
 omitted with the other v3-only fields on negotiated v2 connections.
+Do not use an additive extension until its token is present in `ProtocolInfo.capabilities`; a requested token is not
+itself proof that the server enabled it.
 
 ### 2. Handle the v3 server messages
 
@@ -139,6 +144,9 @@ shutdown messages are independently gated by their features:
   connection. Gap-bearing reports are event-driven even when periodic stats are
   disabled.
 - `GoingAway` (server → client) — shutdown-drain advisory before close code `4000 server_shutdown`.
+- `RoomOperation` / `RoomOperationResult` — after `room_operation_ids` is echoed, wrap room-membership commands
+  with a unique client UUID and match the terminal result by that echoed UUID. The server provides correlation,
+  not deduplication or idempotency; malformed frames and autonomous lifecycle events remain uncorrelated.
 
 ### 3. Know what is optional vs required
 
@@ -153,6 +161,7 @@ shutdown messages are independently gated by their features:
 | Handle `RelayStats` | optional diagnostics |
 | Handle `DeliveryReport` | required for a conformant v3 receive loop; peers may send `latest` / `volatile` |
 | Handle `GoingAway` | optional but recommended for clean shutdown UX |
+| Use correlated room operations | optional; request and verify `room_operation_ids`, otherwise retain legacy commands |
 | Pre-gather ICE from `RoomJoined` / `Reconnected` | optional latency optimization |
 
 If you implement neither P2P nor classified delivery, omit the new fields and

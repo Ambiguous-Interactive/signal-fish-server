@@ -97,9 +97,22 @@ impl SpectatorService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn join(
         &self,
         player_id: &PlayerId,
+        game_name: String,
+        room_code: String,
+        spectator_name: String,
+    ) -> Result<(), SpectatorError> {
+        self.join_operation(player_id, None, game_name, room_code, spectator_name)
+            .await
+    }
+
+    pub(crate) async fn join_operation(
+        &self,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
         game_name: String,
         room_code: String,
         spectator_name: String,
@@ -108,7 +121,13 @@ impl SpectatorService {
         let player_id = *player_id;
         tokio::spawn(async move {
             service
-                .join_owned(player_id, game_name, room_code, spectator_name)
+                .join_owned(
+                    player_id,
+                    operation_id,
+                    game_name,
+                    room_code,
+                    spectator_name,
+                )
                 .await
         })
         .await
@@ -123,6 +142,7 @@ impl SpectatorService {
     async fn join_owned(
         self,
         player_id: PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
         game_name: String,
         room_code: String,
         spectator_name: String,
@@ -351,8 +371,8 @@ impl SpectatorService {
                     .message_coordinator
                     .send_to_player_if(
                         player_id,
-                        Arc::new(ServerMessage::SpectatorJoined(Box::new(
-                            SpectatorJoinedPayload {
+                        Arc::new(
+                            (ServerMessage::SpectatorJoined(Box::new(SpectatorJoinedPayload {
                                 room_id: current_room.id,
                                 room_code: current_room.code.clone(),
                                 spectator_id: *player_id,
@@ -361,8 +381,9 @@ impl SpectatorService {
                                 current_spectators: spectator_snapshot.clone(),
                                 lobby_state: current_room.lobby_state.clone(),
                                 reason: Some(join_reason.clone()),
-                            },
-                        ))),
+                            })))
+                            .correlate_room_operation(operation_id),
+                        ),
                         &should_deliver,
                         drain,
                     )
@@ -472,6 +493,34 @@ impl SpectatorService {
         }
     }
 
+    pub(crate) async fn leave_operation(
+        &self,
+        player_id: &PlayerId,
+        operation_id: crate::protocol::RoomOperationId,
+    ) -> Result<(), SpectatorError> {
+        if !self.is_spectating(player_id) {
+            return Err(SpectatorError::new(
+                "You are not currently spectating a room",
+                Some(ErrorCode::NotASpectator),
+            ));
+        }
+        if self
+            .detach_operation(
+                player_id,
+                SpectatorStateChangeReason::VoluntaryLeave,
+                operation_id,
+            )
+            .await
+        {
+            Ok(())
+        } else {
+            Err(SpectatorError::new(
+                "Failed to leave spectator room",
+                Some(ErrorCode::StorageError),
+            ))
+        }
+    }
+
     pub(crate) fn is_spectating(&self, player_id: &PlayerId) -> bool {
         self.spectator_rooms.contains_key(player_id)
     }
@@ -516,6 +565,7 @@ impl SpectatorService {
                     Some(room_id),
                     drain,
                     None,
+                    None,
                 )
                 .await
             }
@@ -556,8 +606,26 @@ impl SpectatorService {
         reason: SpectatorStateChangeReason,
     ) -> bool {
         let (drain_tx, drain_rx) = watch::channel(false);
-        self.detach_expected(player_id, reason, None, drain_rx, Some(drain_tx))
+        self.detach_expected(player_id, reason, None, drain_rx, Some(drain_tx), None)
             .await
+    }
+
+    pub(crate) async fn detach_operation(
+        &self,
+        player_id: &PlayerId,
+        reason: SpectatorStateChangeReason,
+        operation_id: crate::protocol::RoomOperationId,
+    ) -> bool {
+        let (drain_tx, drain_rx) = watch::channel(false);
+        self.detach_expected(
+            player_id,
+            reason,
+            None,
+            drain_rx,
+            Some(drain_tx),
+            Some(operation_id),
+        )
+        .await
     }
 
     async fn detach_expected(
@@ -567,6 +635,7 @@ impl SpectatorService {
         expected_room: Option<RoomId>,
         drain: watch::Receiver<bool>,
         drain_owner: Option<watch::Sender<bool>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         let lifecycle = self.connection_manager.client_lifecycle(player_id);
         let lifecycle_guard = match lifecycle.as_ref() {
@@ -594,6 +663,7 @@ impl SpectatorService {
             drain,
             lifecycle_guard,
             drain_owner,
+            operation_id,
         )
         .await
     }
@@ -605,7 +675,7 @@ impl SpectatorService {
         should_send: &(dyn Fn() -> bool + Send + Sync),
         drain: watch::Receiver<bool>,
     ) -> bool {
-        self.spawn_detach(*player_id, reason, should_send(), drain, None, None)
+        self.spawn_detach(*player_id, reason, should_send(), drain, None, None, None)
             .await
     }
 
@@ -617,6 +687,7 @@ impl SpectatorService {
         drain: watch::Receiver<bool>,
         lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
         drain_owner: Option<watch::Sender<bool>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         let service = self.clone();
         tokio::spawn(async move {
@@ -631,6 +702,7 @@ impl SpectatorService {
                     send_notifications,
                     drain,
                     lifecycle_guard,
+                    operation_id,
                 )
                 .await
         })
@@ -648,6 +720,7 @@ impl SpectatorService {
         send_notifications: bool,
         drain: watch::Receiver<bool>,
         _lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         let player_id = &player_id;
         let Some(room_id) = self
@@ -688,12 +761,15 @@ impl SpectatorService {
                         .message_coordinator
                         .send_to_player_if(
                             player_id,
-                            Arc::new(ServerMessage::SpectatorLeft {
-                                room_id: Some(room_id),
-                                room_code: None,
-                                reason: Some(reason),
-                                current_spectators: Vec::new(),
-                            }),
+                            Arc::new(
+                                (ServerMessage::SpectatorLeft {
+                                    room_id: Some(room_id),
+                                    room_code: None,
+                                    reason: Some(reason),
+                                    current_spectators: Vec::new(),
+                                })
+                                .correlate_room_operation(operation_id),
+                            ),
                             &should_send,
                             drain,
                         )
@@ -743,12 +819,15 @@ impl SpectatorService {
         // job. Once the DB/map transition above commits, dropping the caller
         // cannot suppress its lifecycle event, and a later spectator mutation
         // is enqueued behind this captured roster.
-        let acknowledgement = Arc::new(ServerMessage::SpectatorLeft {
-            room_id: Some(room_id),
-            room_code: Some(room.code.clone()),
-            reason: Some(reason.clone()),
-            current_spectators: current_spectators.clone(),
-        });
+        let acknowledgement = Arc::new(
+            (ServerMessage::SpectatorLeft {
+                room_id: Some(room_id),
+                room_code: Some(room.code.clone()),
+                reason: Some(reason.clone()),
+                current_spectators: current_spectators.clone(),
+            })
+            .correlate_room_operation(operation_id),
+        );
         let notification = Arc::new(ServerMessage::SpectatorDisconnected {
             spectator_id: *player_id,
             reason: Some(reason.clone()),

@@ -75,6 +75,7 @@ async fn connect_with_public_app_id(addr: std::net::SocketAddr, app_id: &str) ->
             protocol_version: Some(2),
             supported_transports: None,
             supported_topologies: None,
+            requested_capabilities: None,
         },
     )
     .await;

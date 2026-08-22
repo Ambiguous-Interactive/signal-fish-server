@@ -786,6 +786,7 @@ async fn authenticate_v3(ws: &mut WsStream) {
             protocol_version: Some(3),
             supported_transports: None,
             supported_topologies: None,
+            requested_capabilities: None,
         },
     )
     .await;

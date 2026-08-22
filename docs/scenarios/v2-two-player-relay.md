@@ -12,6 +12,11 @@ Throughout this page:
 
 Each player has opened its own WebSocket to `ws://localhost:3536/v2/ws`.
 
+The `relay_type: "matchbox"` values below are informational legacy integration
+labels, not transport selectors or reachability proof. The actual relay in this
+scenario is the authenticated WebSocket `GameData` fan-out shown below;
+`JoinRoom.relay_transport`, if supplied, is ignored.
+
 ## 1. Alice authenticates
 
 Intent: Alice's client identifies the game application before doing anything else. `Authenticate` must be the first

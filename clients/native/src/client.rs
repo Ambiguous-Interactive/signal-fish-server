@@ -550,6 +550,7 @@ async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<u16, FatalError> {
         protocol_version: cli.is_v3().then_some(cli.protocol_version),
         supported_transports: cli.is_v3().then(|| cli.transports()),
         supported_topologies: cli.is_v3().then(|| cli.topologies()),
+        requested_capabilities: None,
     };
     wire::send_client_message(ws, &message)
         .await

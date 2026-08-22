@@ -72,6 +72,10 @@ pub(crate) struct ClientConnection {
     pub reconnection_identity: Option<Arc<str>>,
     /// Protocol version + transport/topology capabilities negotiated at auth.
     pub protocol: NegotiatedProtocol,
+    /// Whether this physical connection explicitly negotiated correlated room
+    /// operation envelopes. Preserved across a successful reconnect identity
+    /// swap because the WebSocket connection itself survives that swap.
+    pub room_operation_ids: bool,
     /// Last data-path transport state this client reported via
     /// [`ClientMessage::TransportStatus`](crate::protocol::ClientMessage::TransportStatus)
     /// (v3 only), tagged with the room/spectator membership generation in which
@@ -317,6 +321,7 @@ impl ConnectionManager {
             app_context: None,
             reconnection_identity: None,
             protocol: NegotiatedProtocol::default(),
+            room_operation_ids: false,
             transport_status: None,
             membership_generation: Uuid::nil(),
             prior_membership_generation: None,
@@ -362,6 +367,7 @@ impl ConnectionManager {
             app_context: None,
             reconnection_identity: None,
             protocol: NegotiatedProtocol::default(),
+            room_operation_ids: false,
             transport_status: None,
             membership_generation: Uuid::nil(),
             prior_membership_generation: None,
@@ -469,6 +475,19 @@ impl ConnectionManager {
             connection.sender.set_protocol_version(protocol.version);
             connection.protocol = protocol;
         }
+    }
+
+    pub fn set_room_operation_ids(&self, player_id: &PlayerId, enabled: bool) {
+        if let Some(mut connection) = self.clients.get_mut(player_id) {
+            connection.room_operation_ids = enabled;
+        }
+    }
+
+    pub fn supports_room_operation_ids(&self, player_id: &PlayerId) -> bool {
+        self.clients
+            .get(player_id)
+            .map(|connection| connection.room_operation_ids)
+            .unwrap_or(false)
     }
 
     // Read the full negotiated protocol for a connection. Consumed by the
@@ -808,6 +827,7 @@ impl ConnectionManager {
                 app_context: old_connection.app_context,
                 reconnection_identity: old_connection.reconnection_identity,
                 protocol: old_connection.protocol,
+                room_operation_ids: old_connection.room_operation_ids,
                 // Preserve any roomless transient-socket status only as rollback
                 // state. Advancing the membership generation below makes it
                 // ineligible for reconnect deduplication, so the restored player
@@ -879,6 +899,7 @@ impl ConnectionManager {
             app_context: reassigned_connection.app_context,
             reconnection_identity: reassigned_connection.reconnection_identity,
             protocol: reassigned_connection.protocol,
+            room_operation_ids: reassigned_connection.room_operation_ids,
             transport_status: reassigned_connection.transport_status,
             membership_generation,
             prior_membership_generation: None,
