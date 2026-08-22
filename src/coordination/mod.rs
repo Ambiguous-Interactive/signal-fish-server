@@ -141,7 +141,12 @@ pub enum RoomMessageTransactionOutcome {
 ///
 /// Every coordinator implementation must share one lane across room,
 /// authority, ready-state, session, and spectator services.
+#[derive(Clone)]
 pub struct RoomEventMutationGuard {
+    lease: Arc<RoomEventMutationLease>,
+}
+
+struct RoomEventMutationLease {
     _guard: tokio::sync::OwnedMutexGuard<()>,
     _lane: Arc<RoomEventLane>,
 }
@@ -295,8 +300,10 @@ impl RoomEventSequencer {
         let lane = self.lane(room_id);
         let guard = Arc::clone(&lane.mutation_gate).lock_owned().await;
         RoomEventMutationGuard {
-            _guard: guard,
-            _lane: lane,
+            lease: Arc::new(RoomEventMutationLease {
+                _guard: guard,
+                _lane: lane,
+            }),
         }
     }
 
@@ -305,7 +312,7 @@ impl RoomEventSequencer {
         mutation_guard: RoomEventMutationGuard,
         job: RoomEventJob,
     ) -> RoomEventCompletion {
-        let lane = Arc::clone(&mutation_guard._lane);
+        let lane = Arc::clone(&mutation_guard.lease._lane);
         lane.enqueue(Box::new(move || {
             Box::pin(async move {
                 let _mutation_guard = mutation_guard;
@@ -2447,6 +2454,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloned_room_mutation_guard_retains_the_exact_gate_until_recovery_finishes() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5707);
+        let original = sequencer.lock(room_id).await;
+        let recovery_lease = original.clone();
+        drop(original);
+
+        let waiting_sequencer = Arc::clone(&sequencer);
+        let mut waiting = tokio::spawn(async move { waiting_sequencer.lock(room_id).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut waiting)
+                .await
+                .is_err(),
+            "a queued room mutation must not overtake an unwind recovery lease"
+        );
+
+        drop(recovery_lease);
+        let acquired = tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, waiting)
+            .await
+            .expect("the queued mutation acquires after recovery releases the lease")
+            .expect("the queued mutation task remains healthy");
+        drop(acquired);
+    }
+
+    #[tokio::test]
     async fn drain_empty_handoff_reuses_or_restarts_the_room_worker() {
         let sequencer = Arc::new(RoomEventSequencer::default());
         let room_id = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5708);
@@ -2454,7 +2486,7 @@ mod tests {
         let resume_existing_worker = Arc::new(tokio::sync::Notify::new());
 
         let first_guard = sequencer.lock(room_id).await;
-        let lane = Arc::clone(&first_guard._lane);
+        let lane = Arc::clone(&first_guard.lease._lane);
         *lane
             .post_job_pause
             .lock()

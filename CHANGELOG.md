@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and receive the `room_operation_ids` capability can wrap join, leave,
   reconnect, spectator-join, and spectator-leave commands with a UUID and
   receive exactly matched terminal results without changing legacy v2/0.4/0.7
-  wire shapes (issue #395).
+  wire shapes. Unexpected owned-task failures also return a correlated internal
+  failure while the connection remains deliverable (issue #395).
 
 ### Changed
 

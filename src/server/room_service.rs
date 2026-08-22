@@ -2,6 +2,7 @@ use super::{
     EnhancedGameServer, MaxPlayersPerApplicationExceededError, MaxRoomsPerApplicationExceededError,
     MaxRoomsPerGameExceededError, PendingApplicationClaimRollback,
 };
+use crate::coordination::RoomEventMutationGuard;
 use crate::database::CreateRoomError;
 use crate::distributed::LockHandle;
 use crate::protocol::validation;
@@ -9,7 +10,9 @@ use crate::protocol::{
     ErrorCode, LobbyState, PlayerId, PlayerInfo, RelayTransport, Room, RoomId, RoomJoinedPayload,
     ServerMessage,
 };
+use futures_util::FutureExt;
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +37,14 @@ enum RoomAdmissionKind {
     Created {
         application_claim_rollback: Option<PendingApplicationClaimRollback>,
     },
+}
+
+#[derive(Clone, Default)]
+struct JoinPanicRecovery {
+    room_id: Option<RoomId>,
+    epoch: Option<u32>,
+    admission_kind: Option<RoomAdmissionKind>,
+    room_event_guard: Option<RoomEventMutationGuard>,
 }
 
 impl RoomAdmissionKind {
@@ -120,6 +131,57 @@ impl JoinRoomError {
 }
 
 impl EnhancedGameServer {
+    /// Repair a delivered join while the caller retains the actor lifecycle
+    /// guard across its unwind boundary.
+    async fn repair_panicked_join_publication_locked(
+        self: &Arc<Self>,
+        player_id: PlayerId,
+        room_id: RoomId,
+        epoch: u32,
+        _room_event_guard: RoomEventMutationGuard,
+    ) {
+        if self
+            .connection_manager
+            .current_relay_stamp_in_room(&player_id, &room_id)
+            .is_none_or(|stamp| stamp.epoch != epoch)
+        {
+            return;
+        }
+        // Keep subsequent room events behind the missing opening until the
+        // fallback is committed. The teardown spawned below also waits for the
+        // lifecycle guard, so its PlayerLeft cannot overtake it.
+        let room = match self.database.get_room_by_id(&room_id).await {
+            Ok(Some(room)) => room,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::error!(%player_id, %room_id, %error, "Failed to load room for panicked join repair");
+                return;
+            }
+        };
+        let Some(mut player) = room.players.get(&player_id).cloned() else {
+            return;
+        };
+        player.epoch = Some(epoch);
+        let opening = Arc::new(ServerMessage::PlayerJoined {
+            player: player.clone(),
+        });
+        self.terminate_room_generation_after_publication_failure(
+            player_id,
+            room_id,
+            epoch,
+            player,
+            room.authority_player == Some(player_id),
+            "join_panic",
+        )
+        .await;
+        if let Err(error) = self
+            .publish_join_lifecycle_fallback(room_id, player_id, opening)
+            .await
+        {
+            tracing::error!(%player_id, %room_id, %error, "Failed to repair join lifecycle after panic");
+        }
+    }
+
     async fn rollback_unpublished_player_admission(
         &self,
         room_id: RoomId,
@@ -127,7 +189,17 @@ impl EnhancedGameServer {
         admission_kind: RoomAdmissionKind,
         reason: &'static str,
     ) {
-        if matches!(admission_kind, RoomAdmissionKind::Created { .. }) {
+        let created_room_is_still_exclusive =
+            if matches!(admission_kind, RoomAdmissionKind::Created { .. }) {
+                matches!(
+                    self.database.get_room_by_id(&room_id).await,
+                    Ok(Some(room))
+                        if room.players.len() == 1 && room.players.contains_key(&player_id)
+                )
+            } else {
+                false
+            };
+        if created_room_is_still_exclusive {
             match self.database.delete_room(&room_id).await {
                 Ok(_) => {
                     self.room_applications.remove(&room_id);
@@ -177,6 +249,36 @@ impl EnhancedGameServer {
         self.metrics.increment_players_left();
     }
 
+    /// Roll back a pre-terminal join while the actor lifecycle guard remains
+    /// held by the unwind supervisor. The room gate prevents a later admission
+    /// from racing this prepared generation.
+    async fn rollback_panicked_join_admission_locked(
+        self: &Arc<Self>,
+        room_id: RoomId,
+        player_id: PlayerId,
+        epoch: u32,
+        admission_kind: RoomAdmissionKind,
+        _room_event_guard: RoomEventMutationGuard,
+    ) {
+        if self
+            .connection_manager
+            .current_relay_stamp_in_room(&player_id, &room_id)
+            .is_none_or(|stamp| stamp.epoch != epoch)
+        {
+            return;
+        }
+        self.rollback_unpublished_player_admission(
+            room_id,
+            player_id,
+            admission_kind,
+            "join_panic",
+        )
+        .await;
+        self.discard_pre_issued_reconnection_token(&player_id).await;
+        self.connection_manager
+            .rollback_prepared_room_assignment(&player_id, room_id, epoch);
+    }
+
     /// Join a room under process-local coordination.
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_join_room(
@@ -216,19 +318,95 @@ impl EnhancedGameServer {
     ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
+        let terminal_response_committed = Arc::new(AtomicBool::new(false));
+        let terminal_response_committed_in_task = Arc::clone(&terminal_response_committed);
+        let lifecycle_finalized = Arc::new(AtomicBool::new(false));
+        let lifecycle_finalized_in_task = Arc::clone(&lifecycle_finalized);
+        let panic_recovery = Arc::new(std::sync::Mutex::new(JoinPanicRecovery::default()));
+        let panic_recovery_in_task = Arc::clone(&panic_recovery);
         let task = tokio::spawn(async move {
-            server
-                .handle_join_room_owned(
-                    player_id,
-                    game_name,
-                    room_code,
-                    player_name,
-                    max_players,
-                    supports_authority,
-                    relay_transport,
-                    operation_id,
-                )
-                .await;
+            let Some(lifecycle) = server.connection_manager.client_lifecycle(&player_id) else {
+                return;
+            };
+            let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            if lifecycle.player_id() != player_id
+                || !server
+                    .connection_manager
+                    .lifecycle_matches(&player_id, &lifecycle)
+            {
+                return;
+            }
+            let outcome = AssertUnwindSafe(Arc::clone(&server).handle_join_room_owned(
+                player_id,
+                game_name,
+                room_code,
+                player_name,
+                max_players,
+                supports_authority,
+                relay_transport,
+                operation_id,
+                terminal_response_committed_in_task,
+                lifecycle_finalized_in_task,
+                panic_recovery_in_task,
+            ))
+            .catch_unwind()
+            .await;
+            if outcome.is_err() {
+                tracing::error!(%player_id, "Owned room join transaction panicked");
+                if terminal_response_committed.load(Ordering::Acquire) {
+                    if !lifecycle_finalized.load(Ordering::Acquire) {
+                        let recovery = panic_recovery
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone();
+                        if let (Some(room_id), Some(epoch), Some(room_event_guard)) =
+                            (recovery.room_id, recovery.epoch, recovery.room_event_guard)
+                        {
+                            server
+                                .repair_panicked_join_publication_locked(
+                                    player_id,
+                                    room_id,
+                                    epoch,
+                                    room_event_guard,
+                                )
+                                .await;
+                        }
+                    }
+                } else {
+                    let recovery = panic_recovery
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    if let (
+                        Some(room_id),
+                        Some(epoch),
+                        Some(admission_kind),
+                        Some(room_event_guard),
+                    ) = (
+                        recovery.room_id,
+                        recovery.epoch,
+                        recovery.admission_kind,
+                        recovery.room_event_guard,
+                    ) {
+                        server
+                            .rollback_panicked_join_admission_locked(
+                                room_id,
+                                player_id,
+                                epoch,
+                                admission_kind,
+                                room_event_guard,
+                            )
+                            .await;
+                    }
+                    server
+                        .send_unexpected_room_operation_failure(
+                            player_id,
+                            operation_id,
+                            "Room join failed unexpectedly",
+                        )
+                        .await;
+                }
+            }
         });
         if let Err(error) = task.await {
             tracing::error!(%player_id, %error, "Owned room join transaction failed");
@@ -246,20 +424,15 @@ impl EnhancedGameServer {
         supports_authority: Option<bool>,
         _relay_transport: Option<RelayTransport>,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        terminal_response_committed: Arc<AtomicBool>,
+        lifecycle_finalized: Arc<AtomicBool>,
+        panic_recovery: Arc<std::sync::Mutex<JoinPanicRecovery>>,
     ) {
+        #[cfg(test)]
+        self.trigger_owned_room_operation_panic_for_test(
+            super::OwnedRoomOperationPanicPoint::JoinBeforeTerminal,
+        );
         let player_id = &player_id;
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
-            return;
-        };
-        let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
-        if lifecycle.player_id() != *player_id
-            || !self
-                .connection_manager
-                .lifecycle_matches(player_id, &lifecycle)
-        {
-            return;
-        }
-
         let requested_room_code = room_code.clone();
         let room_join_span = tracing::info_span!(
             "room.join",
@@ -459,6 +632,18 @@ impl EnhancedGameServer {
                     .await;
                     return;
                 };
+                *panic_recovery
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = JoinPanicRecovery {
+                    room_id: Some(room.id),
+                    epoch: Some(membership_stamp.epoch),
+                    admission_kind: Some(admission_kind.clone()),
+                    room_event_guard: Some(room_event_guard.clone()),
+                };
+                #[cfg(test)]
+                self.trigger_owned_room_operation_panic_for_test(
+                    super::OwnedRoomOperationPanicPoint::JoinAfterAdmission,
+                );
 
                 let recipient_is_v3 = self.connection_manager.supports_v3(player_id);
                 let server = Arc::clone(&self);
@@ -609,6 +794,11 @@ impl EnhancedGameServer {
                     }
                     return;
                 }
+                terminal_response_committed.store(true, Ordering::Release);
+                #[cfg(test)]
+                self.trigger_owned_room_operation_panic_for_test(
+                    super::OwnedRoomOperationPanicPoint::JoinAfterTerminal,
+                );
 
                 let Some(current_room) = baseline_room
                     .lock()
@@ -756,8 +946,28 @@ impl EnhancedGameServer {
                     committed.load(Ordering::Acquire)
                 };
                 if !committed {
+                    let repair_guard = panic_recovery
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .room_event_guard
+                        .clone();
+                    if let Some(repair_guard) = repair_guard {
+                        self.repair_panicked_join_publication_locked(
+                            *player_id,
+                            room.id,
+                            membership_stamp.epoch,
+                            repair_guard,
+                        )
+                        .await;
+                    }
                     return;
                 }
+                panic_recovery
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .room_event_guard
+                    .take();
+                lifecycle_finalized.store(true, Ordering::Release);
 
                 // Check if room should transition to lobby state
                 if current_room.should_enter_lobby() {
@@ -867,6 +1077,73 @@ impl EnhancedGameServer {
         self.leave_room_operation(player_id, None).await;
     }
 
+    async fn publish_leave_lifecycle_fallback(
+        &self,
+        room_id: RoomId,
+        departed_player: PlayerId,
+        player_left: Option<Arc<ServerMessage>>,
+        was_authority: bool,
+        player_left_committed: &Arc<AtomicBool>,
+        authority_committed: &Arc<AtomicBool>,
+    ) -> anyhow::Result<()> {
+        if let Some(player_left) = player_left {
+            let replay_message = Arc::clone(&player_left);
+            let reconnection_manager = self.reconnection_manager.clone();
+            let player_left_committed = Arc::clone(player_left_committed);
+            let (_drain_owner, drain) = tokio::sync::watch::channel(false);
+            self.message_coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_id,
+                    &departed_player,
+                    player_left,
+                    &|| true,
+                    drain,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            if let Some(reconnection_manager) = reconnection_manager {
+                                reconnection_manager
+                                    .record_room_event(&room_id, replay_message.as_ref())
+                                    .await;
+                            }
+                            player_left_committed.store(true, Ordering::Release);
+                        })
+                    }),
+                )
+                .await?;
+        }
+
+        if was_authority {
+            let authority_cleared = Arc::new(ServerMessage::AuthorityChanged {
+                authority_player: None,
+                you_are_authority: false,
+            });
+            let replay_authority = Arc::clone(&authority_cleared);
+            let reconnection_manager = self.reconnection_manager.clone();
+            let authority_committed = Arc::clone(authority_committed);
+            let (_drain_owner, drain) = tokio::sync::watch::channel(false);
+            self.message_coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_id,
+                    &departed_player,
+                    authority_cleared,
+                    &|| true,
+                    drain,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            if let Some(reconnection_manager) = reconnection_manager {
+                                reconnection_manager
+                                    .record_room_event(&room_id, replay_authority.as_ref())
+                                    .await;
+                            }
+                            authority_committed.store(true, Ordering::Release);
+                        })
+                    }),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn leave_room_operation(
         self: &Arc<Self>,
         player_id: &PlayerId,
@@ -874,8 +1151,29 @@ impl EnhancedGameServer {
     ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
+        let terminal_response_committed = Arc::new(AtomicBool::new(false));
+        let terminal_response_committed_in_task = Arc::clone(&terminal_response_committed);
         let task = tokio::spawn(async move {
-            server.leave_room_owned(player_id, true, operation_id).await;
+            let outcome = AssertUnwindSafe(Arc::clone(&server).leave_room_owned(
+                player_id,
+                true,
+                operation_id,
+                terminal_response_committed_in_task,
+            ))
+            .catch_unwind()
+            .await;
+            if outcome.is_err() {
+                tracing::error!(%player_id, "Owned room leave transaction panicked");
+                if !terminal_response_committed.load(Ordering::Acquire) {
+                    server
+                        .send_unexpected_room_operation_failure(
+                            player_id,
+                            operation_id,
+                            "Room leave failed unexpectedly",
+                        )
+                        .await;
+                }
+            }
         });
         if let Err(error) = task.await {
             tracing::error!(%player_id, %error, "Owned room leave transaction failed");
@@ -887,11 +1185,21 @@ impl EnhancedGameServer {
         player_id: PlayerId,
         notify_player: bool,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        terminal_response_committed: Arc<AtomicBool>,
     ) {
+        #[cfg(test)]
+        self.trigger_owned_room_operation_panic_for_test(
+            super::OwnedRoomOperationPanicPoint::LeaveBeforeTerminal,
+        );
         let player_id = &player_id;
         let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
-            self.leave_room_locked_operation(player_id, notify_player, operation_id)
-                .await;
+            self.leave_room_locked_operation(
+                player_id,
+                notify_player,
+                operation_id,
+                terminal_response_committed,
+            )
+            .await;
             return;
         };
         let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
@@ -903,21 +1211,36 @@ impl EnhancedGameServer {
         {
             return;
         }
-        self.leave_room_locked_operation(&effective_player_id, notify_player, operation_id)
-            .await;
+        self.leave_room_locked_operation(
+            &effective_player_id,
+            notify_player,
+            operation_id,
+            terminal_response_committed,
+        )
+        .await;
     }
 
     /// Room departure after the caller acquired the connection lifecycle gate.
-    pub(super) async fn leave_room_locked(&self, player_id: &PlayerId, notify_player: bool) {
-        self.leave_room_locked_operation(player_id, notify_player, None)
-            .await;
+    pub(super) async fn leave_room_locked(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        notify_player: bool,
+    ) {
+        self.leave_room_locked_operation(
+            player_id,
+            notify_player,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
     }
 
     async fn leave_room_locked_operation(
-        &self,
+        self: &Arc<Self>,
         player_id: &PlayerId,
         notify_player: bool,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        terminal_response_committed: Arc<AtomicBool>,
     ) {
         let leave_span = tracing::info_span!(
             "room.leave",
@@ -1119,15 +1442,26 @@ impl EnhancedGameServer {
                 "Skipping normal room-leave traffic because shutdown drain started"
             );
             if let Some(operation_id) = operation_id {
-                let _ = self
-                    .message_coordinator
-                    .try_send_to_player(
-                        player_id,
-                        Arc::new(
-                            ServerMessage::RoomLeft.correlate_room_operation(Some(operation_id)),
-                        ),
-                    )
-                    .await;
+                if matches!(
+                    self.message_coordinator
+                        .try_send_to_player(
+                            player_id,
+                            Arc::new(
+                                ServerMessage::RoomLeft
+                                    .correlate_room_operation(Some(operation_id)),
+                            ),
+                        )
+                        .await,
+                    Ok(true)
+                ) {
+                    terminal_response_committed.store(true, Ordering::Release);
+                }
+            }
+            #[cfg(test)]
+            if terminal_response_committed.load(Ordering::Acquire) {
+                self.trigger_owned_room_operation_panic_for_test(
+                    super::OwnedRoomOperationPanicPoint::LeaveAfterTerminal,
+                );
             }
             return;
         }
@@ -1143,6 +1477,8 @@ impl EnhancedGameServer {
             final_seq: Some(terminal_tail.1),
         };
         let player_left = Arc::new(player_left);
+        let player_left_for_recovery = Arc::clone(&player_left);
+        let player_left_for_job_recovery = Arc::clone(&player_left);
         let replay_message = Arc::clone(&player_left);
         let room_id_for_replay = room_id;
         let drain = self.shutdown_drain_receiver();
@@ -1158,22 +1494,64 @@ impl EnhancedGameServer {
         let committed = Arc::new(AtomicBool::new(false));
         let committed_in_hook = Arc::clone(&committed);
         let committed_for_authority = Arc::clone(&committed);
+        let committed_for_job_recovery = Arc::clone(&committed);
+        let authority_committed = Arc::new(AtomicBool::new(false));
+        let authority_committed_in_hook = Arc::clone(&authority_committed);
+        let authority_committed_for_job_recovery = Arc::clone(&authority_committed);
+        let authority_failed = Arc::new(AtomicBool::new(false));
+        let authority_failed_in_job = Arc::clone(&authority_failed);
+        let terminal_response_committed_in_job = Arc::clone(&terminal_response_committed);
+        let terminal_response_committed_for_job_recovery = Arc::clone(&terminal_response_committed);
+        let server_for_job_recovery = Arc::clone(self);
+        #[cfg(test)]
+        let owned_room_operation_panic = Arc::clone(&self.owned_room_operation_panic);
         let completion = self.message_coordinator.enqueue_room_event(
             room_event_guard,
             Box::new(move || {
                 Box::pin(async move {
+                    let outcome = AssertUnwindSafe(async {
+                    #[cfg(test)]
+                    if owned_room_operation_panic
+                        .compare_exchange(
+                            super::OwnedRoomOperationPanicPoint::LeaveJobBeforeTerminal as u8,
+                            0,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        panic!("injected owned room-operation event panic");
+                    }
                     if notify_player {
                         let should_acknowledge = || !*acknowledgement_predicate_drain.borrow();
-                        let _ = coordinator
-                            .send_to_player_if(
-                                &departed_player,
-                                Arc::new(
-                                    ServerMessage::RoomLeft.correlate_room_operation(operation_id),
-                                ),
-                                &should_acknowledge,
-                                acknowledgement_delivery_drain,
-                            )
-                            .await;
+                        if matches!(
+                            coordinator
+                                .send_to_player_if(
+                                    &departed_player,
+                                    Arc::new(
+                                        ServerMessage::RoomLeft
+                                            .correlate_room_operation(operation_id),
+                                    ),
+                                    &should_acknowledge,
+                                    acknowledgement_delivery_drain,
+                                )
+                                .await,
+                            Ok(true)
+                        ) {
+                            terminal_response_committed_in_job.store(true, Ordering::Release);
+                        }
+                    }
+                    #[cfg(test)]
+                    if owned_room_operation_panic
+                        .compare_exchange(
+                            super::OwnedRoomOperationPanicPoint::LeaveJobAfterTerminal as u8,
+                            0,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        panic!("injected owned room-operation event panic");
                     }
 
                     let should_broadcast = || !*broadcast_predicate_drain.borrow();
@@ -1240,11 +1618,13 @@ impl EnhancedGameServer {
                                                 )
                                                 .await;
                                         }
+                                        authority_committed_in_hook.store(true, Ordering::Release);
                                     })
                                 }),
                             )
                             .await
                         {
+                            authority_failed_in_job.store(true, Ordering::Release);
                             tracing::error!(
                                 player_id = %departed_player,
                                 room_id = %room_id_for_replay,
@@ -1254,11 +1634,106 @@ impl EnhancedGameServer {
                         }
                     }
 
-                    departure
+                        departure
+                    })
+                    .catch_unwind()
+                    .await;
+                    match outcome {
+                        Ok(Ok(departure)) if !authority_failed.load(Ordering::Acquire) => {
+                            return Ok(departure);
+                        }
+                        Ok(Ok(_)) => {
+                            tracing::error!(player_id = %departed_player, room_id = %room_id_for_replay, "Room-leave publication omitted the authority lifecycle stage");
+                        }
+                        Ok(Err(error)) => {
+                            tracing::error!(player_id = %departed_player, room_id = %room_id_for_replay, %error, "Owned room-leave publication job failed");
+                        }
+                        Err(_) => {
+                            tracing::error!(player_id = %departed_player, room_id = %room_id_for_replay, "Owned room-leave publication job panicked");
+                        }
+                    }
+                    if !terminal_response_committed_for_job_recovery.load(Ordering::Acquire)
+                        && server_for_job_recovery
+                            .send_unexpected_room_operation_failure(
+                                departed_player,
+                                operation_id,
+                                "Room leave failed unexpectedly",
+                            )
+                            .await
+                    {
+                        terminal_response_committed_for_job_recovery
+                            .store(true, Ordering::Release);
+                    }
+                    let mut player_left = (!committed_for_job_recovery.load(Ordering::Acquire))
+                        .then(|| Arc::clone(&player_left_for_job_recovery));
+                    let mut authority_missing = was_authority
+                        && !authority_committed_for_job_recovery.load(Ordering::Acquire);
+                    if let Err(error) = server_for_job_recovery
+                        .publish_leave_lifecycle_fallback(
+                            room_id_for_replay,
+                            departed_player,
+                            player_left.take(),
+                            authority_missing,
+                            &committed_for_job_recovery,
+                            &authority_committed_for_job_recovery,
+                        )
+                        .await
+                    {
+                        tracing::error!(player_id = %departed_player, room_id = %room_id_for_replay, %error, "Room-leave in-lane recovery failed; retrying missing stages");
+                        player_left = (!committed_for_job_recovery.load(Ordering::Acquire))
+                            .then(|| Arc::clone(&player_left_for_job_recovery));
+                        authority_missing = was_authority
+                            && !authority_committed_for_job_recovery.load(Ordering::Acquire);
+                        if let Err(retry_error) = server_for_job_recovery
+                            .publish_leave_lifecycle_fallback(
+                                room_id_for_replay,
+                                departed_player,
+                                player_left,
+                                authority_missing,
+                                &committed_for_job_recovery,
+                                &authority_committed_for_job_recovery,
+                            )
+                            .await
+                        {
+                            tracing::error!(player_id = %departed_player, room_id = %room_id_for_replay, %retry_error, "Room-leave in-lane recovery exhausted its retry");
+                        }
+                    }
+                    Ok(true)
                 })
             }),
         );
-        let _ = completion.await;
+        if let Err(error) = completion.await {
+            tracing::error!(%player_id, %room_id, %error, "Owned room-leave publication job failed");
+            if !terminal_response_committed.load(Ordering::Acquire) {
+                self.send_unexpected_room_operation_failure(
+                    *player_id,
+                    operation_id,
+                    "Room leave failed unexpectedly",
+                )
+                .await;
+            }
+            let player_left =
+                (!committed.load(Ordering::Acquire)).then_some(player_left_for_recovery);
+            if let Err(repair_error) = self
+                .publish_leave_lifecycle_fallback(
+                    room_id,
+                    *player_id,
+                    player_left,
+                    was_authority && !authority_committed.load(Ordering::Acquire),
+                    &committed,
+                    &authority_committed,
+                )
+                .await
+            {
+                tracing::error!(%player_id, %room_id, %repair_error, "Failed to repair room-leave lifecycle after publication panic");
+            }
+        }
+        #[cfg(test)]
+        if terminal_response_committed.load(Ordering::Acquire) {
+            self.trigger_owned_room_operation_panic_for_test(
+                super::OwnedRoomOperationPanicPoint::LeaveAfterTerminal,
+            );
+        }
         if !committed.load(Ordering::Acquire) {
             tracing::debug!(%player_id, %room_id, "Skipping departure follow-up because PlayerLeft did not commit");
             return;

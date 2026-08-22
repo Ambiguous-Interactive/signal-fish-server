@@ -11,8 +11,8 @@ use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
 use crate::metrics::ConnectionDeliveryStats;
 use crate::protocol::{
-    room_codes, GameDataEncoding, PlayerId, RoomId, ServerMessage, SpectatorStateChangeReason,
-    Transport,
+    room_codes, ErrorCode, GameDataEncoding, PlayerId, RoomId, RoomOperationId, ServerMessage,
+    SpectatorStateChangeReason, Transport,
 };
 use crate::rate_limit::{RateLimitConfig, RoomRateLimiter};
 use anyhow::Result;
@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 #[cfg(test)]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -87,6 +87,21 @@ use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
 pub use shutdown::ShutdownDrain;
 use spectator_service::SpectatorService;
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum OwnedRoomOperationPanicPoint {
+    JoinBeforeTerminal = 1,
+    LeaveBeforeTerminal = 2,
+    ReconnectBeforeReassignment = 3,
+    ReconnectAfterReassignment = 4,
+    JoinAfterTerminal = 5,
+    LeaveAfterTerminal = 6,
+    ReconnectAfterTerminal = 7,
+    LeaveJobBeforeTerminal = 8,
+    LeaveJobAfterTerminal = 9,
+    JoinAfterAdmission = 10,
+}
+
 /// Narrow dev-only entry point for measuring the production game-data handoff
 /// without constructing an `EnhancedGameServer` or spawning background tasks.
 #[cfg(feature = "allocation-tracking")]
@@ -146,6 +161,8 @@ pub struct EnhancedGameServer {
     reconnect_teardown_test_gate: StdMutex<Option<Arc<ReconnectTeardownTestGate>>>,
     #[cfg(test)]
     scripted_room_codes: StdMutex<VecDeque<String>>,
+    #[cfg(test)]
+    owned_room_operation_panic: Arc<AtomicU8>,
     /// Spectator lifecycle manager
     spectator_service: SpectatorService,
     /// Transport-level security options (TLS, token binding, etc.)
@@ -427,6 +444,8 @@ impl EnhancedGameServer {
             reconnect_teardown_test_gate: StdMutex::new(None),
             #[cfg(test)]
             scripted_room_codes: StdMutex::new(VecDeque::new()),
+            #[cfg(test)]
+            owned_room_operation_panic: Arc::new(AtomicU8::new(0)),
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
@@ -763,7 +782,7 @@ impl EnhancedGameServer {
         }
     }
 
-    async fn unregister_client_locked(&self, player_id: &PlayerId) {
+    async fn unregister_client_locked(self: &Arc<Self>, player_id: &PlayerId) {
         let room_id_opt = self.get_client_room(player_id).await;
         // One authoritative snapshot supplies every reconnect-restoration
         // field. A missing player/room or storage error must not degrade into a
@@ -930,6 +949,60 @@ impl EnhancedGameServer {
     pub(crate) fn fail_retain_room_publication_snapshot_for_test(&self, fail: bool) {
         self.fail_retain_room_publication_snapshot
             .store(fail, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_owned_room_operation_for_test(&self, point: OwnedRoomOperationPanicPoint) {
+        self.owned_room_operation_panic
+            .store(point as u8, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trigger_owned_room_operation_panic_for_test(
+        &self,
+        point: OwnedRoomOperationPanicPoint,
+    ) {
+        if self
+            .owned_room_operation_panic
+            .compare_exchange(
+                point as u8,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            panic!("injected owned room-operation panic");
+        }
+    }
+
+    async fn send_unexpected_room_operation_failure(
+        &self,
+        player_id: PlayerId,
+        operation_id: Option<RoomOperationId>,
+        reason: &'static str,
+    ) -> bool {
+        let Some(operation_id) = operation_id else {
+            return false;
+        };
+        match self
+            .message_coordinator
+            .send_to_player(
+                &player_id,
+                Arc::new(ServerMessage::room_operation_failed(
+                    operation_id,
+                    reason,
+                    Some(ErrorCode::InternalError),
+                )),
+            )
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(%player_id, %operation_id, %error, "Failed to send unexpected room-operation failure");
+                false
+            }
+        }
     }
 
     #[cfg(test)]
