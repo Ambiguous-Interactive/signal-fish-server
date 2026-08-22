@@ -21945,6 +21945,16 @@ test-group = 'powershell-subprocess'",
             && normalized.contains("test-group = 'process-spawning'"),
         "the real-listener mTLS suite must run in nextest's serialized process-spawning group"
     );
+    assert!(
+        normalized.contains(
+            "filter = 'binary(public_api_privacy_tests) or \
+test(published_crate_contains_only_runtime_sources_and_metadata) or \
+test(test_docs_relative_links_resolve_to_existing_files)'\n\
+test-group = 'process-spawning'\n\
+slow-timeout = { period = \"300s\", terminate-after = 3 }"
+        ) && normalized.contains("process-spawning = { max-threads = 1 }"),
+        "nested Cargo package and privacy builds must be serialized with a compile-sized timeout"
+    );
 }
 
 #[test]
