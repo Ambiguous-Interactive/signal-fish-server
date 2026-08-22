@@ -111,6 +111,7 @@ channels:
       Reconnect: { $ref: '#/components/messages/Reconnect' }
       JoinAsSpectator: { $ref: '#/components/messages/JoinAsSpectator' }
       LeaveSpectator: { $ref: '#/components/messages/LeaveSpectator' }
+      RoomOperation: { $ref: '#/components/messages/RoomOperation' }
       TransportStatus: { $ref: '#/components/messages/TransportStatus' }
       ClientTokenBoundJson: { $ref: '#/components/messages/ClientTokenBoundJson' }
       ClientTokenBoundBinary: { $ref: '#/components/messages/ClientTokenBoundBinary' }
@@ -140,6 +141,7 @@ channels:
       SpectatorJoined: { $ref: '#/components/messages/SpectatorJoined' }
       SpectatorJoinFailed: { $ref: '#/components/messages/SpectatorJoinFailed' }
       SpectatorLeft: { $ref: '#/components/messages/SpectatorLeft' }
+      RoomOperationResult: { $ref: '#/components/messages/RoomOperationResult' }
       NewSpectatorJoined: { $ref: '#/components/messages/NewSpectatorJoined' }
       SpectatorDisconnected: { $ref: '#/components/messages/SpectatorDisconnected' }
       Error: { $ref: '#/components/messages/Error' }
@@ -167,6 +169,7 @@ operations:
       - { $ref: '#/channels/signaling/messages/Reconnect' }
       - { $ref: '#/channels/signaling/messages/JoinAsSpectator' }
       - { $ref: '#/channels/signaling/messages/LeaveSpectator' }
+      - { $ref: '#/channels/signaling/messages/RoomOperation' }
       - { $ref: '#/channels/signaling/messages/TransportStatus' }
       - { $ref: '#/channels/signaling/messages/ClientTokenBoundJson' }
       - { $ref: '#/channels/signaling/messages/ClientTokenBoundBinary' }
@@ -193,6 +196,7 @@ operations:
       - { $ref: '#/channels/signaling/messages/ServerSignal' }
       - { $ref: '#/channels/signaling/messages/NewPeer' }
       - { $ref: '#/channels/signaling/messages/SessionPlan' }
+      - { $ref: '#/channels/signaling/messages/RoomOperationResult' }
       - { $ref: '#/channels/signaling/messages/Pong' }
       - { $ref: '#/channels/signaling/messages/Reconnected' }
       - { $ref: '#/channels/signaling/messages/ReconnectionFailed' }
@@ -268,6 +272,10 @@ components:
       title: LeaveSpectator
       summary: Leave spectator mode. No data payload.
       payload: { $ref: '#/components/schemas/LeaveSpectator' }
+    RoomOperation:
+      title: RoomOperation
+      summary: 'Negotiated v3: correlate one room-membership command with its attempted terminal result.'
+      payload: { $ref: '#/components/schemas/RoomOperation' }
     TransportStatus:
       title: TransportStatus
       summary: 'v3: report this client''s data-path transport state (informational).'
@@ -305,6 +313,10 @@ components:
       title: ProtocolInfo
       summary: SDK/protocol compatibility + negotiated version range.
       payload: { $ref: '#/components/schemas/ProtocolInfo' }
+    RoomOperationResult:
+      title: RoomOperationResult
+      summary: Terminal response echoing a negotiated RoomOperation operation_id.
+      payload: { $ref: '#/components/schemas/RoomOperationResult' }
     AuthenticationError:
       title: AuthenticationError
       payload: { $ref: '#/components/schemas/AuthenticationError' }
@@ -437,8 +449,18 @@ components:
       enum: [relay, host, mesh]
     RelayTransport:
       type: string
-      description: Preferred relay transport protocol for GameData fan-out.
+      description: >-
+        Reserved compatibility hint. The server currently ignores this field;
+        omission and every accepted token use the same authenticated WebSocket
+        relay floor.
       enum: [tcp, udp, websocket, auto]
+    RelayTypeLabel:
+      type: string
+      description: >-
+        Deployment-defined legacy integration label. Informational only: it
+        does not select, open, authenticate, or prove the active physical
+        transport. Clients use the authenticated WebSocket relay floor or an
+        explicitly negotiated SessionPlan for executable routing.
     GameDataEncoding:
       type: string
       description: Game data encoding. rkyv is reserved/internal and not advertised.
@@ -494,6 +516,13 @@ components:
       type: string
       format: uuid
       description: Room UUID.
+    RoomOperationId:
+      type: string
+      format: uuid
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      description: >-
+        Client-authored room-operation correlation UUID in its only accepted
+        human-readable form: lowercase hexadecimal with canonical hyphens.
     ErrorCode:
       type: string
       description: >-
@@ -721,14 +750,16 @@ components:
         player_id: { $ref: '#/components/schemas/PlayerId' }
         player_name: { type: string }
         is_authority: { type: boolean }
-        relay_type: { type: string }
+        relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
         connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
     ConnectionInfo:
       description: >-
         Legacy self-declared peer metadata (tagged by an inner `type` field:
         direct | unity_relay | relay | webrtc | custom). Visible in room member
-        snapshots and GameStarting; not v3 capability negotiation. A validated
-        direct value is also used to elect an executable Direct host.
+        snapshots and GameStarting; not v3 capability negotiation. Values are
+        stored and forwarded rather than authenticated. A syntactically
+        validated direct value is also used to elect an executable Direct host,
+        but remains self-declared and is not reachability proof.
       oneOf:
         - type: object
           additionalProperties: false
@@ -747,6 +778,12 @@ components:
             key: { type: string }
         - type: object
           additionalProperties: false
+          description: >-
+            Unvalidated client-supplied legacy metadata. Signal Fish forwards
+            it but does not resolve or probe the endpoint, authenticate the
+            token, bind client_id to the source connection, or select/open this
+            path. Consumers own reachability, credential, and source-identity
+            validation before use.
           required: [type, host, port, allocation_id, token]
           properties:
             type: { const: relay }
@@ -835,6 +872,14 @@ components:
               type: array
               description: 'v3: session topologies the client supports (absent => relay-only).'
               items: { $ref: '#/components/schemas/Topology' }
+            requested_capabilities:
+              type: array
+              description: >-
+                v3: additive capabilities requested by the client. Unknown
+                tokens are ignored. A client must wait for a requested token
+                to appear in ProtocolInfo.capabilities before using its wire
+                extension.
+              items: { type: string }
       required: [type, data]
     JoinRoom:
       type: object
@@ -851,7 +896,12 @@ components:
             player_name: { type: string }
             max_players: { type: integer, description: Ceiling, not a required count. }
             supports_authority: { type: boolean }
-            relay_transport: { $ref: '#/components/schemas/RelayTransport' }
+            relay_transport:
+              allOf:
+                - { $ref: '#/components/schemas/RelayTransport' }
+              description: >-
+                Reserved compatibility hint; currently ignored. Omission and
+                all accepted values have identical server behavior.
       required: [type, data]
     LeaveRoom:
       type: object
@@ -977,6 +1027,29 @@ components:
       properties:
         type: { const: LeaveSpectator }
       required: [type]
+    RoomOperation:
+      type: object
+      description: >-
+        Available only after a v3 Authenticate explicitly requests
+        room_operation_ids and ProtocolInfo.capabilities echoes that token.
+        operation_id is an opaque client-generated UUID unique among live or
+        recently completed operations on this physical connection. The server
+        echoes it but does not deduplicate or make operations idempotent.
+      properties:
+        type: { const: RoomOperation }
+        data:
+          type: object
+          required: [operation_id, operation]
+          properties:
+            operation_id: { $ref: '#/components/schemas/RoomOperationId' }
+            operation:
+              oneOf:
+                - { $ref: '#/components/schemas/JoinRoom' }
+                - { $ref: '#/components/schemas/LeaveRoom' }
+                - { $ref: '#/components/schemas/Reconnect' }
+                - { $ref: '#/components/schemas/JoinAsSpectator' }
+                - { $ref: '#/components/schemas/LeaveSpectator' }
+      required: [type, data]
     TransportStatus:
       type: object
       description: >-
@@ -1028,6 +1101,7 @@ components:
         - { $ref: '#/components/schemas/Reconnect' }
         - { $ref: '#/components/schemas/JoinAsSpectator' }
         - { $ref: '#/components/schemas/LeaveSpectator' }
+        - { $ref: '#/components/schemas/RoomOperation' }
         - { $ref: '#/components/schemas/TransportStatus' }
     ClientTokenBoundJson:
       allOf:
@@ -1112,6 +1186,10 @@ components:
             recommended_version: { type: string }
             capabilities:
               type: array
+              description: >-
+                SDK compatibility capabilities plus explicitly negotiated
+                protocol extensions. room_operation_ids appears only when a
+                v3 client requested it.
               items: { type: string }
             notes: { type: string }
             game_data_formats:
@@ -1185,7 +1263,7 @@ components:
             ready_players:
               type: array
               items: { $ref: '#/components/schemas/PlayerId' }
-            relay_type: { type: string }
+            relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
@@ -1228,7 +1306,7 @@ components:
             ready_players:
               type: array
               items: { $ref: '#/components/schemas/PlayerId' }
-            relay_type: { type: string }
+            relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
@@ -1695,7 +1773,7 @@ components:
             ready_players:
               type: array
               items: { $ref: '#/components/schemas/PlayerId' }
-            relay_type: { type: string }
+            relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
@@ -1745,7 +1823,7 @@ components:
             ready_players:
               type: array
               items: { $ref: '#/components/schemas/PlayerId' }
-            relay_type: { type: string }
+            relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
@@ -1954,6 +2032,51 @@ components:
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
+      required: [type, data]
+    OperationFailed:
+      type: object
+      description: >-
+        A well-formed correlated command could not produce its
+        operation-specific success response. Top-level Error remains
+        deliberately uncorrelated for malformed input that cannot be
+        attributed safely.
+      properties:
+        type: { const: OperationFailed }
+        data:
+          type: object
+          required: [reason]
+          properties:
+            reason: { type: string }
+            error_code: { $ref: '#/components/schemas/ErrorCode' }
+      required: [type, data]
+    RoomOperationResult:
+      type: object
+      description: >-
+        The terminal response attempted for an accepted RoomOperation while
+        the physical connection remains deliverable, echoing the client
+        operation_id. A connection close, shutdown drain, or terminal
+        slow-consumer eviction can prevent receipt. This provides correlation,
+        not deduplication or idempotency. Autonomous lifecycle events such as
+        disconnect-driven SpectatorLeft remain top-level messages without an
+        operation_id.
+      properties:
+        type: { const: RoomOperationResult }
+        data:
+          type: object
+          required: [operation_id, result]
+          properties:
+            operation_id: { $ref: '#/components/schemas/RoomOperationId' }
+            result:
+              oneOf:
+                - { $ref: '#/components/schemas/RoomJoined' }
+                - { $ref: '#/components/schemas/RoomJoinFailed' }
+                - { $ref: '#/components/schemas/RoomLeft' }
+                - { $ref: '#/components/schemas/Reconnected' }
+                - { $ref: '#/components/schemas/ReconnectionFailed' }
+                - { $ref: '#/components/schemas/SpectatorJoined' }
+                - { $ref: '#/components/schemas/SpectatorJoinFailed' }
+                - { $ref: '#/components/schemas/SpectatorLeft' }
+                - { $ref: '#/components/schemas/OperationFailed' }
       required: [type, data]
     NewSpectatorJoined:
       type: object

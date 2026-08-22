@@ -301,6 +301,7 @@ impl EnhancedGameServer {
         restore: &ReconnectRestoreState,
         reason: &str,
         error_code: ErrorCode,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         let Some(disconnected) = claim_guard.disconnected() else {
             tracing::warn!(%reason, "Reconnection rejection had no active claim to release");
@@ -363,10 +364,13 @@ impl EnhancedGameServer {
             .message_coordinator
             .send_to_player(
                 current_player_id,
-                Arc::new(ServerMessage::ReconnectionFailed {
-                    reason: reason.to_string(),
-                    error_code,
-                }),
+                Arc::new(
+                    (ServerMessage::ReconnectionFailed {
+                        reason: reason.to_string(),
+                        error_code,
+                    })
+                    .correlate_room_operation(operation_id),
+                ),
             )
             .await;
         false
@@ -379,6 +383,7 @@ impl EnhancedGameServer {
         claim_guard: ReconnectionClaimGuard,
         restore: &ReconnectRestoreState,
         rollback_context: &'static str,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         self.discard_pre_issued_reconnection_token(reconnect_player_id)
             .await;
@@ -404,6 +409,7 @@ impl EnhancedGameServer {
             restore,
             "Reconnected baseline could not be delivered",
             ErrorCode::ReconnectionFailed,
+            operation_id,
         )
         .await
     }
@@ -416,12 +422,31 @@ impl EnhancedGameServer {
         room_id: &RoomId,
         auth_token: &str,
     ) -> bool {
+        self.handle_reconnect_operation(
+            current_player_id,
+            reconnect_player_id,
+            room_id,
+            auth_token,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_reconnect_operation(
+        self: &Arc<Self>,
+        current_player_id: &PlayerId,
+        reconnect_player_id: &PlayerId,
+        room_id: &RoomId,
+        auth_token: &str,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+    ) -> bool {
         self.spawn_reconnect_transaction(
             *current_player_id,
             *reconnect_player_id,
             *room_id,
             auth_token.to_string(),
             None,
+            operation_id,
         )
         .await
     }
@@ -434,12 +459,33 @@ impl EnhancedGameServer {
         auth_token: &str,
         effective_player_id: Arc<tokio::sync::RwLock<PlayerId>>,
     ) -> bool {
+        self.handle_reconnect_with_identity_operation(
+            current_player_id,
+            reconnect_player_id,
+            room_id,
+            auth_token,
+            effective_player_id,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_reconnect_with_identity_operation(
+        self: &Arc<Self>,
+        current_player_id: &PlayerId,
+        reconnect_player_id: &PlayerId,
+        room_id: &RoomId,
+        auth_token: &str,
+        effective_player_id: Arc<tokio::sync::RwLock<PlayerId>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+    ) -> bool {
         self.spawn_reconnect_transaction(
             *current_player_id,
             *reconnect_player_id,
             *room_id,
             auth_token.to_string(),
             Some(effective_player_id),
+            operation_id,
         )
         .await
     }
@@ -451,6 +497,7 @@ impl EnhancedGameServer {
         room_id: RoomId,
         auth_token: String,
         effective_player_id: Option<Arc<tokio::sync::RwLock<PlayerId>>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         let server = Arc::clone(self);
         let task = tokio::spawn(async move {
@@ -461,6 +508,7 @@ impl EnhancedGameServer {
                     room_id,
                     auth_token,
                     effective_player_id,
+                    operation_id,
                 )
                 .await
         });
@@ -480,6 +528,7 @@ impl EnhancedGameServer {
         room_id: RoomId,
         auth_token: String,
         effective_player_id: Option<Arc<tokio::sync::RwLock<PlayerId>>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         let current_player_id = &current_player_id;
         let reconnect_player_id = &reconnect_player_id;
@@ -504,10 +553,13 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     current_player_id,
-                    Arc::new(ServerMessage::ReconnectionFailed {
-                        reason: "Reconnection is not enabled".to_string(),
-                        error_code: ErrorCode::ReconnectionFailed,
-                    }),
+                    Arc::new(
+                        (ServerMessage::ReconnectionFailed {
+                            reason: "Reconnection is not enabled".to_string(),
+                            error_code: ErrorCode::ReconnectionFailed,
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await;
             return false;
@@ -519,10 +571,13 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     current_player_id,
-                    Arc::new(ServerMessage::ReconnectionFailed {
-                        reason: "Player is already connected".to_string(),
-                        error_code: ErrorCode::PlayerAlreadyConnected,
-                    }),
+                    Arc::new(
+                        (ServerMessage::ReconnectionFailed {
+                            reason: "Player is already connected".to_string(),
+                            error_code: ErrorCode::PlayerAlreadyConnected,
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await;
             return false;
@@ -535,10 +590,14 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     current_player_id,
-                    Arc::new(ServerMessage::ReconnectionFailed {
-                        reason: "Reconnect must be attempted from a fresh connection".to_string(),
-                        error_code: ErrorCode::ReconnectionFailed,
-                    }),
+                    Arc::new(
+                        (ServerMessage::ReconnectionFailed {
+                            reason: "Reconnect must be attempted from a fresh connection"
+                                .to_string(),
+                            error_code: ErrorCode::ReconnectionFailed,
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await;
             return false;
@@ -576,7 +635,10 @@ impl EnhancedGameServer {
                     .message_coordinator
                     .send_to_player(
                         current_player_id,
-                        Arc::new(ServerMessage::ReconnectionFailed { reason, error_code }),
+                        Arc::new(
+                            (ServerMessage::ReconnectionFailed { reason, error_code })
+                                .correlate_room_operation(operation_id),
+                        ),
                     )
                     .await;
                 return false;
@@ -604,6 +666,7 @@ impl EnhancedGameServer {
                     &restore,
                     "Player is already connected",
                     ErrorCode::PlayerAlreadyConnected,
+                    operation_id,
                 )
                 .await;
         }
@@ -629,6 +692,7 @@ impl EnhancedGameServer {
                         &restore,
                         "Room no longer exists",
                         ErrorCode::RoomNotFound,
+                        operation_id,
                     )
                     .await;
             }
@@ -641,6 +705,7 @@ impl EnhancedGameServer {
                         &restore,
                         "Storage error",
                         ErrorCode::InternalError,
+                        operation_id,
                     )
                     .await;
             }
@@ -666,6 +731,7 @@ impl EnhancedGameServer {
                         &restore,
                         "Room no longer exists",
                         ErrorCode::RoomNotFound,
+                        operation_id,
                     )
                     .await;
             }
@@ -693,6 +759,7 @@ impl EnhancedGameServer {
                         &restore,
                         "Room is full",
                         ErrorCode::RoomFull,
+                        operation_id,
                     )
                     .await;
             }
@@ -705,6 +772,7 @@ impl EnhancedGameServer {
                         &restore,
                         "Player room membership could not be restored",
                         ErrorCode::ReconnectionFailed,
+                        operation_id,
                     )
                     .await;
             };
@@ -721,6 +789,7 @@ impl EnhancedGameServer {
                             &restore,
                             "Room is full",
                             ErrorCode::RoomFull,
+                            operation_id,
                         )
                         .await;
                 }
@@ -738,6 +807,7 @@ impl EnhancedGameServer {
                             &restore,
                             "Storage error",
                             ErrorCode::InternalError,
+                            operation_id,
                         )
                         .await;
                 }
@@ -797,6 +867,7 @@ impl EnhancedGameServer {
                         &restore,
                         "Room no longer exists",
                         ErrorCode::RoomNotFound,
+                        operation_id,
                     )
                     .await;
             }
@@ -809,6 +880,7 @@ impl EnhancedGameServer {
                         &restore,
                         "Storage error",
                         ErrorCode::InternalError,
+                        operation_id,
                     )
                     .await;
             }
@@ -827,6 +899,7 @@ impl EnhancedGameServer {
                     &restore,
                     "Current connection no longer exists",
                     ErrorCode::ReconnectionFailed,
+                    operation_id,
                 )
                 .await;
         };
@@ -1073,8 +1146,8 @@ impl EnhancedGameServer {
                             None
                         };
                         let missed_events = missed_events.events;
-                        Ok(Arc::new(ServerMessage::Reconnected(Box::new(
-                            ReconnectedPayload {
+                        Ok(Arc::new(
+                            (ServerMessage::Reconnected(Box::new(ReconnectedPayload {
                                 room_id: response_room_id,
                                 room_code: current_room.code.clone(),
                                 player_id: response_player_id,
@@ -1108,8 +1181,9 @@ impl EnhancedGameServer {
                                         response_room_id,
                                     )
                                     .await,
-                            },
-                        ))))
+                            })))
+                            .correlate_room_operation(operation_id),
+                        ))
                     })
                 }),
             )
@@ -1139,6 +1213,7 @@ impl EnhancedGameServer {
                         claim_guard,
                         &restore,
                         "baseline_delivery",
+                        operation_id,
                     )
                     .await;
             }
@@ -1159,6 +1234,7 @@ impl EnhancedGameServer {
                         claim_guard,
                         &restore,
                         "coordinator_registration",
+                        operation_id,
                     )
                     .await;
             }

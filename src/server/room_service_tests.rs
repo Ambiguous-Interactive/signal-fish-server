@@ -1955,6 +1955,69 @@ async fn aborting_join_while_baseline_is_backpressured_still_completes_admission
     );
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_join_baseline_failure_rolls_back_and_returns_terminal_failure() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database
+        .initialize()
+        .await
+        .expect("initialize join rollback database");
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:47993".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x47993);
+    database.fail_get_room_players_for_test(true);
+
+    server
+        .handle_join_room_operation(
+            &player_id,
+            Some(operation_id),
+            "baseline-failure".to_string(),
+            None,
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(matches!(
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("correlated terminal response should arrive")
+            .as_deref(),
+        Some(ServerMessage::RoomOperationResult { operation_id: received, result })
+            if *received == operation_id
+                && matches!(
+                    result.as_ref(),
+                    crate::protocol::RoomOperationResult::OperationFailed {
+                        error_code: Some(ErrorCode::StorageError),
+                        ..
+                    }
+                )
+    ));
+    assert_eq!(server.get_client_room(&player_id).await, None);
+    assert_eq!(
+        server
+            .metrics
+            .players_joined
+            .load(Ordering::Relaxed)
+            .saturating_sub(server.metrics.players_left.load(Ordering::Relaxed)),
+        0,
+        "failed baseline must balance the provisional admission"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn stalled_incumbent_does_not_hide_fresh_join_or_evict_healthy_peers() {

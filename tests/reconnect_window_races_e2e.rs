@@ -90,7 +90,8 @@ mod websocket_test_helpers;
 use futures_util::SinkExt;
 use signal_fish_server::config::AppRegistrationEntry;
 use signal_fish_server::protocol::{
-    ClientMessage, ErrorCode, PlayerId, ReconnectedPayload, RoomId, ServerMessage,
+    ClientMessage, ErrorCode, PlayerId, ReconnectedPayload, RoomId, RoomOperationRequest,
+    RoomOperationResult, ServerMessage, ROOM_OPERATION_IDS_CAPABILITY,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_route_v3};
@@ -99,6 +100,7 @@ use std::time::Duration;
 use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio::sync::Barrier;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use uuid::Uuid;
 use websocket_test_helpers::{
     assert_message_conservation, next_matching_server_message_within, next_server_message_within,
     WsStream,
@@ -211,6 +213,7 @@ async fn authenticate_v3(ws: &mut WsStream) {
             protocol_version: Some(3),
             supported_transports: None,
             supported_topologies: None,
+            requested_capabilities: None,
         },
     )
     .await;
@@ -224,6 +227,50 @@ async fn authenticate_v3(ws: &mut WsStream) {
     assert!(
         matches!(info, ServerMessage::ProtocolInfo(_)),
         "expected ProtocolInfo, got {info:?}"
+    );
+}
+
+async fn authenticate_correlated_operations(ws: &mut WsStream) {
+    send(
+        ws,
+        &ClientMessage::Authenticate {
+            app_id: APP_ID.to_string(),
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: Some(3),
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: Some(vec![
+                "unknown_future_capability".to_string(),
+                ROOM_OPERATION_IDS_CAPABILITY.to_string(),
+                ROOM_OPERATION_IDS_CAPABILITY.to_string(),
+            ]),
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "Authenticated").await,
+        ServerMessage::Authenticated { .. }
+    ));
+    let info = next_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "ProtocolInfo").await;
+    let ServerMessage::ProtocolInfo(info) = info else {
+        panic!("expected ProtocolInfo, got {info:?}");
+    };
+    assert_eq!(
+        info.capabilities
+            .iter()
+            .filter(|capability| capability.as_str() == ROOM_OPERATION_IDS_CAPABILITY)
+            .count(),
+        1,
+        "the requested supported capability is negotiated exactly once"
+    );
+    assert!(
+        !info
+            .capabilities
+            .iter()
+            .any(|capability| capability == "unknown_future_capability"),
+        "unknown request tokens are not advertised as negotiated"
     );
 }
 
@@ -552,6 +599,124 @@ async fn concurrent_duplicate_reconnect_has_exactly_one_winner() {
         losers, 1,
         "the other concurrent same-token claim must be rejected"
     );
+
+    assert_message_conservation(&game_server.metrics()).await;
+    running_server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn correlated_reconnect_preserves_socket_identity_for_followup_messages() {
+    let (running_server, game_server) =
+        start_server(DUPLICATE_CLAIM_WINDOW, HUGE_CLEANUP_INTERVAL).await;
+    let addr = running_server.addr();
+
+    let mut anchor = connect(addr).await;
+    authenticate_v3(&mut anchor).await;
+    let anchor_room = join_room(&mut anchor, "correlated-reconnect", None, "Anchor").await;
+
+    let mut dropper = connect(addr).await;
+    authenticate_v3(&mut dropper).await;
+    let dropped = join_room(
+        &mut dropper,
+        "correlated-reconnect",
+        Some(anchor_room.room_code.clone()),
+        "Dropper",
+    )
+    .await;
+
+    let mut replacement = connect(addr).await;
+    authenticate_correlated_operations(&mut replacement).await;
+    let token = register_reconnect_token(&game_server, dropped.player_id, dropped.room_id).await;
+    drop(dropper);
+
+    let failed_id = Uuid::from_u128(0x101);
+    send(
+        &mut replacement,
+        &ClientMessage::RoomOperation {
+            operation_id: failed_id,
+            operation: Box::new(RoomOperationRequest::Reconnect {
+                player_id: dropped.player_id,
+                room_id: dropped.room_id,
+                auth_token: "invalid-token".to_string(),
+            }),
+        },
+    )
+    .await;
+    let failed = next_server_message_within(
+        &mut replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "correlated reconnect failure",
+    )
+    .await;
+    assert!(matches!(
+        failed,
+        ServerMessage::RoomOperationResult { operation_id, result }
+            if operation_id == failed_id
+                && matches!(result.as_ref(), RoomOperationResult::ReconnectionFailed { .. })
+    ));
+
+    let reconnect_id = Uuid::from_u128(0x102);
+    send(
+        &mut replacement,
+        &ClientMessage::RoomOperation {
+            operation_id: reconnect_id,
+            operation: Box::new(RoomOperationRequest::Reconnect {
+                player_id: dropped.player_id,
+                room_id: dropped.room_id,
+                auth_token: token,
+            }),
+        },
+    )
+    .await;
+    let reconnected = next_server_message_within(
+        &mut replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "correlated reconnect success",
+    )
+    .await;
+    assert!(
+        matches!(
+            &reconnected,
+            ServerMessage::RoomOperationResult { operation_id, result }
+                if *operation_id == reconnect_id
+                    && matches!(result.as_ref(), RoomOperationResult::Reconnected(payload)
+                        if payload.player_id == dropped.player_id)
+        ),
+        "expected correlated Reconnected, got {reconnected:?}"
+    );
+
+    send(&mut replacement, &ClientMessage::Ping).await;
+    assert!(matches!(
+        next_server_message_within(
+            &mut replacement,
+            SERVER_MESSAGE_TIMEOUT,
+            "post-reconnect Pong",
+        )
+        .await,
+        ServerMessage::Pong
+    ));
+
+    let leave_id = Uuid::from_u128(0x103);
+    send(
+        &mut replacement,
+        &ClientMessage::RoomOperation {
+            operation_id: leave_id,
+            operation: Box::new(RoomOperationRequest::LeaveRoom),
+        },
+    )
+    .await;
+    let left = next_server_message_within(
+        &mut replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "post-reconnect correlated leave",
+    )
+    .await;
+    assert!(matches!(
+        left,
+        ServerMessage::RoomOperationResult { operation_id, result }
+            if operation_id == leave_id
+                && matches!(result.as_ref(), RoomOperationResult::RoomLeft)
+    ));
 
     assert_message_conservation(&game_server.metrics()).await;
     running_server.shutdown().await;

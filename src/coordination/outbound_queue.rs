@@ -2416,8 +2416,117 @@ fn transition_target(message: &ServerMessage) -> Option<Option<RoomId>> {
         ServerMessage::Reconnected(payload) => Some(Some(payload.room_id)),
         ServerMessage::SpectatorJoined(payload) => Some(Some(payload.room_id)),
         ServerMessage::SpectatorLeft { .. } => Some(None),
+        ServerMessage::RoomOperationResult { result, .. } => match result.as_ref() {
+            crate::protocol::RoomOperationResult::RoomJoined(payload) => {
+                Some(Some(payload.room_id))
+            }
+            crate::protocol::RoomOperationResult::RoomLeft => Some(None),
+            crate::protocol::RoomOperationResult::Reconnected(payload) => {
+                Some(Some(payload.room_id))
+            }
+            crate::protocol::RoomOperationResult::SpectatorJoined(payload) => {
+                Some(Some(payload.room_id))
+            }
+            crate::protocol::RoomOperationResult::SpectatorLeft { .. } => Some(None),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+#[cfg(test)]
+pub(super) fn correlated_transition_cases(
+) -> Vec<(&'static str, Arc<ServerMessage>, Option<RoomId>)> {
+    let operation_id = uuid::Uuid::from_u128(1);
+    let room_id = RoomId::from_u128(2);
+    let player_id = PlayerId::from_u128(3);
+    let correlated = |result| {
+        Arc::new(ServerMessage::RoomOperationResult {
+            operation_id,
+            result: Box::new(result),
+        })
+    };
+
+    vec![
+        (
+            "correlated room join",
+            correlated(crate::protocol::RoomOperationResult::RoomJoined(Box::new(
+                crate::protocol::RoomJoinedPayload {
+                    room_id,
+                    room_code: "ABC123".to_string(),
+                    player_id,
+                    game_name: "game".to_string(),
+                    max_players: 4,
+                    supports_authority: true,
+                    current_players: Vec::new(),
+                    is_authority: true,
+                    lobby_state: crate::protocol::LobbyState::Lobby,
+                    ready_players: Vec::new(),
+                    relay_type: "matchbox".to_string(),
+                    current_spectators: Vec::new(),
+                    ice_servers: Vec::new(),
+                    reconnection_token: None,
+                },
+            ))),
+            Some(room_id),
+        ),
+        (
+            "correlated room leave",
+            correlated(crate::protocol::RoomOperationResult::RoomLeft),
+            None,
+        ),
+        (
+            "correlated reconnect",
+            correlated(crate::protocol::RoomOperationResult::Reconnected(Box::new(
+                crate::protocol::ReconnectedPayload {
+                    room_id,
+                    room_code: "ABC123".to_string(),
+                    player_id,
+                    game_name: "game".to_string(),
+                    max_players: 4,
+                    supports_authority: true,
+                    current_players: Vec::new(),
+                    is_authority: true,
+                    lobby_state: crate::protocol::LobbyState::Lobby,
+                    ready_players: Vec::new(),
+                    relay_type: "matchbox".to_string(),
+                    current_spectators: Vec::new(),
+                    ice_servers: Vec::new(),
+                    missed_events: Vec::new(),
+                    replay: None,
+                    sender_watermarks: Vec::new(),
+                    reconnection_token: None,
+                },
+            ))),
+            Some(room_id),
+        ),
+        (
+            "correlated spectator join",
+            correlated(crate::protocol::RoomOperationResult::SpectatorJoined(
+                Box::new(crate::protocol::SpectatorJoinedPayload {
+                    room_id,
+                    room_code: "ABC123".to_string(),
+                    spectator_id: player_id,
+                    game_name: "game".to_string(),
+                    current_players: Vec::new(),
+                    current_spectators: Vec::new(),
+                    lobby_state: crate::protocol::LobbyState::Lobby,
+                    reason: Some(crate::protocol::SpectatorStateChangeReason::Joined),
+                }),
+            )),
+            Some(room_id),
+        ),
+        (
+            "correlated spectator leave",
+            correlated(crate::protocol::RoomOperationResult::SpectatorLeft {
+                room_id: Some(room_id),
+                room_code: Some("ABC123".to_string()),
+                reason: Some(crate::protocol::SpectatorStateChangeReason::VoluntaryLeave),
+                current_spectators: Vec::new(),
+            }),
+            None,
+        ),
+    ]
 }
 
 fn is_data_message(message: &ServerMessage) -> bool {
@@ -2828,6 +2937,132 @@ mod tests {
             OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::RoomLeft)
         ));
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 2);
+    }
+
+    #[tokio::test]
+    async fn correlated_success_transitions_advance_scope_and_fence_generations() {
+        let wrong_room = RoomId::from_u128(4);
+        let cases = correlated_transition_cases();
+        let initial_room_transition = Arc::clone(&cases[0].1);
+
+        for (context, transition, target_room) in cases {
+            assert_eq!(
+                transition_target(transition.as_ref()),
+                Some(target_room),
+                "{context}: transition target"
+            );
+
+            let (tx, mut rx) = channel(4, 4);
+            tx.set_protocol_version(3);
+            tx.try_enqueue_transition(Arc::clone(&initial_room_transition), 1)
+                .unwrap();
+            assert!(
+                matches!(
+                    rx.recv().await.unwrap().unwrap().payload,
+                    OutboundPayload::Message(message)
+                        if Arc::ptr_eq(&message, &initial_room_transition)
+                ),
+                "{context}: setup room transition"
+            );
+            tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
+                .unwrap();
+            tx.try_enqueue_transition(Arc::clone(&transition), 2)
+                .unwrap();
+
+            assert_eq!(
+                tx.try_enqueue_control_scoped(message(90), target_room, 1)
+                    .unwrap(),
+                EnqueueOutcome::CANCELED,
+                "{context}: old generation must be stale"
+            );
+            assert_eq!(
+                tx.try_enqueue_data_scoped(data(91, DeliveryClass::Reliable, None, 91), 1)
+                    .unwrap(),
+                EnqueueOutcome::CANCELED,
+                "{context}: old-generation data must be stale"
+            );
+            let rejected_room = target_room.map_or(RoomId::from_u128(2), |_| wrong_room);
+            assert_eq!(
+                tx.try_enqueue_control_scoped(message(92), Some(rejected_room), 2)
+                    .unwrap(),
+                EnqueueOutcome::CANCELED,
+                "{context}: wrong room must be stale"
+            );
+            assert_eq!(
+                tx.try_enqueue_control_scoped(message(2), target_room, 2)
+                    .unwrap(),
+                EnqueueOutcome::ENQUEUED,
+                "{context}: current control scope"
+            );
+
+            let current_data = tx
+                .try_enqueue_data_scoped(data(3, DeliveryClass::Reliable, None, 2), 2)
+                .unwrap();
+            assert_eq!(
+                current_data,
+                if target_room.is_some() {
+                    EnqueueOutcome::ENQUEUED
+                } else {
+                    EnqueueOutcome::CANCELED
+                },
+                "{context}: current data scope"
+            );
+
+            assert_eq!(
+                message_id(&rx.recv().await.unwrap().unwrap()),
+                1,
+                "{context}: old data precedes transition"
+            );
+            assert!(
+                matches!(
+                    rx.recv().await.unwrap().unwrap().payload,
+                    OutboundPayload::Message(message) if Arc::ptr_eq(&message, &transition)
+                ),
+                "{context}: transition barrier follows old data"
+            );
+            assert_eq!(
+                message_id(&rx.recv().await.unwrap().unwrap()),
+                2,
+                "{context}: current control follows transition"
+            );
+            if target_room.is_some() {
+                assert_eq!(
+                    message_id(&rx.recv().await.unwrap().unwrap()),
+                    3,
+                    "{context}: current-room data follows transition"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn correlated_failure_does_not_advance_scope_or_generation() {
+        let (tx, _rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        let initial_room_transition = Arc::clone(&correlated_transition_cases()[0].1);
+        tx.try_enqueue_transition(initial_room_transition, 1)
+            .unwrap();
+
+        let failure = Arc::new(ServerMessage::room_operation_failed(
+            uuid::Uuid::from_u128(9),
+            "rejected",
+            None,
+        ));
+        assert_eq!(transition_target(failure.as_ref()), None);
+        assert!(matches!(
+            tx.try_enqueue_transition(failure, 2),
+            Err(TryEnqueueError::InvalidMetadata(_))
+        ));
+        assert_eq!(
+            tx.try_enqueue_data_scoped(data(1, DeliveryClass::Reliable, None, 1), 1)
+                .unwrap(),
+            EnqueueOutcome::ENQUEUED
+        );
+        assert_eq!(
+            tx.try_enqueue_data_scoped(data(2, DeliveryClass::Reliable, None, 2), 2)
+                .unwrap(),
+            EnqueueOutcome::CANCELED
+        );
     }
 
     #[test]

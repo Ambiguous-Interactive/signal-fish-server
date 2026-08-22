@@ -135,6 +135,7 @@ async fn authenticate_v3_full(ws: &mut WsStream) {
             protocol_version: Some(3),
             supported_transports: Some(vec![Transport::Relay, Transport::WebRtc]),
             supported_topologies: Some(vec![Topology::Relay, Topology::Host, Topology::Mesh]),
+            requested_capabilities: None,
         },
     )
     .await;

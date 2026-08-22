@@ -39,6 +39,10 @@ Optional fields:
 - `sdk_version` - SDK version for debugging and analytics
 - `platform` - Platform information (e.g., "unity", "godot", "unreal")
 - `game_data_format` - Preferred game data encoding (defaults to JSON text frames)
+- `protocol_version`, `supported_transports`, and `supported_topologies` - v3 negotiation fields described in
+  [Capability negotiation handshake](#capability-negotiation-handshake)
+- `requested_capabilities` - v3 additive extensions the client wants to use; unknown tokens are ignored and the
+  client must wait for the same token in `ProtocolInfo.capabilities`
 
 ### JoinRoom
 
@@ -72,7 +76,13 @@ Optional fields:
 - `room_code` - Code used to join/create a room for this `game_name`
 - `max_players` - Maximum players (applied only when a new room is created)
 - `supports_authority` - Authority support (applied only when a new room is created)
-- `relay_transport` - Preferred relay transport protocol (`tcp`, `udp`, `websocket`, or `auto`; default `auto`)
+- `relay_transport` - Reserved compatibility hint (`tcp`, `udp`, `websocket`, or `auto`). The server currently
+  ignores this field: omission and every accepted value use the same authenticated WebSocket relay path.
+
+New clients should omit `relay_transport`. It remains accepted so existing
+protocol-v2 payloads continue to decode, but it will not become actionable
+without an explicitly negotiated contract. Removing it requires a future
+breaking protocol version; migration is simply to stop sending the field.
 
 ### GameData
 
@@ -276,6 +286,13 @@ elected host's `SessionPlan.direct_endpoint`. `ProvideConnectionInfo` is not
 itself a capability, status, or metrics event, and it does not authorize
 `Signal` or `NewPeer`; those retain their negotiated-v3 gates.
 
+The `relay` variant is also unvalidated client input. Signal Fish stores and
+forwards its host, port, transport, allocation, token, and client ID, but does
+not resolve or probe the endpoint, authenticate the token, bind the claimed
+client ID to the sender, or select/open that path. A consuming integration
+must validate reachability, credentials, and source identity before use; do not
+put secrets here unless every receiving peer may see them.
+
 ```json
 
 {
@@ -464,6 +481,12 @@ room-created response type.
 }
 
 ```
+
+Every `relay_type` field in `RoomJoined`, `Reconnected`, and
+`GameStarting.peer_connections` is a deployment-defined legacy integration
+label. It is informational only: it neither selects nor proves the active
+physical transport. Use the authenticated WebSocket relay path or the
+negotiated `SessionPlan` for executable routing.
 
 ### PlayerJoined
 
@@ -866,7 +889,8 @@ Game is starting with legacy peer metadata.
 
 ```
 
-`peer_connections` carries player identity, authority, relay type, and optional
+`peer_connections` carries player identity, authority, a legacy integration
+label, and optional
 self-declared `connection_info` from `ProvideConnectionInfo`. It is kept for
 v2/back-compat and does not prove direct or WebRTC reachability. v3 clients use
 the negotiated `SessionPlan` for its generation fence, topology, transport,
@@ -975,6 +999,9 @@ must resynchronize application state after any reconnect, especially when
 }
 
 ```
+
+As in `RoomJoined`, `relay_type` is an informational legacy label, not a
+transport selector or reachability proof.
 
 ### ReconnectionFailed
 
@@ -1232,7 +1259,7 @@ topologies and the finalization handoff seam).
 
 ### Capability negotiation handshake
 
-A v3-capable client advertises its capabilities by adding three optional fields to the first `Authenticate`
+A v3-capable client advertises its capabilities by adding optional fields to the first `Authenticate`
 message:
 
 ```json
@@ -1242,7 +1269,8 @@ message:
     "app_id": "mb_app_abc123",
     "protocol_version": 3,
     "supported_transports": ["relay", "direct", "webrtc"],
-    "supported_topologies": ["relay", "host", "mesh"]
+    "supported_topologies": ["relay", "host", "mesh"],
+    "requested_capabilities": ["room_operation_ids"]
   }
 }
 ```
@@ -1253,6 +1281,9 @@ message:
   even when `/v3/ws` defaulted the protocol version to 3. Tokens: `relay`, `direct`, `webrtc`.
 - `supported_topologies` — session topologies the client supports. Absent means the capability set is relay-only
   even when `/v3/ws` defaulted the protocol version to 3. Tokens: `relay`, `host`, `mesh`.
+- `requested_capabilities` — additive wire extensions the client is prepared to use. Unknown and duplicate tokens
+  are ignored. `room_operation_ids` is enabled only for negotiated v3 and only after the server echoes that token
+  in `ProtocolInfo.capabilities`.
 
 The server caps the negotiated version at its configured ceiling:
 `negotiated = min(client_max, max_protocol_version)`. A client that advertises a higher version than the deployment
@@ -1271,7 +1302,7 @@ The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 field
 {
   "type": "ProtocolInfo",
   "data": {
-    "capabilities": ["reconnection", "spectators", "authority"],
+    "capabilities": ["reconnection", "spectators", "authority", "room_operation_ids"],
     "game_data_formats": ["json", "message_pack"],
     "protocol_version": 3,
     "min_protocol_version": 2,
@@ -1285,6 +1316,8 @@ These v3-only fields are omitted from the wire for a negotiated v2 connection, s
 byte-identical. `ProtocolInfo.transports` names the server message lanes available to the connection; today it is
 always `["websocket"]` for negotiated v3 and reserves a future advertisement point for another server relay lane. It
 does not participate in the `Authenticate.supported_transports` data-path negotiation above.
+The reserved `room_operation_ids` token is absent unless explicitly requested and successfully negotiated;
+SDK-compatibility capability tokens may appear alongside it.
 
 **Endpoints.** `/v2/ws` and `/v3/ws` share the same handler. `/v3/ws` only changes the _default_ protocol version
 to 3 when the client omits `protocol_version`; an explicit `protocol_version` in `Authenticate` always wins (then
@@ -1300,7 +1333,8 @@ relay-floor guarantee: v2 and v3 clients interoperate, always.
 
 ### New v3 messages
 
-These eight messages exist only on a negotiated v3 connection.
+These messages exist only on a negotiated v3 connection (and the correlated pair additionally requires the
+`room_operation_ids` capability).
 
 | Message | Direction | Purpose |
 |---|---|---|
@@ -1312,6 +1346,59 @@ These eight messages exist only on a negotiated v3 connection.
 | `RelayStats` | server → client | Optional per-connection relay delivery counters when `websocket.delivery_stats_interval_secs` is enabled |
 | `DeliveryReport` | server → client | Cumulative per-class outcomes plus exact sequence ranges omitted for this connection |
 | `GoingAway` | server → client | Shutdown-drain advisory sent before the server closes the socket with `4000 server_shutdown` |
+| `RoomOperation` | client → server | Wrap one join, leave, reconnect, spectator-join, or spectator-leave command with a client UUID |
+| `RoomOperationResult` | server → client | Echo that UUID on the command's terminal result |
+
+#### Correlated room operations
+
+After `ProtocolInfo.capabilities` contains `room_operation_ids`, send the legacy room command shape inside a
+`RoomOperation` envelope:
+
+```json
+{
+  "type": "RoomOperation",
+  "data": {
+    "operation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "operation": {
+      "type": "JoinRoom",
+      "data": {
+        "game_name": "my-game",
+        "room_code": "ABC123",
+        "player_name": "Player1"
+      }
+    }
+  }
+}
+```
+
+While the physical connection remains deliverable, the server attempts one terminal envelope for an accepted
+operation and echoes the same UUID:
+
+```json
+{
+  "type": "RoomOperationResult",
+  "data": {
+    "operation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "result": { "type": "RoomJoinFailed", "data": { "reason": "Room is full", "error_code": "ROOM_FULL" } }
+  }
+}
+```
+
+The nested request types are `JoinRoom`, `LeaveRoom`, `Reconnect`, `JoinAsSpectator`, and `LeaveSpectator`.
+Their success/failure result types retain the legacy payloads; `OperationFailed` covers a valid correlated command
+that cannot produce its operation-specific success result. A malformed top-level frame may still receive an
+uncorrelated top-level `Error`, because the server cannot safely trust an operation ID from undecodable input.
+
+Generate a UUID that is unique among live and recently completed operations on the current physical WebSocket.
+The scope continues across a successful `Reconnect` on that socket, while a new physical connection starts a new
+scope. The server echoes IDs but does not deduplicate requests or make them idempotent. Autonomous lifecycle events
+(for example, disconnect-driven `SpectatorLeft`) remain top-level and never impersonate an operation result.
+As with every WebSocket response, a connection close, shutdown drain, or terminal slow-consumer eviction can prevent
+the envelope from reaching the client; a missing result is not permission to reuse the UUID or assume the command did
+not commit.
+
+For Server 0.4/0.7 compatibility, do not send `RoomOperation` until the server advertises the capability. Continue
+to send legacy top-level room commands otherwise; their response ambiguity remains unchanged.
 
 #### Signal
 

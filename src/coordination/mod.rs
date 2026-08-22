@@ -1146,14 +1146,22 @@ fn classify_outbound_data(
 }
 
 fn is_delivery_transition(message: &ServerMessage) -> bool {
-    matches!(
-        message,
+    match message {
         ServerMessage::RoomJoined(_)
-            | ServerMessage::RoomLeft
-            | ServerMessage::Reconnected(_)
-            | ServerMessage::SpectatorJoined(_)
-            | ServerMessage::SpectatorLeft { .. }
-    )
+        | ServerMessage::RoomLeft
+        | ServerMessage::Reconnected(_)
+        | ServerMessage::SpectatorJoined(_)
+        | ServerMessage::SpectatorLeft { .. } => true,
+        ServerMessage::RoomOperationResult { result, .. } => matches!(
+            result.as_ref(),
+            crate::protocol::RoomOperationResult::RoomJoined(_)
+                | crate::protocol::RoomOperationResult::RoomLeft
+                | crate::protocol::RoomOperationResult::Reconnected(_)
+                | crate::protocol::RoomOperationResult::SpectatorJoined(_)
+                | crate::protocol::RoomOperationResult::SpectatorLeft { .. }
+        ),
+        _ => false,
+    }
 }
 
 fn map_data_queue_error(error: TryEnqueueError<OutboundData>) -> DeliveryTrySendError {
@@ -3398,8 +3406,20 @@ mod tests {
 
     #[test]
     fn outbound_classification_distinguishes_delivery_transitions() {
+        let operation_id = uuid::Uuid::from_u128(1);
+        for (context, message, _) in outbound_queue::correlated_transition_cases() {
+            assert!(
+                is_delivery_transition(message.as_ref()),
+                "{context}: correlated success must be a transition"
+            );
+        }
         for (context, message, expected) in [
-            ("room departure", ServerMessage::RoomLeft, true),
+            ("ordinary room departure", ServerMessage::RoomLeft, true),
+            (
+                "correlated operation failure",
+                ServerMessage::room_operation_failed(operation_id, "rejected", None),
+                false,
+            ),
             ("ordinary control", ServerMessage::Pong, false),
         ] {
             assert_eq!(is_delivery_transition(&message), expected, "{context}");

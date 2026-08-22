@@ -147,6 +147,7 @@ async fn authenticate(
             protocol_version,
             supported_transports: transports,
             supported_topologies: topologies,
+            requested_capabilities: None,
         },
     )
     .await;

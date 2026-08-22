@@ -189,6 +189,31 @@ impl EnhancedGameServer {
         supports_authority: Option<bool>,
         relay_transport: Option<RelayTransport>,
     ) {
+        self.handle_join_room_operation(
+            player_id,
+            None,
+            game_name,
+            room_code,
+            player_name,
+            max_players,
+            supports_authority,
+            relay_transport,
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn handle_join_room_operation(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        game_name: String,
+        room_code: Option<String>,
+        player_name: String,
+        max_players: Option<u8>,
+        supports_authority: Option<bool>,
+        relay_transport: Option<RelayTransport>,
+    ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
         let task = tokio::spawn(async move {
@@ -201,6 +226,7 @@ impl EnhancedGameServer {
                     max_players,
                     supports_authority,
                     relay_transport,
+                    operation_id,
                 )
                 .await;
         });
@@ -219,6 +245,7 @@ impl EnhancedGameServer {
         max_players: Option<u8>,
         supports_authority: Option<bool>,
         _relay_transport: Option<RelayTransport>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
     ) {
         let player_id = &player_id;
         let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
@@ -252,7 +279,8 @@ impl EnhancedGameServer {
             .join_would_create_room_while_draining(&game_name, room_code.as_deref())
             .await
         {
-            self.reject_join_for_shutdown_drain(player_id).await;
+            self.reject_join_for_shutdown_drain(player_id, operation_id)
+                .await;
             return;
         }
 
@@ -268,10 +296,13 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     player_id,
-                    Arc::new(ServerMessage::RoomJoinFailed {
-                        reason: rate_limit_error.to_string(),
-                        error_code: Some(crate::protocol::ErrorCode::RateLimitExceeded),
-                    }),
+                    Arc::new(
+                        (ServerMessage::RoomJoinFailed {
+                            reason: rate_limit_error.to_string(),
+                            error_code: Some(crate::protocol::ErrorCode::RateLimitExceeded),
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await
             {
@@ -288,10 +319,13 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     player_id,
-                    Arc::new(ServerMessage::RoomJoinFailed {
-                        reason,
-                        error_code: Some(crate::protocol::ErrorCode::InvalidGameName),
-                    }),
+                    Arc::new(
+                        (ServerMessage::RoomJoinFailed {
+                            reason,
+                            error_code: Some(crate::protocol::ErrorCode::InvalidGameName),
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await;
             return;
@@ -304,10 +338,13 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     player_id,
-                    Arc::new(ServerMessage::RoomJoinFailed {
-                        reason,
-                        error_code: Some(crate::protocol::ErrorCode::InvalidPlayerName),
-                    }),
+                    Arc::new(
+                        (ServerMessage::RoomJoinFailed {
+                            reason,
+                            error_code: Some(crate::protocol::ErrorCode::InvalidPlayerName),
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await;
             return;
@@ -321,10 +358,13 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     player_id,
-                    Arc::new(ServerMessage::RoomJoinFailed {
-                        reason,
-                        error_code: Some(crate::protocol::ErrorCode::InvalidMaxPlayers),
-                    }),
+                    Arc::new(
+                        (ServerMessage::RoomJoinFailed {
+                            reason,
+                            error_code: Some(crate::protocol::ErrorCode::InvalidMaxPlayers),
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await;
             return;
@@ -341,14 +381,17 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .send_to_player(
                     player_id,
-                    Arc::new(ServerMessage::RoomJoinFailed {
-                        reason: if is_spectating {
-                            "Already participating in a room as a spectator".to_string()
-                        } else {
-                            "Already in a room".to_string()
-                        },
-                        error_code: Some(crate::protocol::ErrorCode::AlreadyInRoom),
-                    }),
+                    Arc::new(
+                        (ServerMessage::RoomJoinFailed {
+                            reason: if is_spectating {
+                                "Already participating in a room as a spectator".to_string()
+                            } else {
+                                "Already in a room".to_string()
+                            },
+                            error_code: Some(crate::protocol::ErrorCode::AlreadyInRoom),
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
                 )
                 .await;
             return;
@@ -363,10 +406,13 @@ impl EnhancedGameServer {
                         .message_coordinator
                         .send_to_player(
                             player_id,
-                            Arc::new(ServerMessage::RoomJoinFailed {
-                                reason,
-                                error_code: Some(crate::protocol::ErrorCode::InvalidRoomCode),
-                            }),
+                            Arc::new(
+                                (ServerMessage::RoomJoinFailed {
+                                    reason,
+                                    error_code: Some(crate::protocol::ErrorCode::InvalidRoomCode),
+                                })
+                                .correlate_room_operation(operation_id),
+                            ),
                         )
                         .await;
                     return;
@@ -497,8 +543,8 @@ impl EnhancedGameServer {
                                         Some(current_room.clone());
                                 }
 
-                                Ok(Arc::new(ServerMessage::RoomJoined(Box::new(
-                                    RoomJoinedPayload {
+                                Ok(Arc::new(
+                                    (ServerMessage::RoomJoined(Box::new(RoomJoinedPayload {
                                         room_id: current_room.id,
                                         room_code: current_room.code.clone(),
                                         player_id: response_player_id,
@@ -522,8 +568,9 @@ impl EnhancedGameServer {
                                                 current_room.id,
                                             )
                                             .await,
-                                    },
-                                ))))
+                                    })))
+                                    .correlate_room_operation(operation_id),
+                                ))
                             })
                         }),
                     )
@@ -547,6 +594,19 @@ impl EnhancedGameServer {
                         room.id,
                         membership_stamp.epoch,
                     );
+                    if let Some(operation_id) = operation_id {
+                        let _ = self
+                            .message_coordinator
+                            .send_to_player(
+                                player_id,
+                                Arc::new(ServerMessage::room_operation_failed(
+                                    operation_id,
+                                    "Room join could not be finalized",
+                                    Some(crate::protocol::ErrorCode::StorageError),
+                                )),
+                            )
+                            .await;
+                    }
                     return;
                 }
 
@@ -730,7 +790,10 @@ impl EnhancedGameServer {
                     .message_coordinator
                     .send_to_player(
                         player_id,
-                        Arc::new(ServerMessage::RoomJoinFailed { reason, error_code }),
+                        Arc::new(
+                            (ServerMessage::RoomJoinFailed { reason, error_code })
+                                .correlate_room_operation(operation_id),
+                        ),
                     )
                     .await;
             }
@@ -801,20 +864,34 @@ impl EnhancedGameServer {
 
     /// Leave room with coordination
     pub async fn leave_room(self: &Arc<Self>, player_id: &PlayerId) {
+        self.leave_room_operation(player_id, None).await;
+    }
+
+    pub(super) async fn leave_room_operation(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+    ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
         let task = tokio::spawn(async move {
-            server.leave_room_owned(player_id, true).await;
+            server.leave_room_owned(player_id, true, operation_id).await;
         });
         if let Err(error) = task.await {
             tracing::error!(%player_id, %error, "Owned room leave transaction failed");
         }
     }
 
-    async fn leave_room_owned(self: Arc<Self>, player_id: PlayerId, notify_player: bool) {
+    async fn leave_room_owned(
+        self: Arc<Self>,
+        player_id: PlayerId,
+        notify_player: bool,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+    ) {
         let player_id = &player_id;
         let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
-            self.leave_room_locked(player_id, notify_player).await;
+            self.leave_room_locked_operation(player_id, notify_player, operation_id)
+                .await;
             return;
         };
         let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
@@ -826,12 +903,22 @@ impl EnhancedGameServer {
         {
             return;
         }
-        self.leave_room_locked(&effective_player_id, notify_player)
+        self.leave_room_locked_operation(&effective_player_id, notify_player, operation_id)
             .await;
     }
 
     /// Room departure after the caller acquired the connection lifecycle gate.
     pub(super) async fn leave_room_locked(&self, player_id: &PlayerId, notify_player: bool) {
+        self.leave_room_locked_operation(player_id, notify_player, None)
+            .await;
+    }
+
+    async fn leave_room_locked_operation(
+        &self,
+        player_id: &PlayerId,
+        notify_player: bool,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+    ) {
         let leave_span = tracing::info_span!(
             "room.leave",
             player_id = %player_id,
@@ -841,6 +928,19 @@ impl EnhancedGameServer {
         );
         let _span_guard = leave_span.enter();
         let Some(room_id) = self.get_client_room(player_id).await else {
+            if let Some(operation_id) = operation_id {
+                let _ = self
+                    .message_coordinator
+                    .send_to_player(
+                        player_id,
+                        Arc::new(ServerMessage::room_operation_failed(
+                            operation_id,
+                            "Not currently in a room",
+                            Some(crate::protocol::ErrorCode::NotInRoom),
+                        )),
+                    )
+                    .await;
+            }
             return;
         };
         leave_span.record("room_id", tracing::field::display(room_id));
@@ -888,6 +988,19 @@ impl EnhancedGameServer {
                     // A live caller can retry safely, so preserve its complete
                     // role when the durable outcome is unknown.
                     tracing::error!(%player_id, %room_id, error = %e, "Failed to remove player from room");
+                    if let Some(operation_id) = operation_id {
+                        let _ = self
+                            .message_coordinator
+                            .send_to_player(
+                                player_id,
+                                Arc::new(ServerMessage::room_operation_failed(
+                                    operation_id,
+                                    "Failed to leave room",
+                                    Some(crate::protocol::ErrorCode::StorageError),
+                                )),
+                            )
+                            .await;
+                    }
                     return;
                 }
 
@@ -960,10 +1073,36 @@ impl EnhancedGameServer {
             Ok(Some(tail)) => tail,
             Ok(None) => {
                 tracing::error!(%player_id, %room_id, "Terminal unroute found no relay watermark; suppressing incomplete PlayerLeft");
+                if let Some(operation_id) = operation_id {
+                    let _ = self
+                        .message_coordinator
+                        .send_to_player(
+                            player_id,
+                            Arc::new(ServerMessage::room_operation_failed(
+                                operation_id,
+                                "Room departure could not be finalized",
+                                Some(crate::protocol::ErrorCode::StorageError),
+                            )),
+                        )
+                        .await;
+                }
                 return;
             }
             Err(error) => {
                 tracing::error!(%player_id, %room_id, %error, "Failed to atomically unroute departing player");
+                if let Some(operation_id) = operation_id {
+                    let _ = self
+                        .message_coordinator
+                        .send_to_player(
+                            player_id,
+                            Arc::new(ServerMessage::room_operation_failed(
+                                operation_id,
+                                "Room departure could not be finalized",
+                                Some(crate::protocol::ErrorCode::StorageError),
+                            )),
+                        )
+                        .await;
+                }
                 return;
             }
         };
@@ -979,6 +1118,17 @@ impl EnhancedGameServer {
                 %room_id,
                 "Skipping normal room-leave traffic because shutdown drain started"
             );
+            if let Some(operation_id) = operation_id {
+                let _ = self
+                    .message_coordinator
+                    .try_send_to_player(
+                        player_id,
+                        Arc::new(
+                            ServerMessage::RoomLeft.correlate_room_operation(Some(operation_id)),
+                        ),
+                    )
+                    .await;
+            }
             return;
         }
 
@@ -1017,7 +1167,9 @@ impl EnhancedGameServer {
                         let _ = coordinator
                             .send_to_player_if(
                                 &departed_player,
-                                Arc::new(ServerMessage::RoomLeft),
+                                Arc::new(
+                                    ServerMessage::RoomLeft.correlate_room_operation(operation_id),
+                                ),
                                 &should_acknowledge,
                                 acknowledgement_delivery_drain,
                             )
@@ -1727,15 +1879,22 @@ impl EnhancedGameServer {
         )
     }
 
-    async fn reject_join_for_shutdown_drain(&self, player_id: &PlayerId) {
+    async fn reject_join_for_shutdown_drain(
+        &self,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+    ) {
         match self
             .message_coordinator
             .try_send_to_player(
                 player_id,
-                Arc::new(ServerMessage::RoomJoinFailed {
-                    reason: "Server is draining for shutdown".to_string(),
-                    error_code: Some(crate::protocol::ErrorCode::ServerDraining),
-                }),
+                Arc::new(
+                    (ServerMessage::RoomJoinFailed {
+                        reason: "Server is draining for shutdown".to_string(),
+                        error_code: Some(crate::protocol::ErrorCode::ServerDraining),
+                    })
+                    .correlate_room_operation(operation_id),
+                ),
             )
             .await
         {

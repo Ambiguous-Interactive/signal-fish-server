@@ -1,16 +1,20 @@
-//! Relay type configuration.
+//! Legacy integration-label configuration.
 
 use super::defaults::default_relay_type;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Relay type configuration for game-to-relay mappings.
+/// Legacy integration labels emitted in room and peer protocol metadata.
+///
+/// These values are informational. They do not select, open, authenticate, or
+/// prove a physical relay transport.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RelayTypeConfig {
-    /// Map of game names to relay types (e.g., "Chess" -> "unity_netcode")
+    /// Map of game names to legacy labels (for example, `Chess` to
+    /// `unity_netcode`).
     #[serde(default)]
     pub game_relay_mappings: HashMap<String, String>,
-    /// Default relay type for games not explicitly configured
+    /// Default legacy label for games not explicitly configured.
     #[serde(default = "default_relay_type")]
     pub default_relay_type: String,
 }

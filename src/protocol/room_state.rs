@@ -193,6 +193,9 @@ pub struct Room {
     pub ready_players: Vec<PlayerId>,
     pub lobby_started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub game_finalized_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Deployment-defined legacy integration label persisted with the room.
+    ///
+    /// Informational only: it does not select or prove an active transport.
     pub relay_type: String,
     /// Deployment region currently hosting this room.
     pub region_id: String,

@@ -204,6 +204,12 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__DELIVERY_STATS_INTERVAL_SECS` | `websocket.delivery_stats_interval_secs` | `0` | Seconds between v3 aggregate `RelayStats` and counter-only `DeliveryReport` snapshots (`0` disables periodic snapshots, not exact gap reports; must be ≤ `3600`) |
 | `RUST_LOG` | -- | `info` | Standard `tracing` log filter used when `logging.level` is `null` |
 
+`relay_types.default_relay_type` and `game_relay_mappings` configure legacy
+integration labels emitted as `relay_type`. Changing them changes that
+informational string only; it does not select a TCP, UDP, WebSocket, WebRTC, or
+external relay path. Executable v3 routing comes from `session` negotiation,
+and the authenticated WebSocket relay floor remains available independently.
+
 ## Common Configurations
 
 ### Development

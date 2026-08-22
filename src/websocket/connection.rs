@@ -8,7 +8,7 @@ use crate::coordination::{
 use crate::protocol::{
     ClientMessage, ErrorCode, GameDataEncoding, PlayerId, PlayerNameRulesPayload,
     ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
-    PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
+    PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY,
 };
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
@@ -975,6 +975,22 @@ fn dedup_preserving_order<T: PartialEq>(items: &mut Vec<T>) {
     *items = unique;
 }
 
+/// Merge SDK compatibility capabilities with negotiated wire extensions.
+///
+/// `room_operation_ids` is reserved for explicit connection negotiation. A
+/// deployment cannot accidentally advertise it through the SDK compatibility
+/// manifest, and a duplicate client request still produces one token.
+fn protocol_info_capabilities(
+    mut compatibility_capabilities: Vec<String>,
+    room_operation_ids: bool,
+) -> Vec<String> {
+    compatibility_capabilities.retain(|capability| capability != ROOM_OPERATION_IDS_CAPABILITY);
+    if room_operation_ids {
+        compatibility_capabilities.push(ROOM_OPERATION_IDS_CAPABILITY.to_string());
+    }
+    compatibility_capabilities
+}
+
 // `default_protocol_version` is the fallback used when the client omits
 // `Authenticate.protocol_version`: `2` for the `/v2/ws` path, `3` for `/v3/ws`.
 pub(super) async fn handle_socket(
@@ -1909,6 +1925,7 @@ pub(super) async fn handle_socket(
                             protocol_version,
                             supported_transports,
                             supported_topologies,
+                            requested_capabilities,
                         } => {
                             if server_clone.config().app_id_allowlist_enabled
                                 && app_handshake_complete
@@ -2067,6 +2084,14 @@ pub(super) async fn handle_socket(
                                             supported_transports,
                                             supported_topologies,
                                         );
+                                    let room_operation_ids = negotiated_version >= 3
+                                        && requested_capabilities.as_ref().is_some_and(
+                                            |capabilities| {
+                                                capabilities.iter().any(|capability| {
+                                                    capability == ROOM_OPERATION_IDS_CAPABILITY
+                                                })
+                                            },
+                                        );
 
                                     let min_protocol_version = cfg.min_protocol_version;
                                     let max_protocol_version = cfg.max_protocol_version;
@@ -2078,6 +2103,10 @@ pub(super) async fn handle_socket(
                                             transports: negotiated_transports.clone(),
                                             topologies: negotiated_topologies.clone(),
                                         },
+                                    );
+                                    server_clone.set_client_room_operation_ids(
+                                        &active_player_id,
+                                        room_operation_ids,
                                     );
 
                                     tracing::info!(
@@ -2132,7 +2161,10 @@ pub(super) async fn handle_socket(
                                             recommended_version: compatibility
                                                 .recommended_version
                                                 .clone(),
-                                            capabilities: compatibility.capabilities.clone(),
+                                            capabilities: protocol_info_capabilities(
+                                                compatibility.capabilities.clone(),
+                                                room_operation_ids,
+                                            ),
                                             notes: compatibility.notes.clone(),
                                             game_data_formats: supported_formats,
                                             player_name_rules: Some(player_name_rules),
@@ -2252,6 +2284,43 @@ pub(super) async fn handle_socket(
                                         active_player_id = reconnect_player_id;
                                     }
                                 }
+                                ClientMessage::RoomOperation {
+                                    operation_id,
+                                    operation,
+                                } => match *operation {
+                                    crate::protocol::RoomOperationRequest::Reconnect {
+                                        player_id: reconnect_player_id,
+                                        room_id,
+                                        auth_token,
+                                    } if server_clone
+                                        .client_supports_room_operation_ids(&active_player_id) =>
+                                    {
+                                        if server_clone
+                                            .handle_reconnect_with_identity_operation(
+                                                &active_player_id,
+                                                &reconnect_player_id,
+                                                &room_id,
+                                                &auth_token,
+                                                Arc::clone(&effective_player_id_for_receive),
+                                                Some(operation_id),
+                                            )
+                                            .await
+                                        {
+                                            active_player_id = reconnect_player_id;
+                                        }
+                                    }
+                                    operation => {
+                                        server_clone
+                                            .handle_client_message(
+                                                &active_player_id,
+                                                ClientMessage::RoomOperation {
+                                                    operation_id,
+                                                    operation: Box::new(operation),
+                                                },
+                                            )
+                                            .await;
+                                    }
+                                },
                                 other => {
                                     server_clone
                                         .handle_client_message(&active_player_id, other)
@@ -2981,6 +3050,28 @@ mod tests {
         let (transports, topologies) = negotiate_capabilities(3, None, None);
         assert_eq!(transports, vec![Transport::Relay]);
         assert_eq!(topologies, vec![Topology::Relay]);
+    }
+
+    #[test]
+    fn reserved_room_operation_capability_requires_explicit_negotiation() {
+        let compatibility = vec![
+            "sdk_feature".to_string(),
+            ROOM_OPERATION_IDS_CAPABILITY.to_string(),
+            ROOM_OPERATION_IDS_CAPABILITY.to_string(),
+        ];
+        assert_eq!(
+            protocol_info_capabilities(compatibility.clone(), false),
+            vec!["sdk_feature"],
+            "a compatibility manifest cannot pre-enable a reserved wire extension"
+        );
+        assert_eq!(
+            protocol_info_capabilities(compatibility, true),
+            vec![
+                "sdk_feature".to_string(),
+                ROOM_OPERATION_IDS_CAPABILITY.to_string()
+            ],
+            "explicit negotiation advertises the reserved token exactly once"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::LazyLock;
 
-use crate::protocol::{ClientMessage, PlayerId, ServerMessage};
+use crate::protocol::{ClientMessage, PlayerId, RoomOperationRequest, ServerMessage};
 
 use super::{EnhancedGameServer, TransportStatusUpdate};
 
@@ -126,6 +126,80 @@ impl EnhancedGameServer {
             }
             ClientMessage::LeaveSpectator => {
                 self.handle_leave_spectator(player_id).await;
+            }
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation,
+            } => {
+                if !self.client_supports_room_operation_ids(player_id) {
+                    let _ = self
+                        .send_error_to_player(
+                            player_id,
+                            "RoomOperation requires the negotiated room_operation_ids capability"
+                                .to_string(),
+                            Some(crate::protocol::ErrorCode::UnsupportedProtocolVersion),
+                        )
+                        .await;
+                    return;
+                }
+                match *operation {
+                    RoomOperationRequest::JoinRoom {
+                        game_name,
+                        room_code,
+                        player_name,
+                        max_players,
+                        supports_authority,
+                        relay_transport,
+                    } => {
+                        self.handle_join_room_operation(
+                            player_id,
+                            Some(operation_id),
+                            game_name,
+                            room_code,
+                            player_name,
+                            max_players,
+                            supports_authority,
+                            relay_transport,
+                        )
+                        .await;
+                    }
+                    RoomOperationRequest::LeaveRoom => {
+                        self.leave_room_operation(player_id, Some(operation_id))
+                            .await;
+                    }
+                    RoomOperationRequest::Reconnect {
+                        player_id: reconnect_player_id,
+                        room_id,
+                        auth_token,
+                    } => {
+                        self.handle_reconnect_operation(
+                            player_id,
+                            &reconnect_player_id,
+                            &room_id,
+                            &auth_token,
+                            Some(operation_id),
+                        )
+                        .await;
+                    }
+                    RoomOperationRequest::JoinAsSpectator {
+                        game_name,
+                        room_code,
+                        spectator_name,
+                    } => {
+                        self.handle_join_as_spectator_operation(
+                            player_id,
+                            Some(operation_id),
+                            game_name,
+                            room_code,
+                            spectator_name,
+                        )
+                        .await;
+                    }
+                    RoomOperationRequest::LeaveSpectator => {
+                        self.handle_leave_spectator_operation(player_id, Some(operation_id))
+                            .await;
+                    }
+                }
             }
             ClientMessage::TransportStatus {
                 transport,

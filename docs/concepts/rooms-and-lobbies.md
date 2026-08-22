@@ -57,6 +57,11 @@ A room is created when a player sends a `JoinRoom` message **without** a
 Alice now shares the room code `HK7T3W` with other players (via your
 game's UI, a chat message, or any other channel).
 
+`relay_type` is a deployment-defined legacy integration label. It is
+informational only and does not select or prove the active transport; use the
+authenticated WebSocket relay path or a negotiated v3 `SessionPlan` for
+executable routing.
+
 ## `JoinRoom` Resolution Rules
 
 `JoinRoom` is used for both creation and joining. The server resolves each

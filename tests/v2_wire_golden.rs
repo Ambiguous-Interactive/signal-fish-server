@@ -158,6 +158,7 @@ fn golden_client_authenticate() {
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     assert_json(
         &msg,
@@ -186,6 +187,7 @@ fn golden_client_authenticate_minimal() {
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     assert_json(
         &msg,

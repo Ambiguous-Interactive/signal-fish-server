@@ -190,7 +190,7 @@ trybuild = "1.0"
 # actually parsing them, rather than approximating a parser with fragile quote/
 # indent heuristics. `default-features = false` drops the encoding_rs dependency
 # (UTF-8 input only), which is all the test fixtures and on-disk workflows need.
-saphyr = { version = "0.0.11", default-features = false }
+saphyr = { version = "0.0.12", default-features = false }
 
 [[bin]]
 name = "signal-fish-server"

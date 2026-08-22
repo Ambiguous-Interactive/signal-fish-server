@@ -1,14 +1,56 @@
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::delivery::{DeliveryClass, DeliveryReportPayload};
 use super::error_codes::ErrorCode;
 use super::room_state::LobbyState;
 use super::types::{
     ConnectionInfo, GameDataEncoding, IceServer, PeerConnectionInfo, PlayerId, PlayerInfo,
-    ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, SessionGeneration,
+    ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId, RoomOperationId, SessionGeneration,
     SessionPlanPayload, SpectatorInfo, SpectatorStateChangeReason, Topology, Transport,
 };
+
+/// Serde boundary for client-authored room-operation identifiers.
+///
+/// JSON UUID parsers commonly accept compact, braced, URN, and uppercase
+/// spellings. Correlation identifiers deliberately have one textual spelling
+/// so logs, schemas, and exact echoed responses cannot disagree about the same
+/// value. Binary formats retain `uuid`'s compact 16-byte representation.
+mod canonical_room_operation_id {
+    use serde::de::Error as _;
+
+    use super::{Deserialize, Deserializer, RoomOperationId, Serialize, Serializer};
+
+    pub(super) fn serialize<S>(value: &RoomOperationId, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&value.hyphenated().to_string())
+        } else {
+            value.serialize(serializer)
+        }
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<RoomOperationId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if !deserializer.is_human_readable() {
+            return RoomOperationId::deserialize(deserializer);
+        }
+
+        let encoded = String::deserialize(deserializer)?;
+        let parsed = RoomOperationId::parse_str(&encoded).map_err(D::Error::custom)?;
+        let canonical = parsed.hyphenated().to_string();
+        if encoded != canonical {
+            return Err(D::Error::custom(format_args!(
+                "room operation id must use lowercase hyphenated UUID text; expected {canonical}"
+            )));
+        }
+        Ok(parsed)
+    }
+}
 
 /// Message types sent from client to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +89,15 @@ pub enum ClientMessage {
         /// the omitted `protocol_version` to v3.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_topologies: Option<Vec<Topology>>,
+        /// Additive protocol capabilities the client is prepared to use.
+        ///
+        /// A client must wait for the same token in
+        /// `ProtocolInfo.capabilities` before changing its wire shape. That
+        /// field also carries SDK compatibility capabilities; this reserved
+        /// token is added only when explicitly requested and enabled. Unknown
+        /// request tokens are ignored for forward compatibility.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_capabilities: Option<Vec<String>>,
     },
     /// Join or create a room for a specific game
     JoinRoom {
@@ -55,8 +106,9 @@ pub enum ClientMessage {
         player_name: String,
         max_players: Option<u8>,
         supports_authority: Option<bool>,
-        /// Preferred relay transport protocol (TCP, UDP, or Auto)
-        /// If not specified, defaults to Auto
+        /// Reserved compatibility hint. The server currently ignores this
+        /// field and relays game data over the authenticated WebSocket path.
+        /// Omission and every accepted token have identical behavior.
         #[serde(default)]
         relay_transport: Option<RelayTransport>,
     },
@@ -139,6 +191,16 @@ pub enum ClientMessage {
     },
     /// Leave spectator mode
     LeaveSpectator,
+    /// A room-membership operation carrying an opaque client-generated id.
+    ///
+    /// This envelope is accepted only after negotiating the
+    /// `room_operation_ids` capability. Legacy command variants remain
+    /// byte-identical for Server 0.4/0.7 compatibility.
+    RoomOperation {
+        #[serde(with = "canonical_room_operation_id")]
+        operation_id: RoomOperationId,
+        operation: Box<RoomOperationRequest>,
+    },
     /// Report this client's current data-path transport state to the server (v3 only).
     /// Lets the server distinguish P2P-connected peers from relay-fallback peers
     /// (drives metrics and, in future, targeted relay for stuck peers). Purely
@@ -146,6 +208,78 @@ pub enum ClientMessage {
     TransportStatus {
         transport: Transport,
         connected: bool,
+    },
+}
+
+/// A correlated room-membership command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum RoomOperationRequest {
+    JoinRoom {
+        game_name: String,
+        room_code: Option<String>,
+        player_name: String,
+        max_players: Option<u8>,
+        supports_authority: Option<bool>,
+        /// Reserved compatibility hint. The server currently ignores this
+        /// field and relays game data over the authenticated WebSocket path.
+        /// Omission and every accepted token have identical behavior.
+        #[serde(default)]
+        relay_transport: Option<RelayTransport>,
+    },
+    LeaveRoom,
+    Reconnect {
+        player_id: PlayerId,
+        room_id: RoomId,
+        auth_token: String,
+    },
+    JoinAsSpectator {
+        game_name: String,
+        room_code: String,
+        spectator_name: String,
+    },
+    LeaveSpectator,
+}
+
+/// A terminal response to a correlated room-membership command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum RoomOperationResult {
+    RoomJoined(Box<RoomJoinedPayload>),
+    RoomJoinFailed {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<ErrorCode>,
+    },
+    RoomLeft,
+    Reconnected(Box<ReconnectedPayload>),
+    ReconnectionFailed {
+        reason: String,
+        error_code: ErrorCode,
+    },
+    SpectatorJoined(Box<SpectatorJoinedPayload>),
+    SpectatorJoinFailed {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<ErrorCode>,
+    },
+    SpectatorLeft {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        room_id: Option<RoomId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        room_code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<SpectatorStateChangeReason>,
+        #[serde(default)]
+        current_spectators: Vec<SpectatorInfo>,
+    },
+    /// A correlated operation that could not produce its operation-specific
+    /// success response. This is distinct from a top-level `Error`, which is
+    /// never safe to attribute to any pending operation.
+    OperationFailed {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<ErrorCode>,
     },
 }
 
@@ -163,6 +297,11 @@ pub struct RoomJoinedPayload {
     pub is_authority: bool,
     pub lobby_state: LobbyState,
     pub ready_players: Vec<PlayerId>,
+    /// Deployment-defined legacy integration label.
+    ///
+    /// This is informational only: it neither selects nor proves the active
+    /// physical transport. Use the negotiated `SessionPlan` or the
+    /// authenticated WebSocket relay floor for executable routing.
     pub relay_type: String,
     /// List of spectators currently watching (if any)
     #[serde(default)]
@@ -207,6 +346,11 @@ pub struct ReconnectedPayload {
     pub is_authority: bool,
     pub lobby_state: LobbyState,
     pub ready_players: Vec<PlayerId>,
+    /// Deployment-defined legacy integration label.
+    ///
+    /// This is informational only: it neither selects nor proves the active
+    /// physical transport. Use the negotiated `SessionPlan` or the
+    /// authenticated WebSocket relay floor for executable routing.
     pub relay_type: String,
     /// List of spectators currently watching (if any)
     #[serde(default)]
@@ -521,6 +665,11 @@ pub enum ServerMessage {
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
     },
+    /// Terminal response to a negotiated correlated room operation.
+    RoomOperationResult {
+        operation_id: RoomOperationId,
+        result: Box<RoomOperationResult>,
+    },
     /// Another spectator joined the room
     NewSpectatorJoined {
         spectator: SpectatorInfo,
@@ -615,6 +764,63 @@ pub enum ServerMessage {
     /// operation on the priority control lane, before any later data can expose
     /// the sequence gap. Counter-only reports may be emitted periodically.
     DeliveryReport(Box<DeliveryReportPayload>),
+}
+
+impl ServerMessage {
+    pub(crate) fn room_operation_failed(
+        operation_id: RoomOperationId,
+        reason: impl Into<String>,
+        error_code: Option<ErrorCode>,
+    ) -> Self {
+        Self::RoomOperationResult {
+            operation_id,
+            result: Box::new(RoomOperationResult::OperationFailed {
+                reason: reason.into(),
+                error_code,
+            }),
+        }
+    }
+
+    /// Wrap a directed room-operation terminal response when an operation id
+    /// was negotiated and supplied. Non-terminal messages are returned
+    /// unchanged so autonomous lifecycle traffic can never impersonate a
+    /// response merely because it shares a legacy message kind.
+    pub(crate) fn correlate_room_operation(self, operation_id: Option<RoomOperationId>) -> Self {
+        let Some(operation_id) = operation_id else {
+            return self;
+        };
+        let result = match self {
+            Self::RoomJoined(payload) => RoomOperationResult::RoomJoined(payload),
+            Self::RoomJoinFailed { reason, error_code } => {
+                RoomOperationResult::RoomJoinFailed { reason, error_code }
+            }
+            Self::RoomLeft => RoomOperationResult::RoomLeft,
+            Self::Reconnected(payload) => RoomOperationResult::Reconnected(payload),
+            Self::ReconnectionFailed { reason, error_code } => {
+                RoomOperationResult::ReconnectionFailed { reason, error_code }
+            }
+            Self::SpectatorJoined(payload) => RoomOperationResult::SpectatorJoined(payload),
+            Self::SpectatorJoinFailed { reason, error_code } => {
+                RoomOperationResult::SpectatorJoinFailed { reason, error_code }
+            }
+            Self::SpectatorLeft {
+                room_id,
+                room_code,
+                reason,
+                current_spectators,
+            } => RoomOperationResult::SpectatorLeft {
+                room_id,
+                room_code,
+                reason,
+                current_spectators,
+            },
+            other => return other,
+        };
+        Self::RoomOperationResult {
+            operation_id,
+            result: Box::new(result),
+        }
+    }
 }
 
 /// Deserialize an optional wire field while distinguishing omission from an

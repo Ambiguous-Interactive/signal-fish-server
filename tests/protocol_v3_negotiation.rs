@@ -85,6 +85,7 @@ fn authenticate_without_new_fields_is_pure_v2() {
         protocol_version: None,
         supported_transports: None,
         supported_topologies: None,
+        requested_capabilities: None,
     };
     // Absent fields must not appear on the wire (skip_serializing_if).
     let value = serde_json::to_value(&msg).unwrap();
@@ -121,6 +122,7 @@ fn authenticate_with_new_fields_round_trips() {
         protocol_version: Some(3),
         supported_transports: Some(vec![Transport::Relay, Transport::Direct, Transport::WebRtc]),
         supported_topologies: Some(vec![Topology::Relay, Topology::Host, Topology::Mesh]),
+        requested_capabilities: None,
     };
 
     let value = serde_json::to_value(&msg).unwrap();

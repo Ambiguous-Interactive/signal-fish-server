@@ -107,7 +107,7 @@ pub struct EnhancedGameServer {
     config: ServerConfig,
     /// Protocol configuration for validation
     protocol_config: crate::config::ProtocolConfig,
-    /// Relay type configuration for game-specific networking
+    /// Legacy integration-label configuration; not a routing policy.
     relay_type_config: crate::config::RelayTypeConfig,
     /// Session topology/transport selection policy (protocol v3)
     session_config: crate::config::SessionConfig,
@@ -564,6 +564,16 @@ impl EnhancedGameServer {
     /// for a client (mirrors [`set_client_game_data_format`](Self::set_client_game_data_format)).
     pub(crate) fn set_client_protocol(&self, player_id: &PlayerId, protocol: NegotiatedProtocol) {
         self.connection_manager.set_protocol(player_id, protocol);
+    }
+
+    pub(crate) fn set_client_room_operation_ids(&self, player_id: &PlayerId, enabled: bool) {
+        self.connection_manager
+            .set_room_operation_ids(player_id, enabled);
+    }
+
+    pub(crate) fn client_supports_room_operation_ids(&self, player_id: &PlayerId) -> bool {
+        self.connection_manager
+            .supports_room_operation_ids(player_id)
     }
 
     /// Fetch the negotiated protocol capabilities for a client (defaults to v2 relay-only).

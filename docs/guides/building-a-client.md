@@ -216,6 +216,12 @@ Worked v3 sessions: [mesh + WebRTC](../scenarios/v3-mesh-webrtc.md),
 
 ## Common pitfalls
 
+- **Do not route from legacy relay metadata.** Omit `JoinRoom.relay_transport`:
+  all accepted values are ignored and use the same authenticated WebSocket
+  relay floor. Treat every `relay_type` as an informational deployment label,
+  and treat `ConnectionInfo.relay` as unvalidated peer input. Use
+  `SessionPlan` for v3 routing and validate any external endpoint, credential,
+  and source identity in the consuming integration.
 - **Don't recompute glare.** The single most common P2P bug is deriving the
   offerer from UUID order or topology. The server already did it; obey
   `you_initiate` / `initiate`.
