@@ -20,8 +20,8 @@ transports and topologies it supports, and the server can _upgrade_ a room from 
 `host` or `mesh` topology over the `direct` or `webrtc` transport — when (and only when) every member supports
 it. The v2 shapes and default reliable behavior remain byte-for-byte; v3 adds optional `Authenticate` fields,
 v3-only messages (`SessionPlan`, `Signal`, `NewPeer`, `TransportStatus`, `PeerTransportStatus`, `DeliveryReport`,
-`GoingAway`, opt-in `RelayStats`, and opt-in correlated room-operation envelopes), classified JSON delivery, and optional v3 fields such as ICE lists and
-relay sequence metadata. The relay floor is always
+`GoingAway`, opt-in `RelayStats`, and opt-in correlated room-operation envelopes), classified JSON delivery, and
+optional v3 fields such as ICE lists and relay sequence metadata. The relay floor is always
 present underneath, and any peer that cannot establish (or loses) its P2P path falls back to it. A v2 client on a
 v3 server observes pure v2 behavior.
 
