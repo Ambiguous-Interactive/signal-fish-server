@@ -9,6 +9,7 @@ use signal_fish_server::distributed::{
     CircuitBreaker, CircuitState, DistributedLock, InMemoryDistributedLock,
 };
 use signal_fish_server::protocol::{PlayerInfo, ServerMessage};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Barrier;
@@ -735,9 +736,10 @@ async fn test_circuit_breaker_reset_clears_state() {
 ///
 /// 20 tasks call the circuit breaker concurrently. Half intend to succeed,
 /// half intend to fail. The circuit may open mid-flight, causing some
-/// "success" tasks to be rejected by the open breaker. The key invariant is
-/// that all tasks complete (no deadlock), no panics occur, and the final
-/// state is one of the valid circuit states.
+/// tasks to be rejected by an open breaker. With consecutive-failure
+/// accounting, a success resets the streak, so the terminal state depends on
+/// scheduling; the invariant is that all tasks complete (no deadlock), no
+/// panics occur, and the final state is a valid circuit state.
 #[tokio::test]
 async fn test_circuit_breaker_concurrent_calls_safe() {
     let breaker = Arc::new(CircuitBreaker::new(10, Duration::from_secs(60)));
@@ -775,13 +777,43 @@ async fn test_circuit_breaker_concurrent_calls_safe() {
         "All concurrent circuit breaker calls should complete within 5 seconds"
     );
 
-    // With threshold=10, timeout=60s, and 10 odd tasks that all fail, the circuit
-    // must be Open (10 failures >= threshold of 10).
+    // Mixed concurrent traffic yields a scheduling-dependent terminal state:
+    // successes reset the consecutive-failure streak while it is open.
+    let state = breaker.get_state().await;
+    assert!(
+        matches!(state, CircuitState::Closed | CircuitState::Open),
+        "Expected a valid terminal circuit state under mixed traffic, got {state:?}"
+    );
+}
+
+/// C15b: Concurrent failures trip the threshold deterministically.
+#[tokio::test]
+async fn test_circuit_breaker_concurrent_failures_open() {
+    let breaker = Arc::new(CircuitBreaker::new(5, Duration::from_secs(60)));
+    let task_count = 10;
+    let barrier = Arc::new(Barrier::new(task_count));
+    let mut handles = Vec::with_capacity(task_count);
+
+    for _ in 0..task_count {
+        let breaker = Arc::clone(&breaker);
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let _result: Result<(), anyhow::Error> = breaker
+                .call(async { Err(anyhow::anyhow!("failure")) })
+                .await;
+        }));
+    }
+
+    for handle in handles {
+        handle.await.expect("task should not panic");
+    }
+
     let state = breaker.get_state().await;
     assert_eq!(
         state,
         CircuitState::Open,
-        "Expected Open state after 10 failures with threshold=10, got {state:?}"
+        "Expected Open state after 10 concurrent failures with threshold=5, got {state:?}"
     );
 }
 
@@ -816,6 +848,160 @@ async fn test_circuit_breaker_half_open_failure_reopens() {
         breaker.get_state().await,
         CircuitState::Open,
         "Circuit should reopen after a failed probe in HalfOpen state"
+    );
+}
+
+/// C17: Closed-state failures must be consecutive to open the circuit.
+///
+/// A success between failures resets the failure streak, so isolated
+/// failures never trip the threshold (issue #403).
+#[tokio::test]
+async fn test_circuit_breaker_requires_consecutive_failures() {
+    let breaker = CircuitBreaker::new(2, Duration::from_secs(60));
+
+    // failure, success, failure: the success must reset the streak.
+    let _: Result<(), anyhow::Error> = breaker
+        .call(async { Err(anyhow::anyhow!("failure")) })
+        .await;
+    let _: Result<(), anyhow::Error> = breaker.call(async { Ok(()) }).await;
+    let _: Result<(), anyhow::Error> = breaker
+        .call(async { Err(anyhow::anyhow!("failure")) })
+        .await;
+    assert_eq!(
+        breaker.get_state().await,
+        CircuitState::Closed,
+        "non-consecutive failures must not open the circuit"
+    );
+
+    // Two consecutive failures counted from the reset streak trip the threshold.
+    let _: Result<(), anyhow::Error> = breaker
+        .call(async { Err(anyhow::anyhow!("failure")) })
+        .await;
+    let _: Result<(), anyhow::Error> = breaker
+        .call(async { Err(anyhow::anyhow!("failure")) })
+        .await;
+    assert_eq!(
+        breaker.get_state().await,
+        CircuitState::Open,
+        "consecutive failures must still open the circuit"
+    );
+}
+
+/// C18: Only one probe may execute while the circuit is half-open.
+///
+/// While a half-open probe is blocked inside its operation, a second call is
+/// rejected without executing its operation (issue #403).
+#[tokio::test]
+async fn test_circuit_breaker_admits_single_half_open_probe() {
+    let breaker = Arc::new(CircuitBreaker::new(1, Duration::from_millis(50)));
+
+    // Open the circuit with one failure.
+    let _: Result<(), anyhow::Error> = breaker
+        .call(async { Err(anyhow::anyhow!("failure")) })
+        .await;
+    assert_eq!(breaker.get_state().await, CircuitState::Open);
+
+    // Sleep past the timeout so the next call is admitted as the probe.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The probe blocks inside its operation until released.
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let breaker_for_probe = Arc::clone(&breaker);
+    let probe = tokio::spawn(async move {
+        breaker_for_probe
+            .call(async move {
+                let _ = release_rx.await;
+                Result::<(), anyhow::Error>::Ok(())
+            })
+            .await
+    });
+
+    // Deterministically wait for the probe to enter the half-open state.
+    let deadline = Duration::from_secs(5);
+    tokio::time::timeout(deadline, async {
+        while breaker.get_state().await != CircuitState::HalfOpen {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("probe should reach the half-open state");
+
+    // A concurrent call must be rejected without executing its operation.
+    let second_executed = Arc::new(AtomicBool::new(false));
+    let executed_flag = Arc::clone(&second_executed);
+    let second: Result<(), anyhow::Error> = breaker
+        .call(async move {
+            executed_flag.store(true, Ordering::SeqCst);
+            Err(anyhow::anyhow!("second call must not run"))
+        })
+        .await;
+    assert!(
+        second.is_err(),
+        "half-open breaker must reject calls while a probe is in flight"
+    );
+    let error_message = second.unwrap_err().to_string();
+    assert!(
+        error_message.contains("half-open"),
+        "rejection must cite the half-open state, got: {error_message}"
+    );
+    assert!(
+        !second_executed.load(Ordering::SeqCst),
+        "a rejected call's operation must not execute"
+    );
+
+    // Releasing the probe lets it succeed and close the circuit.
+    release_tx
+        .send(())
+        .expect("the blocked probe must still be waiting");
+    let probe_result = probe.await.expect("probe task should join");
+    assert!(probe_result.is_ok(), "the released probe should succeed");
+    assert_eq!(breaker.get_state().await, CircuitState::Closed);
+}
+
+/// C19: An abandoned half-open probe must not wedge the breaker.
+///
+/// Dropping a call future mid-operation releases the probe slot so a later
+/// call can become a fresh probe and recover the circuit.
+#[tokio::test]
+async fn test_circuit_breaker_recovers_from_abandoned_half_open_probe() {
+    let breaker = Arc::new(CircuitBreaker::new(1, Duration::from_millis(50)));
+
+    // Open the circuit with one failure.
+    let _: Result<(), anyhow::Error> = breaker
+        .call(async { Err(anyhow::anyhow!("failure")) })
+        .await;
+    assert_eq!(breaker.get_state().await, CircuitState::Open);
+
+    // Sleep past the timeout so the next call is admitted as the probe.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Start a probe whose operation starts but never resolves.
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let breaker_for_probe = Arc::clone(&breaker);
+    let probe = tokio::spawn(async move {
+        breaker_for_probe
+            .call(async move {
+                let _ = started_tx.send(());
+                std::future::pending::<Result<(), anyhow::Error>>().await
+            })
+            .await
+    });
+    started_rx.await.expect("the probe operation should start");
+
+    // Abandon the probe: aborting the task drops the call future mid-operation.
+    probe.abort();
+    let _ = probe.await;
+
+    // The next call must be admitted as a fresh probe and recover the circuit.
+    let result: Result<(), anyhow::Error> = breaker.call(async { Ok(()) }).await;
+    assert!(
+        result.is_ok(),
+        "a fresh probe must be admitted after the previous probe was abandoned"
+    );
+    assert_eq!(
+        breaker.get_state().await,
+        CircuitState::Closed,
+        "a successful fresh probe must close the circuit"
     );
 }
 
