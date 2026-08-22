@@ -28,6 +28,7 @@ on:
     branches: [main]
     paths:
       - "src/**"
+      - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -39,6 +40,7 @@ on:
     branches: [main]
     paths:
       - "src/**"
+      - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"

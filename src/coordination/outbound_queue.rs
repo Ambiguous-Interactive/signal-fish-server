@@ -161,6 +161,7 @@ impl DeliveryMessage {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn shares_relay_carrier_with(&self, expected: &Self) -> bool {
         match (&self.storage, &expected.storage) {
             (DeliveryMessageStorage::Coowned(left), DeliveryMessageStorage::Coowned(right)) => {

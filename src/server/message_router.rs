@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 use std::sync::LazyLock;
 
 use crate::protocol::{ClientMessage, PlayerId, RoomOperationRequest, ServerMessage};
@@ -10,11 +12,13 @@ use crate::protocol::{ClientMessage, PlayerId, RoomOperationRequest, ServerMessa
 use super::{EnhancedGameServer, TransportStatusUpdate};
 
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 static TRANSPORT_STATUS_LIFECYCLE_PROBES: LazyLock<
     dashmap::DashMap<crate::protocol::PlayerId, Arc<AtomicBool>>,
 > = LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 pub(super) fn arm_transport_status_lifecycle_probe(
     player_id: crate::protocol::PlayerId,
 ) -> Arc<AtomicBool> {
@@ -24,6 +28,7 @@ pub(super) fn arm_transport_status_lifecycle_probe(
 }
 
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 pub(super) fn disarm_transport_status_lifecycle_probe(player_id: &crate::protocol::PlayerId) {
     TRANSPORT_STATUS_LIFECYCLE_PROBES.remove(player_id);
 }
@@ -245,6 +250,7 @@ impl EnhancedGameServer {
             return;
         };
         #[cfg(test)]
+        #[cfg(signal_fish_repository_tests)]
         if let Some(probe) = TRANSPORT_STATUS_LIFECYCLE_PROBES.get(player_id) {
             probe.store(true, Ordering::Release);
         }

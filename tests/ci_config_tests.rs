@@ -3008,6 +3008,7 @@ fn test_h14_pr_gate_is_isolated_and_covers_its_complete_input_surface() {
         .collect::<BTreeSet<_>>();
     let expected = [
         "src/**",
+        "build.rs",
         "tests/mixed_encoding_relay_e2e.rs",
         "tests/test_helpers.rs",
         "tests/websocket_test_helpers/**",
@@ -19601,6 +19602,37 @@ fn test_workflow_consumed_configuration_paths_trigger_validation() {
 }
 
 #[test]
+fn test_root_build_script_triggers_specialized_root_compile_workflows() {
+    let root = repo_root();
+    let cases: [(&str, &[&str]); 6] = [
+        ("browser-interop.yml", &["push", "pull_request"]),
+        ("fortress-interop.yml", &["push", "pull_request"]),
+        ("fortress-wasm-interop.yml", &["push", "pull_request"]),
+        ("turn-interop.yml", &["push", "pull_request"]),
+        ("webrtc-interop.yml", &["push", "pull_request"]),
+        ("h14-pr.yml", &["pull_request"]),
+    ];
+
+    for (workflow_name, events) in cases {
+        let workflow_path = root.join(".github/workflows").join(workflow_name);
+        let workflow = read_live_file(&workflow_path);
+        for event in events {
+            let paths = extract_workflow_event_paths(&workflow, event)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            assert!(
+                paths.contains("build.rs"),
+                "{workflow_name} {event}.paths must include `build.rs`: the workflow compiles \
+                 the root Cargo package, so a build-script-only change is a consumed input.\n\
+                 Fix: add `build.rs` to `{event}.paths` in {workflow_name}.\n\
+                 Verify: cargo test --locked --test ci_config_tests \
+                 test_root_build_script_triggers_specialized_root_compile_workflows -- --exact"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_fuzz_dependency_resolution_is_locked_in_ci() {
     let root = repo_root();
     let tracked = Command::new("git")
@@ -21912,6 +21944,16 @@ test-group = 'powershell-subprocess'",
         normalized.contains("binary(mtls_token_binding_e2e)")
             && normalized.contains("test-group = 'process-spawning'"),
         "the real-listener mTLS suite must run in nextest's serialized process-spawning group"
+    );
+    assert!(
+        normalized.contains(
+            "filter = 'binary(public_api_privacy_tests) or \
+test(published_crate_contains_only_runtime_sources_and_metadata) or \
+test(test_docs_relative_links_resolve_to_existing_files)'\n\
+test-group = 'process-spawning'\n\
+slow-timeout = { period = \"300s\", terminate-after = 3 }"
+        ) && normalized.contains("process-spawning = { max-threads = 1 }"),
+        "nested Cargo package and privacy builds must be serialized with a compile-sized timeout"
     );
 }
 
@@ -27399,6 +27441,7 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
         "fortress-interop.yml",
         &[
             "src/**",
+            "build.rs",
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
@@ -27434,6 +27477,7 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
         "turn-interop.yml",
         &[
             "src/**",
+            "build.rs",
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
@@ -27958,6 +28002,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         "webrtc-interop.yml",
         &[
             "src/**",
+            "build.rs",
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
@@ -28798,6 +28843,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "fortress-wasm-interop.yml",
         &[
             "src/**",
+            "build.rs",
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",

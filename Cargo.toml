@@ -13,15 +13,26 @@ categories = [
     "web-programming::websocket",
 ]
 rust-version = "1.91.0"
+build = "build.rs"
 # Keep the published artifact to the server's runtime/library sources and the
-# metadata Cargo needs to install it. An allowlist is deliberate: development
-# benchmarks, extended operator documentation, repository tooling, planning
-# records, tests, and CI files must not silently become crates.io payload.
+# metadata Cargo needs to install it. An allowlist is deliberate: standalone
+# test modules, development benchmarks, extended operator documentation,
+# repository tooling, planning records, tests, and CI files must not silently
+# become crates.io payload.
 # Cargo warns that the deliberately omitted test/benchmark targets are
 # unavailable in the packaged source; the package inventory regression
 # validates that exact warning class.
 include = [
     "/src/**",
+    "!/src/server/app_admission_tests.rs",
+    "!/src/server/game_data_tests.rs",
+    "!/src/server/message_coordinator_tests.rs",
+    "!/src/server/message_router_tests.rs",
+    "!/src/server/ready_state_tests.rs",
+    "!/src/server/room_service_tests.rs",
+    "!/src/server/session_policy_tests.rs",
+    "!/src/server/signaling_tests.rs",
+    "/build.rs",
     "/Cargo.lock",
     "/config.example.json",
     "/README.md",

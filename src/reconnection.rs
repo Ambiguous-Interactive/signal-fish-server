@@ -480,17 +480,20 @@ impl ReconnectionManager {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn pause_record_room_event_for_test(&self) {
         self.pause_record_room_event
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) async fn wait_for_record_room_event_for_test(&self) {
         self.record_room_event_reached.notified().await;
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn release_record_room_event_for_test(&self) {
         self.release_record_room_event.notify_one();
     }

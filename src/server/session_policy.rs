@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use crate::config::SessionConfig;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 use crate::coordination::FinalizedRoom;
 use crate::coordination::{
     RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
@@ -396,6 +397,7 @@ pub(crate) fn ice_pregather_eligible(
 /// invariant test protects the ladder and fallback constants.
 #[must_use]
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 pub(crate) fn is_valid_pair(topology: Topology, transport: Transport) -> bool {
     UPGRADE_LADDER
         .into_iter()
@@ -823,6 +825,7 @@ impl EnhancedGameServer {
     /// Production finalization uses [`Self::start_game_publication_builder`] so
     /// plan state and delivery cannot split from `GameStarting`.
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) async fn emit_session_plan(&self, room_id: &RoomId, finalized: &FinalizedRoom) {
         let members = self.session_members_from(&finalized.members);
 
@@ -1232,6 +1235,7 @@ impl EnhancedGameServer {
     /// re-planning ([`Self::replan_host_session`]); the normal late-join path
     /// delivers to a single recipient via [`Self::send_session_plan_to`].
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(super) async fn send_session_plans_to_members(
         &self,
         room_id: &RoomId,
@@ -1267,6 +1271,7 @@ impl EnhancedGameServer {
     /// gated off (nothing sent), otherwise `Some(minted)` — the number of TURN
     /// credentials minted into the delivered plan.
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(super) async fn send_session_plan_to(
         &self,
         room_id: &RoomId,

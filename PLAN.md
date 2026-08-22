@@ -124,6 +124,9 @@ correctness evidence appears.
   seam not already covered by the retained TLA+/TLC and Z3 suites.
 - #213 — add analyzers only when they prevent a demonstrated defect class with
   acceptable signal and maintenance cost.
+- #396 — continue the correctness and performance sweep through named,
+  gameplay-facing seams; require a deterministic counterexample or current
+  profile before changing production behavior.
 - #318 — use representative cross-platform measurements to choose the next
   hook-latency reduction without weakening fail-closed checks.
 - #378 — consolidate duplicate hosted link validation only with an atomic
