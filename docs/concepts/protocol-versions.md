@@ -112,8 +112,8 @@ Connect to `/v3/ws` and add the optional fields your client supports to its firs
 
 Advertise only what you can actually run. Always include `relay` so you remain a valid floor member. The
 negotiated result comes back in the extended `ProtocolInfo` (`protocol_version`, `min_protocol_version`,
-`max_protocol_version`, `transports`, `max_outbound_message_size`). For negotiated v3, `transports` currently advertises `["websocket"]`; it is
-omitted with the other v3-only fields on negotiated v2 connections.
+`max_protocol_version`, `transports`, `max_outbound_message_size`). For negotiated v3, `transports` currently
+advertises `["websocket"]`; it is omitted with the other v3-only fields on negotiated v2 connections.
 Before opening either version, browser and v2 clients read the same outbound
 limit from the CORS-enabled `/v2/client-config` or `/v3/client-config` endpoint.
 Do not use an additive extension until its token is present in `ProtocolInfo.capabilities`; a requested token is not

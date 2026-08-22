@@ -1364,9 +1364,10 @@ The reserved `room_operation_ids` token is absent unless explicitly requested an
 SDK-compatibility capability tokens may appear alongside it.
 
 **Endpoints.** `/v2/ws` and `/v3/ws` share the same handler, and their version-neutral
-`/v2/client-config` and `/v3/client-config` companions return the current receive-limit metadata. `/v3/ws` only changes the _default_ protocol version
-to 3 when the client omits `protocol_version`; an explicit `protocol_version` in `Authenticate` always wins (then
-capped downward at the server maximum, or rejected below its minimum). `/v2/ws` behavior is unchanged.
+`/v2/client-config` and `/v3/client-config` companions return the current receive-limit metadata. `/v3/ws` only
+changes the _default_ protocol version to 3 when the client omits `protocol_version`; an explicit
+`protocol_version` in `Authenticate` always wins (then capped downward at the server maximum, or rejected below
+its minimum). `/v2/ws` behavior is unchanged.
 
 **Back-compat invariant.** A non-relay plan requires _every_ member of a room to be v3-capable and to support the
 chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor. Every
