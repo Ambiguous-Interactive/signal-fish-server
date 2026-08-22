@@ -97,11 +97,16 @@ mod tests {
     use tokio::time::{advance, timeout, Duration};
 
     async fn create_test_server() -> Arc<EnhancedGameServer> {
+        create_test_server_with_config(ServerConfig {
+            max_connections_per_ip: 32,
+            ..ServerConfig::default()
+        })
+        .await
+    }
+
+    async fn create_test_server_with_config(config: ServerConfig) -> Arc<EnhancedGameServer> {
         EnhancedGameServer::new(
-            ServerConfig {
-                max_connections_per_ip: 32,
-                ..ServerConfig::default()
-            },
+            config,
             ProtocolConfig::default(),
             RelayTypeConfig::default(),
             SessionConfig::default(),
@@ -114,6 +119,106 @@ mod tests {
         )
         .await
         .expect("failed to construct test server")
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn oversized_binary_payload_does_not_refresh_client_or_room_liveness() {
+        let server = create_test_server_with_config(ServerConfig {
+            heartbeat_throttle: StdDuration::ZERO,
+            max_connections_per_ip: 32,
+            max_message_size: 4,
+            ..ServerConfig::default()
+        })
+        .await;
+        let (sender, mut receiver) = mpsc::channel(4);
+        let player_id = server
+            .connection_manager
+            .register_client(
+                sender,
+                crate::coordination::ConnectionCloseSignal::detached(),
+                "127.0.0.1:45002".parse().unwrap(),
+                server.instance_id,
+            )
+            .await
+            .expect("client registration");
+        let room = server
+            .database
+            .create_room(
+                "invalid-binary-liveness".to_string(),
+                Some("BINBAD".to_string()),
+                2,
+                true,
+                player_id,
+                "relay".to_string(),
+                "test".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation");
+        server
+            .connection_manager
+            .assign_client_to_room(&player_id, room.id)
+            .await;
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .expect("test server uses in-memory storage");
+        database
+            .backdate_room_activity_for_test(&room.id, chrono::Duration::minutes(5))
+            .await;
+        let room_activity_before = server
+            .database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .last_activity;
+
+        advance(Duration::from_millis(25)).await;
+        assert_eq!(
+            server
+                .connection_manager
+                .collect_expired_clients(StdDuration::from_millis(5)),
+            vec![player_id],
+            "client should be stale before the rejected payload"
+        );
+
+        server
+            .handle_game_data_binary(
+                &player_id,
+                GameDataEncoding::MessagePack,
+                Bytes::from_static(b"12345"),
+            )
+            .await;
+
+        let response = receiver.recv().await.expect("oversize error is delivered");
+        assert!(matches!(
+            response.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(crate::protocol::ErrorCode::MessageTooLarge),
+                ..
+            }
+        ));
+        assert_eq!(
+            server
+                .connection_manager
+                .collect_expired_clients(StdDuration::from_millis(5)),
+            vec![player_id],
+            "a rejected payload must not keep an inactive client alive"
+        );
+        let room_activity_after = server
+            .database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .last_activity;
+        assert_eq!(
+            room_activity_after, room_activity_before,
+            "a rejected payload must not keep an inactive room alive"
+        );
     }
 
     // Deterministic under the paused-clock runtime: the activity reaper reads

@@ -25,6 +25,11 @@ use crate::protocol::Room;
 #[derive(Clone)]
 pub(crate) struct SpectatorService {
     spectator_rooms: Arc<DashMap<PlayerId, RoomId>>,
+    /// Durable rows created by a spectator admission that never became
+    /// externally visible, but whose compensating delete failed. These are
+    /// deliberately separate from `spectator_rooms`: the client must not look
+    /// joined while maintenance retains enough identity to repair storage.
+    pending_unpublished_detaches: Arc<DashMap<(RoomId, PlayerId), ()>>,
     database: Arc<dyn GameDatabase>,
     /// Readiness is coordinator state, not room-record state, until finalize
     /// writes it through. The spectator snapshot reads it from here so it
@@ -71,6 +76,7 @@ impl SpectatorService {
     ) -> Self {
         Self {
             spectator_rooms: Arc::new(DashMap::new()),
+            pending_unpublished_detaches: Arc::new(DashMap::new()),
             database,
             room_coordinator,
             message_coordinator,
@@ -88,12 +94,20 @@ impl SpectatorService {
         self.connection_manager
             .rollback_delivery_generation(player_id)
             .await;
-        if let Err(err) = self
+        match self
             .database
             .remove_spectator_from_room(room_id, player_id)
             .await
         {
-            warn!(%player_id, %room_id, error = %err, "Failed to roll back unpublished spectator join");
+            Ok(_) => {
+                self.pending_unpublished_detaches
+                    .remove(&(*room_id, *player_id));
+            }
+            Err(err) => {
+                self.pending_unpublished_detaches
+                    .insert((*room_id, *player_id), ());
+                warn!(%player_id, %room_id, error = %err, "Failed to roll back unpublished spectator join; queued durable repair");
+            }
         }
     }
 
@@ -582,13 +596,50 @@ impl SpectatorService {
     /// local role indexed so this maintenance sweep can converge persistence
     /// and publish the terminal roster once storage recovers.
     pub(crate) async fn retry_disconnected_detaches(&self) -> usize {
+        let pending_unpublished: Vec<(RoomId, PlayerId)> = self
+            .pending_unpublished_detaches
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        let mut detached = 0_usize;
+        for (room_id, player_id) in pending_unpublished {
+            let _guard = self
+                .message_coordinator
+                .lock_room_event_mutation(&room_id)
+                .await;
+            if self.spectator_room(&player_id) == Some(room_id) {
+                // A later admission published the same durable identity. It is
+                // no longer an unpublished rollback and must not be deleted.
+                self.pending_unpublished_detaches
+                    .remove(&(room_id, player_id));
+                continue;
+            }
+            match self
+                .database
+                .remove_spectator_from_room(&room_id, &player_id)
+                .await
+            {
+                Ok(_) => {
+                    if self
+                        .pending_unpublished_detaches
+                        .remove(&(room_id, player_id))
+                        .is_some()
+                    {
+                        detached = detached.saturating_add(1);
+                    }
+                }
+                Err(err) => {
+                    warn!(%player_id, %room_id, error = %err, "Failed to retry unpublished spectator rollback");
+                }
+            }
+        }
+
         let candidates: Vec<PlayerId> = self
             .spectator_rooms
             .iter()
             .filter(|entry| !self.connection_manager.has_client(entry.key()))
             .map(|entry| *entry.key())
             .collect();
-        let mut detached = 0_usize;
         for player_id in candidates {
             if self
                 .detach(&player_id, SpectatorStateChangeReason::Disconnected)

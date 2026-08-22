@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix in-memory distributed lock leases starting before local lock contention
+  completed, which could make a newly acquired or extended lease immediately
+  expire and allow overlapping room-capacity or game-start mutations.
+- Fix room and spectator cleanup races: room garbage collection now preserves
+  reconnectable rooms when a disconnect overlaps a sweep, and failed rollback
+  of an unpublished spectator admission is retained for maintenance repair.
+- Fix rejected oversized binary game-data frames refreshing client and room
+  liveness, so invalid traffic cannot indefinitely postpone inactivity cleanup.
 - Correct the protocol contract for `JoinRoom.relay_transport`: it is a
   compatibility-only hint that the server ignores, so every accepted value and
   omission retain the same authenticated WebSocket relay path. New clients

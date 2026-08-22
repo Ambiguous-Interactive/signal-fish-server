@@ -401,7 +401,8 @@ impl EnhancedGameServer {
         // socket teardown can race a failing database read. The normal
         // unregister path may register the same room again; that operation is
         // idempotent and retains this complete snapshot.
-        self.register_disconnection_for_reconnect(&player_id, room_id, was_authority, player_info)
+        let _ = self
+            .register_disconnection_for_reconnect(&player_id, room_id, was_authority, player_info)
             .await;
 
         let initiated = self

@@ -622,6 +622,12 @@ struct DrainAfterCreateDatabase {
     trigger_drain_after_create: bool,
     legacy_collision_once: AtomicBool,
     ambiguous_commit_once: AtomicBool,
+    pause_empty_cleanup_once: AtomicBool,
+    empty_cleanup_reached: Notify,
+    release_empty_cleanup: Notify,
+    pause_expired_cleanup_once: AtomicBool,
+    expired_cleanup_reached: Notify,
+    release_expired_cleanup: Notify,
 }
 
 impl DrainAfterCreateDatabase {
@@ -633,6 +639,12 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: true,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(false),
+            pause_empty_cleanup_once: AtomicBool::new(false),
+            empty_cleanup_reached: Notify::new(),
+            release_empty_cleanup: Notify::new(),
+            pause_expired_cleanup_once: AtomicBool::new(false),
+            expired_cleanup_reached: Notify::new(),
+            release_expired_cleanup: Notify::new(),
         }
     }
 
@@ -644,6 +656,12 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: false,
             legacy_collision_once: AtomicBool::new(true),
             ambiguous_commit_once: AtomicBool::new(false),
+            pause_empty_cleanup_once: AtomicBool::new(false),
+            empty_cleanup_reached: Notify::new(),
+            release_empty_cleanup: Notify::new(),
+            pause_expired_cleanup_once: AtomicBool::new(false),
+            expired_cleanup_reached: Notify::new(),
+            release_expired_cleanup: Notify::new(),
         }
     }
 
@@ -655,7 +673,63 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(true),
+            pause_empty_cleanup_once: AtomicBool::new(false),
+            empty_cleanup_reached: Notify::new(),
+            release_empty_cleanup: Notify::new(),
+            pause_expired_cleanup_once: AtomicBool::new(false),
+            expired_cleanup_reached: Notify::new(),
+            release_expired_cleanup: Notify::new(),
         }
+    }
+
+    fn with_paused_empty_cleanup(inner: Arc<dyn GameDatabase>) -> Self {
+        Self {
+            inner,
+            server: StdMutex::new(None),
+            triggered: AtomicBool::new(false),
+            trigger_drain_after_create: false,
+            legacy_collision_once: AtomicBool::new(false),
+            ambiguous_commit_once: AtomicBool::new(false),
+            pause_empty_cleanup_once: AtomicBool::new(true),
+            empty_cleanup_reached: Notify::new(),
+            release_empty_cleanup: Notify::new(),
+            pause_expired_cleanup_once: AtomicBool::new(false),
+            expired_cleanup_reached: Notify::new(),
+            release_expired_cleanup: Notify::new(),
+        }
+    }
+
+    fn with_paused_expired_cleanup(inner: Arc<dyn GameDatabase>) -> Self {
+        Self {
+            inner,
+            server: StdMutex::new(None),
+            triggered: AtomicBool::new(false),
+            trigger_drain_after_create: false,
+            legacy_collision_once: AtomicBool::new(false),
+            ambiguous_commit_once: AtomicBool::new(false),
+            pause_empty_cleanup_once: AtomicBool::new(false),
+            empty_cleanup_reached: Notify::new(),
+            release_empty_cleanup: Notify::new(),
+            pause_expired_cleanup_once: AtomicBool::new(true),
+            expired_cleanup_reached: Notify::new(),
+            release_expired_cleanup: Notify::new(),
+        }
+    }
+
+    async fn wait_for_empty_cleanup(&self) {
+        self.empty_cleanup_reached.notified().await;
+    }
+
+    fn release_empty_cleanup(&self) {
+        self.release_empty_cleanup.notify_one();
+    }
+
+    async fn wait_for_expired_cleanup(&self) {
+        self.expired_cleanup_reached.notified().await;
+    }
+
+    fn release_expired_cleanup(&self) {
+        self.release_expired_cleanup.notify_one();
     }
 
     fn attach_server(&self, server: &Arc<EnhancedGameServer>) {
@@ -827,6 +901,10 @@ impl GameDatabase for DrainAfterCreateDatabase {
         empty_timeout: chrono::Duration,
         protected: &HashSet<RoomId>,
     ) -> anyhow::Result<Vec<RoomId>> {
+        if self.pause_empty_cleanup_once.swap(false, Ordering::AcqRel) {
+            self.empty_cleanup_reached.notify_one();
+            self.release_empty_cleanup.notified().await;
+        }
         self.inner
             .cleanup_empty_rooms(empty_timeout, protected)
             .await
@@ -838,6 +916,13 @@ impl GameDatabase for DrainAfterCreateDatabase {
         inactive_timeout: chrono::Duration,
         protected: &HashSet<RoomId>,
     ) -> anyhow::Result<RoomCleanupOutcome> {
+        if self
+            .pause_expired_cleanup_once
+            .swap(false, Ordering::AcqRel)
+        {
+            self.expired_cleanup_reached.notify_one();
+            self.release_expired_cleanup.notified().await;
+        }
         self.inner
             .cleanup_expired_rooms(empty_timeout, inactive_timeout, protected)
             .await
@@ -1755,14 +1840,24 @@ async fn spectator_join_waits_for_one_slot_baseline_capacity() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn failed_spectator_publication_restores_transport_status_generation() {
+async fn failed_spectator_publication_retries_rollback_and_restores_transport_generation() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
         DrainTrigger::SpectatorRoutingLookupFailure,
     ));
     let message_coordinator: Arc<dyn MessageCoordinator> = coordinator.clone();
-    let server =
-        create_test_server_with_message_coordinator(ServerConfig::default(), message_coordinator)
-            .await;
+    let database = Arc::new(InMemoryDatabase::new());
+    database
+        .initialize()
+        .await
+        .expect("initialize spectator rollback database");
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        message_coordinator,
+        Arc::new(InMemoryDistributedLock::new()),
+        server_database,
+    )
+    .await;
 
     let (creator, _creator_rx) = register_client(&server, "127.0.0.1:47988".parse().unwrap()).await;
     let room = server
@@ -1805,6 +1900,7 @@ async fn failed_spectator_publication_restores_transport_status_generation() {
         server.set_client_transport_status(&spectator, status.0, status.1),
         TransportStatusUpdate::Changed
     );
+    database.fail_remove_spectator_from_room_for_test(true);
 
     let result = server
         .spectator_service
@@ -1821,14 +1917,25 @@ async fn failed_spectator_publication_restores_transport_status_generation() {
         "injected routed-member lookup must fail admission"
     );
     assert!(!server.spectator_service.is_spectating(&spectator));
+    assert!(database
+        .get_room_spectators(&room.id)
+        .await
+        .expect("rollback ghost remains readable during outage")
+        .iter()
+        .any(|entry| entry.id == spectator));
+    database.fail_remove_spectator_from_room_for_test(false);
+    assert_eq!(
+        server.spectator_service.retry_disconnected_detaches().await,
+        1,
+        "maintenance must retain and repair an unpublished rollback failure"
+    );
     assert!(
-        server
-            .database
+        database
             .get_room_spectators(&room.id)
             .await
-            .expect("spectator roster remains readable")
+            .expect("spectator roster remains readable after retry")
             .is_empty(),
-        "failed publication must remove the provisional spectator"
+        "rollback retry must remove the provisional spectator"
     );
     assert_eq!(
         server.client_transport_status(&spectator),
@@ -6309,6 +6416,270 @@ async fn maintenance_cleanup_removes_expired_reconnections() {
             .reconnection_sessions_active
             .load(Ordering::Relaxed),
         0
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn empty_room_cleanup_preserves_reconnect_registered_during_its_snapshot() {
+    let database = Arc::new(DrainAfterCreateDatabase::with_paused_empty_cleanup(
+        create_test_database().await,
+    ));
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            ping_timeout: Duration::ZERO,
+            room_cleanup_interval: Duration::from_secs(3_600),
+            empty_room_timeout: Duration::ZERO,
+            inactive_room_timeout: Duration::from_secs(3_600),
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        },
+        coordinator,
+        Arc::new(InMemoryDistributedLock::new()),
+        server_database,
+    )
+    .await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48037".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    server
+        .handle_join_room(
+            &player_id,
+            "cleanup-reconnect-race".to_string(),
+            Some("GCRACE".to_string()),
+            "player".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    let joined = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("join response should not stall")
+        .expect("join response should be delivered");
+    let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+        panic!("expected RoomJoined, got {joined:?}");
+    };
+    let room_id = payload.room_id;
+    let reconnect_token = payload
+        .reconnection_token
+        .clone()
+        .expect("v3 join should carry its pre-issued reconnect token");
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("reconnect room lookup should succeed")
+        .expect("reconnect room should exist");
+    let player_info = room
+        .players
+        .get(&player_id)
+        .cloned()
+        .expect("joined player should be present in the reconnect room");
+    let was_authority = room.authority_player == Some(player_id);
+
+    let mut cleanup =
+        Box::pin(server.cleanup_empty_rooms_protecting_reconnections(chrono::Duration::zero()));
+    assert!(
+        futures_util::poll!(cleanup.as_mut()).is_pending(),
+        "the database gate must pause cleanup while its reconnect view is pinned"
+    );
+    timeout(Duration::from_secs(1), database.wait_for_empty_cleanup())
+        .await
+        .expect("cleanup should pause after capturing its protection snapshot");
+
+    let mut registration = Box::pin(server.register_disconnection_for_reconnect(
+        &player_id,
+        room_id,
+        was_authority,
+        player_info,
+    ));
+    assert!(
+        futures_util::poll!(registration.as_mut()).is_pending(),
+        "reconnect registration must wait for the pinned cleanup view"
+    );
+
+    database.release_empty_cleanup();
+    let deleted = timeout(Duration::from_secs(1), &mut cleanup)
+        .await
+        .expect("empty cleanup should finish after its database gate opens")
+        .expect("empty cleanup should succeed");
+    assert!(
+        deleted.is_empty(),
+        "the player must remain seated until cleanup releases replay state"
+    );
+    assert!(
+        timeout(Duration::from_secs(1), &mut registration)
+            .await
+            .expect("registration should finish after cleanup releases replay state"),
+        "registration must remain valid when empty cleanup ran before it"
+    );
+
+    timeout(
+        Duration::from_secs(1),
+        server.unregister_client_locked(&player_id),
+    )
+    .await
+    .expect("client teardown should finish after registration");
+
+    assert!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup should succeed")
+            .is_some(),
+        "room GC must not delete a room after a live reconnect record appears"
+    );
+
+    let (replacement, mut replacement_rx) =
+        register_client(&server, "127.0.0.1:48038".parse().unwrap()).await;
+    server.set_client_protocol(
+        &replacement,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    assert!(
+        server
+            .handle_reconnect(&replacement, &player_id, &room_id, &reconnect_token)
+            .await,
+        "the token advertised before disconnect must remain redeemable"
+    );
+    let response = timeout(Duration::from_secs(1), replacement_rx.recv())
+        .await
+        .expect("reconnect response should not stall")
+        .expect("reconnect response should be delivered");
+    assert!(matches!(
+        response.as_ref(),
+        ServerMessage::Reconnected(payload) if payload.player_id == player_id
+    ));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
+    let database = Arc::new(DrainAfterCreateDatabase::with_paused_expired_cleanup(
+        create_test_database().await,
+    ));
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        },
+        coordinator,
+        Arc::new(InMemoryDistributedLock::new()),
+        server_database,
+    )
+    .await;
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48039".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    server
+        .handle_join_room(
+            &player_id,
+            "inactive-cleanup-reconnect-race".to_string(),
+            Some("GCRA02".to_string()),
+            "player".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    let joined = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("join response should not stall")
+        .expect("join response should be delivered");
+    let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+        panic!("expected RoomJoined, got {joined:?}");
+    };
+    let room_id = payload.room_id;
+
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("inactive room lookup should succeed")
+        .expect("inactive room should exist before cleanup");
+    let player_info = room
+        .players
+        .get(&player_id)
+        .cloned()
+        .expect("joined player should be present in the inactive room");
+    let was_authority = room.authority_player == Some(player_id);
+
+    let mut cleanup = Box::pin(server.cleanup_expired_rooms_protecting_reconnections(
+        chrono::Duration::hours(1),
+        chrono::Duration::zero(),
+    ));
+    assert!(
+        futures_util::poll!(cleanup.as_mut()).is_pending(),
+        "the database gate must pause inactive cleanup while its reconnect view is pinned"
+    );
+    timeout(Duration::from_secs(1), database.wait_for_expired_cleanup())
+        .await
+        .expect("inactive cleanup should pause after capturing its protection snapshot");
+
+    let mut registration = Box::pin(server.register_disconnection_for_reconnect(
+        &player_id,
+        room_id,
+        was_authority,
+        player_info,
+    ));
+    assert!(
+        futures_util::poll!(registration.as_mut()).is_pending(),
+        "reconnect registration must wait for the pinned inactive cleanup view"
+    );
+
+    database.release_expired_cleanup();
+    let outcome = timeout(Duration::from_secs(1), &mut cleanup)
+        .await
+        .expect("inactive cleanup should finish after its database gate opens")
+        .expect("inactive cleanup should succeed");
+    assert_eq!(outcome.inactive_rooms_cleaned, 1);
+
+    assert!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup should succeed")
+            .is_none(),
+        "inactive cleanup is allowed to delete an occupied stale room"
+    );
+    assert!(
+        !timeout(Duration::from_secs(1), &mut registration)
+            .await
+            .expect("registration should finish after inactive cleanup releases replay state"),
+        "registration must fail after inactive cleanup deletes its room"
+    );
+    assert!(
+        !server
+            .reconnection_manager()
+            .expect("reconnection should be enabled")
+            .has_pending_reconnection(&player_id)
+            .await,
+        "cleanup-first ordering must not leave a reconnect for a missing room"
     );
 }
 

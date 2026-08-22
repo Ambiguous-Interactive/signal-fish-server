@@ -106,12 +106,6 @@ impl EnhancedGameServer {
         encoding: GameDataEncoding,
         payload: Bytes,
     ) {
-        // Binary frames bypass the message router, so record liveness here
-        // (mirrors `handle_client_message`): a client streaming binary game
-        // data must never be reaped as inactive, and its ROOM must not be GC'd
-        // as inactive either (throttled room + last_seen refresh, BUG-1).
-        self.record_client_activity(player_id);
-        self.maybe_update_last_seen(player_id).await;
         if payload.len() > self.config.max_message_size {
             tracing::warn!(
                 %player_id,
@@ -131,6 +125,13 @@ impl EnhancedGameServer {
                 .await;
             return;
         }
+
+        // Binary frames bypass the message router, so valid frames record
+        // liveness here (mirrors `handle_client_message`). Validate first: a
+        // stream of rejected oversized frames must not keep an otherwise idle
+        // client or room alive indefinitely.
+        self.record_client_activity(player_id);
+        self.maybe_update_last_seen(player_id).await;
 
         if let Some(room_id) = self.get_client_room(player_id).await {
             let connection_manager = &self.connection_manager;

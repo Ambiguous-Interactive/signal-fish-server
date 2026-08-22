@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockReadGuard};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -455,6 +455,23 @@ pub struct ReconnectionManager {
     record_room_event_reached: tokio::sync::Notify,
     #[cfg(test)]
     release_record_room_event: tokio::sync::Notify,
+}
+
+/// A stable reconnection-room view held while room garbage collection runs.
+///
+/// Keeping the replay-state read lock alive prevents a disconnect from
+/// publishing a new reconnection record between GC's protection snapshot and
+/// its storage deletion. The room set alone is insufficient: it becomes stale
+/// as soon as the lock used to build it is released.
+pub(crate) struct RoomGcProtection<'a> {
+    _state: RwLockReadGuard<'a, ReplayState>,
+    room_ids: HashSet<RoomId>,
+}
+
+impl RoomGcProtection<'_> {
+    pub(crate) fn room_ids(&self) -> &HashSet<RoomId> {
+        &self.room_ids
+    }
 }
 
 impl ReconnectionManager {
@@ -1298,16 +1315,26 @@ impl ReconnectionManager {
     /// [`Self::cleanup_expired`] and no longer protect anything); claimed and
     /// unclaimed records both protect, since an in-flight claim still needs
     /// the room to exist.
-    pub async fn rooms_with_active_reconnections(&self) -> HashSet<RoomId> {
+    pub(crate) async fn room_gc_protection(&self) -> RoomGcProtection<'_> {
         let now = Instant::now();
-        self.replay_state
-            .read()
-            .await
+        let state = self.replay_state.read().await;
+        let room_ids = state
             .disconnected_players
             .values()
             .filter(|record| record.claim.is_some() || !record.window_closed_at(now))
             .map(|record| record.disconnected.room_id)
-            .collect()
+            .collect();
+        RoomGcProtection {
+            _state: state,
+            room_ids,
+        }
+    }
+
+    /// Return a point-in-time snapshot of rooms with active reconnection
+    /// records. Callers that authorize room deletion must use the internally
+    /// pinned GC view instead so registration cannot race that decision.
+    pub async fn rooms_with_active_reconnections(&self) -> HashSet<RoomId> {
+        self.room_gc_protection().await.room_ids().clone()
     }
 }
 
