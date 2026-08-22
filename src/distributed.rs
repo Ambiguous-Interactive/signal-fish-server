@@ -149,14 +149,12 @@ impl DistributedLock for InMemoryDistributedLock {
         if self.should_fail_acquire_for_test(key).await {
             anyhow::bail!("injected lock acquisition failure for {key}");
         }
-        let handle = LockHandle::new(key.to_string(), ttl);
-        let expires_at = handle
-            .acquired_at
-            .checked_add_signed(chrono::Duration::from_std(ttl)?)
-            .ok_or_else(|| anyhow::anyhow!("lock TTL exceeds the supported date range"))?;
+        let ttl_delta = chrono::Duration::from_std(ttl)?;
 
         // Single write lock acquisition: cleanup expired entries and check/insert atomically
-        // to prevent TOCTOU race where another task acquires the same lock between cleanup and insert
+        // to prevent TOCTOU races. Start the lease only after this internal
+        // contention ends; otherwise a short lease can expire before this
+        // method inserts it and returns ownership to its caller.
         let mut locks = self.locks.write().await;
         let now = chrono::Utc::now();
         locks.retain(|_, entry| entry.expires_at > now);
@@ -164,6 +162,16 @@ impl DistributedLock for InMemoryDistributedLock {
         if locks.contains_key(key) {
             return Ok(None);
         }
+
+        let expires_at = now
+            .checked_add_signed(ttl_delta)
+            .ok_or_else(|| anyhow::anyhow!("lock TTL exceeds the supported date range"))?;
+        let handle = LockHandle {
+            key: key.to_string(),
+            token: Uuid::new_v4(),
+            acquired_at: now,
+            ttl,
+        };
 
         locks.insert(
             key.to_string(),
@@ -178,17 +186,20 @@ impl DistributedLock for InMemoryDistributedLock {
     }
 
     async fn extend(&self, handle: &LockHandle, ttl: Duration) -> Result<bool> {
-        let new_expires_at = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::from_std(ttl)?)
-            .ok_or_else(|| anyhow::anyhow!("lock TTL exceeds the supported date range"))?;
+        let ttl_delta = chrono::Duration::from_std(ttl)?;
 
-        // Single write lock acquisition: cleanup and extend atomically
+        // Single write lock acquisition: cleanup and extend atomically. The
+        // requested extension begins when the state can actually be changed,
+        // not while this future is still waiting behind internal contention.
         let mut locks = self.locks.write().await;
         let now = chrono::Utc::now();
         locks.retain(|_, entry| entry.expires_at > now);
 
         if let Some(entry) = locks.get_mut(&handle.key) {
             if entry.token == handle.token {
+                let new_expires_at = now
+                    .checked_add_signed(ttl_delta)
+                    .ok_or_else(|| anyhow::anyhow!("lock TTL exceeds the supported date range"))?;
                 entry.expires_at = new_expires_at;
                 return Ok(true);
             }
@@ -360,5 +371,81 @@ impl CircuitBreaker {
         inner.state = CircuitState::Closed;
         inner.failure_count = 0;
         inner.last_failure_time = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DistributedLock, InMemoryDistributedLock};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn try_acquire_starts_ttl_after_internal_lock_contention() {
+        let lock = InMemoryDistributedLock::new();
+        let guard = lock.locks.write().await;
+        let ttl = Duration::from_secs(1);
+        let mut acquisition = Box::pin(lock.try_acquire("contended-acquire", ttl));
+
+        tokio::select! {
+            result = &mut acquisition => {
+                panic!("acquisition unexpectedly completed while the internal lock was held: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+
+        let lease_must_start_at = chrono::Utc::now();
+        drop(guard);
+        let handle = acquisition
+            .await
+            .expect("contended acquisition should not fail")
+            .expect("contended acquisition should obtain the free key");
+
+        assert!(
+            handle.acquired_at >= lease_must_start_at,
+            "a successful acquisition must start after internal contention ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn extend_starts_ttl_after_internal_lock_contention() {
+        let lock = InMemoryDistributedLock::new();
+        let handle = lock
+            .try_acquire("contended-extension", Duration::from_secs(60))
+            .await
+            .expect("initial acquisition should not fail")
+            .expect("initial acquisition should obtain the free key");
+        let guard = lock.locks.write().await;
+        let ttl = Duration::from_secs(1);
+        let mut extension = Box::pin(lock.extend(&handle, ttl));
+
+        tokio::select! {
+            result = &mut extension => {
+                panic!("extension unexpectedly completed while the internal lock was held: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+
+        let extension_must_start_at = chrono::Utc::now();
+        drop(guard);
+        assert!(
+            extension
+                .await
+                .expect("contended extension should not fail"),
+            "the current owner should retain the lock while extending"
+        );
+        let expires_at = lock
+            .locks
+            .read()
+            .await
+            .get(&handle.key)
+            .expect("extended lock should remain stored")
+            .expires_at;
+        let expected_not_before = extension_must_start_at
+            .checked_add_signed(chrono::Duration::from_std(ttl).expect("test TTL is valid"))
+            .expect("test timestamp remains representable");
+        assert!(
+            expires_at >= expected_not_before,
+            "a successful extension must start after internal contention ends"
+        );
     }
 }

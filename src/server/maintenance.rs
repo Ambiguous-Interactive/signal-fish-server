@@ -116,13 +116,49 @@ impl EnhancedGameServer {
         tracing::debug!(%room_id, %reason, "Room closed");
     }
 
-    /// Rooms that room GC must not delete this tick because they still hold a
-    /// valid reconnection record. Empty when reconnection is disabled (no
-    /// manager), so the cleanup paths behave exactly as before in that case.
-    pub(crate) async fn rooms_protected_by_reconnection(&self) -> HashSet<RoomId> {
+    /// Delete empty rooms while pinning the reconnection snapshot that
+    /// authorizes the deletion. A disconnect registration needs the matching
+    /// write lock, so it must happen wholly before this snapshot or after the
+    /// storage sweep instead of appearing in the deletion race window.
+    pub(crate) async fn cleanup_empty_rooms_protecting_reconnections(
+        &self,
+        empty_timeout: chrono::Duration,
+    ) -> anyhow::Result<Vec<RoomId>> {
         match &self.reconnection_manager {
-            Some(manager) => manager.rooms_with_active_reconnections().await,
-            None => HashSet::new(),
+            Some(manager) => {
+                let protected = manager.room_gc_protection().await;
+                self.database
+                    .cleanup_empty_rooms(empty_timeout, protected.room_ids())
+                    .await
+            }
+            None => {
+                self.database
+                    .cleanup_empty_rooms(empty_timeout, &HashSet::new())
+                    .await
+            }
+        }
+    }
+
+    /// Run the count-only room sweep under a fresh pinned reconnection view.
+    /// Post-cleanup work can be slow, so each database sweep gets its own guard
+    /// rather than blocking new disconnect registrations for the whole tick.
+    pub(crate) async fn cleanup_expired_rooms_protecting_reconnections(
+        &self,
+        empty_timeout: chrono::Duration,
+        inactive_timeout: chrono::Duration,
+    ) -> anyhow::Result<crate::database::RoomCleanupOutcome> {
+        match &self.reconnection_manager {
+            Some(manager) => {
+                let protected = manager.room_gc_protection().await;
+                self.database
+                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, protected.room_ids())
+                    .await
+            }
+            None => {
+                self.database
+                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, &HashSet::new())
+                    .await
+            }
         }
     }
 
@@ -506,17 +542,9 @@ impl EnhancedGameServer {
 
             self.cleanup_pending_durable_player_detaches().await;
 
-            // Rooms with an unexpired reconnection record must survive both
-            // sweeps below: they are empty (their members disconnected) but a
-            // still-valid token points at them, and reaping them would fail the
-            // reconnect with `RoomNotFound` (BUG-1 corollary B). Computed once
-            // per tick, before either sweep.
-            let protected = self.rooms_protected_by_reconnection().await;
-
             // Cleanup empty rooms with idempotency
             match self
-                .database
-                .cleanup_empty_rooms(empty_timeout, &protected)
+                .cleanup_empty_rooms_protecting_reconnections(empty_timeout)
                 .await
             {
                 Ok(deleted_room_ids) => {
@@ -587,8 +615,7 @@ impl EnhancedGameServer {
             }
 
             match self
-                .database
-                .cleanup_expired_rooms(empty_timeout, inactive_timeout, &protected)
+                .cleanup_expired_rooms_protecting_reconnections(empty_timeout, inactive_timeout)
                 .await
             {
                 Ok(outcome) if !outcome.is_empty() => {

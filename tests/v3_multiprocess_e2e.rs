@@ -343,6 +343,31 @@ async fn multiprocess_sigterm_gracefully_drains_with_goingaway_and_4000() {
         "v3 join should expose the pre-issued reconnect token before shutdown"
     );
 
+    // Establish the application-message phase boundary before signaling the
+    // process. RoomJoined is intentionally queued before the owned lobby
+    // transition completes, so its LobbyStateChanged may otherwise race with
+    // GoingAway on slower instrumented builds and appear between the shutdown
+    // advisory and close frame.
+    next_matching_server_message_within(
+        &mut peer,
+        SERVER_MESSAGE_TIMEOUT,
+        "initial lobby state",
+        |message| match message {
+            ServerMessage::LobbyStateChanged {
+                lobby_state,
+                ready_players,
+                all_ready,
+            } => {
+                assert_eq!(lobby_state, signal_fish_server::protocol::LobbyState::Lobby);
+                assert!(ready_players.is_empty());
+                assert!(!all_ready);
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+
     let before_deadline_ms = now_unix_ms();
     server.send_sigterm();
 

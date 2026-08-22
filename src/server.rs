@@ -855,14 +855,14 @@ impl EnhancedGameServer {
                 .request_close_for(player_id, CloseReason::Shutdown);
             self.discard_pre_issued_reconnection_token(player_id).await;
         } else if let Some((room_id, was_authority, player_info)) = reconnect_snapshot {
-            self.register_disconnection_for_reconnect(
-                player_id,
-                room_id,
-                was_authority,
-                player_info,
-            )
-            .await;
-            registered_reconnect = true;
+            registered_reconnect = self
+                .register_disconnection_for_reconnect(
+                    player_id,
+                    room_id,
+                    was_authority,
+                    player_info,
+                )
+                .await;
         } else if room_id_opt.is_none() {
             // No room to reconnect into: any token pre-issued at an earlier
             // join must not outlive the connection (bounded-map contract).

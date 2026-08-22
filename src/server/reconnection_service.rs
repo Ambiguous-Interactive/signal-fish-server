@@ -310,9 +310,9 @@ impl EnhancedGameServer {
         room_id: RoomId,
         was_authority: bool,
         player_info: PlayerInfo,
-    ) {
+    ) -> bool {
         let Some(reconnection_manager) = &self.reconnection_manager else {
-            return;
+            return false;
         };
 
         // Capture the connection's current game-data incarnation epoch WHILE it
@@ -341,6 +341,41 @@ impl EnhancedGameServer {
             )
             .await;
 
+        // Room GC pins replay state while it makes its storage decision. If
+        // registration wins that ordering, the new record protects the room.
+        // If inactive-room cleanup wins, it may delete an occupied stale room
+        // before this write lock becomes available. Re-check storage after the
+        // record is visible: a successful read now cannot race a later GC
+        // deletion because that GC must observe this record, while a missing
+        // room means the advertised credential can no longer be fulfilled and
+        // must not survive as a pending reconnect.
+        match self.database.get_room_by_id(&room_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let discarded = reconnection_manager
+                    .discard_pending_reconnection(player_id)
+                    .await;
+                tracing::warn!(
+                    %player_id,
+                    %room_id,
+                    %discarded,
+                    "Discarded reconnection registration after room cleanup won the race"
+                );
+                return false;
+            }
+            Err(error) => {
+                // A transient read failure is not proof that the room is gone.
+                // Retain the record so maintenance cannot delete a live room
+                // merely because this verification was unavailable.
+                tracing::warn!(
+                    %player_id,
+                    %room_id,
+                    %error,
+                    "Failed to verify room after reconnection registration; retaining protection"
+                );
+            }
+        }
+
         tracing::info!(
             %player_id,
             %room_id,
@@ -348,6 +383,7 @@ impl EnhancedGameServer {
             reconnection_token = %token.get(..8).unwrap_or("<invalid>"),
             "Player disconnection registered for reconnection"
         );
+        true
     }
 
     async fn reject_claimed_reconnect(
