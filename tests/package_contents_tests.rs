@@ -292,7 +292,7 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
     struct Case {
         name: &'static str,
         present_modules: usize,
-        package_markers: bool,
+        package_markers: &'static [&'static str],
         cargo_chef_skeleton: bool,
         succeeds: bool,
         enables_repository_tests: bool,
@@ -302,7 +302,7 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
         Case {
             name: "complete-checkout",
             present_modules: REPOSITORY_ONLY_TEST_MODULES.len(),
-            package_markers: false,
+            package_markers: &[],
             cargo_chef_skeleton: false,
             succeeds: true,
             enables_repository_tests: true,
@@ -310,7 +310,7 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
         Case {
             name: "generated-package",
             present_modules: 0,
-            package_markers: true,
+            package_markers: &["Cargo.toml.orig", ".cargo_vcs_info.json"],
             cargo_chef_skeleton: false,
             succeeds: true,
             enables_repository_tests: false,
@@ -318,7 +318,7 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
         Case {
             name: "empty-checkout",
             present_modules: 0,
-            package_markers: false,
+            package_markers: &[],
             cargo_chef_skeleton: false,
             succeeds: false,
             enables_repository_tests: false,
@@ -326,7 +326,7 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
         Case {
             name: "partial-generated-package",
             present_modules: 1,
-            package_markers: true,
+            package_markers: &["Cargo.toml.orig", ".cargo_vcs_info.json"],
             cargo_chef_skeleton: false,
             succeeds: false,
             enables_repository_tests: false,
@@ -334,9 +334,25 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
         Case {
             name: "cargo-chef-skeleton",
             present_modules: 0,
-            package_markers: false,
+            package_markers: &[],
             cargo_chef_skeleton: true,
             succeeds: true,
+            enables_repository_tests: false,
+        },
+        Case {
+            name: "cargo-toml-orig-only",
+            present_modules: 0,
+            package_markers: &["Cargo.toml.orig"],
+            cargo_chef_skeleton: false,
+            succeeds: false,
+            enables_repository_tests: false,
+        },
+        Case {
+            name: "cargo-vcs-info-only",
+            present_modules: 0,
+            package_markers: &[".cargo_vcs_info.json"],
+            cargo_chef_skeleton: false,
+            succeeds: false,
             enables_repository_tests: false,
         },
     ];
@@ -356,11 +372,9 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
                 .expect("test module parent must be created");
             std::fs::write(path, []).expect("test module fixture must be written");
         }
-        if case.package_markers {
-            for marker in ["Cargo.toml.orig", ".cargo_vcs_info.json"] {
-                std::fs::write(manifest_dir.join(marker), [])
-                    .expect("package marker fixture must be written");
-            }
+        for &marker in case.package_markers {
+            std::fs::write(manifest_dir.join(marker), [])
+                .expect("package marker fixture must be written");
         }
 
         let mut command = Command::new(&executable);
@@ -381,6 +395,35 @@ fn package_build_script_distinguishes_checkout_archive_and_partial_sources() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8(output.stdout).expect("build-script output must be UTF-8");
+        let mut rerun_paths = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo::rerun-if-changed="))
+            .collect::<Vec<_>>();
+        rerun_paths.sort_unstable();
+        let mut expected_rerun_paths = vec!["build.rs"];
+        expected_rerun_paths.extend(
+            REPOSITORY_ONLY_TEST_MODULES
+                .iter()
+                .take(case.present_modules)
+                .copied(),
+        );
+        expected_rerun_paths.extend(case.package_markers.iter().copied());
+        expected_rerun_paths.sort_unstable();
+        assert_eq!(
+            rerun_paths, expected_rerun_paths,
+            "build-script case `{}` must watch exactly its existing inputs:\n{stdout}",
+            case.name
+        );
+        let rerun_env = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo::rerun-if-env-changed="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rerun_env,
+            ["SIGNAL_FISH_CARGO_CHEF_SKELETON"],
+            "build-script case `{}` must watch exactly the Cargo Chef classifier:\n{stdout}",
+            case.name
+        );
         assert_eq!(
             stdout.contains("cargo::rustc-cfg=signal_fish_repository_tests"),
             case.enables_repository_tests,

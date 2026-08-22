@@ -13,6 +13,7 @@ const REPOSITORY_ONLY_TEST_MODULES: [&str; 8] = [
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(signal_fish_repository_tests)");
+    println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=SIGNAL_FISH_CARGO_CHEF_SKELETON");
 
     let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR") else {
@@ -21,18 +22,28 @@ fn main() {
     };
     let manifest_dir = Path::new(&manifest_dir);
     let package_markers = ["Cargo.toml.orig", ".cargo_vcs_info.json"];
-    let generated_package = package_markers.iter().all(|path| {
-        println!("cargo::rerun-if-changed={path}");
-        manifest_dir.join(path).is_file()
-    });
+    let present_package_markers = package_markers
+        .iter()
+        .filter(|path| {
+            let exists = manifest_dir.join(path).is_file();
+            if exists {
+                println!("cargo::rerun-if-changed={path}");
+            }
+            exists
+        })
+        .count();
+    let generated_package = present_package_markers == package_markers.len();
     let cargo_chef_skeleton = std::env::var_os("SIGNAL_FISH_CARGO_CHEF_SKELETON")
         .is_some_and(|value| value == "1")
         && std::env::var_os("CARGO_PKG_VERSION").is_some_and(|value| value == "0.0.1");
     let present = REPOSITORY_ONLY_TEST_MODULES
         .iter()
         .filter(|path| {
-            println!("cargo::rerun-if-changed={path}");
-            manifest_dir.join(path).is_file()
+            let exists = manifest_dir.join(path).is_file();
+            if exists {
+                println!("cargo::rerun-if-changed={path}");
+            }
+            exists
         })
         .count();
 
