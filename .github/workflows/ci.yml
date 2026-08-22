@@ -276,14 +276,14 @@ jobs:
       - name: Install cargo-nextest (attempt 1)
         id: install_nextest
         continue-on-error: true
-        uses: taiki-e/install-action@v2.85.13
+        uses: taiki-e/install-action@v2.86.3
         with:
           tool: cargo-nextest
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
-        uses: taiki-e/install-action@v2.85.13
+        uses: taiki-e/install-action@v2.86.3
         with:
           tool: cargo-nextest
 
@@ -504,7 +504,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.85.13
+        uses: taiki-e/install-action@v2.86.3
         with:
           tool: cargo-audit@0.22.2
           fallback: none
@@ -601,7 +601,7 @@ jobs:
         # Buildx unlocks the GitHub Actions layer cache below. Mirrors the proven
         # pattern in docker-publish.yml (same pinned action versions), turning a
         # cold ~3-5 min image build into a warm sub-minute one on cache hits.
-        uses: docker/setup-buildx-action@v4.2.0
+        uses: docker/setup-buildx-action@v4.3.0
       - name: Build Docker image
         uses: docker/build-push-action@v7.3.0
         with:
@@ -711,7 +711,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.85.13
+        uses: taiki-e/install-action@v2.86.3
         with:
           tool: cargo-llvm-cov
 
@@ -808,7 +808,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.85.13
+        uses: taiki-e/install-action@v2.86.3
         with:
           tool: cargo-sbom
 
