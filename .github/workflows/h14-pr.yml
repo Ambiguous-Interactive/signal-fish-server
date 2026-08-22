@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - "src/**"
+      - "build.rs"
       - "tests/mixed_encoding_relay_e2e.rs"
       - "tests/test_helpers.rs"
       - "tests/websocket_test_helpers/**"

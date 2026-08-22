@@ -563,30 +563,35 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn fail_get_room_by_id_for_test(&self, fail: bool) {
         self.fail_get_room_by_id
             .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn fail_get_application_room_count_for_test(&self, fail: bool) {
         self.fail_get_application_room_count
             .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn fail_clear_room_application_id_for_test(&self, fail: bool) {
         self.fail_clear_room_application_id
             .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn fail_set_room_application_id_for_test(&self, fail: bool) {
         self.fail_set_room_application_id
             .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn pause_next_get_application_room_count_for_test(&self) {
         self.get_application_room_count_calls
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -595,16 +600,19 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) async fn wait_for_paused_get_application_room_count_for_test(&self) {
         self.get_application_room_count_reached.notified().await;
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn release_paused_get_application_room_count_for_test(&self) {
         self.release_get_application_room_count.notify_one();
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn get_application_room_count_calls_for_test(&self) -> u32 {
         self.get_application_room_count_calls
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -639,6 +647,7 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn fail_remove_player_from_room_for_test(&self, fail: bool) {
         self.fail_remove_player_from_room
             .store(fail, std::sync::atomic::Ordering::Relaxed);
@@ -678,6 +687,7 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn get_room_players_calls_for_test(&self) -> u32 {
         self.get_room_players_calls
             .load(std::sync::atomic::Ordering::Relaxed)

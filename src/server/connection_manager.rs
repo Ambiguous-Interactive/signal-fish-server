@@ -715,6 +715,7 @@ impl ConnectionManager {
     /// Production metadata reads must use [`Self::current_relay_stamp_in_room`]
     /// so an epoch cannot be projected across a concurrent room transition.
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub fn game_data_epoch(&self, player_id: &PlayerId) -> Option<u32> {
         self.clients
             .get(player_id)

@@ -48,35 +48,43 @@ mod duration_conversion_tests {
 
 mod admin;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod app_admission_tests;
 mod authority;
 mod connection_manager;
 mod dashboard_cache;
 mod game_data;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod game_data_tests;
 mod heartbeat;
 mod maintenance;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod message_coordinator_tests;
 mod message_router;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod message_router_tests;
 mod messaging;
 mod ready_state;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod ready_state_tests;
 mod reconnection_service;
 mod relay_policy;
 mod room_service;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod room_service_tests;
 mod session_policy;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod session_policy_tests;
 mod shutdown;
 mod signaling;
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 mod signaling_tests;
 mod spectator_handlers;
 mod spectator_service;
@@ -198,6 +206,7 @@ pub(crate) struct ReconnectTeardownTestGate {
 }
 
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 impl ReconnectTeardownTestGate {
     pub(crate) async fn wait_until_armed(&self) {
         self.armed.notified().await;
@@ -502,6 +511,7 @@ impl EnhancedGameServer {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     fn script_room_codes_for_test(&self, codes: impl IntoIterator<Item = &'static str>) {
         self.scripted_room_codes
             .lock()
@@ -958,12 +968,14 @@ impl EnhancedGameServer {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn fail_retain_room_publication_snapshot_for_test(&self, fail: bool) {
         self.fail_retain_room_publication_snapshot
             .store(fail, std::sync::atomic::Ordering::Release);
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn panic_owned_room_operation_for_test(&self, point: OwnedRoomOperationPanicPoint) {
         self.owned_room_operation_panic
             .store(point as u8, std::sync::atomic::Ordering::Release);
@@ -1018,6 +1030,7 @@ impl EnhancedGameServer {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn install_reconnect_teardown_test_gate(&self) -> Arc<ReconnectTeardownTestGate> {
         let gate = Arc::new(ReconnectTeardownTestGate::default());
         *self

@@ -88,6 +88,7 @@ impl InMemoryDistributedLock {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) async fn fail_acquire_for_test(&self, key: Option<String>) {
         *self.fail_acquire_key.write().await = key;
     }
