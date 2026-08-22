@@ -2292,8 +2292,8 @@ pub(super) async fn handle_socket(
                                     } else {
                                         (None, None, None, None)
                                     };
-                                    let protocol_info =
-                                        ServerMessage::ProtocolInfo(ProtocolInfoPayload {
+                                    let protocol_info = ServerMessage::ProtocolInfo(Box::new(
+                                        ProtocolInfoPayload {
                                             platform: compatibility.platform.clone(),
                                             sdk_version: compatibility.sdk_version.clone(),
                                             minimum_version: compatibility.minimum_version.clone(),
@@ -2315,7 +2315,8 @@ pub(super) async fn handle_socket(
                                                 .then_some(
                                                     server_clone.config().max_outbound_message_size,
                                                 ),
-                                        });
+                                        },
+                                    ));
 
                                     let auth_response_queued = enqueue_connection_message(
                                         &tx_clone,

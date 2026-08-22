@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Add `max_outbound_message_size` to the public Rust
   `SecurityConfig`, `ServerConfig`, and `ProtocolInfoPayload` structs.
   Downstream struct literals must supply the field or use struct update syntax.
+  `ServerMessage::ProtocolInfo` now stores its payload in a `Box`, so downstream
+  constructors must use `ServerMessage::ProtocolInfo(Box::new(payload))` and
+  moved pattern matches receive `Box<ProtocolInfoPayload>`.
   Valid configured values are `1..=67108864` bytes so the advertised integer is
   portable across JavaScript and 32-bit clients.
 - **Breaking:** Add `requested_capabilities` to the public Rust

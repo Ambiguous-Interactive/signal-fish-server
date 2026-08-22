@@ -439,7 +439,7 @@ fn golden_server_authenticated() {
 
 #[test]
 fn golden_server_protocol_info() {
-    let msg = ServerMessage::ProtocolInfo(ProtocolInfoPayload {
+    let msg = ServerMessage::ProtocolInfo(Box::new(ProtocolInfoPayload {
         platform: Some("godot".to_string()),
         sdk_version: Some("1.2.3".to_string()),
         minimum_version: Some("1.0.0".to_string()),
@@ -453,7 +453,7 @@ fn golden_server_protocol_info() {
         max_protocol_version: None,
         transports: None,
         max_outbound_message_size: None,
-    });
+    }));
     assert_json(
         &msg,
         json!({
