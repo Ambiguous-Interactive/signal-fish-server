@@ -127,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         empty_room_timeout: tokio::time::Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: tokio::time::Duration::from_secs(cfg.server.inactive_room_timeout),
         max_message_size: cfg.security.max_message_size,
+        max_outbound_message_size: cfg.security.max_outbound_message_size,
         max_signal_bytes: cfg.security.max_signal_bytes,
         max_connections_per_ip: cfg.security.max_connections_per_ip,
         require_metrics_auth: cfg.security.require_metrics_auth,
@@ -228,8 +229,9 @@ async fn main() -> anyhow::Result<()> {
             "/v3/ws",
             websocket::websocket_route_v3_with_origin_policy(origin_policy.clone()),
         ) // v3 alias, shared handler
+        .route("/v3/client-config", websocket::client_config_route())
         .fallback(|| async {
-            "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v1/metrics for metrics, /metrics/prom for Prometheus."
+            "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v2/client-config (or /v3/client-config) for client limits, /v1/metrics for metrics, /metrics/prom for Prometheus."
         })
         .with_state(game_server)
         .layer(cors);

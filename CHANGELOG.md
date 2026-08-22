@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a configurable aggregate outbound WebSocket payload limit, discoverable
+  before connection through the CORS-enabled `/v2/client-config` and
+  `/v3/client-config` endpoints and also advertised in the HTTP upgrade response
+  and negotiated-v3 `ProtocolInfo`. Bounded serialization rejects oversized
+  text, binary, snapshot, and replay messages whole and closes the affected
+  connection with RFC 6455 code `1009` instead of truncating them; binary
+  fallback decoding is separately bounded against compact-tree allocation
+  amplification (issue #399).
 - Add negotiated protocol-v3 room-operation correlation. Clients that request
   and receive the `room_operation_ids` capability can wrap join, leave,
   reconnect, spectator-join, and spectator-leave commands with a UUID and
@@ -18,13 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Add `max_outbound_message_size` to the public Rust
+  `SecurityConfig`, `ServerConfig`, and `ProtocolInfoPayload` structs.
+  Downstream struct literals must supply the field or use struct update syntax.
+  `ServerMessage::ProtocolInfo` now stores its payload in a `Box`, so downstream
+  constructors must use `ServerMessage::ProtocolInfo(Box::new(payload))` and
+  moved pattern matches receive `Box<ProtocolInfoPayload>`.
+  Valid configured values are `1..=67108864` bytes so the advertised integer is
+  portable across JavaScript and 32-bit clients.
 - **Breaking:** Add `requested_capabilities` to the public Rust
   `ClientMessage::Authenticate` variant and correlated room-operation variants
   to the public client/server message enums. Downstream struct-variant
   constructors and exhaustive matches must handle the new fields and variants.
 - Refresh compatible Rust dependencies across the server, fuzz, and native
   reference-client lockfiles, including `uuid` 1.24.1, `saphyr` 0.0.12, and
-  `webrtc`/`rtc` 0.20.3, and update `taiki-e/install-action` to 2.85.13.
+  `webrtc`/`rtc` 0.20.3, update `taiki-e/install-action` to 2.86.3, and update
+  `docker/setup-buildx-action` to 4.3.0.
 
 ### Fixed
 

@@ -227,6 +227,21 @@ pub const fn default_max_message_size() -> usize {
     65536 // 64KB
 }
 
+/// Default maximum aggregate application payload for one server-to-client
+/// WebSocket message. The limit is intentionally independent of the inbound
+/// cap because snapshots and replay messages aggregate multiple accepted
+/// client values.
+pub const fn default_max_outbound_message_size() -> usize {
+    8 * 1024 * 1024 // 8 MiB
+}
+
+/// Largest configurable outbound WebSocket application payload.
+///
+/// Keeping the deployment value at or below 64 MiB gives JavaScript and
+/// 32-bit clients one exact, portable integer range while also bounding the
+/// server's fallible materialization buffer.
+pub const MAX_OUTBOUND_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 /// Default cap on the serialized size of a v3 `Signal` payload (16 KiB):
 /// generously above any real SDP/ICE payload, well under the 64 KiB
 /// `max_message_size` frame cap.

@@ -4,9 +4,9 @@
 //! The farewell `Error` frame is best-effort — on the congested socket a
 //! slow-consumer eviction escapes, it frequently cannot be delivered at all.
 //! The close frame's code travels in the closing handshake itself, so it is
-//! the one attribution signal a client can always read. Contract pinned here
-//! (RFC 6455 private range; the assignments are documented protocol surface
-//! and must never be renumbered):
+//! the one attribution signal a client can always read. Contract pinned here:
+//! standard RFC 6455 codes plus documented private-range assignments that must
+//! never be renumbered.
 //!
 //! - `4001 auth_timeout` — no app-ID handshake input within
 //!   `websocket.auth_timeout_secs`;
@@ -17,6 +17,8 @@
 //!   `websocket.idle_timeout_secs`.
 //! - `4005 room_inactive` — the assigned room was deleted after exceeding
 //!   `server.inactive_room_timeout`.
+//! - `1009 outbound_message_too_large` — a complete encoded server message
+//!   exceeded the deployment's advertised aggregate outbound payload limit.
 //!
 //! (`4000 server_shutdown` is defined in the contract but has no in-process
 //! trigger today; `CloseReason::Unregistered` closes with a normal `1000`.)
@@ -81,6 +83,18 @@ async fn read_close_frame(ws: &mut WsStream, context: &str) -> (u16, String) {
     }
 }
 
+async fn read_exact_next_close_frame(ws: &mut WsStream, context: &str) -> (u16, String) {
+    match tokio::time::timeout(CLOSE_DEADLINE, ws.next()).await {
+        Ok(Some(Ok(Message::Close(Some(frame))))) => (frame.code.into(), frame.reason.to_string()),
+        Ok(Some(Ok(other))) => {
+            panic!("{context}: application/control frame leaked before close: {other:?}")
+        }
+        Ok(Some(Err(error))) => panic!("{context}: transport error before close: {error}"),
+        Ok(None) => panic!("{context}: stream ended before close frame"),
+        Err(_elapsed) => panic!("{context}: timed out waiting for immediate close frame"),
+    }
+}
+
 fn base_config() -> ServerConfig {
     ServerConfig {
         // Long reaper window by default so individual tests opt IN to the
@@ -122,6 +136,29 @@ async fn authenticate_v3(ws: &mut WsStream) {
     ws.send(Message::Text(json.into()))
         .await
         .expect("send Authenticate");
+}
+
+/// An oversized server application message is rejected before the WebSocket
+/// sink sees any prefix, and the connection closes with RFC 6455's standard
+/// message-too-big code rather than silently truncating protocol state.
+#[tokio::test]
+async fn outbound_message_over_configured_limit_closes_with_1009() {
+    let mut config = base_config();
+    config.max_outbound_message_size = 32;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let running_server = start_server(server).await;
+    let mut ws = connect(running_server.addr()).await;
+
+    authenticate(&mut ws).await;
+    let (code, reason) =
+        read_exact_next_close_frame(&mut ws, "oversized outbound auth response").await;
+    assert_eq!(
+        code, 1009,
+        "oversized outbound message must close with 1009"
+    );
+    assert_eq!(reason, "outbound_message_too_large");
+
+    running_server.shutdown().await;
 }
 
 /// A connection that never authenticates is closed with `4001 auth_timeout`

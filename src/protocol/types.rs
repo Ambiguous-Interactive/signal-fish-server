@@ -421,6 +421,13 @@ pub struct ProtocolInfoPayload {
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transports: Option<Vec<String>>,
+    /// Maximum aggregate encoded application payload, in bytes, that this
+    /// deployment will send in one WebSocket message (v3+ only).
+    ///
+    /// This counts the complete JSON text or MessagePack binary payload before
+    /// WebSocket framing. `None` preserves the frozen v2 wire contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_outbound_message_size: Option<usize>,
 }
 
 /// Preserve omission as `None` while rejecting an explicitly null wire value.

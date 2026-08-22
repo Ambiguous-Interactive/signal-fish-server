@@ -141,6 +141,7 @@ self-hosted only.
     "enforce_app_id_allowlist": true,
     "allowed_apps": [{"app_id": "my-game", "app_name": "My Game"}],
     "max_message_size": 65536,
+    "max_outbound_message_size": 8388608,
     "max_connections_per_ip": 24
   },
   "websocket": {
@@ -151,6 +152,10 @@ self-hosted only.
 }
 
 ```
+
+Expose `/v2/client-config` and `/v3/client-config` through the same proxy and
+CORS policy as their WebSocket endpoints. Clients read the configured outbound
+receive ceiling there before opening a socket.
 
 ## Reverse Proxy Setup
 

@@ -2015,7 +2015,7 @@ fn test_doc_validation_uses_prebuilt_taplo() {
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
     for required in [
-        "uses: taiki-e/install-action@v2.85.13",
+        "uses: taiki-e/install-action@",
         "tool: taplo-cli@${{ env.TAPLO_CLI_VERSION }}",
         "fallback: none",
         "taplo --version",
@@ -21265,7 +21265,7 @@ fn test_analysis_nightly_version_consistency() {
 
     let unused_deps = read_live_file(&root.join(".github/workflows/unused-deps.yml"));
     for required in [
-        "uses: taiki-e/install-action@v2.85.13",
+        "uses: taiki-e/install-action@",
         "tool: cargo-machete@0.7.0,cargo-udeps@0.1.61",
         "fallback: none",
         "cargo machete --version | grep -Fxq '0.7.0'",

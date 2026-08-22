@@ -2,8 +2,11 @@ use crate::database::DatabaseConfig;
 use crate::security::{OriginPolicy, OriginPolicyError};
 use crate::server::{EnhancedGameServer, ServerConfig};
 use axum::extract::{Extension, State};
+use axum::http::header::CACHE_CONTROL;
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
+use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -176,6 +179,11 @@ pub fn websocket_route_v3_with_origin_policy(
     get(websocket_handler_v3).layer(Extension(origin_policy))
 }
 
+/// Build the version-neutral browser-readable client configuration route.
+pub fn client_config_route() -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
+    get(client_config)
+}
+
 fn create_router_inner(
     origin_policy: OriginPolicy,
     include_v3_alias: bool,
@@ -186,12 +194,15 @@ fn create_router_inner(
 
     let router = axum::Router::new()
         .route("/ws", get(websocket_handler))
+        .route("/client-config", client_config_route())
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .route("/metrics/prom", get(prometheus_metrics_handler));
 
     let router = if include_v3_alias {
-        router.route("/v3/ws", get(websocket_handler_v3))
+        router
+            .route("/v3/ws", get(websocket_handler_v3))
+            .route("/v3/client-config", client_config_route())
     } else {
         router
     };
@@ -200,6 +211,22 @@ fn create_router_inner(
         .layer(Extension(origin_policy))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
+}
+
+#[derive(Debug, Serialize)]
+struct ClientConfigResponse {
+    max_outbound_message_size: usize,
+}
+
+/// Browser-readable pre-connect metadata shared by every protocol version.
+async fn client_config(State(server): State<Arc<EnhancedGameServer>>) -> Response {
+    (
+        [(CACHE_CONTROL, "no-store")],
+        Json(ClientConfigResponse {
+            max_outbound_message_size: server.config().max_outbound_message_size,
+        }),
+    )
+        .into_response()
 }
 
 fn parse_origin_policy_or_deny(cors_origins: &str) -> OriginPolicy {

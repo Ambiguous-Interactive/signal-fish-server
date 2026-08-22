@@ -249,6 +249,10 @@ pub struct ServerConfig {
     pub empty_room_timeout: Duration,
     pub inactive_room_timeout: Duration,
     pub max_message_size: usize,
+    /// Maximum encoded application payload for one outbound WebSocket
+    /// message. Mirrors validated `security.max_outbound_message_size` and
+    /// must be in `1..=67108864` for direct library construction.
+    pub max_outbound_message_size: usize,
     /// Maximum serialized size in bytes of a v3 `Signal` payload (the opaque
     /// `signal` JSON value). Mirrors `security.max_signal_bytes`.
     pub max_signal_bytes: usize,
@@ -281,8 +285,9 @@ impl Default for ServerConfig {
             rate_limit_config: RateLimitConfig::default(),
             empty_room_timeout: Duration::from_secs(300),
             inactive_room_timeout: Duration::from_secs(3600),
-            max_message_size: 65536, // 64KB
-            max_signal_bytes: 16384, // 16KB
+            max_message_size: 65536,                    // 64KB
+            max_outbound_message_size: 8 * 1024 * 1024, // 8 MiB
+            max_signal_bytes: 16384,                    // 16KB
             max_connections_per_ip: 24,
             require_metrics_auth: true,
             metrics_auth_token: None,
@@ -316,6 +321,13 @@ impl EnhancedGameServer {
         // top-level config loader. Enforce the same generation/join closure
         // here before initializing storage or background tasks.
         protocol_config.validate_room_code_generation(config.room_code_prefix.as_deref())?;
+        anyhow::ensure!(
+            (1..=crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE)
+                .contains(&config.max_outbound_message_size),
+            "max_outbound_message_size must be between 1 and {} bytes, got {}",
+            crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
+            config.max_outbound_message_size,
+        );
 
         let database: Arc<dyn GameDatabase> =
             Arc::from(create_database(database_config.clone()).await?);
@@ -4122,5 +4134,39 @@ mod relay_projection_cache_tests {
                 .contains("server.room_code_prefix must contain only ASCII alphanumeric"),
             "constructor must report the exact invalid generation field: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn library_constructor_rejects_nonportable_outbound_limits() {
+        for invalid in [0, crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE + 1] {
+            let config = super::ServerConfig {
+                max_outbound_message_size: invalid,
+                ..super::ServerConfig::default()
+            };
+            let result = super::EnhancedGameServer::new(
+                config,
+                crate::config::ProtocolConfig::default(),
+                crate::config::RelayTypeConfig::default(),
+                crate::config::SessionConfig::default(),
+                crate::config::TurnConfig::default(),
+                crate::database::DatabaseConfig::InMemory,
+                crate::config::MetricsConfig::default(),
+                crate::config::CoordinationConfig::default(),
+                crate::config::TransportSecurityConfig::default(),
+                Vec::new(),
+            )
+            .await;
+
+            let error = match result {
+                Ok(_) => panic!("outbound limit {invalid} must fail before server construction"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("max_outbound_message_size must be between 1"),
+                "constructor must report the invalid outbound limit: {error}"
+            );
+        }
     }
 }

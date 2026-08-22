@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         empty_room_timeout: Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: Duration::from_secs(cfg.server.inactive_room_timeout),
         max_message_size: cfg.security.max_message_size,
+        max_outbound_message_size: cfg.security.max_outbound_message_size,
         max_connections_per_ip: cfg.security.max_connections_per_ip,
         require_metrics_auth: cfg.security.require_metrics_auth,
         metrics_auth_token: cfg.security.metrics_auth_token.clone(),

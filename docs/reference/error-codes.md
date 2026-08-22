@@ -28,6 +28,13 @@ what authorizes the missing sequence. On a congested connection a final error
 can be lost, so WebSocket close codes such as `4002 slow_consumer` are
 authoritative.
 
+The outbound message-size contract uses RFC 6455 close code `1009` with reason
+`outbound_message_too_large`. It means the server rejected one complete encoded
+application payload before writing any prefix because it exceeded the value
+advertised in `ProtocolInfo.max_outbound_message_size` (and the matching HTTP
+upgrade response header). Browser and v2 clients discover the value before
+connecting from `/v2/client-config` or `/v3/client-config`.
+
 ### Example Error Message
 
 ```json

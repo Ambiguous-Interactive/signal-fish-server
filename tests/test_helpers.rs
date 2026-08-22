@@ -195,7 +195,8 @@ pub fn test_server_config() -> ServerConfig {
         },
         empty_room_timeout: Duration::from_secs(5), // Fast timeout for tests
         inactive_room_timeout: Duration::from_secs(10),
-        max_message_size: 65536,     // 64KB default
+        max_message_size: 65536, // 64KB default
+        max_outbound_message_size: 8 * 1024 * 1024,
         max_signal_bytes: 16384,     // 16KB default
         max_connections_per_ip: 100, // Generous for tests
         require_metrics_auth: false, // No auth for tests

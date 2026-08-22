@@ -15,8 +15,9 @@ use crate::server::EnhancedGameServer;
 
 use super::connection::{record_outbound_probe_activity, PingProbeState};
 use super::sending::{
-    preflight_binary_fallback, send_single_message, send_single_message_ref,
+    preflight_binary_fallback_limited, send_single_message, send_single_message_ref,
     write_pending_unsupported_report, BinaryFallbackPreflight, SendAccounting, SendDisposition,
+    SendMessageError,
 };
 use super::{complete_before_optional_deadline, deadline_after};
 
@@ -203,6 +204,30 @@ pub(super) enum QueueWriteError {
     SocketClosed,
     SojournExpired,
     AccountabilityFailed,
+    OutboundMessageTooLarge,
+}
+
+fn classify_send_error(
+    error: SendMessageError,
+    player_id: &PlayerId,
+    close_signal: &ConnectionCloseSignal,
+) -> QueueWriteError {
+    match error {
+        SendMessageError::MessageTooLarge { size, max } => {
+            let initiated_close = close_signal.request_close(CloseReason::OutboundMessageTooLarge);
+            tracing::warn!(
+                %player_id,
+                size,
+                max,
+                initiated_close,
+                "Closing connection because an encoded outbound message exceeds the advertised limit"
+            );
+            QueueWriteError::OutboundMessageTooLarge
+        }
+        SendMessageError::SocketClosed | SendMessageError::Materialization => {
+            QueueWriteError::SocketClosed
+        }
+    }
 }
 
 /// Whether a queued item belongs to the live writer loop or the bounded final
@@ -298,10 +323,10 @@ async fn write_queued_report<F, Fut>(
     receiver: &OutboundReceiver,
     mut report: DeliveryReportPayload,
     write: F,
-) -> Result<SendDisposition, ()>
+) -> Result<SendDisposition, SendMessageError>
 where
     F: FnOnce(Arc<ServerMessage>) -> Fut,
-    Fut: Future<Output = Result<SendDisposition, ()>>,
+    Fut: Future<Output = Result<SendDisposition, SendMessageError>>,
 {
     receiver.prepare_report_for_wire(&mut report);
     let per_class = report.per_class;
@@ -340,14 +365,19 @@ pub(super) async fn send_queued(
     let metadata = queued.metadata;
     let write_started_at = Instant::now();
     let recipient_format = receiver.game_data_format();
+    let max_outbound_message_size = server.config().max_outbound_message_size;
     let fallback_preflight = match &queued.payload {
-        OutboundPayload::Message(message) => {
-            preflight_binary_fallback(message, recipient_format, None)
-        }
-        OutboundPayload::Data(delivery) => preflight_binary_fallback(
+        OutboundPayload::Message(message) => preflight_binary_fallback_limited(
+            message,
+            recipient_format,
+            None,
+            max_outbound_message_size,
+        ),
+        OutboundPayload::Data(delivery) => preflight_binary_fallback_limited(
             delivery.message(),
             recipient_format,
             delivery.relay_frame_cache(),
+            max_outbound_message_size,
         ),
         OutboundPayload::DeliveryReport(_) => BinaryFallbackPreflight::NotNeeded,
     };
@@ -377,7 +407,15 @@ pub(super) async fn send_queued(
     let recipient_supports_v3 = receiver.supports_v3();
     let recipient_format = receiver.game_data_format();
     let write = async {
-        if flush_before && write_pending_unsupported_report(sender, receiver, player_id).await? {
+        if flush_before
+            && write_pending_unsupported_report(
+                sender,
+                receiver,
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?
+        {
             record_outbound_probe_activity(ping_probe_state, Instant::now());
         }
         let disposition = match queued.payload {
@@ -424,7 +462,18 @@ pub(super) async fn send_queued(
                     )
                 })
                 .await?;
-                if write_pending_unsupported_report(sender, receiver, player_id).await? {
+                if disposition == SendDisposition::Written {
+                    accounting.complete_written();
+                    record_outbound_probe_activity(ping_probe_state, Instant::now());
+                }
+                if write_pending_unsupported_report(
+                    sender,
+                    receiver,
+                    player_id,
+                    max_outbound_message_size,
+                )
+                .await?
+                {
                     record_outbound_probe_activity(ping_probe_state, Instant::now());
                 }
                 disposition
@@ -433,7 +482,9 @@ pub(super) async fn send_queued(
         Ok(disposition)
     };
     let result = if max_sojourn.is_zero() {
-        write.await.map_err(|()| QueueWriteError::SocketClosed)
+        write
+            .await
+            .map_err(|error| classify_send_error(error, player_id, close_signal))
     } else {
         complete_selected_write(
             deadline,
@@ -444,25 +495,60 @@ pub(super) async fn send_queued(
             max_sojourn,
         )
         .await?
-        .map_err(|()| QueueWriteError::SocketClosed)
+        .map_err(|error| classify_send_error(error, player_id, close_signal))
     };
-    let disposition = result?;
-    if disposition == SendDisposition::Written {
-        accounting.complete_written();
-        record_outbound_probe_activity(ping_probe_state, Instant::now());
-        #[cfg(feature = "trace-validation")]
-        if let Some(delivery_id) = trace_write {
-            close_signal.finish_trace_write(delivery_id, write_phase == WritePhase::CloseFlush);
+    let disposition = match result {
+        Ok(disposition) => disposition,
+        Err(QueueWriteError::OutboundMessageTooLarge) => {
+            accounting.complete_rejected_before_write();
+            return Err(QueueWriteError::OutboundMessageTooLarge);
         }
-    } else {
+        Err(error) => return Err(error),
+    };
+    finish_send_accounting(
+        disposition,
+        &mut accounting,
+        ping_probe_state,
+        close_signal,
+        #[cfg(feature = "trace-validation")]
+        trace_write,
+        write_phase,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_send_accounting(
+    disposition: SendDisposition,
+    accounting: &mut SendAccounting<'_>,
+    ping_probe_state: &watch::Sender<PingProbeState>,
+    close_signal: &ConnectionCloseSignal,
+    #[cfg(feature = "trace-validation")] trace_write: Option<u64>,
+    write_phase: WritePhase,
+) {
+    if disposition != SendDisposition::Written {
         #[cfg(feature = "trace-validation")]
         close_signal.record_trace(
             crate::trace_validation::DeliveryTraceAction::Unsupported,
             None,
             Some("writer-accounted-drop"),
         );
+        return;
     }
-    Ok(())
+
+    if accounting.is_resolved() {
+        return;
+    }
+
+    accounting.complete_written();
+    record_outbound_probe_activity(ping_probe_state, Instant::now());
+    #[cfg(feature = "trace-validation")]
+    if let Some(delivery_id) = trace_write {
+        close_signal.finish_trace_write(delivery_id, write_phase == WritePhase::CloseFlush);
+    }
+
+    #[cfg(not(feature = "trace-validation"))]
+    let _ = (close_signal, write_phase);
 }
 
 #[cfg(test)]
@@ -543,6 +629,61 @@ mod tests {
         let mut probe = DeliveryReportPayload::default();
         receiver.prepare_report_for_wire(&mut probe);
         probe.per_class
+    }
+
+    #[cfg(feature = "trace-validation")]
+    fn trace_actions(trace: &crate::trace_validation::DeliveryTraceRecorder) -> Vec<String> {
+        let mut bytes = Vec::new();
+        trace
+            .write_jsonl_to(&mut bytes)
+            .expect("serialize captured trace");
+        String::from_utf8(bytes)
+            .expect("trace JSONL is UTF-8")
+            .lines()
+            .filter_map(|line| {
+                let record: serde_json::Value =
+                    serde_json::from_str(line).expect("valid trace JSON record");
+                (record["kind"] == "event")
+                    .then(|| record["action"].as_str().expect("event action").to_string())
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "trace-validation")]
+    #[tokio::test]
+    async fn written_report_with_resolved_accounting_is_not_traced_as_unsupported() {
+        let server = test_server().await;
+        let (_tx, receiver) = channel(1, 1);
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let trace = Arc::new(
+            crate::trace_validation::DeliveryTraceRecorder::new("queued-report", 1)
+                .expect("valid trace recorder"),
+        );
+        let (close, _listener) = ConnectionCloseSignal::channel_with_trace(Arc::clone(&trace));
+        let mut accounting = SendAccounting::new(
+            &receiver,
+            &server,
+            &probe_state,
+            PlayerId::from_u128(1),
+            None,
+        );
+        accounting.complete_written();
+
+        finish_send_accounting(
+            SendDisposition::Written,
+            &mut accounting,
+            &probe_state,
+            &close,
+            None,
+            WritePhase::Live,
+        );
+
+        assert!(
+            !trace_actions(&trace)
+                .iter()
+                .any(|action| action == "Unsupported"),
+            "an already-accounted queued delivery report must remain a successful write"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -739,8 +880,11 @@ mod tests {
         let mut failed_report = DeliveryReportPayload::default();
         failed_report.per_class.volatile.dropped = 2;
         assert_eq!(
-            write_queued_report(&receiver, failed_report, |_| async { Err(()) }).await,
-            Err(())
+            write_queued_report(&receiver, failed_report, |_| async {
+                Err(SendMessageError::SocketClosed)
+            })
+            .await,
+            Err(SendMessageError::SocketClosed)
         );
         assert_eq!(
             report_frontier(&receiver),

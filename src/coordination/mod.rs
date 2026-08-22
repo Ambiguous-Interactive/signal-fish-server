@@ -324,8 +324,8 @@ impl RoomEventSequencer {
 
 /// Why the server requested a connection be closed.
 ///
-/// Every reason maps to a distinct RFC 6455 private-range WebSocket close
-/// code ([`Self::websocket_close_code`]) carried on the close frame, so a
+/// Every reason maps to a distinct RFC 6455 WebSocket close code
+/// ([`Self::websocket_close_code`]) carried on the close frame, so a
 /// client that observes only the stream termination — the farewell `Error`
 /// frame may be undeliverable on a congested socket — can still attribute
 /// the disconnect (issue #136, F1).
@@ -352,6 +352,10 @@ pub enum CloseReason {
     /// deleted by maintenance. This is terminal: the deleted room cannot be
     /// resumed through a stale local assignment or reconnection token.
     RoomInactive,
+    /// A fully encoded server message exceeded the configured outbound
+    /// aggregate payload limit. No prefix of that application message was
+    /// handed to the WebSocket sink.
+    OutboundMessageTooLarge,
     /// The connection was unregistered server-side (explicit disconnect,
     /// normal teardown). Socket tasks should flush whatever is already
     /// queued and exit instead of lingering until a socket timeout.
@@ -361,8 +365,9 @@ pub enum CloseReason {
 impl CloseReason {
     /// The WebSocket close code carried on this connection's close frame.
     ///
-    /// RFC 6455 reserves 4000-4999 for private application use; the exact
-    /// assignments below are part of the documented protocol surface
+    /// RFC 6455 reserves 4000-4999 for private application use and defines
+    /// 1009 for an oversized message; the exact assignments below are part of
+    /// the documented protocol surface
     /// (docs/protocol.md, "Close codes") and must never be renumbered:
     /// clients switch on them to attribute a disconnect without needing the
     /// (best-effort) farewell `Error` frame to have survived the congested
@@ -375,6 +380,10 @@ impl CloseReason {
             Self::ActivityTimeout => 4003,
             Self::IdleTimeout => 4004,
             Self::RoomInactive => 4005,
+            // RFC 6455's standard "message too big" code. Unlike the private
+            // operational reasons above, this condition has an exact standard
+            // close-code meaning clients already understand.
+            Self::OutboundMessageTooLarge => 1009,
             // A plain unregistration (leave, replaced connection, normal
             // teardown) is a normal closure, not an application fault.
             Self::Unregistered => 1000,
@@ -391,6 +400,7 @@ impl CloseReason {
             Self::ActivityTimeout => "activity_timeout",
             Self::IdleTimeout => "idle_timeout",
             Self::RoomInactive => "room_inactive",
+            Self::OutboundMessageTooLarge => "outbound_message_too_large",
             Self::Unregistered => "unregistered",
         }
     }
@@ -4853,8 +4863,8 @@ mod tests {
         assert_eq!(listener.requested_reason(), Some(CloseReason::Shutdown));
     }
 
-    /// The RFC 6455 private-range close-code assignments are documented
-    /// protocol surface (docs/protocol.md "Close codes"): pin every mapping
+    /// The RFC 6455 close-code assignments are documented protocol surface
+    /// (docs/protocol.md "Close codes"): pin every mapping
     /// exactly so a renumbering cannot slip through, and pin the reason
     /// strings' close-frame constraints (non-empty, stable, ≤123 bytes).
     #[test]
@@ -4866,6 +4876,11 @@ mod tests {
             (CloseReason::ActivityTimeout, 4003, "activity_timeout"),
             (CloseReason::IdleTimeout, 4004, "idle_timeout"),
             (CloseReason::RoomInactive, 4005, "room_inactive"),
+            (
+                CloseReason::OutboundMessageTooLarge,
+                1009,
+                "outbound_message_too_large",
+            ),
             (CloseReason::Unregistered, 1000, "unregistered"),
         ];
         for (reason, code, text) in expectations {

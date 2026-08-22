@@ -15,9 +15,10 @@ use signal_fish_server::config::{
 };
 use signal_fish_server::security::token_binding::TokenBindingScheme;
 use signal_fish_server::websocket::{
-    create_router, create_router_with_origin_policy, create_standalone_router, websocket_handler,
-    websocket_handler_v3, websocket_route_v3, websocket_route_v3_with_origin_policy,
-    WEBSOCKET_REQUEST_ID_HEADER, WEBSOCKET_UPGRADE_OUTCOME_HEADER,
+    client_config_route, create_router, create_router_with_origin_policy, create_standalone_router,
+    websocket_handler, websocket_handler_v3, websocket_route_v3,
+    websocket_route_v3_with_origin_policy, WEBSOCKET_REQUEST_ID_HEADER,
+    WEBSOCKET_UPGRADE_OUTCOME_HEADER,
 };
 use std::{
     fs,
@@ -289,6 +290,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         env: "SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE",
         path: "security.max_message_size",
         default: Some("65536"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__MAX_OUTBOUND_MESSAGE_SIZE",
+        path: "security.max_outbound_message_size",
+        default: Some("8388608"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES",
@@ -1439,6 +1445,47 @@ async fn test_health_endpoint_returns_ok() {
     response.assert_text("OK");
 }
 
+#[tokio::test]
+async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
+    let mut config = test_server_config();
+    config.max_outbound_message_size = 12_345;
+    let server =
+        test_helpers::create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let enhanced_router = create_router("https://game.example").with_state(server.clone());
+    let app = axum::Router::new()
+        .nest("/v2", enhanced_router)
+        .route("/v3/client-config", client_config_route())
+        .with_state(server)
+        .layer(
+            signal_fish_server::security::OriginPolicy::parse("https://game.example")
+                .expect("origin policy parses")
+                .cors_layer(),
+        );
+    let test_server = axum_test::TestServer::new(app);
+
+    for path in ["/v2/client-config", "/v3/client-config"] {
+        let response = test_server
+            .get(path)
+            .add_header(
+                axum::http::header::ORIGIN,
+                axum::http::HeaderValue::from_static("https://game.example"),
+            )
+            .await;
+        response
+            .assert_status_ok()
+            .assert_header(axum::http::header::CACHE_CONTROL, "no-store")
+            .assert_header(
+                axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                "https://game.example",
+            );
+        assert_eq!(
+            response.json::<serde_json::Value>(),
+            serde_json::json!({"max_outbound_message_size": 12_345}),
+            "{path} must expose the same version-neutral pre-connect limit"
+        );
+    }
+}
+
 // ===========================================================================
 // Metrics endpoint tests
 // ===========================================================================
@@ -2329,6 +2376,32 @@ fn test_config_validation_scenarios() {
             Box::new(|c: &mut Config| {
                 c.security.require_metrics_auth = false;
                 c.security.max_signal_bytes = 0;
+            }),
+            false,
+        ),
+        (
+            "max_outbound_message_size of zero → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.max_outbound_message_size = 0;
+            }),
+            false,
+        ),
+        (
+            "max_outbound_message_size at portable maximum → passes",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.max_outbound_message_size =
+                    signal_fish_server::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE;
+            }),
+            true,
+        ),
+        (
+            "max_outbound_message_size above portable maximum → fails",
+            Box::new(|c: &mut Config| {
+                c.security.require_metrics_auth = false;
+                c.security.max_outbound_message_size =
+                    signal_fish_server::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE + 1;
             }),
             false,
         ),

@@ -2,8 +2,8 @@
 
 use super::defaults::{
     default_client_auth_mode, default_cors_origins, default_max_connections_per_ip,
-    default_max_message_size, default_max_signal_bytes, default_require_auth,
-    default_token_binding_subprotocol,
+    default_max_message_size, default_max_outbound_message_size, default_max_signal_bytes,
+    default_require_auth, default_token_binding_subprotocol,
 };
 use crate::security::token_binding::TokenBindingScheme;
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub struct SecurityConfig {
     /// Authentication token for metrics endpoint (if required)
     #[serde(default)]
     pub metrics_auth_token: Option<String>,
-    /// Maximum WebSocket message size in bytes.
+    /// Maximum inbound WebSocket message size in bytes.
     ///
     /// Enforced twice, at two layers: messages over this value get a polite
     /// `MessageTooLarge` error frame from the application-level check, and the
@@ -39,6 +39,17 @@ pub struct SecurityConfig {
     /// the polite path the authority near the limit). Must be greater than 0.
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
+    /// Maximum aggregate application payload, in bytes, of one outbound
+    /// WebSocket text or binary message after protocol encoding and before
+    /// WebSocket framing.
+    ///
+    /// The complete encoded message is checked before it is handed to the
+    /// WebSocket sink, so transport fragmentation cannot bypass this limit.
+    /// An oversized message is never partially written: the affected
+    /// connection closes with WebSocket code 1009 instead. Must be in
+    /// `1..=67108864` so every advertised value is portable.
+    #[serde(default = "default_max_outbound_message_size")]
+    pub max_outbound_message_size: usize,
     /// Maximum serialized size in bytes of a v3 `Signal` payload (the opaque
     /// `signal` value, measured as canonical JSON).
     ///
@@ -72,6 +83,7 @@ impl Default for SecurityConfig {
             require_metrics_auth: default_require_auth(),
             metrics_auth_token: None,
             max_message_size: default_max_message_size(),
+            max_outbound_message_size: default_max_outbound_message_size(),
             max_signal_bytes: default_max_signal_bytes(),
             max_connections_per_ip: default_max_connections_per_ip(),
             transport: TransportSecurityConfig::default(),

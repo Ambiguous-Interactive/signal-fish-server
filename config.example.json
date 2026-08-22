@@ -43,6 +43,7 @@
     "enforce_app_id_allowlist": false,
     "require_metrics_auth": false,
     "max_message_size": 65536,
+    "max_outbound_message_size": 8388608,
     "max_signal_bytes": 16384,
     "max_connections_per_ip": 24,
     "transport": {

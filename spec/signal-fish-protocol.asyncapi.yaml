@@ -1174,7 +1174,8 @@ components:
       description: >-
         Payload is a flattened ProtocolInfoPayload (newtype variant). v3 fields
         protocol_version / min_protocol_version / max_protocol_version /
-        transports are absent on negotiated v2 connections.
+        transports / max_outbound_message_size are absent on negotiated v2
+        connections.
       properties:
         type: { const: ProtocolInfo }
         data:
@@ -1205,6 +1206,14 @@ components:
               items:
                 type: string
                 enum: [websocket]
+            max_outbound_message_size:
+              type: integer
+              minimum: 1
+              maximum: 67108864
+              description: >-
+                Maximum complete encoded WebSocket application payload, in
+                bytes, this deployment sends to the client. Counted after
+                Signal Fish protocol encoding and before WebSocket framing.
       required: [type, data]
     AuthenticationError:
       type: object

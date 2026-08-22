@@ -460,7 +460,9 @@ pub enum ServerMessage {
         rate_limits: RateLimitInfo,
     },
     /// SDK/protocol compatibility details advertised after the app-ID handshake.
-    ProtocolInfo(ProtocolInfoPayload),
+    /// Boxed to keep rare negotiation metadata from enlarging every relayed
+    /// game-data message.
+    ProtocolInfo(Box<ProtocolInfoPayload>),
     /// App-ID handshake rejected (frozen legacy wire name).
     AuthenticationError {
         /// Error message
