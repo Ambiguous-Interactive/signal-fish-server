@@ -961,29 +961,23 @@ impl EnhancedGameServer {
                     // of peer traffic after the joiner already received its
                     // authoritative baseline. Only a failed FIFO job needs the
                     // terminal-generation repair below.
-                    if !repair_uncommitted {
-                        panic_recovery
+                    if repair_uncommitted {
+                        let repair_guard = panic_recovery
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .room_event_guard
-                            .take();
+                            .clone();
+                        if let Some(repair_guard) = repair_guard {
+                            self.repair_panicked_join_publication_locked(
+                                *player_id,
+                                room.id,
+                                membership_stamp.epoch,
+                                repair_guard,
+                            )
+                            .await;
+                        }
                         return;
                     }
-                    let repair_guard = panic_recovery
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .room_event_guard
-                        .clone();
-                    if let Some(repair_guard) = repair_guard {
-                        self.repair_panicked_join_publication_locked(
-                            *player_id,
-                            room.id,
-                            membership_stamp.epoch,
-                            repair_guard,
-                        )
-                        .await;
-                    }
-                    return;
                 }
                 panic_recovery
                     .lock()

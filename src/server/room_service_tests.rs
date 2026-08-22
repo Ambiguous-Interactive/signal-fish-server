@@ -6186,6 +6186,11 @@ async fn draining_server_allows_existing_room_join() {
         Some(room.id),
         "drain-canceled peer publication must retain the accepted route"
     );
+    assert_eq!(
+        authoritative.lobby_state,
+        LobbyState::Lobby,
+        "drain-canceled peer publication must still run the join success epilogue"
+    );
 }
 
 #[tokio::test]
