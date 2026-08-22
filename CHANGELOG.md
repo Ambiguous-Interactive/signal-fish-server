@@ -35,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constructors and exhaustive matches must handle the new fields and variants.
 - Refresh compatible Rust dependencies across the server, fuzz, and native
   reference-client lockfiles, including `uuid` 1.24.1, `saphyr` 0.0.12, and
-  `webrtc`/`rtc` 0.20.3, and update `taiki-e/install-action` to 2.85.13.
+  `webrtc`/`rtc` 0.20.3, update `taiki-e/install-action` to 2.86.3, and update
+  `docker/setup-buildx-action` to 4.3.0.
 
 ### Fixed
 

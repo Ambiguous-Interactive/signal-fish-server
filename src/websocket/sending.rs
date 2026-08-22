@@ -211,6 +211,7 @@ impl RelayFrameCache {
 /// benchmark sends the same returned Axum frame to an in-memory ledger, so the
 /// measurement cannot drift from v2 field stripping, the v3 binary envelope,
 /// or MessagePack-to-JSON fallback.
+#[cfg(any(test, feature = "allocation-tracking"))]
 pub(super) fn materialize_game_data_frame(
     message: &ServerMessage,
     recipient_supports_v3: bool,
