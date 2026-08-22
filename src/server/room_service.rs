@@ -881,14 +881,19 @@ impl EnhancedGameServer {
                 player_info.is_ready = false;
                 player_info.epoch = Some(membership_stamp.epoch);
                 player_info.seq = Some(membership_stamp.seq);
-                let committed = if current_room.lobby_state == LobbyState::Finalized {
-                    self.publish_finalized_join_membership(
-                        &current_room,
-                        *player_id,
-                        player_info,
-                        room_event_guard,
+                let (committed, repair_uncommitted) = if current_room.lobby_state
+                    == LobbyState::Finalized
+                {
+                    (
+                        self.publish_finalized_join_membership(
+                            &current_room,
+                            *player_id,
+                            player_info,
+                            room_event_guard,
+                        )
+                        .await,
+                        true,
                     )
-                    .await
                 } else {
                     let player_joined = Arc::new(ServerMessage::PlayerJoined {
                         player: player_info,
@@ -942,10 +947,28 @@ impl EnhancedGameServer {
                             })
                         }),
                     );
-                    let _ = completion.await;
-                    committed.load(Ordering::Acquire)
+                    let publication_failed = match completion.await {
+                        Ok(_) => false,
+                        Err(error) => {
+                            tracing::error!(%player_id, room_id = %room.id, %error, "Owned room-join publication job failed");
+                            true
+                        }
+                    };
+                    (committed.load(Ordering::Acquire), publication_failed)
                 };
                 if !committed {
+                    // A predicate/drain cancellation is an intentional absence
+                    // of peer traffic after the joiner already received its
+                    // authoritative baseline. Only a failed FIFO job needs the
+                    // terminal-generation repair below.
+                    if !repair_uncommitted {
+                        panic_recovery
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .room_event_guard
+                            .take();
+                        return;
+                    }
                     let repair_guard = panic_recovery
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1505,6 +1528,10 @@ impl EnhancedGameServer {
         let server_for_job_recovery = Arc::clone(self);
         #[cfg(test)]
         let owned_room_operation_panic = Arc::clone(&self.owned_room_operation_panic);
+        // Retain the exact lease outside the FIFO job as well. If the lane
+        // itself fails after dropping its copy, outer recovery must still run
+        // before a later room mutation can overtake missing leave stages.
+        let room_event_guard_for_recovery = room_event_guard.clone();
         let completion = self.message_coordinator.enqueue_room_event(
             room_event_guard,
             Box::new(move || {
@@ -1728,6 +1755,7 @@ impl EnhancedGameServer {
                 tracing::error!(%player_id, %room_id, %repair_error, "Failed to repair room-leave lifecycle after publication panic");
             }
         }
+        drop(room_event_guard_for_recovery);
         #[cfg(test)]
         if terminal_response_committed.load(Ordering::Acquire) {
             self.trigger_owned_room_operation_panic_for_test(

@@ -971,6 +971,12 @@ struct DrainTriggerCoordinator {
     try_send_calls: AtomicUsize,
     room_left_send_calls: AtomicUsize,
     player_left_broadcast_calls: AtomicUsize,
+    fail_next_room_event_completion: AtomicBool,
+    room_event_guard_released: Arc<Notify>,
+    resume_failed_room_event: Arc<Notify>,
+    pause_next_player_left_broadcast: AtomicBool,
+    player_left_broadcast_started: Arc<Notify>,
+    resume_player_left_broadcast: Arc<Notify>,
     clients: RwLock<HashMap<PlayerId, ClientDeliveryHandle>>,
     room_players: RwLock<HashMap<RoomId, HashSet<PlayerId>>>,
 }
@@ -985,6 +991,12 @@ impl DrainTriggerCoordinator {
             try_send_calls: AtomicUsize::new(0),
             room_left_send_calls: AtomicUsize::new(0),
             player_left_broadcast_calls: AtomicUsize::new(0),
+            fail_next_room_event_completion: AtomicBool::new(false),
+            room_event_guard_released: Arc::new(Notify::new()),
+            resume_failed_room_event: Arc::new(Notify::new()),
+            pause_next_player_left_broadcast: AtomicBool::new(false),
+            player_left_broadcast_started: Arc::new(Notify::new()),
+            resume_player_left_broadcast: Arc::new(Notify::new()),
             clients: RwLock::new(HashMap::new()),
             room_players: RwLock::new(HashMap::new()),
         }
@@ -1050,6 +1062,19 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         mutation_guard: RoomEventMutationGuard,
         job: RoomEventJob,
     ) -> RoomEventCompletion {
+        if self
+            .fail_next_room_event_completion
+            .swap(false, Ordering::AcqRel)
+        {
+            let guard_released = Arc::clone(&self.room_event_guard_released);
+            let resume = Arc::clone(&self.resume_failed_room_event);
+            return Box::pin(async move {
+                drop(mutation_guard);
+                guard_released.notify_one();
+                resume.notified().await;
+                anyhow::bail!("injected room-event completion failure")
+            });
+        }
         self.room_events.enqueue(mutation_guard, job)
     }
 
@@ -1144,6 +1169,14 @@ impl MessageCoordinator for DrainTriggerCoordinator {
             && matches!(message.as_ref(), ServerMessage::PlayerLeft { .. })
         {
             self.begin_drain_once();
+        }
+        if matches!(message.as_ref(), ServerMessage::PlayerLeft { .. })
+            && self
+                .pause_next_player_left_broadcast
+                .swap(false, Ordering::AcqRel)
+        {
+            self.player_left_broadcast_started.notify_one();
+            self.resume_player_left_broadcast.notified().await;
         }
         if *drain.borrow() || !should_send() {
             return Ok(false);
@@ -2605,6 +2638,154 @@ async fn correlated_reconnect_panic_after_identity_move_uses_the_still_routed_id
         "mid-reassignment reconnect panic",
     )
     .await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::SpectatorLeftSend,
+    ));
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig::default(),
+        Arc::clone(&coordinator) as Arc<dyn MessageCoordinator>,
+    )
+    .await;
+    coordinator.attach_server(&server);
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48013".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &player_id,
+            "outer-leave-failure".to_string(),
+            None,
+            "leaver".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let room_code = match timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("leaver baseline arrives")
+        .expect("leaver channel remains open")
+        .as_ref()
+    {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("expected leaver RoomJoined, got {other:?}"),
+    };
+    let room_id = server
+        .get_client_room(&player_id)
+        .await
+        .expect("leaver is routed to the room");
+    let (peer_id, mut peer_receiver) =
+        register_client(&server, "127.0.0.1:48014".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &peer_id,
+            "outer-leave-failure".to_string(),
+            Some(room_code),
+            "peer".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
+        .await
+        .expect("peer baseline arrives")
+        .expect("peer channel remains open");
+    assert!(matches!(
+        peer_baseline.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    coordinator
+        .fail_next_room_event_completion
+        .store(true, Ordering::Release);
+    coordinator
+        .pause_next_player_left_broadcast
+        .store(true, Ordering::Release);
+    let operation_id = uuid::Uuid::from_u128(0x48013);
+    let mut leave = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .leave_room_operation(&player_id, Some(operation_id))
+                .await;
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        coordinator.room_event_guard_released.notified(),
+    )
+    .await
+    .expect("injected completion drops the FIFO job's guard");
+
+    let sequencer = Arc::clone(&coordinator.room_events);
+    let mut waiting_mutation = tokio::spawn(async move { sequencer.lock(room_id).await });
+    assert!(
+        timeout(Duration::from_millis(25), &mut waiting_mutation)
+            .await
+            .is_err(),
+        "outer leave recovery must retain the exact room gate"
+    );
+
+    coordinator.resume_failed_room_event.notify_one();
+    timeout(
+        Duration::from_secs(1),
+        coordinator.player_left_broadcast_started.notified(),
+    )
+    .await
+    .expect("outer recovery reaches the PlayerLeft fallback");
+    assert!(
+        timeout(Duration::from_millis(25), &mut waiting_mutation)
+            .await
+            .is_err(),
+        "outer leave recovery must retain the room gate through fallback publication"
+    );
+    coordinator.resume_player_left_broadcast.notify_one();
+    let acquired = timeout(Duration::from_secs(1), waiting_mutation)
+        .await
+        .expect("later mutation acquires after recovery")
+        .expect("later mutation task remains healthy");
+    drop(acquired);
+    timeout(Duration::from_secs(1), &mut leave)
+        .await
+        .expect("leave recovery completes")
+        .expect("leave task remains healthy");
+
+    expect_correlated_internal_operation_failure(
+        &mut receiver,
+        operation_id,
+        "outer leave completion failure",
+    )
+    .await;
+    let mut saw_left = false;
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let message = peer_receiver
+                .recv()
+                .await
+                .expect("peer channel remains open");
+            match message.as_ref() {
+                ServerMessage::PlayerLeft {
+                    player_id: departed,
+                    ..
+                } if *departed == player_id => saw_left = true,
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                } => {
+                    assert!(saw_left, "authority clear must follow PlayerLeft");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("peer observes leave recovery before the room gate opens");
 }
 
 #[tokio::test]
@@ -5944,7 +6125,7 @@ async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
 async fn draining_server_allows_existing_room_join() {
     let server = create_test_server().await;
     let (creator, _creator_rx) = register_client(&server, "127.0.0.1:48011".parse().unwrap()).await;
-    server
+    let room = server
         .database
         .create_room(
             "test-game".to_string(),
@@ -5990,6 +6171,21 @@ async fn draining_server_allows_existing_room_join() {
         }
         other => panic!("expected RoomJoined, got {other:?}"),
     }
+    let authoritative = server
+        .database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("joined room lookup succeeds")
+        .expect("joined room remains present");
+    assert!(
+        authoritative.players.contains_key(&joiner),
+        "drain-canceled peer publication must retain the accepted membership"
+    );
+    assert_eq!(
+        server.get_client_room(&joiner).await,
+        Some(room.id),
+        "drain-canceled peer publication must retain the accepted route"
+    );
 }
 
 #[tokio::test]
