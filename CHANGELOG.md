@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix the public `CircuitBreaker` opening on isolated failures: a successful
+  closed-state call resets the failure streak so only genuinely consecutive
+  failures trip the threshold, half-open recovery admits exactly one probe and
+  rejects concurrent calls without executing their operations, and an abandoned
+  probe admits a fresh probe instead of wedging half-open admission
+  (issue #403).
 - Fix in-memory distributed lock leases starting before local lock contention
   completed, which could make a newly acquired or extended lease immediately
   expire and allow overlapping room-capacity or game-start mutations.
