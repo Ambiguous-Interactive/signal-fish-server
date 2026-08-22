@@ -1471,10 +1471,13 @@ async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
                 axum::http::HeaderValue::from_static("https://game.example"),
             )
             .await;
-        response.assert_status_ok().assert_header(
-            axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            "https://game.example",
-        );
+        response
+            .assert_status_ok()
+            .assert_header(axum::http::header::CACHE_CONTROL, "no-store")
+            .assert_header(
+                axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                "https://game.example",
+            );
         assert_eq!(
             response.json::<serde_json::Value>(),
             serde_json::json!({"max_outbound_message_size": 12_345}),

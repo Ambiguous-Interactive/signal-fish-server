@@ -37,10 +37,25 @@ impl BinaryFallbackPreflight {
     }
 }
 
+#[cfg(any(test, feature = "allocation-tracking"))]
 pub(super) fn preflight_binary_fallback(
     message: &ServerMessage,
     recipient_format: GameDataEncoding,
     relay_cache: Option<&RelayFrameCache>,
+) -> BinaryFallbackPreflight {
+    preflight_binary_fallback_limited(
+        message,
+        recipient_format,
+        relay_cache,
+        crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
+    )
+}
+
+pub(super) fn preflight_binary_fallback_limited(
+    message: &ServerMessage,
+    recipient_format: GameDataEncoding,
+    relay_cache: Option<&RelayFrameCache>,
+    max_outbound_message_size: usize,
 ) -> BinaryFallbackPreflight {
     let ServerMessage::GameDataBinary {
         encoding, payload, ..
@@ -50,6 +65,18 @@ pub(super) fn preflight_binary_fallback(
     };
     if *encoding == recipient_format {
         return BinaryFallbackPreflight::NotNeeded;
+    }
+    // Decoding a compact MessagePack tree into `serde_json::Value` can amplify
+    // one input byte into a heap node. Requiring the opaque source to fit the
+    // outbound budget bounds both node count and string storage before any
+    // fallback allocation. This affects format conversion only; direct binary
+    // forwarding remains zero-copy and is checked against its encoded frame.
+    if payload.len() > max_outbound_message_size {
+        return BinaryFallbackPreflight::Undeliverable(format!(
+            "binary fallback input is {} bytes, exceeding the decode budget of {} bytes",
+            payload.len(),
+            max_outbound_message_size,
+        ));
     }
     if let Some(cache) = relay_cache.filter(|cache| cache.kind == RelayFrameKind::Binary) {
         return match cache.decoded_fallback.get_or_init(|| {
@@ -432,7 +459,6 @@ pub(super) async fn send_immediate_server_message(
             }
         })?;
 
-    debug_assert!(payload.len() <= max_outbound_message_size);
     sender
         .send(Message::Text(payload.into()))
         .await
@@ -1991,6 +2017,32 @@ mod tests {
             None,
         )
         .is_unsupported());
+    }
+
+    #[test]
+    fn binary_fallback_decode_budget_rejects_compact_tree_before_cache_allocation() {
+        let payload =
+            rmp_serde::to_vec(&vec![None::<u8>; 4_096]).expect("encode compact MessagePack array");
+        assert!(
+            payload.len() > 64,
+            "fixture must exceed the tiny decode budget"
+        );
+        let message = ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: Bytes::from(payload),
+            seq: Some(1),
+            epoch: Some(1),
+        };
+        let cache = RelayFrameCache::for_message(&message).expect("binary message has cache");
+
+        let preflight =
+            preflight_binary_fallback_limited(&message, GameDataEncoding::Json, Some(&cache), 64);
+        assert!(preflight.is_unsupported());
+        assert!(
+            cache.decoded_fallback.get().is_none(),
+            "over-budget compact input must be rejected before allocating and retaining a Value tree"
+        );
     }
 
     #[test]

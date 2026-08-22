@@ -441,7 +441,9 @@ suffix with `/client-config` (`GET /v2/client-config` or
 HTTP CORS policy and returns
 `{"max_outbound_message_size":8388608}`. Configure the WebSocket receive limit
 to at least that value before connecting. Valid deployment values are
-`1..=67108864`, an exact portable range for JavaScript and 32-bit clients.
+`1..=67108864`, an exact portable range for JavaScript and 32-bit clients. The
+response uses `Cache-Control: no-store` so a deployment change cannot leave a
+client with a stale receive ceiling.
 
 The limit counts the complete JSON UTF-8 text payload or MessagePack binary
 payload after Signal Fish protocol encoding and before WebSocket framing.
@@ -456,6 +458,12 @@ silently truncated.
 If the connection was already closing for a distinct operational cause such as
 shutdown or slow-consumer eviction, that earlier causal close code remains
 authoritative and an oversized best-effort farewell is simply omitted.
+
+For negotiated binary-format conversion, the opaque source payload must also
+fit the outbound cap before the server decodes it into a JSON value tree. This
+bounds compact MessagePack allocation amplification. An over-budget conversion
+uses the existing `UnsupportedGameDataFormat` delivery-report/advisory path;
+direct binary forwarding remains zero-copy and is judged by its encoded frame.
 
 ### AuthenticationError
 

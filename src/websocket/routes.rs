@@ -2,7 +2,8 @@ use crate::database::DatabaseConfig;
 use crate::security::{OriginPolicy, OriginPolicyError};
 use crate::server::{EnhancedGameServer, ServerConfig};
 use axum::extract::{Extension, State};
-use axum::response::Json;
+use axum::http::header::CACHE_CONTROL;
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use serde::Serialize;
@@ -218,12 +219,14 @@ struct ClientConfigResponse {
 }
 
 /// Browser-readable pre-connect metadata shared by every protocol version.
-async fn client_config(
-    State(server): State<Arc<EnhancedGameServer>>,
-) -> Json<ClientConfigResponse> {
-    Json(ClientConfigResponse {
-        max_outbound_message_size: server.config().max_outbound_message_size,
-    })
+async fn client_config(State(server): State<Arc<EnhancedGameServer>>) -> Response {
+    (
+        [(CACHE_CONTROL, "no-store")],
+        Json(ClientConfigResponse {
+            max_outbound_message_size: server.config().max_outbound_message_size,
+        }),
+    )
+        .into_response()
 }
 
 fn parse_origin_policy_or_deny(cors_origins: &str) -> OriginPolicy {

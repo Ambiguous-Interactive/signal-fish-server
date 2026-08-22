@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/v3/client-config` endpoints and also advertised in the HTTP upgrade response
   and negotiated-v3 `ProtocolInfo`. Bounded serialization rejects oversized
   text, binary, snapshot, and replay messages whole and closes the affected
-  connection with RFC 6455 code `1009` instead of truncating them (issue #399).
+  connection with RFC 6455 code `1009` instead of truncating them; binary
+  fallback decoding is separately bounded against compact-tree allocation
+  amplification (issue #399).
 - Add negotiated protocol-v3 room-operation correlation. Clients that request
   and receive the `room_operation_ids` capability can wrap join, leave,
   reconnect, spectator-join, and spectator-leave commands with a UUID and
