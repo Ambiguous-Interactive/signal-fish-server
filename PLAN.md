@@ -127,8 +127,6 @@ correctness evidence appears.
 - #396 — continue the correctness and performance sweep through named,
   gameplay-facing seams; require a deterministic counterexample or current
   profile before changing production behavior.
-- #403 — make the public circuit breaker require genuinely consecutive
-  failures, and audit whether half-open recovery admits more than one probe.
 - #318 — use representative cross-platform measurements to choose the next
   hook-latency reduction without weakening fail-closed checks.
 - #378 — consolidate duplicate hosted link validation only with an atomic

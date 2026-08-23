@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -290,8 +291,26 @@ struct CircuitBreakerInner {
 }
 
 /// Circuit breaker extension seam for fallible coordination operations.
+///
+/// Contract (issue #403):
+/// - In the [`CircuitState::Closed`] state, only *consecutive* failures count
+///   toward `failure_threshold`; any success resets the streak.
+/// - After the open timeout elapses, exactly one call is admitted as a probe.
+///   Concurrent calls are rejected while a probe is outstanding.
+/// - A successful probe closes the circuit; a failed probe reopens it.
+///
+/// Concurrency notes: exactly one probe is admitted at a time and only that
+/// probe resolves the half-open state, so its outcome stays authoritative even
+/// if a straggler call admitted while [`CircuitState::Closed`] resolves while
+/// the probe runs. A closed-state straggler success resets the streak only
+/// when the circuit is still closed; a closed-state straggler failure still
+/// counts toward the streak but cannot steal the half-open transition.
 pub struct CircuitBreaker {
     inner: Arc<Mutex<CircuitBreakerInner>>,
+    /// Tracks whether a half-open probe is currently admitted. Stored outside
+    /// the mutex so an RAII guard can release it synchronously when the probe
+    /// future is dropped or cancelled without resolving.
+    probe_in_flight: AtomicBool,
     failure_threshold: u32,
     timeout: Duration,
 }
@@ -304,6 +323,7 @@ impl CircuitBreaker {
                 failure_count: 0,
                 last_failure_time: None,
             })),
+            probe_in_flight: AtomicBool::new(false),
             failure_threshold,
             timeout,
         }
@@ -315,6 +335,7 @@ impl CircuitBreaker {
         E: std::fmt::Debug + From<anyhow::Error>,
     {
         // Check circuit state (single lock acquisition for all state reads/transitions)
+        let probing;
         {
             let mut inner = self.inner.lock().await;
             match inner.state {
@@ -333,26 +354,66 @@ impl CircuitBreaker {
                     inner.state = CircuitState::HalfOpen;
                 }
                 CircuitState::HalfOpen | CircuitState::Closed => {
-                    // Allow limited calls through / Normal operation
+                    // HalfOpen falls through to single-probe admission below;
+                    // Closed allows normal operation.
                 }
             }
+
+            if inner.state == CircuitState::HalfOpen && !self.acquire_probe_slot() {
+                return Err(E::from(anyhow::anyhow!(
+                    "Circuit breaker is half-open: a probe is already in flight"
+                )));
+            }
+            probing = inner.state == CircuitState::HalfOpen;
         }
+
+        // Release the probe slot on every exit path, including cancellation of
+        // this future while the operation is still pending. A free slot in the
+        // half-open state lets a later call be admitted as a fresh probe, so an
+        // abandoned probe can never wedge the breaker closed.
+        struct ProbeSlotGuard<'a> {
+            slot: &'a AtomicBool,
+        }
+
+        impl Drop for ProbeSlotGuard<'_> {
+            fn drop(&mut self) {
+                self.slot.store(false, Ordering::Release);
+            }
+        }
+
+        let _probe_slot_guard = probing.then(|| ProbeSlotGuard {
+            slot: &self.probe_in_flight,
+        });
 
         // Execute operation (lock is NOT held during the operation itself)
         match operation.await {
             Ok(result) => {
                 let mut inner = self.inner.lock().await;
-                if inner.state == CircuitState::HalfOpen {
+                if probing {
+                    // The probe outcome is authoritative: close the circuit
+                    // even if a concurrent straggler failure reopened it while
+                    // this probe ran.
                     inner.state = CircuitState::Closed;
                     inner.failure_count = 0;
+                } else if inner.state == CircuitState::Closed {
+                    // A closed-state success keeps the failure streak honest:
+                    // only consecutive failures may open the circuit.
+                    inner.failure_count = 0;
                 }
+                // Non-probe successes never resolve Open or HalfOpen: only the
+                // outstanding probe owns those transitions.
                 Ok(result)
             }
             Err(error) => {
                 let mut inner = self.inner.lock().await;
                 inner.failure_count = inner.failure_count.saturating_add(1);
 
-                if inner.failure_count >= self.failure_threshold {
+                // A straggler failure from the closed epoch counts toward the
+                // streak but must not resolve someone else's half-open probe.
+                let straggler_failure_during_probe =
+                    inner.state == CircuitState::HalfOpen && !probing;
+                if !straggler_failure_during_probe && inner.failure_count >= self.failure_threshold
+                {
                     inner.state = CircuitState::Open;
                     inner.last_failure_time = Some(chrono::Utc::now());
                 }
@@ -360,6 +421,14 @@ impl CircuitBreaker {
                 Err(error)
             }
         }
+    }
+
+    /// Admit at most one half-open probe. Returns `false` when another probe
+    /// is already outstanding.
+    fn acquire_probe_slot(&self) -> bool {
+        self.probe_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     pub async fn get_state(&self) -> CircuitState {
