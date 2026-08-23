@@ -128,7 +128,7 @@ impl EnvelopeEncryptor {
     /// Encrypt the provided plaintext bytes and return an `EncryptedSecret` bundle.
     ///
     /// The bundle's `key_id` and `created_at` are authenticated as AES-GCM
-    /// associated data (see [`metadata_aad`]), so a stored bundle cannot be
+    /// associated data (see `metadata_aad`), so a stored bundle cannot be
     /// re-dated or swapped under a same-`key_id` record without failing
     /// decryption.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<EncryptedSecret, EncryptionError> {
