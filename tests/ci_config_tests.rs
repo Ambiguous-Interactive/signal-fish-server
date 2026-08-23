@@ -22804,7 +22804,7 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         stdout.contains("[pre-commit] Completed in"),
         "the preflight must report its total runtime.\nstdout: {stdout}"
     );
-    assert_profile_timing_coverage(&stdout, "clean worktree preflight", &[]);
+    assert_profile_timing_coverage(&stdout, "clean worktree preflight", &[], &[]);
 
     // 3) A metadata commit exercises the PASS path and the staged-content
     //    preload emitter, which runs outside Invoke-Check.
@@ -22834,16 +22834,24 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         &metadata_stdout,
         "metadata worktree preflight",
         &["Staged content preload"],
+        &["Staged content preload"],
     );
 }
 
 /// Every executed check (`PASS:`/`SKIP:`/`FAIL:` outcome lines) must emit one
 /// `[pre-commit] PROFILE: <name> <ms>ms` diagnostic, changed-file discovery
 /// must always report, and no other emitters may appear beyond the explicitly
-/// allowlisted ones that run outside `Invoke-Check`. Applies to runs without
-/// `-EnforceBudget`: an enforced over-budget failure is reported after the
-/// timing snapshot and deliberately has no PROFILE entry.
-fn assert_profile_timing_coverage(stdout: &str, context: &str, extra_emitters: &[&str]) {
+/// allowlisted ones that run outside `Invoke-Check`. Emitters listed in
+/// `required_extra` must additionally be present, so their diagnostics cannot
+/// silently disappear. Applies to runs without `-EnforceBudget`: an enforced
+/// over-budget failure is reported after the timing snapshot and deliberately
+/// has no PROFILE entry.
+fn assert_profile_timing_coverage(
+    stdout: &str,
+    context: &str,
+    allowed_extra: &[&str],
+    required_extra: &[&str],
+) {
     let mut result_names: Vec<String> = Vec::new();
     let mut profile_names: Vec<String> = Vec::new();
     for line in stdout.lines() {
@@ -22892,11 +22900,18 @@ fn assert_profile_timing_coverage(stdout: &str, context: &str, extra_emitters: &
         "{context}: changed-file discovery dominates hook runtime and must always report its \
          timing under SIGNAL_FISH_HOOK_PROFILE=1.\nstdout: {stdout}"
     );
+    for name in required_extra {
+        assert!(
+            profile_names.iter().any(|entry| entry == name),
+            "{context}: required diagnostic emitter {name:?} must report under \
+             SIGNAL_FISH_HOOK_PROFILE=1.\nstdout: {stdout}"
+        );
+    }
     for name in &profile_names {
         assert!(
             result_names.contains(name)
                 || name == "Changed file discovery"
-                || extra_emitters.contains(&name.as_str()),
+                || allowed_extra.contains(&name.as_str()),
             "{context}: unexpected profiling emitter {name:?}; extend the allowlist only for \
              diagnostics that legitimately run outside Invoke-Check.\nstdout: {stdout}"
         );
