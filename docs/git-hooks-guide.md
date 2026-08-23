@@ -105,6 +105,51 @@ worktree hook preflights, LLM file-size/example policies, markdownlint,
 workflow hygiene, doc/changelog consistency, doc policy tests, Dockerfile
 portability, advisory checks, and README badge checks.
 
+## Measured Runtime Budget
+
+The hook enforces a 1,000 ms target (`HookBudgetMs`) as a warning with the
+slowest checks named; `-EnforceBudget` turns it into a failure. The target
+applies to warm runs of normal paths — a real staged commit and the
+`-Worktree` preflight. The first run after opening a repository pays a one-time
+Git index refresh whose cost belongs to the filesystem, not the hook, and can
+exceed the target on cold container volumes.
+
+Per-check timing diagnostics are opt-in and deterministic:
+
+```bash
+SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive \
+    -File scripts/hooks/pre-commit.ps1 -Worktree
+```
+
+On Windows, set the variable for the session first:
+`$env:SIGNAL_FISH_HOOK_PROFILE = "1"`.
+
+Every executed check or phase then prints one
+`[pre-commit] PROFILE: <check> <ms>ms`
+line. The runtime contract test
+`test_pre_commit_profile_diagnostics_contract_when_pwsh_available` keeps this
+boundary working: profiling stays silent unless requested, and every check
+reports its own timing so slow checks identify themselves on any machine.
+
+Reference baseline (Linux devcontainer, 2026-08-23, warm):
+
+| Scenario | Total | Changed-file discovery | Panic-pattern scan |
+| --- | --- | --- | --- |
+| Staged commit path (one production Rust file) | ~400 ms | ~65 ms | ~90 ms |
+| Worktree preflight, clean tree | ~750 ms | ~540-630 ms | skipped |
+| Worktree preflight, small panic-relevant diff | ~900 ms | ~540 ms | ~115 ms |
+| PowerShell startup alone | ~225 ms | — | — |
+
+Worktree discovery is dominated by `git status` refreshing the index over
+policy paths; its cost scales with directory count on the local filesystem
+(~4-5 ms per directory on the reference container volume), not with file
+count. Measured dead ends on that volume: `core.untrackedCache` made status
+25-45% slower, and the fsmonitor daemon is unsuitable for ephemeral containers.
+Do not reintroduce either without new evidence.
+
+macOS and Windows baselines are pending; record them with the same command and
+table shape before revisiting the budget.
+
 ## Markdownlint
 
 Markdownlint remains fail-closed in local CI and CI. It is intentionally not run
@@ -146,10 +191,12 @@ Expected hook index mode is `100755`.
 
 ### Slow Hook
 
-If a hook exceeds the sub-second budget, inspect the hook source for slow
-commands, per-file process fanout, or unbatched staged-blob reads. Move slow
-semantic checks to `scripts/run-local-ci.sh` or CI. The static test suite
-rejects common slow commands in `.githooks/*` and `scripts/hooks/*.ps1`.
+If a hook exceeds the sub-second budget, profile it with
+`SIGNAL_FISH_HOOK_PROFILE=1` (see "Measured Runtime Budget") and inspect the
+slowest reported check for slow commands, per-file process fanout, or
+unbatched staged-blob reads. Move slow semantic checks to
+`scripts/run-local-ci.sh` or CI. The static test suite rejects common slow
+commands in `.githooks/*` and `scripts/hooks/*.ps1`.
 
 ### Bypass
 
