@@ -170,6 +170,15 @@ impl DashboardMetricsCache {
         }
     }
 
+    /// Fetch one dashboard sample from storage.
+    ///
+    /// Consistency note: each query below takes its own `rooms.read()`
+    /// acquisition, so a room created or deleted between them can produce a
+    /// sample whose `active_rooms` disagrees with its percentile entries by
+    /// the rooms moved in that window. This is a bounded, self-healing skew in
+    /// a monitoring-only surface (the next refresh re-samples); unify the
+    /// three reads under one acquisition only if a consumer ever joins those
+    /// fields inside a single history entry.
     async fn fetch_snapshot(database: Arc<dyn GameDatabase>) -> Result<DashboardMetricsSnapshot> {
         let rooms_by_game = database.get_rooms_by_game().await?;
         let player_percentiles = database.get_player_count_percentiles().await?;

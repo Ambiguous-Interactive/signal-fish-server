@@ -183,6 +183,9 @@ pub struct EnhancedGameServer {
     /// Wakes drain-sensitive delivery paths so they can cancel backpressured
     /// normal traffic before it is enqueued after drain begins.
     shutdown_drain_tx: watch::Sender<bool>,
+    /// Rate-limits unauthorized-metrics-access warnings so anonymous request
+    /// loops cannot amplify operator log volume (issue #407).
+    metrics_rejection_log: crate::websocket::RejectionLogThrottle,
     /// Active real WebSocket handlers. During shutdown these stay registered
     /// until both socket halves have completed their bounded close path.
     active_socket_tasks: AtomicUsize,
@@ -472,11 +475,17 @@ impl EnhancedGameServer {
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
             shutdown_drain_deadline_ms: AtomicU64::new(0),
             shutdown_drain_tx,
+            metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
             active_socket_tasks: AtomicUsize::new(0),
             active_socket_tasks_notify: Notify::new(),
         });
 
         Ok(server)
+    }
+
+    /// Throttled warning channel for unauthorized metrics-scrape attempts.
+    pub(crate) fn metrics_rejection_log(&self) -> &crate::websocket::RejectionLogThrottle {
+        &self.metrics_rejection_log
     }
 
     pub async fn dashboard_metrics_view(&self) -> DashboardMetricsView {

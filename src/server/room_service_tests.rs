@@ -165,6 +165,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         dashboard_metrics_cache,
         shutdown_drain_deadline_ms: AtomicU64::new(0),
         shutdown_drain_tx,
+        metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
         active_socket_tasks: AtomicUsize::new(0),
         active_socket_tasks_notify: Notify::new(),
     })
@@ -219,7 +220,7 @@ async fn generated_room_code_collision_retries_instead_of_joining_existing_room(
     assert_eq!(race.room_code_retry_operations, 1);
     assert_eq!(race.room_code_retry_successes, 1);
     assert_eq!(race.room_code_retry_exhaustions, 0);
-    assert_eq!(race.room_code_retry_success_rate, 1.0);
+    assert_eq!(race.room_code_retry_success_rate, Some(1.0));
     assert_eq!(race.retry_attempts, 0, "generic retries stay independent");
     assert_eq!(race.retry_successes, 0, "generic retries stay independent");
     let rate_stats = server
@@ -402,7 +403,7 @@ async fn generated_room_code_retry_budget_exhaustion_is_bounded_and_observable()
     assert_eq!(race.room_code_retry_operations, 1);
     assert_eq!(race.room_code_retry_successes, 0);
     assert_eq!(race.room_code_retry_exhaustions, 1);
-    assert_eq!(race.room_code_retry_success_rate, 0.0);
+    assert_eq!(race.room_code_retry_success_rate, Some(0.0));
     let rate_stats = server
         .rate_limiter
         .get_player_stats(&creator)
@@ -1028,10 +1029,6 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
         self.inner.as_any()
-    }
-
-    async fn admin_user_exists(&self, email: &str) -> anyhow::Result<bool> {
-        self.inner.admin_user_exists(email).await
     }
 }
 
