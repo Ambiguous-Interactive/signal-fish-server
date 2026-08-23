@@ -439,10 +439,17 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-/// Describes the characters your deployment allows inside `player_name`.
+/// Describes the names your deployment allows inside `player_name`.
+///
+/// All length values are measured in UTF-8 **bytes**, not characters or
+/// Unicode scalar values: a 32-byte limit admits at most 10 three-byte CJK
+/// characters. Clients must pre-validate with the same unit to avoid
+/// server-side rejections of names that pass a character-count check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerNameRulesPayload {
+    /// Maximum accepted `player_name` size in UTF-8 bytes.
     pub max_length: usize,
+    /// Minimum accepted `player_name` size in UTF-8 bytes.
     pub min_length: usize,
     pub allow_unicode_alphanumeric: bool,
     pub allow_spaces: bool,

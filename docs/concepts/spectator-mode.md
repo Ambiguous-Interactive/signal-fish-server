@@ -25,6 +25,15 @@ room code, and a display name:
 All three fields are required. Unlike `JoinRoom`, you cannot create a
 room by spectating -- you must provide an existing `room_code`.
 
+`spectator_name` follows the same charset and byte-length rules as player
+names, but — unlike player names — it carries **no uniqueness contract**:
+several spectators may share (or visually match) a display name. This is
+deliberate. Spectator identity is non-authoritative display metadata, and
+spectator capacity is unbounded, so enforced uniqueness would let the first
+client to join under any name permanently block everyone else who uses it.
+Player names keep strict uniqueness because player identity gates gameplay
+authority; spectator names do not.
+
 ## Spectator Joined Response
 
 On success, the server sends a `SpectatorJoined` message with the current

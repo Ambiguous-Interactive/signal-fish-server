@@ -225,9 +225,15 @@ pub enum GameDataEncoding {
 }
 
 /// Server-advertised `player_name` validation rules.
+///
+/// Length values are UTF-8 **bytes**, not characters: a 32-byte limit admits
+/// at most 10 three-byte CJK characters, so pre-validate with the same unit
+/// or a name that fits by character count may still be rejected server-side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerNameRulesPayload {
+    /// Maximum accepted `player_name` size in UTF-8 bytes.
     pub max_length: usize,
+    /// Minimum accepted `player_name` size in UTF-8 bytes.
     pub min_length: usize,
     pub allow_unicode_alphanumeric: bool,
     pub allow_spaces: bool,
@@ -1371,6 +1377,8 @@ pub enum GameDataEncoding {
     MessagePack,
 }
 
+/// Server-advertised `player_name` validation rules. `max_length`/`min_length`
+/// are UTF-8 **bytes**, not characters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerNameRulesPayload {
     pub max_length: usize,

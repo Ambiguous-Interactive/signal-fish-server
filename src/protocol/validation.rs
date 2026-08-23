@@ -62,9 +62,11 @@ pub fn validate_game_name_with_config(name: &str, config: &ProtocolConfig) -> Re
     if name.is_empty() {
         return Err("Game name cannot be empty".to_string());
     }
+    // Length is measured in UTF-8 bytes, not characters, so multi-byte
+    // alphabets consume the budget faster than a character count suggests.
     if name.len() > config.max_game_name_length {
         return Err(format!(
-            "Game name too long (max {} characters)",
+            "Game name too long (max {} bytes)",
             config.max_game_name_length
         ));
     }
@@ -97,9 +99,11 @@ pub fn validate_player_name_with_config(name: &str, config: &ProtocolConfig) -> 
     if name.is_empty() {
         return Err("Player name cannot be empty".to_string());
     }
+    // Length is measured in UTF-8 bytes, not characters — the same unit
+    // `PlayerNameRulesPayload::max_length` advertises to clients.
     if name.len() > config.max_player_name_length {
         return Err(format!(
-            "Player name too long (max {} characters)",
+            "Player name too long (max {} bytes)",
             config.max_player_name_length
         ));
     }
@@ -297,6 +301,45 @@ mod tests {
     }
 
     // -- Max-players boundaries (validation.rs:107 `<`, :110 `>`) -------------
+
+    /// Data-driven: the advertised name limits are UTF-8 **bytes**, not
+    /// characters. A multi-byte name whose character count fits comfortably
+    /// but whose byte length exceeds the limit must be rejected (this is the
+    /// mismatch a client checking against a character reading of
+    /// `max_length` would get wrong), and the same name truncated under the
+    /// byte budget must be accepted.
+    #[test]
+    fn name_limits_are_measured_in_bytes_not_characters() {
+        let config = ProtocolConfig::default();
+        let cjk = "\u{6c34}"; // U+6C34 "water": one char, three UTF-8 bytes
+        assert_eq!(cjk.len(), 3);
+        assert_eq!(cjk.chars().count(), 1);
+
+        // Player names.
+        let max = config.max_player_name_length;
+        let over_budget_chars = max / 3 + 1;
+        let player_over = cjk.repeat(over_budget_chars);
+        assert!(
+            player_over.chars().count() <= max,
+            "fixture must fit by character count"
+        );
+        assert!(player_over.len() > max, "fixture must exceed by bytes");
+        assert!(validate_player_name_with_config(&player_over, &config).is_err());
+        let player_under = cjk.repeat(max / 3);
+        assert!(player_under.len() <= max);
+        assert!(validate_player_name_with_config(&player_under, &config).is_ok());
+
+        // Game names share the byte semantics (unicode alphanumerics allowed).
+        let game_max = config.max_game_name_length;
+        let game_over = cjk.repeat(game_max / 3 + 1);
+        assert!(game_over.chars().count() <= game_max);
+        assert!(game_over.len() > game_max);
+        assert!(validate_game_name_with_config(&game_over, &config).is_err());
+        assert!(
+            validate_game_name_with_config(&cjk.repeat(game_max / 3), &config).is_ok(),
+            "the same name within the byte budget is accepted"
+        );
+    }
 
     // -- Player-name uniqueness identity (validation.rs:145) ------------------
 
