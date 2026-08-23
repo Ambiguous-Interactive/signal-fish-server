@@ -23,6 +23,7 @@ pub(crate) mod prometheus;
 mod routes;
 mod sending;
 mod token_binding;
+mod upgrade_rejection_log;
 
 pub(crate) use sending::RelayFrameCache;
 
@@ -144,6 +145,7 @@ pub use routes::{
     try_create_standalone_router, try_websocket_route_v3, websocket_route_v3,
     websocket_route_v3_with_origin_policy,
 };
+pub(crate) use upgrade_rejection_log::UpgradeRejectionLogThrottle;
 
 /// Upper bound on each best-effort WebSocket close-path write.
 ///

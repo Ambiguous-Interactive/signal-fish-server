@@ -166,6 +166,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         shutdown_drain_deadline_ms: AtomicU64::new(0),
         shutdown_drain_tx,
         metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
+        upgrade_rejection_log: crate::websocket::UpgradeRejectionLogThrottle::new(),
         active_socket_tasks: AtomicUsize::new(0),
         active_socket_tasks_notify: Notify::new(),
     })
