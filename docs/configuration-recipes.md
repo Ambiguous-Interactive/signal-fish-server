@@ -235,7 +235,7 @@ What it does and how to enable it:
   below. A raw legacy binary frame is unauthorized whether or not fingerprint
   binding is enabled.
 
-> **Token binding requires TLS to authenticate.**
+> __Token binding requires TLS to authenticate.__
 > The connection key is derived from the WebSocket handshake key plus a
 > server-fresh challenge. Over plaintext `ws://`, both inputs are visible on
 > the wire, so a passive observer can derive the key and forge every proof —

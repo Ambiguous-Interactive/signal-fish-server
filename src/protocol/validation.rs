@@ -309,7 +309,7 @@ mod tests {
     /// case-insensitivity.
     #[test]
     fn visually_identical_name_spellings_cannot_coexist_in_a_room() {
-        const NFC_CAFE: &str = "caf\u{00e9}"; // c a f é (U+00E9)
+        const NFC_CAFE: &str = "café"; // c a f é (U+00E9)
         const NFD_CAFE: &str = "cafe\u{0301}"; // c a f e + combining acute
         assert_ne!(NFC_CAFE.as_bytes(), NFD_CAFE.as_bytes());
         const NFC_HANGUL: &str = "\u{ac01}"; // U+AC01 (precomposed syllable)
