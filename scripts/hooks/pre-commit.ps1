@@ -707,8 +707,8 @@ function Add-StagedContentPreload {
             $_ -eq "README.md"
         })
 
+    $preloadTimer = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $preloadTimer = [System.Diagnostics.Stopwatch]::StartNew()
         if ($preloadPaths.Count -gt $script:PreloadBatchThreshold) {
             Add-IndexTextCache -Pathspecs $preloadPaths
         }
@@ -716,6 +716,10 @@ function Add-StagedContentPreload {
         $script:PreloadError = $_.Exception.Message
     } finally {
         $preloadTimer.Stop()
+        [void]$script:CheckTimings.Add([pscustomobject]@{
+                Name = "Staged content preload"
+                ElapsedMilliseconds = [long]$preloadTimer.ElapsedMilliseconds
+            })
         Write-Profile -Name "Staged content preload" -ElapsedMilliseconds $preloadTimer.ElapsedMilliseconds
     }
 }

@@ -22713,6 +22713,198 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
 
 #[test]
 #[serial_test::serial]
+fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
+    let root = repo_root();
+    let hook = root.join("scripts/hooks/pre-commit.ps1");
+
+    // Throwaway clean repo so the worktree preflight sees a deterministic
+    // policy tree regardless of the developer's working state.
+    let temp = unique_temp_dir("hook-profile-e2e");
+    let dir = temp.path();
+
+    let git = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        Command::new("git").args(args).current_dir(dir).output()
+    };
+
+    let Ok(init) = git(&["init", "-q"]) else {
+        eprintln!("Skipping hook profile test because git is unavailable.");
+        return;
+    };
+    if !init.status.success() {
+        eprintln!("Skipping hook profile test because git init failed.");
+        return;
+    }
+    let _ = git(&["config", "user.email", "test@example.com"]);
+    let _ = git(&["config", "user.name", "Test"]);
+    let _ = git(&["config", "commit.gpgsign", "false"]);
+    // Seed one commit so worktree discovery's `git diff HEAD` probe has a
+    // valid revision, exactly like any real repository.
+    write_file(&dir.join("README.md"), "# profile probe\n");
+    assert!(git(&["add", "README.md"]).unwrap().status.success());
+    assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
+        .unwrap()
+        .status
+        .success());
+
+    let run_hook = |profile: bool| -> std::io::Result<std::process::Output> {
+        let mut command = Command::new("pwsh");
+        command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+            .arg(&hook)
+            .arg("-Worktree")
+            .current_dir(dir);
+        if profile {
+            command.env("SIGNAL_FISH_HOOK_PROFILE", "1");
+        } else {
+            command.env_remove("SIGNAL_FISH_HOOK_PROFILE");
+        }
+        command.output()
+    };
+
+    // 1) Profiling is opt-in: without SIGNAL_FISH_HOOK_PROFILE=1 the hook must
+    //    stay quiet so normal commits keep their output readable.
+    let quiet = match run_hook(false) {
+        Ok(output) => output,
+        Err(_) => {
+            eprintln!("Skipping hook profile test because pwsh is unavailable.");
+            return;
+        }
+    };
+    let quiet_stdout = String::from_utf8_lossy(&quiet.stdout);
+    assert!(
+        quiet.status.success(),
+        "clean-repo worktree preflight must pass.\nstdout: {quiet_stdout}\nstderr: {}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert!(
+        !quiet_stdout.contains("[pre-commit] PROFILE:"),
+        "per-check timing diagnostics must stay opt-in.\nstdout: {quiet_stdout}"
+    );
+
+    // 2) With profiling enabled, every executed check must report its own
+    //    timing with a machine-readable `<name> <ms>ms` shape. This is the
+    //    deterministic boundary issue #318 baselines rely on: per-check
+    //    timings stay available even when wall-clock totals vary between
+    //    machines, so slow checks identify themselves instead of the hook
+    //    needing an edit to investigate a regression.
+    let profiled = match run_hook(true) {
+        Ok(output) => output,
+        Err(_) => {
+            eprintln!("Skipping hook profile test because pwsh is unavailable.");
+            return;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&profiled.stdout);
+    assert!(
+        profiled.status.success(),
+        "clean-repo worktree preflight must pass.\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&profiled.stderr)
+    );
+    assert!(
+        stdout.contains("[pre-commit] Completed in"),
+        "the preflight must report its total runtime.\nstdout: {stdout}"
+    );
+    assert_profile_timing_coverage(&stdout, "clean worktree preflight", &[]);
+
+    // 3) A metadata commit exercises the PASS path and the staged-content
+    //    preload emitter, which runs outside Invoke-Check.
+    write_file(&dir.join("README.md"), "# probe v2\n");
+    assert!(git(&["add", "README.md"]).unwrap().status.success());
+    let metadata = match run_hook(true) {
+        Ok(output) => output,
+        Err(_) => {
+            eprintln!("Skipping hook profile test because pwsh is unavailable.");
+            return;
+        }
+    };
+    let metadata_stdout = String::from_utf8_lossy(&metadata.stdout);
+    assert!(
+        metadata.status.success(),
+        "metadata worktree preflight must pass.\nstdout: {metadata_stdout}\nstderr: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    assert!(
+        metadata_stdout
+            .lines()
+            .any(|line| line.starts_with("PASS: ")),
+        "the badge policy must pass on probe content so the PASS path is \
+         exercised.\nstdout: {metadata_stdout}"
+    );
+    assert_profile_timing_coverage(
+        &metadata_stdout,
+        "metadata worktree preflight",
+        &["Staged content preload"],
+    );
+}
+
+/// Every executed check (`PASS:`/`SKIP:`/`FAIL:` outcome lines) must emit one
+/// `[pre-commit] PROFILE: <name> <ms>ms` diagnostic, changed-file discovery
+/// must always report, and no other emitters may appear beyond the explicitly
+/// allowlisted ones that run outside `Invoke-Check`. Applies to runs without
+/// `-EnforceBudget`: an enforced over-budget failure is reported after the
+/// timing snapshot and deliberately has no PROFILE entry.
+fn assert_profile_timing_coverage(stdout: &str, context: &str, extra_emitters: &[&str]) {
+    let mut result_names: Vec<String> = Vec::new();
+    let mut profile_names: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        if let Some(outcome) = line
+            .strip_prefix("PASS: ")
+            .or_else(|| line.strip_prefix("SKIP: "))
+            .or_else(|| line.strip_prefix("FAIL: "))
+        {
+            let name = outcome.split(" (").next().unwrap_or(outcome).trim();
+            assert!(
+                !name.is_empty(),
+                "{context}: outcome lines must carry a check name.\nstdout: {stdout}"
+            );
+            result_names.push(name.to_string());
+        } else if let Some(rest) = line.strip_prefix("[pre-commit] PROFILE: ") {
+            let (name, elapsed) = rest.rsplit_once(' ').unwrap_or_else(|| {
+                panic!("{context}: malformed PROFILE line {line:?}.\nstdout: {stdout}")
+            });
+            let milliseconds = elapsed.strip_suffix("ms").unwrap_or_else(|| {
+                panic!("{context}: PROFILE line {line:?} must end in `<n>ms`.\nstdout: {stdout}")
+            });
+            assert!(
+                milliseconds.parse::<u64>().is_ok(),
+                "{context}: PROFILE line {line:?} must carry an integer millisecond value.\n\
+                 stdout: {stdout}"
+            );
+            profile_names.push(name.to_string());
+        }
+    }
+
+    assert!(
+        !result_names.is_empty(),
+        "{context}: the worktree preflight always executes its checks.\nstdout: {stdout}"
+    );
+    for name in &result_names {
+        assert!(
+            profile_names.contains(name),
+            "{context}: executed check {name:?} must report per-check timing under \
+             SIGNAL_FISH_HOOK_PROFILE=1.\nstdout: {stdout}"
+        );
+    }
+    assert!(
+        profile_names
+            .iter()
+            .any(|name| name == "Changed file discovery"),
+        "{context}: changed-file discovery dominates hook runtime and must always report its \
+         timing under SIGNAL_FISH_HOOK_PROFILE=1.\nstdout: {stdout}"
+    );
+    for name in &profile_names {
+        assert!(
+            result_names.contains(name)
+                || name == "Changed file discovery"
+                || extra_emitters.contains(&name.as_str()),
+            "{context}: unexpected profiling emitter {name:?}; extend the allowlist only for \
+             diagnostics that legitimately run outside Invoke-Check.\nstdout: {stdout}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn test_pre_push_workflow_direct_script_detector_matches_assignment_edge_cases_when_pwsh_available()
 {
     let root = repo_root();
