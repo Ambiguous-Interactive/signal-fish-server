@@ -145,12 +145,21 @@ pub fn validate_player_name_with_config(name: &str, config: &ProtocolConfig) -> 
 /// Case-insensitive, canonically-composed identity key for player names.
 ///
 /// Uniqueness must compare what players *see*, not raw bytes: the same visible
-/// name has many byte-distinct spellings (NFC `café` vs NFD `cafe` + combining
-/// acute), and comparing raw (or lowercased-raw) bytes let an impersonator join
-/// a room under a visually identical name. Composing to NFC first collapses
-/// those spellings to one byte string; the subsequent lowercase keeps the
-/// historical ASCII case-insensitivity. The transform is deterministic, so
-/// byte-equal inputs stay byte-equal after it.
+/// name can have byte-distinct spellings, and comparing raw (or
+/// lowercased-raw) bytes let an impersonator join a room under a visually
+/// identical name while it was "taken". Composing to NFC first collapses those
+/// spellings to one byte string; the subsequent lowercase keeps the historical
+/// ASCII case-insensitivity. The transform is deterministic, so byte-equal
+/// inputs stay byte-equal after it.
+///
+/// Reachability note: under the default charset rules the live gap is
+/// Hangul — precomposed syllables are alphanumeric while their decomposed
+/// jamo sequences are too (e.g. U+AC01 vs U+1100 U+1161 U+11A8). Latin NFD
+/// spellings (`cafe` + combining acute) are already rejected by the charset
+/// validator because combining marks are not `char::is_alphanumeric`, but an
+/// operator who allowlists such marks via `allowed_symbols` /
+/// `additional_allowed_characters` reopens that spelling surface, so the
+/// comparison must stay composition-aware for every configuration.
 fn canonical_player_name_key(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     name.nfc().collect::<String>().to_lowercase()
@@ -293,8 +302,11 @@ mod tests {
 
     /// Data-driven: every pair of byte-distinct spellings that render
     /// identically must collide under `validate_player_name_uniqueness`, and
-    /// genuinely different names must not. The NFC/NFD rows pin the canonical
-    /// composition contract; the ASCII rows pin case-insensitivity.
+    /// genuinely different names must not. The NFC/NFD rows pin the
+    /// composition contract (the function is also the guard for operator
+    /// configurations whose custom symbol allowlists admit combining marks
+    /// that the default charset rules would reject); the ASCII rows pin
+    /// case-insensitivity.
     #[test]
     fn visually_identical_name_spellings_cannot_coexist_in_a_room() {
         const NFC_CAFE: &str = "caf\u{00e9}"; // c a f é (U+00E9)

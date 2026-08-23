@@ -241,8 +241,10 @@ What it does and how to enable it:
 > the wire, so a passive observer can derive the key and forge every proof —
 > in that deployment proofs provide replay ordering only, not authentication.
 > Serve token-bound traffic over built-in TLS or reverse-proxy-terminated
-> wss:// (the server warns at startup when it detects this combination), and
-> use `required=true` where clients must not be able to opt out.
+> wss://, and use `required=true` where clients must not be able to opt out.
+> The startup warning fires whenever binding is enabled but optional without
+> *built-in* TLS — including safe reverse-proxy deployments, which the server
+> cannot see; treat it as a reminder to verify the wire is encrypted.
 
 ### v2 wire contract
 

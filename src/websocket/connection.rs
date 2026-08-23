@@ -2095,7 +2095,7 @@ pub(super) async fn handle_socket(
                                             let error_message = err.to_string();
                                             tracing::warn!(
                                                 %active_player_id,
-                                                app_id = ?app_id,
+                                                app_id = %app_id,
                                                 ?sdk_version,
                                                 ?platform,
                                                 error = %error_message,
@@ -2251,7 +2251,7 @@ pub(super) async fn handle_socket(
                                     tracing::info!(
                                         %active_player_id,
                                         app_name = %info.name,
-                                        app_id = ?app_id,
+                                        app_id = %app_id,
                                         ?sdk_version,
                                         ?platform,
                                         protocol_version = negotiated_version,
@@ -2343,7 +2343,7 @@ pub(super) async fn handle_socket(
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!(%active_player_id, app_id = ?app_id, "Public app ID rejected: {:?}", e);
+                                    tracing::warn!(%active_player_id, %app_id, "Public app ID rejected: {:?}", e);
 
                                     // Send error response.
                                     // The AppIdExpired, AppIdRevoked, and AppIdSuspended

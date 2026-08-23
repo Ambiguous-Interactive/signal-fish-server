@@ -405,9 +405,18 @@ pub fn should_warn_missing_signaling_tls(config: &Config) -> bool {
 /// `false` while the wire is still encrypted.
 #[must_use]
 pub fn should_warn_unauthenticated_token_binding(config: &Config) -> bool {
+    should_warn_unauthenticated_token_binding_with(config, cfg!(feature = "tls"))
+}
+
+/// [`should_warn_unauthenticated_token_binding`] with the compile flag made
+/// explicit, so tests can drive the real predicate across both build modes.
+fn should_warn_unauthenticated_token_binding_with(
+    config: &Config,
+    tls_feature_compiled: bool,
+) -> bool {
     config.security.transport.token_binding.enabled
         && !config.security.transport.token_binding.required
-        && !built_in_tls_active(config, cfg!(feature = "tls"))
+        && !built_in_tls_active(config, tls_feature_compiled)
 }
 
 fn built_in_tls_active(config: &Config, tls_feature_compiled: bool) -> bool {
@@ -486,28 +495,13 @@ mod tests {
             config.security.transport.token_binding.enabled = binding_enabled;
             config.security.transport.token_binding.required = binding_required;
             config.security.transport.tls.enabled = tls_enabled;
-            // Same expression as `should_warn_unauthenticated_token_binding`,
-            // parameterized over the compile flag exactly like the TURN
-            // warning truth table above.
             assert_eq!(
-                config.security.transport.token_binding.enabled
-                    && !config.security.transport.token_binding.required
-                    && !built_in_tls_active(&config, tls_feature_compiled),
+                should_warn_unauthenticated_token_binding_with(&config, tls_feature_compiled),
                 expected,
                 "binding.enabled={binding_enabled}, binding.required={binding_required}, \
                  tls.enabled={tls_enabled}, tls_feature_compiled={tls_feature_compiled}"
             );
         }
-        // The published function agrees with the simulated expression under
-        // this build's actual feature set.
-        let mut config = Config::default();
-        config.security.require_metrics_auth = false;
-        config.security.transport.token_binding.enabled = true;
-        config.security.transport.tls.enabled = true;
-        assert_eq!(
-            should_warn_unauthenticated_token_binding(&config),
-            !built_in_tls_active(&config, cfg!(feature = "tls"))
-        );
     }
 
     #[cfg(not(feature = "tls"))]

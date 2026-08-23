@@ -59,8 +59,10 @@ pub const MAX_APP_ID_LENGTH: usize = 256;
 ///
 /// Rejects control characters (newlines, ANSI escapes, C1 controls) — the
 /// classic log-forging vector on `%`-formatted `tracing` fields — and
-/// unbounded lengths. Every other string is accepted verbatim so existing
-/// allowlist configurations keep resolving exactly as before.
+/// unbounded lengths. Configured allowlist entries are held to the same gate
+/// at startup, so a configured ID either resolves exactly as before or the
+/// server refuses to start; resolution-time behavior for every accepted
+/// configuration is unchanged.
 #[must_use]
 pub fn app_id_is_log_safe(app_id: &str) -> bool {
     app_id.len() <= MAX_APP_ID_LENGTH && app_id.chars().all(|ch| !ch.is_control())
@@ -123,7 +125,20 @@ impl AppIdAllowlist {
         let has_rate_limited_app = entries.iter().any(|e| e.rate_limit_per_minute.is_some());
 
         let mut apps = HashMap::with_capacity(entries.len());
-        for entry in entries {
+        for (index, entry) in entries.into_iter().enumerate() {
+            // Fail fast on entries the resolution gate could never accept:
+            // otherwise one misconfigured ID silently fails every handshake
+            // for that app with INVALID_APP_ID, indistinguishable from
+            // unknown-ID probing. Startup is the only place this can be loud.
+            if !app_id_is_log_safe(&entry.app_id) {
+                tracing::error!(
+                    entry_index = index,
+                    app_id_length = entry.app_id.len(),
+                    "Configured app ID is not acceptable (control characters or over \
+                     MAX_APP_ID_LENGTH bytes); it could never authenticate"
+                );
+                return Err(AuthError::InvalidAppId);
+            }
             let per_minute = entry
                 .rate_limit_per_minute
                 .unwrap_or(DEFAULT_RATE_LIMIT_PER_MINUTE);
@@ -289,20 +304,18 @@ mod tests {
                 ),
                 "open policy must reject {app_id:?}"
             );
-            let enforcing = AppIdAllowlist::new(vec![AppRegistrationEntry {
+            // The constructor fails fast on the same gate, so a misconfigured
+            // entry can never silently fail every later handshake.
+            let constructed = AppIdAllowlist::new(vec![AppRegistrationEntry {
                 app_id: (*app_id).to_string(),
                 app_name: "Configured".to_string(),
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
-            }])
-            .expect("constructor does not vet charset; resolution does");
+            }]);
             assert!(
-                matches!(
-                    enforcing.resolve_app_id(app_id).await,
-                    Err(AuthError::InvalidAppId)
-                ),
-                "enforcing policy must reject {app_id:?}"
+                matches!(constructed, Err(AuthError::InvalidAppId)),
+                "constructor must reject {app_id:?}"
             );
         }
 

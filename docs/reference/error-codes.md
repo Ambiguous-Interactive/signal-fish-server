@@ -76,7 +76,7 @@ names do not imply client credentials.
 | Error Code | Description |
 |---|---|
 | `UNAUTHORIZED` | Access denied by a policy that uses this legacy wire code. |
-| `INVALID_APP_ID` | The provided application ID is not recognized. |
+| `INVALID_APP_ID` | The provided application ID is not recognized, or it is not acceptable (control characters such as newlines or ANSI escapes, or more than 256 bytes). |
 | `MISSING_APP_ID` | The required app-ID handshake was not completed before an application message. |
 | `AUTHENTICATION_TIMEOUT` | Authentication input was not observed strictly before the exclusive authentication deadline. |
 | `CONNECTION_IDLE_TIMEOUT` | The connection was closed because no inbound WebSocket frame was observed strictly before the exclusive idle deadline (`websocket.idle_timeout_secs`). Send periodic `Ping` messages to keep the connection alive. |
@@ -305,9 +305,11 @@ not relayed.
 
 ### App-ID admission failures (`UNAUTHORIZED`, `INVALID_APP_ID`)
 
-Verify that your `app_id` is present in the configured allowlist. Send an
-`Authenticate` message before attempting room operations when app-ID allowlist
-enforcement is enabled. A recognized ID is still public and replayable; see
+Verify that your `app_id` is present in the configured allowlist and is itself
+acceptable: control characters (newlines, ANSI escapes) or a length over 256
+bytes are rejected with `INVALID_APP_ID` in every mode. Send an `Authenticate`
+message before attempting room operations when app-ID allowlist enforcement is
+enabled. A recognized ID is still public and replayable; see
 [Application identification](../authentication.md).
 
 ### Spectator join failed

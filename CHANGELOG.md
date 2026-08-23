@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a startup warning when token binding is enabled but optional without an
+  effective built-in TLS listener: over plaintext `ws://` the v2 connection
+  key is publicly derivable, so proofs provide replay ordering only, not
+  authentication. Required mode already refused to start in that configuration.
 - Add a configurable aggregate outbound WebSocket payload limit, discoverable
   before connection through the CORS-enabled `/v2/client-config` and
   `/v3/client-config` endpoints and also advertised in the HTTP upgrade response
@@ -38,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ClientMessage::Authenticate` variant and correlated room-operation variants
   to the public client/server message enums. Downstream struct-variant
   constructors and exhaustive matches must handle the new fields and variants.
+- **Breaking:** Reject app IDs containing control characters (newlines, ANSI
+  escapes) or exceeding 256 bytes with `INVALID_APP_ID` in every app-ID policy
+  mode, and refuse to start when a configured allowlist entry fails the same
+  gate. Previously an open policy accepted any string verbatim into log lines,
+  where newlines or ANSI escapes could forge operator-facing logs.
+  Structured logs for the anomalous post-handshake `Authenticate` warning and
+  the pre-validation `room.join` span now render `app_id`, `game_name`, and
+  `requested_room_code` as Debug values (quoted with escapes) instead of raw
+  Display strings; all other `app_id` log sites keep their previous shape.
 - Refresh compatible Rust dependencies across the server, fuzz, and native
   reference-client lockfiles, including `uuid` 1.24.1, `saphyr` 0.0.12, and
   `webrtc`/`rtc` 0.20.3, update `taiki-e/install-action` to 2.86.3, and update
@@ -48,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix player-name uniqueness accepting canonically decomposed (NFD) spellings
+  of an already-taken name: comparison now composes both sides to NFC before
+  case folding, so byte-distinct spellings of one visible name (Hangul
+  syllables vs jamo sequences, or decomposed spellings under configurations
+  that allow combining marks) can no longer coexist in a room.
 - Fix the public `CircuitBreaker` opening on isolated failures: a successful
   closed-state call resets the failure streak so only genuinely consecutive
   failures trip the threshold, half-open recovery admits exactly one probe and

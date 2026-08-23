@@ -115,8 +115,10 @@ Migrate to the canonical names. Supplying both a canonical and legacy name in
 the same JSON source rejects that source and installs an enforced empty
 allowlist, so falling back to a lower-priority open config cannot fail open.
 Canonical individual-field environment overrides still have final precedence.
-Duplicate `app_id` entries are rejected rather than using last-entry-wins
-limits. The canonical environment override is:
+Duplicate `app_id` entries — and entries that could never authenticate (control
+characters such as newlines or ANSI escapes, or more than 256 bytes) — are
+rejected at startup rather than using last-entry-wins limits or failing every
+later handshake silently. The canonical environment override is:
 
 ```bash
 SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true
