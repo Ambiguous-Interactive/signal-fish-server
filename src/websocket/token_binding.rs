@@ -700,6 +700,36 @@ mod tests {
         ));
     }
 
+    /// A *present* fingerprint that differs from the server-verified one must
+    /// fail with the specific mismatch error (not the missing-fingerprint arm
+    /// or a generic signature failure). The proof's signature validly covers
+    /// the wrong fingerprint, so only the equality comparison can reject it.
+    #[test]
+    fn token_binding_rejects_a_present_but_wrong_fingerprint() {
+        let secret: Arc<[u8]> = Arc::from(b"abcdef0123456789".to_vec().into_boxed_slice());
+        let verified_fingerprint = "sha256/verified";
+        for presented in [
+            "sha256/different",
+            "sha256/",
+            "",
+            "SHA256/VERIFIED", // comparison is exact, not case-normalized
+        ] {
+            let handshake =
+                handshake_with_secret(Arc::clone(&secret), true, Some(verified_fingerprint));
+            let raw =
+                signed_client_message(secret.as_ref(), &ClientMessage::Ping, 1, Some(presented));
+            assert!(
+                matches!(
+                    parse_client_message(&raw, Some(&handshake)),
+                    Err(TokenBindingViolation::Verification(
+                        TokenBindingError::FingerprintMismatch
+                    ))
+                ),
+                "presented {presented:?} must fail the fingerprint equality check"
+            );
+        }
+    }
+
     #[test]
     fn token_binding_rejects_replay_and_cross_connection_reuse() {
         let handshake_key = "MDEyMzQ1Njc4OWFiY2RlZg==";
