@@ -19,29 +19,24 @@ const KEY_SIZE: usize = 32;
 ///
 /// Without this binding the metadata sits outside the authentication boundary:
 /// two bundles sharing a `key_id` could be swapped undetected and `created_at`
-/// was attacker-malleable at rest. The length prefix keeps distinct
-/// `(key_id, created_at)` pairs mapping to distinct byte strings, so any
-/// metadata edit breaks GCM verification instead of decrypting successfully.
+/// was attacker-malleable at rest. The encoding is injective over ALL
+/// representable metadata values — a length-prefixed key id plus the
+/// `(Unix seconds, sub-second nanos)` pair, whose components are total for
+/// every `DateTime<Utc>` and together identify it exactly — so any metadata
+/// edit breaks GCM verification instead of decrypting successfully.
 fn metadata_aad(key_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Vec<u8> {
     let key_bytes = key_id.as_bytes();
-    // 8-byte length prefix + key bytes + 1 timestamp flag + 8 nanos.
-    let mut aad = Vec::with_capacity(17usize.saturating_add(key_bytes.len()));
+    // 8-byte length prefix + key bytes + 8-byte seconds + 4-byte nanos.
+    let mut aad = Vec::with_capacity(20usize.saturating_add(key_bytes.len()));
+    // Lossless on every supported target (`u64` spans `usize` everywhere).
     aad.extend_from_slice(
         &u64::try_from(key_bytes.len())
             .unwrap_or(u64::MAX)
             .to_be_bytes(),
     );
     aad.extend_from_slice(key_bytes);
-    // `timestamp_nanos` is total for every representable bundle: nanosecond
-    // precision when available, a single reserved marker otherwise. Either way
-    // the encoding is injective per timestamp value.
-    match created_at.timestamp_nanos_opt() {
-        Some(nanos) => {
-            aad.push(1);
-            aad.extend_from_slice(&nanos.to_be_bytes());
-        }
-        None => aad.push(0),
-    }
+    aad.extend_from_slice(&created_at.timestamp().to_be_bytes());
+    aad.extend_from_slice(&created_at.timestamp_subsec_nanos().to_be_bytes());
     aad
 }
 
@@ -289,12 +284,21 @@ mod tests {
         let encryptor =
             EnvelopeEncryptor::new_from_base64_key("kms-1", &sample_key()).expect("key");
         let first = encryptor.encrypt_string("first-secret").expect("encrypt");
-        let second = encryptor.encrypt_string("second-secret").expect("encrypt");
+        // Coarse wall clocks (e.g. Windows' ~15.6 ms granularity) can stamp
+        // adjacent encryptions identically, which makes the fixtures
+        // indistinguishable by construction; re-encrypt until the clock gives
+        // two distinct stamps so the swap assertions are always meaningful.
+        let mut second = encryptor.encrypt_string("second-secret").expect("encrypt");
+        let mut attempts = 0;
+        while second.created_at == first.created_at {
+            attempts += 1;
+            assert!(
+                attempts < 10_000,
+                "clock never advanced between encryptions; tamper fixtures unusable"
+            );
+            second = encryptor.encrypt_string("second-secret").expect("encrypt");
+        }
         assert_ne!(first.ciphertext, second.ciphertext);
-        assert_ne!(
-            first.created_at, second.created_at,
-            "the tamper fixtures require distinct encryption timestamps"
-        );
 
         // Re-date one bundle to the other's timestamp: the swap of `created_at`
         // values must be rejected even though both carry the same `key_id`.

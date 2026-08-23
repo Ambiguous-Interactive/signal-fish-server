@@ -681,6 +681,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
+        "signal_fish_dashboard_cache_refreshes_total",
+        "Total successful dashboard metrics cache refreshes",
+        snapshot.dashboard_cache.refresh_count,
+    );
+    counter(
+        &mut buf,
         "signal_fish_dashboard_cache_refresh_failures_total",
         "Total dashboard metrics cache refresh failures",
         snapshot.dashboard_cache.refresh_failures,
@@ -839,6 +845,10 @@ mod tests {
         assert!(
             rendered.contains("signal_fish_dashboard_cache_age_seconds"),
             "expected dashboard cache age gauge"
+        );
+        assert!(
+            rendered.contains("signal_fish_dashboard_cache_refreshes_total 0"),
+            "expected dashboard cache success counter"
         );
         assert!(
             rendered.contains("signal_fish_dashboard_cache_refresh_failures_total 0"),

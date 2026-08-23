@@ -1632,21 +1632,14 @@ impl ServerMetrics {
             ));
         }
 
-        // Check retry success rate
-        if snapshot
+        // Check retry success rate (`None` means "never attempted" — neither
+        // a fabricated healthy rate nor a warning).
+        if let Some(rate) = snapshot
             .race_conditions
             .retry_success_rate
-            .is_some_and(|rate| rate < 0.9)
-            && snapshot.race_conditions.retry_attempts > 0
+            .filter(|rate| *rate < 0.9)
         {
-            warnings.push(format!(
-                "Retry issues: {:.1}% success rate",
-                snapshot
-                    .race_conditions
-                    .retry_success_rate
-                    .unwrap_or_default()
-                    * 100.0
-            ));
+            warnings.push(format!("Retry issues: {:.1}% success rate", rate * 100.0));
         }
 
         let status = if !issues.is_empty() {

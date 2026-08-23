@@ -47,16 +47,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrapper and its always-false `GameDatabase::admin_user_exists` trait
   method, which suggested an admin-account seam that does not exist and
   hard-coded `false` in every trait implementation.
-- Change `RaceConditionMetrics.retry_success_rate` and
+- **Breaking:** Change `RaceConditionMetrics.retry_success_rate` and
   `room_code_retry_success_rate` to report `null` while zero attempts have
   been recorded instead of a fabricated `1.0` (100%), which alert thresholds
   like `< 0.9` previously read as healthy for servers that never retried.
+  Strict clients typing these fields as non-optional numbers must accept
+  `null`.
+- **Breaking:** Wire `MetricsSnapshot.dashboard_cache.refresh_count` to the
+  real successful refresh counter and remove the hardcoded-zero
+  `refresh_errors` stub field beside the live `refresh_failures` counter it
+  contradicted.
 - Route the conventional top-level `/health` path to the real health handler
   in the production router instead of falling into the 200-OK catch-all
   banner that ignored backend state; `/v2/health` remains equivalent.
-- Wire `MetricsSnapshot.dashboard_cache.refresh_count` to the real successful
-  refresh counter and remove the hardcoded-zero `refresh_errors` stub field
-  beside the live `refresh_failures` counter it contradicted.
 - Advertise player/game name length limits as UTF-8 bytes everywhere:
   validation error messages now say "bytes", and `PlayerNameRulesPayload`
   documentation states the unit, matching the byte-measured server checks.
