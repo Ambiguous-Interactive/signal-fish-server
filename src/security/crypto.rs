@@ -1,4 +1,4 @@
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -13,6 +13,37 @@ use thiserror::Error;
 const NONCE_SIZE: usize = 12;
 /// Size of the AES-256 key in bytes.
 const KEY_SIZE: usize = 32;
+
+/// Deterministic, unambiguous byte encoding of an [`EncryptedSecret`] bundle's
+/// metadata, bound as AES-GCM associated data.
+///
+/// Without this binding the metadata sits outside the authentication boundary:
+/// two bundles sharing a `key_id` could be swapped undetected and `created_at`
+/// was attacker-malleable at rest. The length prefix keeps distinct
+/// `(key_id, created_at)` pairs mapping to distinct byte strings, so any
+/// metadata edit breaks GCM verification instead of decrypting successfully.
+fn metadata_aad(key_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Vec<u8> {
+    let key_bytes = key_id.as_bytes();
+    // 8-byte length prefix + key bytes + 1 timestamp flag + 8 nanos.
+    let mut aad = Vec::with_capacity(17usize.saturating_add(key_bytes.len()));
+    aad.extend_from_slice(
+        &u64::try_from(key_bytes.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    aad.extend_from_slice(key_bytes);
+    // `timestamp_nanos` is total for every representable bundle: nanosecond
+    // precision when available, a single reserved marker otherwise. Either way
+    // the encoding is injective per timestamp value.
+    match created_at.timestamp_nanos_opt() {
+        Some(nanos) => {
+            aad.push(1);
+            aad.extend_from_slice(&nanos.to_be_bytes());
+        }
+        None => aad.push(0),
+    }
+    aad
+}
 
 /// Encrypted secret payload for secure storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,21 +131,33 @@ impl EnvelopeEncryptor {
     }
 
     /// Encrypt the provided plaintext bytes and return an `EncryptedSecret` bundle.
+    ///
+    /// The bundle's `key_id` and `created_at` are authenticated as AES-GCM
+    /// associated data (see [`metadata_aad`]), so a stored bundle cannot be
+    /// re-dated or swapped under a same-`key_id` record without failing
+    /// decryption.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<EncryptedSecret, EncryptionError> {
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         fill_random(&mut nonce_bytes).map_err(|_| EncryptionError::EntropyUnavailable)?;
         let nonce = Nonce::from(nonce_bytes);
+        let created_at = Utc::now();
 
         let ciphertext = self
             .cipher
-            .encrypt(&nonce, plaintext)
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: &metadata_aad(&self.key_id, created_at),
+                },
+            )
             .map_err(|_| EncryptionError::EncryptionFailure)?;
 
         Ok(EncryptedSecret {
             key_id: self.key_id.clone(),
             ciphertext: BASE64.encode(ciphertext),
             nonce: BASE64.encode(nonce_bytes),
-            created_at: Utc::now(),
+            created_at,
         })
     }
 
@@ -124,6 +167,10 @@ impl EnvelopeEncryptor {
     }
 
     /// Decrypt the provided bundle into raw bytes.
+    ///
+    /// Fails closed when any metadata field (`key_id`, `created_at`) was
+    /// altered after encryption; those fields are part of the authenticated
+    /// associated data, not just advisory labels.
     pub fn decrypt(&self, bundle: &EncryptedSecret) -> Result<Vec<u8>, EncryptionError> {
         if bundle.key_id != self.key_id {
             return Err(EncryptionError::KeyMismatch {
@@ -149,7 +196,13 @@ impl EnvelopeEncryptor {
         let nonce = Nonce::from(nonce_bytes);
 
         self.cipher
-            .decrypt(&nonce, ciphertext.as_ref())
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext.as_ref(),
+                    aad: &metadata_aad(&bundle.key_id, bundle.created_at),
+                },
+            )
             .map_err(|_| EncryptionError::DecryptionFailure)
     }
 
@@ -198,5 +251,83 @@ mod tests {
             matches!(err, EncryptionError::KeyMismatch { .. }),
             "expected KeyMismatch error, got: {err}"
         );
+    }
+
+    /// The metadata fields sit inside the authentication boundary: editing
+    /// `created_at` (or any other metadata) on a stored bundle must break GCM
+    /// verification instead of decrypting successfully.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn tampered_metadata_fails_decryption() {
+        let encryptor =
+            EnvelopeEncryptor::new_from_base64_key("kms-1", &sample_key()).expect("key");
+        let mut bundle = encryptor.encrypt_string("value").expect("encrypt");
+
+        let original_created_at = bundle.created_at;
+        bundle.created_at = original_created_at + chrono::Duration::microseconds(1);
+        assert!(matches!(
+            encryptor.decrypt(&bundle),
+            Err(EncryptionError::DecryptionFailure)
+        ));
+        bundle.created_at = original_created_at - chrono::Duration::seconds(1);
+        assert!(matches!(
+            encryptor.decrypt(&bundle),
+            Err(EncryptionError::DecryptionFailure)
+        ));
+        bundle.created_at = original_created_at;
+        encryptor
+            .decrypt(&bundle)
+            .expect("the untouched bundle still decrypts");
+    }
+
+    /// Two records sharing a `key_id` cannot have their ciphertexts (or their
+    /// whole bundles) swapped undetected: each ciphertext is bound to the exact
+    /// `created_at` it was encrypted with.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn same_key_id_bundles_cannot_be_swapped_or_redated() {
+        let encryptor =
+            EnvelopeEncryptor::new_from_base64_key("kms-1", &sample_key()).expect("key");
+        let first = encryptor.encrypt_string("first-secret").expect("encrypt");
+        let second = encryptor.encrypt_string("second-secret").expect("encrypt");
+        assert_ne!(first.ciphertext, second.ciphertext);
+        assert_ne!(
+            first.created_at, second.created_at,
+            "the tamper fixtures require distinct encryption timestamps"
+        );
+
+        // Re-date one bundle to the other's timestamp: the swap of `created_at`
+        // values must be rejected even though both carry the same `key_id`.
+        let redated = EncryptedSecret {
+            key_id: first.key_id.clone(),
+            ciphertext: first.ciphertext.clone(),
+            nonce: first.nonce.clone(),
+            created_at: second.created_at,
+        };
+        assert!(matches!(
+            encryptor.decrypt(&redated),
+            Err(EncryptionError::DecryptionFailure)
+        ));
+
+        // A wholesale bundle move under a same-key record is likewise bound:
+        // moving `second`'s ciphertext into `first`'s metadata fails.
+        let moved = EncryptedSecret {
+            key_id: first.key_id.clone(),
+            ciphertext: second.ciphertext.clone(),
+            nonce: second.nonce.clone(),
+            created_at: first.created_at,
+        };
+        assert!(matches!(
+            encryptor.decrypt(&moved),
+            Err(EncryptionError::DecryptionFailure)
+        ));
+
+        // Both originals remain intact.
+        encryptor
+            .decrypt(&first)
+            .expect("untouched first bundle decrypts");
+        encryptor
+            .decrypt(&second)
+            .expect("untouched second bundle decrypts");
     }
 }
