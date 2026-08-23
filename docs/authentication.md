@@ -68,8 +68,10 @@ ws.onmessage = (event) => {
 
 If another message arrives first in allowlist mode, the server sends a generic
 `MISSING_APP_ID` error and closes the connection. Unknown IDs receive
-`INVALID_APP_ID`. A protocol maximum below the deployment minimum receives
-`UNSUPPORTED_PROTOCOL_VERSION`.
+`INVALID_APP_ID`. The same code rejects IDs that cannot be accepted safely in
+operator-facing logs — control characters such as newlines or ANSI escapes, or
+lengths over 256 bytes — in every mode. A protocol maximum below the deployment
+minimum receives `UNSUPPORTED_PROTOCOL_VERSION`.
 
 ## Exact trust boundary
 

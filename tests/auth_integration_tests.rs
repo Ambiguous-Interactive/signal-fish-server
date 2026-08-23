@@ -537,3 +537,57 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
 
     running.shutdown().await;
 }
+
+/// Socket-level contract for the log-safety gate: an app ID that could forge
+/// or bloat operator-facing log lines must fail authentication with
+/// `INVALID_APP_ID` in BOTH policy modes, before any room surface is reachable.
+#[tokio::test]
+async fn test_unloggable_app_id_fails_authentication_with_invalid_app_id() {
+    let config = test_server_config(); // open policy
+    let server = create_test_server_with_config(
+        config,
+        signal_fish_server::config::ProtocolConfig::default(),
+    )
+    .await;
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    let running = RunningTestServer::spawn(server, router).await;
+
+    let rejected_ids: Vec<String> = vec![
+        "game\n2026-08-23T00:00:00Z WARN forged event \u{1b}[31mRED".to_string(),
+        "a".repeat(signal_fish_server::auth::MAX_APP_ID_LENGTH + 1),
+        "id\u{7f}".to_string(),
+    ];
+    for app_id in rejected_ids {
+        let url = format!("ws://{}/ws", running.addr());
+        let (mut ws, _) = tokio::time::timeout(SOCKET_DEADLINE, connect_async(url))
+            .await
+            .expect("WebSocket connect timed out")
+            .expect("WebSocket connects");
+        send_client_message(
+            &mut ws,
+            &ClientMessage::Authenticate {
+                app_id,
+                sdk_version: None,
+                platform: None,
+                game_data_format: None,
+                protocol_version: Some(2),
+                supported_transports: None,
+                supported_topologies: None,
+                requested_capabilities: None,
+            },
+        )
+        .await;
+        match next_server_message_within(&mut ws, SOCKET_DEADLINE, "rejected app ID").await {
+            ServerMessage::AuthenticationError {
+                error_code: ErrorCode::InvalidAppId,
+                ..
+            } => {}
+            other => panic!("expected INVALID_APP_ID rejection, got {other:?}"),
+        }
+    }
+
+    // A well-formed ID still authenticates on the same deployment.
+    let _ = connect_with_public_app_id(running.addr(), "legitimate-app").await;
+
+    running.shutdown().await;
+}

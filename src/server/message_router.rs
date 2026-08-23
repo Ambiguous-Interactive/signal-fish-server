@@ -58,7 +58,7 @@ impl EnhancedGameServer {
             ClientMessage::Authenticate { app_id, .. } => {
                 tracing::warn!(
                     %player_id,
-                    %app_id,
+                    app_id = ?app_id,
                     "Received Authenticate message after connection established - this should not happen. \
                      App-ID negotiation must occur during the WebSocket handshake."
                 );

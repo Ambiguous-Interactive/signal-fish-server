@@ -48,6 +48,24 @@ const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 1000;
 const DEFAULT_RATE_LIMIT_PER_HOUR: u32 = 10000;
 const DEFAULT_RATE_LIMIT_PER_DAY: u32 = 100_000;
 
+/// Maximum accepted app-ID byte length.
+///
+/// App IDs are attacker-chosen strings that reach operator-facing log lines,
+/// error messages, and derived-UUID keys. A generous bound keeps any single
+/// handshake from amplifying log volume while leaving room for realistic IDs.
+pub const MAX_APP_ID_LENGTH: usize = 256;
+
+/// Whether an app ID can be accepted and logged safely.
+///
+/// Rejects control characters (newlines, ANSI escapes, C1 controls) — the
+/// classic log-forging vector on `%`-formatted `tracing` fields — and
+/// unbounded lengths. Every other string is accepted verbatim so existing
+/// allowlist configurations keep resolving exactly as before.
+#[must_use]
+pub fn app_id_is_log_safe(app_id: &str) -> bool {
+    app_id.len() <= MAX_APP_ID_LENGTH && app_id.chars().all(|ch| !ch.is_control())
+}
+
 /// Derive a deterministic UUID from a string key using SHA-256. The first 16
 /// bytes of the hash are used as the UUID value with the version nibble set
 /// to 4 (random) and the variant to RFC 4122.
@@ -163,6 +181,13 @@ impl AppIdAllowlist {
     /// implementations (e.g., database-backed auth) can perform I/O without
     /// changing the call-site.
     pub async fn resolve_app_id(&self, app_id: &str) -> Result<AppContext, AuthError> {
+        // Vet before any policy path (including the open-policy early return):
+        // both modes feed the ID into logs and derived keys, so neither may
+        // admit a string that forges log lines or unboundedly bloats them.
+        if !app_id_is_log_safe(app_id) {
+            return Err(AuthError::InvalidAppId);
+        }
+
         if !self.enforce {
             return Ok(self.default_app_context(app_id));
         }
@@ -238,6 +263,57 @@ mod tests {
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.name, "default");
+    }
+
+    /// Data-driven: app IDs that could forge or bloat operator-facing log
+    /// lines are rejected in BOTH policy modes, while ordinary IDs (including
+    /// spaces, unicode, and every allowlisted ID) keep resolving.
+    #[tokio::test]
+    async fn unloggable_app_ids_are_rejected_before_any_policy_evaluation() {
+        let over_limit = "a".repeat(MAX_APP_ID_LENGTH + 1);
+        let at_limit = "a".repeat(MAX_APP_ID_LENGTH);
+        let rejected: &[&str] = &[
+            "game\n2026-01-01 WARN forged log line", // newline injection
+            "\u{1b}[31mred\u{1b}[0m",                // ANSI escape injection
+            "id\u{7f}",                              // DEL
+            "id\u{9}tab",                            // C0 tab
+            "\u{85}",                                // C1 next line
+            over_limit.as_str(),                     // unbounded log amplification
+        ];
+        for app_id in rejected {
+            let open = AppIdAllowlist::disabled();
+            assert!(
+                matches!(
+                    open.resolve_app_id(app_id).await,
+                    Err(AuthError::InvalidAppId)
+                ),
+                "open policy must reject {app_id:?}"
+            );
+            let enforcing = AppIdAllowlist::new(vec![AppRegistrationEntry {
+                app_id: (*app_id).to_string(),
+                app_name: "Configured".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: None,
+            }])
+            .expect("constructor does not vet charset; resolution does");
+            assert!(
+                matches!(
+                    enforcing.resolve_app_id(app_id).await,
+                    Err(AuthError::InvalidAppId)
+                ),
+                "enforcing policy must reject {app_id:?}"
+            );
+        }
+
+        let accepted: &[&str] = &["anything", "my-game/v1.2", &at_limit, "café-ünïcode"];
+        for app_id in accepted {
+            let open = AppIdAllowlist::disabled();
+            assert!(
+                open.resolve_app_id(app_id).await.is_ok(),
+                "open policy must accept {app_id:?}"
+            );
+        }
     }
 
     #[test]

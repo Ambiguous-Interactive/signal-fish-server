@@ -392,6 +392,24 @@ pub fn should_warn_missing_signaling_tls(config: &Config) -> bool {
     config.turn.enabled && !built_in_tls_active(config, cfg!(feature = "tls"))
 }
 
+/// Whether optional token binding runs without an effective TLS listener.
+///
+/// Token binding's connection key is derived from the WebSocket handshake key
+/// plus a server challenge; over plaintext `ws://` both inputs travel in
+/// cleartext, so any passive observer can derive the key and forge proofs. In
+/// that deployment the proofs provide replay *ordering* only, not
+/// authentication. `required=true` already fails closed without built-in TLS,
+/// so this warns exactly for the remaining degenerate combination:
+/// `enabled=true, required=false`, no effective TLS. Like the TURN warning it
+/// stays advisory because reverse-proxy TLS termination keeps `tls.enabled`
+/// `false` while the wire is still encrypted.
+#[must_use]
+pub fn should_warn_unauthenticated_token_binding(config: &Config) -> bool {
+    config.security.transport.token_binding.enabled
+        && !config.security.transport.token_binding.required
+        && !built_in_tls_active(config, cfg!(feature = "tls"))
+}
+
 fn built_in_tls_active(config: &Config, tls_feature_compiled: bool) -> bool {
     config.security.transport.tls.enabled && tls_feature_compiled
 }
@@ -442,6 +460,54 @@ mod tests {
                  tls_feature_compiled={tls_feature_compiled}"
             );
         }
+    }
+
+    /// Truth table for the optional-token-binding-without-TLS startup
+    /// warning: it fires exactly when binding is enabled but optional while no
+    /// effective built-in TLS listener exists — the only combination where
+    /// proofs degrade to replay ordering without authentication.
+    #[test]
+    fn unauthenticated_token_binding_warning_fires_only_for_optional_binding_without_tls() {
+        let cases = [
+            // (binding_enabled, binding_required, tls_enabled, tls_feature_compiled, expected)
+            (false, false, false, false, false),
+            (false, true, false, true, false),
+            (true, true, false, false, false),
+            (true, true, true, true, false),
+            (true, false, false, false, true),
+            (true, false, false, true, true),
+            (true, false, true, true, false),
+        ];
+        for (binding_enabled, binding_required, tls_enabled, tls_feature_compiled, expected) in
+            cases
+        {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.transport.token_binding.enabled = binding_enabled;
+            config.security.transport.token_binding.required = binding_required;
+            config.security.transport.tls.enabled = tls_enabled;
+            // Same expression as `should_warn_unauthenticated_token_binding`,
+            // parameterized over the compile flag exactly like the TURN
+            // warning truth table above.
+            assert_eq!(
+                config.security.transport.token_binding.enabled
+                    && !config.security.transport.token_binding.required
+                    && !built_in_tls_active(&config, tls_feature_compiled),
+                expected,
+                "binding.enabled={binding_enabled}, binding.required={binding_required}, \
+                 tls.enabled={tls_enabled}, tls_feature_compiled={tls_feature_compiled}"
+            );
+        }
+        // The published function agrees with the simulated expression under
+        // this build's actual feature set.
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.transport.token_binding.enabled = true;
+        config.security.transport.tls.enabled = true;
+        assert_eq!(
+            should_warn_unauthenticated_token_binding(&config),
+            !built_in_tls_active(&config, cfg!(feature = "tls"))
+        );
     }
 
     #[cfg(not(feature = "tls"))]
