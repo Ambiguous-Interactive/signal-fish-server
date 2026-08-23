@@ -512,8 +512,8 @@ proptest! {
         player in arb_uuid(),
         expiry in 0i64..=4_102_444_800i64,
     ) {
-        let first = mint_turn_credentials(&secret, player, expiry);
-        let second = mint_turn_credentials(&secret, player, expiry);
+        let first = mint_turn_credentials(&secret, player, expiry).expect("HMAC accepts any key");
+        let second = mint_turn_credentials(&secret, player, expiry).expect("HMAC accepts any key");
         prop_assert_eq!(&first, &second, "same inputs must mint the same pair");
 
         prop_assert_eq!(&first.username, &format!("{expiry}:{player}"));
@@ -533,8 +533,10 @@ proptest! {
         (a, b) in (any::<u128>(), any::<u128>()).prop_filter("distinct players", |(a, b)| a != b),
         expiry in 0i64..=4_102_444_800i64,
     ) {
-        let creds_a = mint_turn_credentials(&secret, Uuid::from_u128(a), expiry);
-        let creds_b = mint_turn_credentials(&secret, Uuid::from_u128(b), expiry);
+        let creds_a =
+            mint_turn_credentials(&secret, Uuid::from_u128(a), expiry).expect("HMAC accepts any key");
+        let creds_b =
+            mint_turn_credentials(&secret, Uuid::from_u128(b), expiry).expect("HMAC accepts any key");
         prop_assert_ne!(&creds_a.username, &creds_b.username);
         prop_assert_ne!(&creds_a.credential, &creds_b.credential);
     }

@@ -198,6 +198,15 @@ impl SpectatorService {
                 Some(ErrorCode::SpectatorJoinFailed),
             ));
         }
+        // Spectator names deliberately get charset validation but NO
+        // uniqueness contract, unlike player names. Spectator capacity is
+        // unlimited by default and spectator identity is non-authoritative
+        // display metadata; enforcing canonical uniqueness here would hand any
+        // anonymous client a name-squatting denial-of-service lever against an
+        // unbounded admission surface ("Guest" joined first, so no other
+        // "Guest" ever can), and extending uniqueness across the room's
+        // players would let a spectator pre-claim a name and block the real
+        // player from joining. See `docs/concepts/spectator-mode.md`.
         if let Err(err) =
             validation::validate_player_name_with_config(&spectator_name, &self.protocol_config)
         {

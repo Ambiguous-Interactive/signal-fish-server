@@ -7,6 +7,7 @@
 //! - Metrics endpoint (`/metrics`)
 
 mod test_helpers;
+mod websocket_test_helpers;
 
 use regex::Regex;
 use signal_fish_server::config::{
@@ -1511,8 +1512,9 @@ async fn test_metrics_endpoint_no_auth_required() {
     // Should return JSON with expected structure
     let json: serde_json::Value = response.json();
     assert!(
-        json.get("timeRange").is_some(),
-        "metrics should contain timeRange"
+        json.get("timeRange").is_none(),
+        "timeRange was removed (issue #407): every reported metric is a \
+         lifetime-cumulative total, so an echoed window string could only mislead"
     );
     assert!(
         json.get("serverMetrics").is_some(),
@@ -2669,4 +2671,27 @@ fn test_print_config_redacts_secrets_end_to_end() {
         printed["turn"]["urls"][0], "turn:turn.example.com:3478",
         "non-secret turn.urls should print unredacted"
     );
+}
+
+/// The REAL compiled binary must serve the conventional top-level `/health`
+/// with the real health handler — not fall into the 200-OK catch-all banner,
+/// which cannot reflect backend state (issue #407). `/v2/health` stays the
+/// documented probe target and must remain equivalent.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_binary_routes_top_level_health_to_the_real_handler() {
+    use websocket_test_helpers::server_process::spawn_server;
+
+    let server = spawn_server(serde_json::json!({})).await;
+    let client = reqwest::Client::new();
+    for path in ["/v2/health", "/health"] {
+        let response = client
+            .get(format!("http://127.0.0.1:{}{path}", server.port))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("GET {path}: {error}"));
+        assert_eq!(response.status(), 200, "{path}");
+        let body = response.text().await.expect("health response body");
+        assert_eq!(body, "OK", "{path} must serve the real health verdict");
+    }
 }

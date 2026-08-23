@@ -2,9 +2,91 @@ use crate::server::EnhancedGameServer;
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::prometheus::render_prometheus_metrics;
+
+/// Minimum quiet period between emitted unauthorized-metrics-access warnings.
+///
+/// Unauthenticated endpoints are a log-disk amplification vector: file logging
+/// defaults on, there is no HTTP rate limiter on these routes, and one JSON
+/// log line per rejection would let an anonymous request loop grow the log
+/// indefinitely before any credential guess matters. Sixty seconds keeps the
+/// first signal and a periodic suppressed-count summary at negligible volume.
+const REJECTION_LOG_MIN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// One decision to emit a rejected-metrics-access warning.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RejectionLogEmission<'a> {
+    /// The first rejection after a quiet period (or ever).
+    First { reason: &'a str },
+    /// A quiet-period boundary reached while earlier rejections were
+    /// suppressed; the count summarizes them.
+    WithSuppressedCount { reason: &'a str, suppressed: u64 },
+}
+
+/// Emits at most one unauthorized-access warning per [`REJECTION_LOG_MIN_INTERVAL`],
+/// counting suppressed repeats so the next emission carries their number.
+///
+/// The decision logic is pure (tests drive it with synthetic instants); the
+/// handler maps a returned [`RejectionLogEmission`] to the actual `tracing::warn!`.
+#[derive(Default)]
+pub(crate) struct RejectionLogThrottle {
+    state: Mutex<Option<(Instant, u64)>>,
+}
+
+impl RejectionLogThrottle {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one rejected attempt at instant `now`.
+    ///
+    /// Returns the emission to log, or `None` when the rejection falls inside
+    /// the quiet period following a previous emission. An elapsed quiet period
+    /// is exactly `[min_interval, ∞)`; the comparison uses wall-clock-free
+    /// monotonic arithmetic, so identical inputs give identical decisions.
+    fn record_at<'a>(&self, reason: &'a str, now: Instant) -> Option<RejectionLogEmission<'a>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((last_emit, suppressed)) = state.as_mut() {
+            if now.duration_since(*last_emit) < REJECTION_LOG_MIN_INTERVAL {
+                // A u64 counter cannot saturate from log throttling alone.
+                *suppressed = suppressed.saturating_add(1);
+                return None;
+            }
+            let emission = RejectionLogEmission::WithSuppressedCount {
+                reason,
+                suppressed: *suppressed,
+            };
+            *state = Some((now, 0));
+            return Some(emission);
+        }
+        *state = Some((now, 0));
+        Some(RejectionLogEmission::First { reason })
+    }
+
+    /// Production entry point: decide and emit the warning in one step.
+    pub(crate) fn record(&self, reason: &'static str) {
+        if let Some(emission) = self.record_at(reason, Instant::now()) {
+            match emission {
+                RejectionLogEmission::First { reason } => {
+                    tracing::warn!(reason, "Unauthorized metrics access attempt");
+                }
+                RejectionLogEmission::WithSuppressedCount { reason, suppressed } => {
+                    tracing::warn!(
+                        reason,
+                        suppressed_repeats = suppressed,
+                        "Unauthorized metrics access attempts (throttled)"
+                    );
+                }
+            }
+        }
+    }
+}
 
 async fn enforce_metrics_auth(
     headers: &HeaderMap,
@@ -15,12 +97,16 @@ async fn enforce_metrics_auth(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
     else {
-        tracing::warn!("Unauthorized metrics access attempt: missing Authorization header");
+        server
+            .metrics_rejection_log()
+            .record("missing Authorization header");
         return Err(StatusCode::UNAUTHORIZED);
     };
 
     let Some(token) = raw_header.strip_prefix("Bearer ") else {
-        tracing::warn!("Unauthorized metrics access attempt: invalid Authorization scheme");
+        server
+            .metrics_rejection_log()
+            .record("invalid Authorization scheme");
         return Err(StatusCode::UNAUTHORIZED);
     };
 
@@ -33,21 +119,21 @@ async fn enforce_metrics_auth(
         }
     }
 
-    tracing::warn!("Unauthorized metrics access attempt: token rejected");
+    server.metrics_rejection_log().record("token rejected");
     Err(StatusCode::UNAUTHORIZED)
 }
 
-/// Query parameters for metrics endpoint
+/// Query parameters for the metrics endpoints.
+///
+/// Every reported counter is a **lifetime-cumulative total** since process
+/// start; there is deliberately no `timeRange` windowing parameter. Unknown
+/// query parameters are accepted and ignored. Clients that need a window can
+/// filter the `dashboardCache.history` samples client-side by their
+/// `fetchedAt` timestamps instead.
 #[derive(serde::Deserialize)]
 pub struct MetricsQuery {
-    #[serde(default = "default_time_range")]
-    time_range: String,
     #[serde(default, rename = "includeSnapshot")]
     include_snapshot: bool,
-}
-
-fn default_time_range() -> String {
-    "1h".to_string()
 }
 
 /// Metrics API endpoint - returns real data from server metrics
@@ -91,7 +177,6 @@ pub async fn metrics_handler(
 
     // Create response with real data
     let mut response = serde_json::json!({
-        "timeRange": query.time_range,
         "playerPercentiles": player_percentiles,
         "roomsByGame": rooms_by_game,
         "gamePercentiles": game_percentiles,
@@ -181,6 +266,58 @@ mod tests {
     use crate::server::ServerConfig;
     use axum::http::header::AUTHORIZATION;
     use axum::http::HeaderMap;
+
+    /// Data-driven, sleep-free: the throttle emits the first rejection,
+    /// suppresses everything inside the quiet period (counting the
+    /// suppressions), then summarizes them at the next boundary and starts a
+    /// fresh quiet period.
+    #[test]
+    fn rejection_log_throttle_emits_first_and_window_summaries() {
+        let throttle = RejectionLogThrottle::new();
+        let start = Instant::now();
+        let step = REJECTION_LOG_MIN_INTERVAL / 4;
+
+        assert_eq!(
+            throttle.record_at("token rejected", start),
+            Some(RejectionLogEmission::First {
+                reason: "token rejected"
+            }),
+            "the first rejection is always emitted"
+        );
+
+        // Three suppressed rejections inside the quiet period...
+        for offset in [1 * step, 2 * step, 3 * step] {
+            assert_eq!(
+                throttle.record_at("token rejected", start + offset),
+                None,
+                "rejections inside the quiet period must be suppressed"
+            );
+        }
+
+        // ...then the boundary emission carries their count.
+        let boundary = start + REJECTION_LOG_MIN_INTERVAL;
+        assert_eq!(
+            throttle.record_at("missing Authorization header", boundary),
+            Some(RejectionLogEmission::WithSuppressedCount {
+                reason: "missing Authorization header",
+                suppressed: 3
+            })
+        );
+
+        // The quiet period restarts after a summary emission; an immediate
+        // repeat is suppressed again rather than double-counted.
+        assert_eq!(
+            throttle.record_at("token rejected", boundary + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            throttle.record_at("token rejected", boundary + REJECTION_LOG_MIN_INTERVAL),
+            Some(RejectionLogEmission::WithSuppressedCount {
+                reason: "token rejected",
+                suppressed: 1
+            })
+        );
+    }
 
     async fn build_metrics_test_server(mut config: ServerConfig) -> Arc<EnhancedGameServer> {
         config.require_metrics_auth = true;

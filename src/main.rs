@@ -243,6 +243,10 @@ async fn main() -> anyhow::Result<()> {
             websocket::websocket_route_v3_with_origin_policy(origin_policy.clone()),
         ) // v3 alias, shared handler
         .route("/v3/client-config", websocket::client_config_route())
+        // The conventional top-level probe path: without this route a prober
+        // hitting `/health` would get the 200-OK fallback banner regardless of
+        // backend state instead of the real health verdict.
+        .route("/health", websocket::health_route())
         .fallback(|| async {
             "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v2/client-config (or /v3/client-config) for client limits, /v1/metrics for metrics, /metrics/prom for Prometheus."
         })

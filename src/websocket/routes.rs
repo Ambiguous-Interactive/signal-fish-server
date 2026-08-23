@@ -184,6 +184,13 @@ pub fn client_config_route() -> axum::routing::MethodRouter<Arc<EnhancedGameServ
     get(client_config)
 }
 
+/// Build the health-check route so the production topology can serve the
+/// real handler at the conventional top-level `/health` path too (the nested
+/// router exposes it as `/v2/health`; see `main.rs`).
+pub fn health_route() -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
+    get(health_check)
+}
+
 fn create_router_inner(
     origin_policy: OriginPolicy,
     include_v3_alias: bool,

@@ -48,11 +48,13 @@ pub struct TurnCredentials {
 /// Compute `base64_standard( HMAC-SHA1( key, msg ) )`.
 ///
 /// The building block of the coturn REST scheme, factored out so it can be pinned
-/// against the RFC 2202 HMAC-SHA1 test vectors. HMAC accepts a key of any length
-/// (`new_from_slice` is infallible for `Hmac`), so an empty key still produces
-/// output — that degenerate case is guarded at the config layer
+/// against the RFC 2202 HMAC-SHA1 test vectors. `None` is a refuse-to-mint
+/// signal for an unusable MAC key — never an empty credential. In practice
+/// HMAC accepts a key of any length (`new_from_slice` is infallible for
+/// `Hmac`), so this cannot fail today; the empty-key degenerate case is
+/// guarded at the config layer
 /// ([`TurnConfig::validate`](crate::config::TurnConfig::validate) rejects an empty
-/// secret when TURN is enabled), never here.
+/// secret when TURN is enabled), not by silently emitting garbage.
 #[must_use]
 fn hmac_sha1_base64(key: &[u8], msg: &[u8]) -> Option<String> {
     let mut mac = HmacSha1::new_from_slice(key).ok()?;
@@ -64,23 +66,25 @@ fn hmac_sha1_base64(key: &[u8], msg: &[u8]) -> Option<String> {
 /// `expiry_unix` (the coturn REST credential contract in `docs/deployment-turn.md`).
 ///
 /// Pure and deterministic: the same `(static_auth_secret, player_id, expiry_unix)`
-/// always yields the same pair. The time source is intentionally **not** read here
-/// — the caller captures `now` once and passes `expiry_unix = now + ttl` — so all
-/// members finalized together share one expiry and the function is unit-testable
-/// against fixed vectors.
+/// always yields the same pair. Returns `None` only when the credential could not
+/// be derived (an unusable MAC key) — the caller must then withhold the whole
+/// TURN entry rather than advertise a pair coturn would always reject.
+/// The time source is intentionally **not** read here — the caller captures
+/// `now` once and passes `expiry_unix = now + ttl` — so all members finalized
+/// together share one expiry and the function is unit-testable against fixed
+/// vectors.
 #[must_use]
 pub fn mint_turn_credentials(
     static_auth_secret: &str,
     player_id: PlayerId,
     expiry_unix: i64,
-) -> TurnCredentials {
+) -> Option<TurnCredentials> {
     let username = format!("{expiry_unix}:{player_id}");
-    let credential =
-        hmac_sha1_base64(static_auth_secret.as_bytes(), username.as_bytes()).unwrap_or_default();
-    TurnCredentials {
+    let credential = hmac_sha1_base64(static_auth_secret.as_bytes(), username.as_bytes())?;
+    Some(TurnCredentials {
         username,
         credential,
-    }
+    })
 }
 
 /// Compute the expiry timestamp `now_unix + ttl_secs`, saturating on overflow.
@@ -135,12 +139,19 @@ pub fn build_ice_servers(turn: &TurnConfig, player_id: PlayerId, now_unix: i64) 
 
     if turn.enabled && !turn.urls.is_empty() {
         let expiry_unix = turn_expiry_unix(now_unix, turn.credential_ttl_secs);
-        let minted = mint_turn_credentials(&turn.static_auth_secret, player_id, expiry_unix);
-        servers.push(IceServer {
-            urls: turn.urls.clone(),
-            username: Some(minted.username),
-            credential: Some(minted.credential),
-        });
+        // Fail closed: if the credential cannot be derived, withhold the whole
+        // TURN entry (the client still gets STUN and the operator's static ICE
+        // list) instead of advertising a username/credential pair that coturn
+        // would always reject.
+        if let Some(minted) =
+            mint_turn_credentials(&turn.static_auth_secret, player_id, expiry_unix)
+        {
+            servers.push(IceServer {
+                urls: turn.urls.clone(),
+                username: Some(minted.username),
+                credential: Some(minted.credential),
+            });
+        }
     }
 
     servers
@@ -173,7 +184,8 @@ mod tests {
     #[test]
     fn username_is_expiry_colon_player_id() {
         let player_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-        let creds = mint_turn_credentials("secret", player_id, 1_700_000_000);
+        let creds = mint_turn_credentials("secret", player_id, 1_700_000_000)
+            .expect("HMAC accepts any key");
         assert_eq!(
             creds.username,
             "1700000000:00000000-0000-0000-0000-000000000001"
@@ -183,8 +195,8 @@ mod tests {
     #[test]
     fn minting_is_deterministic() {
         let player_id = Uuid::new_v4();
-        let a = mint_turn_credentials("secret", player_id, 1_700_000_000);
-        let b = mint_turn_credentials("secret", player_id, 1_700_000_000);
+        let a = mint_turn_credentials("secret", player_id, 1_700_000_000).expect("mint");
+        let b = mint_turn_credentials("secret", player_id, 1_700_000_000).expect("mint");
         assert_eq!(a, b);
     }
 
@@ -192,8 +204,8 @@ mod tests {
     fn different_player_ids_differ_in_username_and_credential() {
         let p1 = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let p2 = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
-        let a = mint_turn_credentials("secret", p1, 1_700_000_000);
-        let b = mint_turn_credentials("secret", p2, 1_700_000_000);
+        let a = mint_turn_credentials("secret", p1, 1_700_000_000).expect("mint");
+        let b = mint_turn_credentials("secret", p2, 1_700_000_000).expect("mint");
         assert_ne!(a.username, b.username);
         assert_ne!(a.credential, b.credential);
     }
@@ -201,8 +213,8 @@ mod tests {
     #[test]
     fn different_expiry_differs_in_username_and_credential() {
         let player_id = Uuid::new_v4();
-        let a = mint_turn_credentials("secret", player_id, 1_700_000_000);
-        let b = mint_turn_credentials("secret", player_id, 1_700_000_001);
+        let a = mint_turn_credentials("secret", player_id, 1_700_000_000).expect("mint");
+        let b = mint_turn_credentials("secret", player_id, 1_700_000_001).expect("mint");
         assert_ne!(a.username, b.username);
         assert_ne!(a.credential, b.credential);
     }
@@ -212,18 +224,20 @@ mod tests {
         // The username does not embed the secret, so it is unchanged; only the
         // HMAC-derived credential differs.
         let player_id = Uuid::new_v4();
-        let a = mint_turn_credentials("secret-a", player_id, 1_700_000_000);
-        let b = mint_turn_credentials("secret-b", player_id, 1_700_000_000);
+        let a = mint_turn_credentials("secret-a", player_id, 1_700_000_000).expect("mint");
+        let b = mint_turn_credentials("secret-b", player_id, 1_700_000_000).expect("mint");
         assert_eq!(a.username, b.username);
         assert_ne!(a.credential, b.credential);
     }
 
     #[test]
     fn empty_secret_still_produces_output() {
-        // HMAC allows an empty key, so minting does not panic. The empty-secret
-        // case is rejected at the config layer (TurnConfig::validate), not here.
+        // HMAC allows an empty key, so minting succeeds (Some) and never
+        // degrades to an unusable empty credential. The empty-secret case is
+        // rejected at the config layer (TurnConfig::validate), not here.
         let player_id = Uuid::new_v4();
-        let creds = mint_turn_credentials("", player_id, 1_700_000_000);
+        let creds =
+            mint_turn_credentials("", player_id, 1_700_000_000).expect("HMAC accepts any key");
         assert!(!creds.credential.is_empty());
     }
 

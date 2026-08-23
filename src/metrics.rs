@@ -176,6 +176,7 @@ pub struct ServerMetrics {
     pub average_response_times: Arc<RwLock<ResponseTimeTracker>>,
     pub dashboard_cache_last_refresh_epoch: AtomicU64,
     pub dashboard_cache_refresh_failures: AtomicU64,
+    pub dashboard_cache_refresh_count: AtomicU64,
     pub latency_histogram_clamped_samples: AtomicU64,
 
     // Rate limiting metrics
@@ -421,11 +422,16 @@ pub struct RaceConditionMetrics {
     pub room_code_retry_operations: u64,
     pub room_code_retry_successes: u64,
     pub room_code_retry_exhaustions: u64,
-    pub room_code_retry_success_rate: f64,
+    /// Success fraction of room-code retry operations; `null` (not `1.0`)
+    /// while no operation has ever been attempted, so alert thresholds cannot
+    /// read a fabricated 100% success rate from an idle server.
+    pub room_code_retry_success_rate: Option<f64>,
     pub authority_transfer_conflicts: u64,
     pub retry_attempts: u64,
     pub retry_successes: u64,
-    pub retry_success_rate: f64,
+    /// Success fraction of retry attempts; `null` (not `1.0`) while no attempt
+    /// has ever been recorded.
+    pub retry_success_rate: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -621,6 +627,7 @@ impl ServerMetrics {
             average_response_times: Arc::new(RwLock::new(ResponseTimeTracker::new())),
             dashboard_cache_last_refresh_epoch: AtomicU64::new(0),
             dashboard_cache_refresh_failures: AtomicU64::new(0),
+            dashboard_cache_refresh_count: AtomicU64::new(0),
             latency_histogram_clamped_samples: AtomicU64::new(0),
             rate_limit_auth_rejections: AtomicU64::new(0),
             rate_limit_room_creation_rejections: AtomicU64::new(0),
@@ -1051,6 +1058,8 @@ impl ServerMetrics {
         let epoch = u64::try_from(timestamp.timestamp()).unwrap_or(0);
         self.dashboard_cache_last_refresh_epoch
             .store(epoch, Ordering::Relaxed);
+        self.dashboard_cache_refresh_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn increment_dashboard_cache_refresh_failures(&self) {
@@ -1345,18 +1354,15 @@ impl ServerMetrics {
 
         let retry_attempts = self.retry_attempts.load(Ordering::Relaxed);
         let retry_successes = self.retry_successes.load(Ordering::Relaxed);
-        let retry_success_rate = if retry_attempts > 0 {
-            (retry_successes as f64) / (retry_attempts as f64)
-        } else {
-            1.0
-        };
+        // `null` (not 1.0) with zero attempts: a fabricated 100% success rate
+        // would satisfy alert thresholds like `< 0.9` for a server that has
+        // never retried. The health warning fires only for `Some(rate < 0.9)`.
+        let retry_success_rate =
+            (retry_attempts > 0).then(|| (retry_successes as f64) / (retry_attempts as f64));
         let room_code_retry_operations = self.room_code_retry_operations.load(Ordering::Relaxed);
         let room_code_retry_successes = self.room_code_retry_successes.load(Ordering::Relaxed);
-        let room_code_retry_success_rate = if room_code_retry_operations > 0 {
-            (room_code_retry_successes as f64) / (room_code_retry_operations as f64)
-        } else {
-            1.0
-        };
+        let room_code_retry_success_rate = (room_code_retry_operations > 0)
+            .then(|| (room_code_retry_successes as f64) / (room_code_retry_operations as f64));
 
         let validation_errors = self.validation_errors.load(Ordering::Relaxed);
         let internal_errors = self.internal_errors.load(Ordering::Relaxed);
@@ -1480,8 +1486,7 @@ impl ServerMetrics {
                     .load(Ordering::Relaxed),
             },
             dashboard_cache: DashboardCacheMetrics {
-                refresh_count: 0,
-                refresh_errors: 0,
+                refresh_count: self.dashboard_cache_refresh_count.load(Ordering::Relaxed),
                 last_refresh_timestamp: self
                     .dashboard_cache_last_refresh_epoch
                     .load(Ordering::Relaxed),
@@ -1627,14 +1632,14 @@ impl ServerMetrics {
             ));
         }
 
-        // Check retry success rate
-        if snapshot.race_conditions.retry_success_rate < 0.9
-            && snapshot.race_conditions.retry_attempts > 0
+        // Check retry success rate (`None` means "never attempted" — neither
+        // a fabricated healthy rate nor a warning).
+        if let Some(rate) = snapshot
+            .race_conditions
+            .retry_success_rate
+            .filter(|rate| *rate < 0.9)
         {
-            warnings.push(format!(
-                "Retry issues: {:.1}% success rate",
-                snapshot.race_conditions.retry_success_rate * 100.0
-            ));
+            warnings.push(format!("Retry issues: {:.1}% success rate", rate * 100.0));
         }
 
         let status = if !issues.is_empty() {
@@ -1861,12 +1866,14 @@ impl OperationTimer {
     }
 }
 
-/// Stub for DashboardCacheMetrics (not used in signal-fish-server)
+/// Live dashboard-cache health counters, all maintained by the refresh loop in
+/// `DashboardMetricsCache::refresh_once`.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DashboardCacheMetrics {
+    /// Successful cache refreshes since process start.
     pub refresh_count: u64,
-    pub refresh_errors: u64,
     pub last_refresh_timestamp: u64,
+    /// Failed refresh attempts since process start.
     pub refresh_failures: u64,
 }
 
@@ -2090,12 +2097,40 @@ mod tests {
         assert!(health.warnings.is_empty());
         assert_eq!(
             health.metrics.race_conditions.room_code_retry_success_rate,
-            1.0
+            Some(1.0)
         );
 
         metrics.increment_room_code_retry_exhaustions();
         let exhausted = metrics.health_status().await;
         assert_eq!(exhausted.status, HealthStatusLevel::Degraded);
         assert_eq!(exhausted.warnings, ["Room code retry exhaustions: 1"]);
+    }
+
+    /// Retry-success rates must read `null` (never a fabricated `1.0`) while
+    /// zero attempts exist, so alert thresholds like `< 0.9` cannot see a
+    /// healthy 100% for a server that has never retried. The first recorded
+    /// attempt makes the rate defined and honest.
+    #[tokio::test]
+    async fn retry_success_rates_are_null_until_an_attempt_exists() {
+        let metrics = ServerMetrics::new();
+        let race = metrics.snapshot().await.race_conditions;
+        assert_eq!(
+            race.retry_success_rate, None,
+            "an idle server must not advertise a 100% generic-retry success rate"
+        );
+        assert_eq!(
+            race.room_code_retry_success_rate, None,
+            "an idle server must not advertise a 100% room-code retry success rate"
+        );
+        // And it must stay healthy with no fabricated-rate warnings.
+        let health = metrics.health_status().await;
+        assert_eq!(health.status, HealthStatusLevel::Healthy);
+        assert!(health.warnings.is_empty());
+
+        // One failed attempt defines the rate at its real (failing) value.
+        metrics.increment_retry_attempts();
+        let race = metrics.snapshot().await.race_conditions;
+        assert_eq!(race.retry_attempts, 1);
+        assert_eq!(race.retry_success_rate, Some(0.0));
     }
 }

@@ -145,7 +145,8 @@ default six-character total length therefore comfortably supports the default
 1,000-room per-game cap. Monitor `race_conditions.room_code_collisions` and the
 dedicated `room_code_retry_operations`, `room_code_retry_successes`,
 `room_code_retry_exhaustions`, and `room_code_retry_success_rate` fields when
-selecting a longer prefix or shorter total length.
+selecting a longer prefix or shorter total length (`room_code_retry_success_rate`
+is `null` until at least one retry operation has been attempted).
 
 ## Room Lifecycle
 

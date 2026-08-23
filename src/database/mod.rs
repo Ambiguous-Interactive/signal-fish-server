@@ -403,13 +403,6 @@ pub trait GameDatabase: Send + Sync {
 
     /// Downcast helper to access backend-specific implementations
     fn as_any(&self) -> &(dyn Any + Send + Sync);
-
-    /// Check if an admin user exists. Always returns false for in-memory backend.
-    /// Placeholder for future auth integration.
-    async fn admin_user_exists(&self, email: &str) -> Result<bool> {
-        let _ = email;
-        Ok(false)
-    }
 }
 
 /// Capability marker traits that identify focused slices of the GameDatabase contract.
@@ -1553,10 +1546,6 @@ impl GameDatabase for InMemoryDatabase {
 
     fn as_any(&self) -> &(dyn Any + Send + Sync) {
         self
-    }
-
-    async fn admin_user_exists(&self, _email: &str) -> Result<bool> {
-        Ok(false)
     }
 }
 
