@@ -74,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suppressed-repeat count, so anonymous request loops against `/metrics*`
   can no longer amplify operator log-disk volume before any credential guess
   matters.
+- Throttle rejected-WebSocket-upgrade warnings to one per source address and
+  outcome per 60 seconds with a suppressed-repeat count, so anonymous request
+  loops against the unauthenticated `/v2/ws` and `/v3/ws` upgrades can no
+  longer amplify operator log-disk volume. The first warning for a source
+  keeps its exact previous field set (`request_id`, `peer_ip`, `outcome`,
+  `http_status`), distinct addresses keep warning independently, tracked
+  sources stay bounded under rotated-address floods, and response headers and
+  status codes are unchanged (issue #411).
 - **Breaking:** Add `max_outbound_message_size` to the public Rust
   `SecurityConfig`, `ServerConfig`, and `ProtocolInfoPayload` structs.
   Downstream struct literals must supply the field or use struct update syntax.

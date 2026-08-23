@@ -326,12 +326,11 @@ fn finish_upgrade_response(
             "WebSocket upgrade accepted"
         );
     } else {
-        tracing::warn!(
+        server.upgrade_rejection_log().record(
+            addr.ip(),
+            outcome.header_value(),
             request_id,
-            peer_ip = %addr.ip(),
-            outcome = outcome.header_value(),
-            http_status = response.status().as_u16(),
-            "WebSocket upgrade rejected"
+            response.status().as_u16(),
         );
     }
 
@@ -408,5 +407,72 @@ mod tests {
             &enabled,
             TokenBindingProtocolOffer::Supported
         ));
+    }
+
+    /// Throttling only shapes logging: every rejected upgrade keeps the exact
+    /// status code and header set, whether it is the source's first warning,
+    /// a suppressed repeat, or a boundary summary.
+    #[tokio::test]
+    async fn throttled_rejection_logging_keeps_responses_byte_for_byte_compatible() {
+        let server = EnhancedGameServer::new(
+            crate::server::ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct rejection-response test server");
+
+        let addr = "127.0.0.1:3536".parse().expect("test address parses");
+        let request_id = "00000000-0000-4000-8000-000000000002";
+        let outcomes = [
+            (UpgradeOutcome::RejectedOrigin, StatusCode::FORBIDDEN),
+            // A suppressed repeat from the same peer...
+            (UpgradeOutcome::RejectedOrigin, StatusCode::FORBIDDEN),
+            // ...and a distinct outcome lane that keeps its own first warning.
+            (
+                UpgradeOutcome::RejectedTokenBindingOffer,
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+
+        for (outcome, expected_status) in outcomes {
+            let response = finish_upgrade_response(
+                &server,
+                addr,
+                request_id,
+                outcome,
+                (expected_status, "rejected").into_response(),
+            );
+
+            assert_eq!(response.status(), expected_status);
+            let headers = response.headers();
+            assert_eq!(
+                headers.get(WEBSOCKET_REQUEST_ID_HEADER),
+                Some(&HeaderValue::from_static(request_id))
+            );
+            assert_eq!(
+                headers.get(WEBSOCKET_UPGRADE_OUTCOME_HEADER),
+                Some(&HeaderValue::from_static(outcome.header_value()))
+            );
+            assert_eq!(
+                headers
+                    .get(WEBSOCKET_MAX_OUTBOUND_MESSAGE_SIZE_HEADER)
+                    .and_then(|value| value.to_str().ok()),
+                Some(
+                    server
+                        .config()
+                        .max_outbound_message_size
+                        .to_string()
+                        .as_str()
+                )
+            );
+        }
     }
 }
