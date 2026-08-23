@@ -58,7 +58,11 @@ impl EnhancedGameServer {
             ClientMessage::Authenticate { app_id, .. } => {
                 tracing::warn!(
                     %player_id,
-                    %app_id,
+                    // Debug-escaped deliberately: this anomalous path warns
+                    // BEFORE resolve_app_id's log-safety gate can vet the ID,
+                    // so a raw `%` field would let control characters forge
+                    // this log line.
+                    app_id = ?app_id,
                     "Received Authenticate message after connection established - this should not happen. \
                      App-ID negotiation must occur during the WebSocket handshake."
                 );

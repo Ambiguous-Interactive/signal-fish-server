@@ -235,6 +235,17 @@ What it does and how to enable it:
   below. A raw legacy binary frame is unauthorized whether or not fingerprint
   binding is enabled.
 
+> **Token binding requires TLS to authenticate.**
+> The connection key is derived from the WebSocket handshake key plus a
+> server-fresh challenge. Over plaintext `ws://`, both inputs are visible on
+> the wire, so a passive observer can derive the key and forge every proof —
+> in that deployment proofs provide replay ordering only, not authentication.
+> Serve token-bound traffic over built-in TLS or reverse-proxy-terminated
+> wss://, and use `required=true` where clients must not be able to opt out.
+> The startup warning fires whenever binding is enabled but optional without
+> _built-in_ TLS — including safe reverse-proxy deployments, which the server
+> cannot see; treat it as a reminder to verify the wire is encrypted.
+
 ### v2 wire contract
 
 The first server application message after a token-bound WebSocket upgrade is:

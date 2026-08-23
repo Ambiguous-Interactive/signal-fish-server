@@ -142,13 +142,36 @@ pub fn validate_player_name_with_config(name: &str, config: &ProtocolConfig) -> 
     Ok(())
 }
 
+/// Case-insensitive, canonically-composed identity key for player names.
+///
+/// Uniqueness must compare what players *see*, not raw bytes: the same visible
+/// name can have byte-distinct spellings, and comparing raw (or
+/// lowercased-raw) bytes let an impersonator join a room under a visually
+/// identical name while it was "taken". Composing to NFC first collapses those
+/// spellings to one byte string; the subsequent lowercase keeps the historical
+/// ASCII case-insensitivity. The transform is deterministic, so byte-equal
+/// inputs stay byte-equal after it.
+///
+/// Reachability note: under the default charset rules the live gap is
+/// Hangul — precomposed syllables are alphanumeric while their decomposed
+/// jamo sequences are too (e.g. U+AC01 vs U+1100 U+1161 U+11A8). Latin NFD
+/// spellings (`cafe` + combining acute) are already rejected by the charset
+/// validator because combining marks are not `char::is_alphanumeric`, but an
+/// operator who allowlists such marks via `allowed_symbols` /
+/// `additional_allowed_characters` reopens that spelling surface, so the
+/// comparison must stay composition-aware for every configuration.
+fn canonical_player_name_key(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfc().collect::<String>().to_lowercase()
+}
+
 pub fn validate_player_name_uniqueness(
     name: &str,
     existing_players: &HashMap<PlayerId, PlayerInfo>,
 ) -> Result<(), String> {
-    let normalized_name = name.to_lowercase();
+    let normalized_name = canonical_player_name_key(name);
     for player in existing_players.values() {
-        if player.name.to_lowercase() == normalized_name {
+        if canonical_player_name_key(&player.name) == normalized_name {
             return Err("Player name already exists in this room".to_string());
         }
     }
@@ -274,6 +297,73 @@ mod tests {
     }
 
     // -- Max-players boundaries (validation.rs:107 `<`, :110 `>`) -------------
+
+    // -- Player-name uniqueness identity (validation.rs:145) ------------------
+
+    /// Data-driven: every pair of byte-distinct spellings that render
+    /// identically must collide under `validate_player_name_uniqueness`, and
+    /// genuinely different names must not. The NFC/NFD rows pin the
+    /// composition contract (the function is also the guard for operator
+    /// configurations whose custom symbol allowlists admit combining marks
+    /// that the default charset rules would reject); the ASCII rows pin
+    /// case-insensitivity.
+    #[test]
+    fn visually_identical_name_spellings_cannot_coexist_in_a_room() {
+        const NFC_CAFE: &str = "café"; // c a f é (U+00E9)
+        const NFD_CAFE: &str = "cafe\u{0301}"; // c a f e + combining acute
+        assert_ne!(NFC_CAFE.as_bytes(), NFD_CAFE.as_bytes());
+        const NFC_HANGUL: &str = "\u{ac01}"; // U+AC01 (precomposed syllable)
+        const NFD_HANGUL: &str = "\u{1100}\u{1161}\u{11a8}"; // same jamo sequence
+        assert_ne!(NFC_HANGUL.as_bytes(), NFD_HANGUL.as_bytes());
+
+        let collisions: &[(&str, &str)] = &[
+            ("Player1", "player1"),
+            ("Player1", "PLAYER1"),
+            (NFC_CAFE, NFD_CAFE),
+            (NFD_CAFE, NFC_CAFE),
+            (NFC_HANGUL, NFD_HANGUL),
+            (NFD_HANGUL, NFC_HANGUL),
+        ];
+        for (member, joiner) in collisions {
+            let mut players = HashMap::new();
+            players.insert(
+                PlayerId::new_v4(),
+                PlayerInfo {
+                    id: PlayerId::new_v4(),
+                    name: (*member).to_string(),
+                    is_authority: false,
+                    is_ready: false,
+                    connected_at: chrono::Utc::now(),
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: crate::protocol::types::DEFAULT_REGION_ID.to_string(),
+                },
+            );
+            assert!(
+                validate_player_name_uniqueness(joiner, &players).is_err(),
+                "joiner {joiner:?} must collide with member {member:?}"
+            );
+        }
+
+        // A genuinely distinct name never collides.
+        let mut players = HashMap::new();
+        players.insert(
+            PlayerId::new_v4(),
+            PlayerInfo {
+                id: PlayerId::new_v4(),
+                name: NFC_CAFE.to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: crate::protocol::types::DEFAULT_REGION_ID.to_string(),
+            },
+        );
+        assert!(validate_player_name_uniqueness("cafe", &players).is_ok());
+    }
 
     #[test]
     fn max_players_min_boundary_is_inclusive_of_one() {

@@ -437,10 +437,13 @@ impl EnhancedGameServer {
         let room_join_span = tracing::info_span!(
             "room.join",
             player_id = %player_id,
-            game_name = %game_name,
-            requested_room_code = requested_room_code
-                .as_deref()
-                .unwrap_or("auto"),
+            // Recorded before charset validation runs, so both client-chosen
+            // fields are Debug-escaped: a raw `%` field would let a newline or
+            // ANSI escape in an invalid game name / room code forge log lines.
+            game_name = ?game_name,
+            requested_room_code = tracing::field::debug(
+                requested_room_code.as_deref().unwrap_or("auto")
+            ),
             room_code = tracing::field::Empty,
             room_id = tracing::field::Empty,
             instance_id = %self.instance_id,

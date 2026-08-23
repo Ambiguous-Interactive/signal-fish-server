@@ -98,6 +98,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Token binding's connection key derives from the handshake key plus a
+    // server challenge. Over plaintext ws:// both are wire-visible, so proofs
+    // authenticate nothing there; `required=true` already fails closed without
+    // TLS, so only the optional mode needs this once-at-startup warning.
+    if config::should_warn_unauthenticated_token_binding(&cfg) {
+        tracing::warn!(
+            "Token binding is enabled and optional but built-in TLS is disabled: over \
+             plaintext ws:// the connection key is publicly derivable, so proofs provide \
+             replay ordering only, not authentication (enable security.transport.tls, \
+             terminate TLS at a reverse proxy, or set token_binding.required=true)."
+        );
+    }
+
     let port: u16 = cfg.port;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 

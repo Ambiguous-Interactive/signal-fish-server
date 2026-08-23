@@ -141,3 +141,11 @@ correctness evidence appears.
   before/after evidence.
 - #207 — pursue the next optimization only from current allocation and latency
   profiles, with exact wire and delivery semantics held constant.
+- #407 — clean up the admin/metrics observability contract (ignored `timeRange`,
+  zero-attempt success rates, stub snapshot fields, dead `admin_user_exists`,
+  unrouted `/health` fallback, rejection-log amplification) with an explicit
+  response-shape note for dashboard consumers.
+- #408 — resolve name-identity and crypto leftovers (byte-vs-character
+  name-limit documentation, spectator-name uniqueness decision,
+  EnvelopeEncryptor AAD binding) when operator or embedder evidence makes each
+  change concrete.

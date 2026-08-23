@@ -68,8 +68,10 @@ ws.onmessage = (event) => {
 
 If another message arrives first in allowlist mode, the server sends a generic
 `MISSING_APP_ID` error and closes the connection. Unknown IDs receive
-`INVALID_APP_ID`. A protocol maximum below the deployment minimum receives
-`UNSUPPORTED_PROTOCOL_VERSION`.
+`INVALID_APP_ID`. The same code rejects IDs that cannot be accepted safely in
+operator-facing logs — control characters such as newlines or ANSI escapes, or
+lengths over 256 bytes — in every mode. A protocol maximum below the deployment
+minimum receives `UNSUPPORTED_PROTOCOL_VERSION`.
 
 ## Exact trust boundary
 
@@ -113,8 +115,10 @@ Migrate to the canonical names. Supplying both a canonical and legacy name in
 the same JSON source rejects that source and installs an enforced empty
 allowlist, so falling back to a lower-priority open config cannot fail open.
 Canonical individual-field environment overrides still have final precedence.
-Duplicate `app_id` entries are rejected rather than using last-entry-wins
-limits. The canonical environment override is:
+Duplicate `app_id` entries — and entries that could never authenticate (control
+characters such as newlines or ANSI escapes, or more than 256 bytes) — are
+rejected at startup rather than using last-entry-wins limits or failing every
+later handshake silently. The canonical environment override is:
 
 ```bash
 SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true
