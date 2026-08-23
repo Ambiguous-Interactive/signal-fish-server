@@ -299,10 +299,12 @@ struct CircuitBreakerInner {
 ///   Concurrent calls are rejected while a probe is outstanding.
 /// - A successful probe closes the circuit; a failed probe reopens it.
 ///
-/// Remaining concurrency caveat: a call admitted while [`CircuitState::Closed`]
-/// may resolve after another caller's failure opened the circuit; such a
-/// straggler success leaves the open circuit untouched while such a straggler
-/// failure can refresh it. Admission remains single-probe throughout.
+/// Concurrency notes: exactly one probe is admitted at a time and only that
+/// probe resolves the half-open state, so its outcome stays authoritative even
+/// if a straggler call admitted while [`CircuitState::Closed`] resolves while
+/// the probe runs. A closed-state straggler success resets the streak only
+/// when the circuit is still closed; a closed-state straggler failure still
+/// counts toward the streak but cannot steal the half-open transition.
 pub struct CircuitBreaker {
     inner: Arc<Mutex<CircuitBreakerInner>>,
     /// Tracks whether a half-open probe is currently admitted. Stored outside
@@ -387,25 +389,31 @@ impl CircuitBreaker {
         match operation.await {
             Ok(result) => {
                 let mut inner = self.inner.lock().await;
-                match inner.state {
-                    CircuitState::HalfOpen => {
-                        inner.state = CircuitState::Closed;
-                        inner.failure_count = 0;
-                    }
+                if probing {
+                    // The probe outcome is authoritative: close the circuit
+                    // even if a concurrent straggler failure reopened it while
+                    // this probe ran.
+                    inner.state = CircuitState::Closed;
+                    inner.failure_count = 0;
+                } else if inner.state == CircuitState::Closed {
                     // A closed-state success keeps the failure streak honest:
                     // only consecutive failures may open the circuit.
-                    CircuitState::Closed => inner.failure_count = 0,
-                    // The circuit opened concurrently while this call ran; the
-                    // accumulated streak must survive until a probe resolves.
-                    CircuitState::Open => {}
+                    inner.failure_count = 0;
                 }
+                // Non-probe successes never resolve Open or HalfOpen: only the
+                // outstanding probe owns those transitions.
                 Ok(result)
             }
             Err(error) => {
                 let mut inner = self.inner.lock().await;
                 inner.failure_count = inner.failure_count.saturating_add(1);
 
-                if inner.failure_count >= self.failure_threshold {
+                // A straggler failure from the closed epoch counts toward the
+                // streak but must not resolve someone else's half-open probe.
+                let straggler_failure_during_probe =
+                    inner.state == CircuitState::HalfOpen && !probing;
+                if !straggler_failure_during_probe && inner.failure_count >= self.failure_threshold
+                {
                     inner.state = CircuitState::Open;
                     inner.last_failure_time = Some(chrono::Utc::now());
                 }
