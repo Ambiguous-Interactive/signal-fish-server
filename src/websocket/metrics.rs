@@ -30,7 +30,7 @@ pub(crate) enum RejectionLogEmission<'a> {
 /// counting suppressed repeats so the next emission carries their number.
 ///
 /// The decision logic is pure (tests drive it with synthetic instants); the
-/// handler maps an [`RejectionLogEmission`] to the actual `tracing::warn!`.
+/// handler maps a returned [`RejectionLogEmission`] to the actual `tracing::warn!`.
 #[derive(Default)]
 pub(crate) struct RejectionLogThrottle {
     state: Mutex<Option<(Instant, u64)>>,

@@ -1356,7 +1356,7 @@ impl ServerMetrics {
         let retry_successes = self.retry_successes.load(Ordering::Relaxed);
         // `null` (not 1.0) with zero attempts: a fabricated 100% success rate
         // would satisfy alert thresholds like `< 0.9` for a server that has
-        // never retried. Health logic additionally gates on attempts > 0.
+        // never retried. The health warning fires only for `Some(rate < 0.9)`.
         let retry_success_rate =
             (retry_attempts > 0).then(|| (retry_successes as f64) / (retry_attempts as f64));
         let room_code_retry_operations = self.room_code_retry_operations.load(Ordering::Relaxed);
