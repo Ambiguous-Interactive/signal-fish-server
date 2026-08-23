@@ -30,6 +30,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Bind the `EncryptedSecret` metadata (`key_id`, `created_at`) of
+  `EnvelopeEncryptor` as AES-256-GCM associated data. Bundles encrypted by a
+  previous version no longer decrypt — they carry no authenticated metadata —
+  so re-encrypt any persisted secrets when upgrading (no in-repo caller
+  persists bundles today; this is an embedder-facing surface). Tampering with
+  either metadata field now fails decryption instead of succeeding with
+  attacker-chosen labels.
+- **Breaking:** Remove `MetricsQuery`'s parsed-but-ignored `timeRange`
+  parameter and stop echoing it in the `/metrics` response body. Every
+  reported metric was already a lifetime-cumulative total, so the echoed
+  window string could only mislead window-expecting dashboards; clients can
+  filter `dashboardCache.history` samples by `fetchedAt` client-side.
+  Unknown query parameters remain accepted and ignored.
+- **Breaking:** Remove the dead public `EnhancedGameServer::admin_user_exists`
+  wrapper and its always-false `GameDatabase::admin_user_exists` trait
+  method, which suggested an admin-account seam that does not exist and
+  hard-coded `false` in every trait implementation.
+- Change `RaceConditionMetrics.retry_success_rate` and
+  `room_code_retry_success_rate` to report `null` while zero attempts have
+  been recorded instead of a fabricated `1.0` (100%), which alert thresholds
+  like `< 0.9` previously read as healthy for servers that never retried.
+- Route the conventional top-level `/health` path to the real health handler
+  in the production router instead of falling into the 200-OK catch-all
+  banner that ignored backend state; `/v2/health` remains equivalent.
+- Wire `MetricsSnapshot.dashboard_cache.refresh_count` to the real successful
+  refresh counter and remove the hardcoded-zero `refresh_errors` stub field
+  beside the live `refresh_failures` counter it contradicted.
+- Advertise player/game name length limits as UTF-8 bytes everywhere:
+  validation error messages now say "bytes", and `PlayerNameRulesPayload`
+  documentation states the unit, matching the byte-measured server checks.
+  An 11-character CJK name (33 bytes) still exceeds the default 32-byte
+  limit, as it always has; only the wording changed.
+- Document the deliberate absence of spectator-name uniqueness: spectator
+  names are non-authoritative display metadata on an unbounded admission
+  surface, so enforced uniqueness would enable name-squatting denial of
+  service against spectators (and, across roles, pre-claiming that blocks
+  real players from joining).
+- Throttle unauthorized-metrics-access warnings to one per 60 seconds with a
+  suppressed-repeat count, so anonymous request loops against `/metrics*`
+  can no longer amplify operator log-disk volume before any credential guess
+  matters.
 - **Breaking:** Add `max_outbound_message_size` to the public Rust
   `SecurityConfig`, `ServerConfig`, and `ProtocolInfoPayload` structs.
   Downstream struct literals must supply the field or use struct update syntax.
@@ -62,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix TURN credential minting silently emitting an empty (always-rejected)
+  credential if HMAC initialization ever failed: the ICE builder now refuses
+  the whole TURN entry (fail closed, STUN/static entries unaffected) rather
+  than advertising an unusable pair.
 - Fix player-name uniqueness accepting canonically decomposed (NFD) spellings
   of an already-taken name: comparison now composes both sides to NFC before
   case folding, so byte-distinct spellings of one visible name (Hangul
