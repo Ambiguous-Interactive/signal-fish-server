@@ -47,10 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode, and refuse to start when a configured allowlist entry fails the same
   gate. Previously an open policy accepted any string verbatim into log lines,
   where newlines or ANSI escapes could forge operator-facing logs.
-  Structured logs for the anomalous post-handshake `Authenticate` warning and
-  the pre-validation `room.join` span now render `app_id`, `game_name`, and
-  `requested_room_code` as Debug values (quoted with escapes) instead of raw
-  Display strings; all other `app_id` log sites keep their previous shape.
+  The structured log fields recorded before validation or the app-ID gate —
+  the pre-validation `room.join` span's `game_name` and `requested_room_code`
+  and the anomalous post-handshake `Authenticate` warning's `app_id` — now
+  render as Debug values (quoted with escapes) instead of raw Display strings;
+  all other `app_id` log sites keep their previous shape.
 - Refresh compatible Rust dependencies across the server, fuzz, and native
   reference-client lockfiles, including `uuid` 1.24.1, `saphyr` 0.0.12, and
   `webrtc`/`rtc` 0.20.3, update `taiki-e/install-action` to 2.86.3, and update
