@@ -35,11 +35,13 @@ to risk.
 - Evaluate the first 20 consecutive eligible scheduled attempts per operating
   system, counting red, cancelled, missing, and incomplete attempts under the
   rules in `docs/development.md`.
-- Stratify timing claims by exact source commit if the cohort spans multiple
-  implementations.
-- Decide from the completed distribution whether each platform receives a
-  pull-request timing gate or correctness-only placement, and commit that lane
-  decision before closing #274.
+- Remaining: confirm allocation 20 (due ~2026-08-25 05:45 UTC) preserves the
+  audited pattern; 19/20 per OS are already collected and audited in the issue
+  (all manifests complete/eligible, toolchain pinned, zero backpressure,
+  exact-complete deliveries). The lane decision is committed in
+  `docs/development.md` (macOS correctness-only; Linux/Windows keep the
+  existing broad-job ceiling; no new isolated PR job); close #274 once the
+  full cohort stands.
 
 Acceptance: 100 requested observations per matrix cell are reviewable for each
 operating system, semantic failures are not censored, and the resulting lane
@@ -49,8 +51,10 @@ placement matches the observed execution context.
 
 - Complete the unchanged `h14-capacity-v1` cohort through 20 eligible scheduled
   first attempts, retaining red, cancelled, missing, and incomplete outcomes.
-- Correlate the deterministic queue-arbitration fix with the full hosted
-  distribution rather than throughput alone, then close or refine #290.
+- Remaining: confirm allocation 20 (due ~2026-08-25 03:25 UTC); 19/20 are
+  collected and audited in the issue (exact fallback accounting, complete
+  compatible delivery, ≤0.02x amplification, zero unintended evictions on
+  every instrumented attempt). Close #290 once the cohort completes.
 
 Acceptance: all 20 first attempts preserve exact fallback accounting, complete
 compatible delivery, 0.01x-class amplification, and zero unintended eviction.

@@ -84,6 +84,16 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 **Zero warnings policy** -- all linters enforce strict compliance.
 
+### Local vs hosted-CI work split (Required)
+
+- Locally, agents run `cargo fmt` and `cargo clippy --all-targets
+  --all-features`, plus narrowly targeted red-green checks only:
+  `cargo nextest run -E 'test(<name>)'` filtered to the changed seams.
+- Do NOT run expensive suites locally: full `cargo test`/nextest sweeps,
+  `cargo doc`, `cargo deny`, mutation testing, or whole integration binaries.
+  Those belong to hosted CI; replicate them only when RCA-ing an actual red
+  hosted check, and then prefer the narrowest reproduction that shows it.
+
 ### GitHub Access (Required for All Agents)
 
 - This policy applies to every repository agent entrypoint (Codex, Claude, and

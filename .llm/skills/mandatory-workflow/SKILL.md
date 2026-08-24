@@ -62,6 +62,18 @@ cargo deny --all-features check            # Advisories, licenses, bans, sources
 A public doc comment must not link a private item: `private_intra_doc_links`
 rejects it, and only the `Rustdoc Validation` workflow catches that.
 
+### Local vs hosted-CI work split (Required)
+
+Expensive verification belongs to hosted CI, not the local agent loop:
+
+- **Run locally**: `cargo fmt` + `cargo clippy --all-targets --all-features`,
+  and narrowly targeted red-green checks for the change under review:
+  `cargo nextest run -E 'test(<name>)'`.
+- **Do NOT run locally**: full `cargo test`/nextest sweeps, `cargo doc`,
+  `cargo deny`, mutation testing, or whole integration binaries. Open the PR
+  and let hosted CI run them; a red hosted check is the RCA signal, and any
+  local replication must be the narrowest reproduction that shows it.
+
 ### Pre-Push Validation
 
 ```bash
