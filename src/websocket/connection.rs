@@ -2637,6 +2637,7 @@ mod tests {
     use crate::server::ServerConfig;
     use std::net::SocketAddr;
     use std::sync::atomic::AtomicBool;
+    use std::task::{Context, Poll};
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     async fn test_server() -> Arc<EnhancedGameServer> {
@@ -3703,6 +3704,125 @@ mod tests {
             );
             pair.shutdown().await;
         }
+    }
+
+    /// Issue #415: teardown after an abandoned in-flight write must never hand
+    /// the client a corrupt byte stream.
+    ///
+    /// A large binary frame is cancelled mid-flush on a real upgraded socket
+    /// (the client is not reading yet, so the first poll leaves part of the
+    /// frame unflushed and the future pending), the queue is fenced exactly as
+    /// `SendAccounting::drop` does in production, and then the slow-consumer
+    /// teardown — farewell Error plus coded close — writes onto the same sink.
+    /// The client must observe the abandoned frame COMPLETE (never truncated),
+    /// every later frame on a clean frame boundary, and a decodable stream all
+    /// the way through the close handshake.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn teardown_behind_an_abandoned_write_still_delivers_a_clean_stream() {
+        const PAYLOAD_BYTES: usize = 8 << 20;
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (_tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+
+        let mut pair = UpgradedSocketPair::connect().await;
+
+        // Cancel a huge binary write mid-flush: with the client not yet
+        // reading, the first poll cannot flush the whole frame, so dropping
+        // here reproduces "wire position unknown" at a real sink.
+        let send =
+            pair.server_sink
+                .send(axum::extract::ws::Message::Binary(axum::body::Bytes::from(
+                    vec![0xAB_u8; PAYLOAD_BYTES],
+                )));
+        tokio::pin!(send);
+        let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+        assert!(
+            matches!(send.as_mut().poll(&mut context), Poll::Pending),
+            "an 8 MiB frame must not flush completely while the client is silent"
+        );
+        // Dropping the pinned send future cancels it mid-flush.
+        let _cancelled = send;
+
+        // The production fence: a socket write owned one payload and its
+        // future was dropped before resolving.
+        let accounting = crate::websocket::sending::SendAccounting::new(
+            &rx,
+            &server,
+            &probe_state,
+            player_id,
+            Some(crate::protocol::DeliveryClass::Reliable),
+        );
+        drop(accounting);
+        assert!(
+            rx.abandoned_in_flight_write(),
+            "the dropped write must fence the connection"
+        );
+
+        // Split the pair so the client half drains concurrently while the
+        // server half runs teardown: the bounded farewell writes need an
+        // active reader to make progress, exactly like production.
+        let UpgradedSocketPair {
+            mut server_sink,
+            mut client,
+            serve_task,
+            ..
+        } = pair;
+        let drain = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(frame) = client.next().await {
+                match frame.expect("client stream must stay decodable") {
+                    TungsteniteMessage::Close(_) => break,
+                    other => frames.push(other),
+                }
+            }
+            frames
+        });
+
+        let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+        let mut batcher = MessageBatcher::new(1, 1);
+        finalize_closed_connection(
+            &mut server_sink,
+            &mut rx,
+            &mut batcher,
+            Some(CloseReason::SlowConsumer),
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let frames = tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("client drain must finish in time")
+            .expect("client drain task must not panic");
+        serve_task.abort();
+        let _ = serve_task.await;
+
+        // The abandoned frame must arrive whole: tungstenite retains any
+        // unflushed tail inside the sink, so appended teardown bytes continue
+        // behind it instead of truncating it.
+        assert!(
+            matches!(
+                frames.first(),
+                Some(TungsteniteMessage::Binary(data)) if data.len() == PAYLOAD_BYTES
+            ),
+            "first client frame must be the complete abandoned binary payload, got {:?}",
+            frames.first().map(|frame| match frame {
+                TungsteniteMessage::Binary(data) => format!("binary len {}", data.len()),
+                other => format!("other {other:?}"),
+            })
+        );
+        // The farewell Error frame must follow on a clean boundary...
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, TungsteniteMessage::Text(_))),
+            "the slow-consumer farewell must reach the client"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
