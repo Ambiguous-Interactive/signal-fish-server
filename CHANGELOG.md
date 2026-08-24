@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Remove the never-wired cross-instance deduplication seam. The
+  `DedupCache` had zero production callers, its `coordination.dedup_cache`
+  configuration block (and `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__*`
+  environment variables) was parsed but consumed by nothing, and the
+  `signal_fish_cross_instance_dedup_{hits,misses,evictions}_total` Prometheus
+  series plus the `MetricsSnapshot.cross_instance.dedup_cache_*` fields
+  exported permanent zeros. The module, its configuration types, the
+  always-zero counters, and the `lru` dependency that existed only for it are
+  gone. Config files carrying a `dedup_cache` block still parse (unknown
+  fields are ignored); embedders referencing the removed public types must
+  drop those references.
 - **Breaking:** The public coordination delivery entry point
   `deliver_or_disconnect` now takes `&Arc<ServerMetrics>` instead of
   `&ServerMetrics` (the `_in_room` variants are crate-internal and changed

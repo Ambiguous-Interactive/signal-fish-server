@@ -1,13 +1,11 @@
 //! Message coordination and room operation management
 //!
 //! This module provides facilities for coordinating messages and room operations:
-//! - Message deduplication (LRU-based cache)
 //! - Room operation coordination with process-local locking
 //!
 //! For signal-fish-server, this is an in-memory-only implementation.
 
 // Public modules
-pub mod dedup;
 pub(crate) mod outbound_queue;
 pub mod room_coordinator;
 
@@ -26,7 +24,6 @@ pub mod allocation_benchmark {
 }
 
 // Re-export public types
-pub use dedup::DedupCacheSettings;
 pub use room_coordinator::{
     FinalizedRoom, InMemoryRoomOperationCoordinator, PlayerReadyError,
     RoomOperationCoordinatorTrait, StartGameOutcome, StartGamePublication,

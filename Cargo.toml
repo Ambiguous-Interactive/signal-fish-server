@@ -148,7 +148,6 @@ getrandom = "0.4"
 subtle = "2.6"
 
 # Data structures
-lru = "0.18"
 hdrhistogram = "7.5"
 rand = "0.10"
 fastrand = "2.4"

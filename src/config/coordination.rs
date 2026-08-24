@@ -1,16 +1,11 @@
 //! Process-local coordination configuration and future-backend seams.
 
-use super::defaults::{
-    default_dedup_cache_capacity, default_dedup_cache_cleanup_interval_secs,
-    default_dedup_cache_ttl_secs, default_membership_snapshot_interval_secs,
-};
+use super::defaults::default_membership_snapshot_interval_secs;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the in-memory coordinator.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CoordinationConfig {
-    #[serde(default)]
-    pub dedup_cache: DedupCacheConfig,
     /// Reserved interval for a future membership-snapshot backend (seconds).
     /// The shipped coordinator does not exchange snapshots between processes.
     #[serde(default = "default_membership_snapshot_interval_secs")]
@@ -20,29 +15,7 @@ pub struct CoordinationConfig {
 impl Default for CoordinationConfig {
     fn default() -> Self {
         Self {
-            dedup_cache: DedupCacheConfig::default(),
             membership_snapshot_interval_secs: default_membership_snapshot_interval_secs(),
-        }
-    }
-}
-
-/// Deduplication cache configuration.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DedupCacheConfig {
-    #[serde(default = "default_dedup_cache_capacity")]
-    pub capacity: usize,
-    #[serde(default = "default_dedup_cache_ttl_secs")]
-    pub ttl_secs: u64,
-    #[serde(default = "default_dedup_cache_cleanup_interval_secs")]
-    pub cleanup_interval_secs: u64,
-}
-
-impl Default for DedupCacheConfig {
-    fn default() -> Self {
-        Self {
-            capacity: default_dedup_cache_capacity(),
-            ttl_secs: default_dedup_cache_ttl_secs(),
-            cleanup_interval_secs: default_dedup_cache_cleanup_interval_secs(),
         }
     }
 }

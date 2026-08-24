@@ -41,7 +41,7 @@ pub mod validation;
 pub mod websocket;
 
 // Re-exports for convenience
-pub use coordination::{CoordinationConfig, DedupCacheConfig};
+pub use coordination::CoordinationConfig;
 
 pub use defaults::DashboardHistoryField;
 

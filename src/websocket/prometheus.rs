@@ -501,24 +501,6 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
-        "signal_fish_cross_instance_dedup_hits_total",
-        "Total deduplication cache hits",
-        snapshot.cross_instance.dedup_cache_hits,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_cross_instance_dedup_misses_total",
-        "Total deduplication cache misses",
-        snapshot.cross_instance.dedup_cache_misses,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_cross_instance_dedup_evictions_total",
-        "Total deduplication cache evictions",
-        snapshot.cross_instance.dedup_cache_evictions,
-    );
-    counter(
-        &mut buf,
         "signal_fish_cross_instance_membership_cache_hits_total",
         "Total membership cache hits within the message coordinator",
         snapshot.cross_instance.membership_cache_hits,

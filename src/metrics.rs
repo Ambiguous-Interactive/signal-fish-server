@@ -159,10 +159,6 @@ pub struct ServerMetrics {
 
     // Reserved remote-coordination seam metrics (the shipped backend is local)
     pub cross_instance_messages: AtomicU64,
-    pub dedup_cache_hits: AtomicU64,
-    pub dedup_cache_misses: AtomicU64,
-    pub dedup_cache_evictions: AtomicU64,
-    pub dedup_cache_size: AtomicU64,
     pub membership_cache_hits: AtomicU64,
     pub membership_cache_misses: AtomicU64,
     pub remote_membership_updates_published: AtomicU64,
@@ -437,10 +433,6 @@ pub struct RaceConditionMetrics {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CrossInstanceMetrics {
     pub cross_instance_messages: u64,
-    pub dedup_cache_hits: u64,
-    pub dedup_cache_misses: u64,
-    pub dedup_cache_evictions: u64,
-    pub dedup_cache_size: u64,
     pub membership_cache_hits: u64,
     pub membership_cache_misses: u64,
     pub remote_membership_updates_published: u64,
@@ -612,10 +604,6 @@ impl ServerMetrics {
             retry_attempts: AtomicU64::new(0),
             retry_successes: AtomicU64::new(0),
             cross_instance_messages: AtomicU64::new(0),
-            dedup_cache_hits: AtomicU64::new(0),
-            dedup_cache_misses: AtomicU64::new(0),
-            dedup_cache_evictions: AtomicU64::new(0),
-            dedup_cache_size: AtomicU64::new(0),
             membership_cache_hits: AtomicU64::new(0),
             membership_cache_misses: AtomicU64::new(0),
             remote_membership_updates_published: AtomicU64::new(0),
@@ -987,14 +975,6 @@ impl ServerMetrics {
         self.cross_instance_messages.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn increment_dedup_cache_hit(&self) {
-        self.dedup_cache_hits.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn increment_dedup_cache_miss(&self) {
-        self.dedup_cache_misses.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn increment_membership_cache_hit(&self) {
         self.membership_cache_hits.fetch_add(1, Ordering::Relaxed);
     }
@@ -1026,17 +1006,6 @@ impl ServerMetrics {
     pub fn increment_remote_membership_skipped_broadcast(&self) {
         self.remote_membership_skipped_broadcasts
             .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn add_dedup_cache_evictions(&self, count: u64) {
-        if count > 0 {
-            self.dedup_cache_evictions
-                .fetch_add(count, Ordering::Relaxed);
-        }
-    }
-
-    pub fn set_dedup_cache_size(&self, size: u64) {
-        self.dedup_cache_size.store(size, Ordering::Relaxed);
     }
 
     // Performance metrics
@@ -1451,10 +1420,6 @@ impl ServerMetrics {
             },
             cross_instance: CrossInstanceMetrics {
                 cross_instance_messages: self.cross_instance_messages.load(Ordering::Relaxed),
-                dedup_cache_hits: self.dedup_cache_hits.load(Ordering::Relaxed),
-                dedup_cache_misses: self.dedup_cache_misses.load(Ordering::Relaxed),
-                dedup_cache_evictions: self.dedup_cache_evictions.load(Ordering::Relaxed),
-                dedup_cache_size: self.dedup_cache_size.load(Ordering::Relaxed),
                 membership_cache_hits: self.membership_cache_hits.load(Ordering::Relaxed),
                 membership_cache_misses: self.membership_cache_misses.load(Ordering::Relaxed),
                 remote_membership_updates_published: self

@@ -504,10 +504,10 @@ bracket-accounted `seq`), `ReplayFaithful` / `StatusHonest` (honest reconnect
 replay), and by extension the `DeliveryContract` conservation law — assumes one
 authoritative counter and one queue/ring per room, i.e. a single home. The
 session-lifecycle invariants in `SignalFishSession.tla` are likewise per-room and
-single-instance by the same construction. The multi-instance seams
-(`DedupCache`, the in-memory "distributed lock", `should_process_message`) are
-dead stubs today; the deliberate single-node CP stance and the LB room-affinity
-requirement are documented in
+single-instance by the same construction. The multi-instance seams (the
+in-memory "distributed lock", `should_process_message`) are dead stubs today;
+the deliberate single-node CP stance and the LB room-affinity requirement are
+documented in
 [`docs/architecture/single-instance-deployment.md`](../docs/architecture/single-instance-deployment.md).
 
 ## Timing theorem (sender pacing vs the activity reaper)
