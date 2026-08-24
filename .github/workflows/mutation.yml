@@ -85,7 +85,7 @@ jobs:
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2.86.5
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2.86.5
@@ -208,7 +208,7 @@ jobs:
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2.86.5
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
 
       - name: Install cargo-nextest
         # The mutation oracle uses nextest process isolation plus the dedicated

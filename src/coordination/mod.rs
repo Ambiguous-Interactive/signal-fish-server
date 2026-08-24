@@ -741,7 +741,7 @@ impl DeliverySender {
         }
     }
 
-    fn effective_data_class(
+    pub(crate) fn effective_data_class(
         &self,
         message: &ServerMessage,
     ) -> Option<crate::protocol::DeliveryClass> {
@@ -1336,76 +1336,92 @@ pub(crate) enum DeliveryStart {
 /// recipients without allocating one async future per recipient, while the
 /// scalar wrapper above still uses the exact same delivery state machine.
 pub(crate) struct BackpressuredDelivery {
-    /// `None` once [`BackpressuredDelivery::resolve`] has taken ownership for
-    /// normal resolution; `Some` means the delivery is still unresolved and
-    /// dropping the struct must account for it.
-    inner: Option<BackpressuredDeliveryInner>,
+    /// Accounting token for this attempt. `Some` means the delivery is still
+    /// unresolved and dropping the struct must account for it; taken only at
+    /// actual resolution, after every await point has been passed.
+    attempt: Option<ParkedDeliveryAttempt>,
+    /// Wait state owned by whichever future drives the park to completion.
+    /// Kept separate so the future can move/borrow it freely while the
+    /// cancellation guard above stays armed across every await point.
+    wait: BackpressuredDeliveryWait,
 }
 
-struct BackpressuredDeliveryInner {
+/// Cancellation guard for one parked delivery attempt.
+struct ParkedDeliveryAttempt {
     player_id: PlayerId,
     handle: ClientDeliveryHandle,
     /// Server metrics shared by every outcome of this attempt, so drop-path
     /// accounting resolves the same counter set as normal resolution even for
     /// queues that carry no embedded metrics handle.
     metrics: std::sync::Arc<crate::metrics::ServerMetrics>,
-    delivery: DeliveryMessage,
-    room_id: Option<RoomId>,
-    deadline: Option<tokio::time::Instant>,
-    capacity_witness: Option<CapacityReleaseWitness>,
-    timeout: std::time::Duration,
     connection_stats: Option<Arc<crate::metrics::ConnectionDeliveryStats>>,
     pending_class: Option<crate::protocol::DeliveryClass>,
     #[cfg(feature = "trace-validation")]
     trace_delivery_id: Option<u64>,
 }
 
-impl Drop for BackpressuredDelivery {
-    fn drop(&mut self) {
-        let Some(pending) = self.inner.take() else {
-            return;
-        };
-        // The parked delivery was cancelled before it could be enqueued (its
-        // owning broadcast/scalar future was dropped mid-await). Resolve the
-        // attempt as a drop so conservation holds, and record the abandonment
-        // in the recipient's queue ledger. The recipient is NOT closed here:
-        // unlike a slow-consumer timeout this is not the recipient's fault,
-        // and latest/volatile losses are already part of the delivery model.
-        if let Some(class) = pending.pending_class {
+impl ParkedDeliveryAttempt {
+    /// Resolve a cancelled park as an accounted drop.
+    ///
+    /// The parked delivery was cancelled before it could be enqueued (its
+    /// owning broadcast/scalar/wait future was dropped mid-await). Resolve the
+    /// attempt as a drop so conservation holds, and record the abandonment in
+    /// the recipient's queue ledger. The recipient is NOT closed here: unlike
+    /// a slow-consumer timeout this is not the recipient's fault, and
+    /// latest/volatile losses are already part of the delivery model.
+    fn resolve_as_cancelled_drop(self) {
+        if let Some(class) = self.pending_class {
             // Pair the per-class ledger counters (attempted + abandoned): the
             // parked item was never enqueued, so nothing recorded its attempt
             // queue-side yet, and the exported conservation identity requires
             // both halves.
-            pending.handle.sender.record_cancelled_before_enqueue(class);
+            self.handle.sender.record_cancelled_before_enqueue(class);
         }
-        pending.metrics.increment_websocket_messages_dropped();
-        if let Some(stats) = &pending.connection_stats {
+        self.metrics.increment_websocket_messages_dropped();
+        if let Some(stats) = &self.connection_stats {
             stats
                 .dropped_for_you
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         #[cfg(feature = "trace-validation")]
-        pending.handle.close.record_trace(
+        self.handle.close.record_trace(
             crate::trace_validation::DeliveryTraceAction::Unsupported,
-            pending.trace_delivery_id,
+            self.trace_delivery_id,
             Some("parked-delivery-cancelled"),
         );
         tracing::debug!(
-            player_id = %pending.player_id,
+            player_id = %self.player_id,
             "Parked outbound delivery abandoned before resolution; counted as dropped"
         );
     }
 }
 
+/// Delivery state owned by the future that waits out the backpressure.
+struct BackpressuredDeliveryWait {
+    delivery: DeliveryMessage,
+    room_id: Option<RoomId>,
+    deadline: Option<tokio::time::Instant>,
+    capacity_witness: Option<CapacityReleaseWitness>,
+    timeout: std::time::Duration,
+}
+
+impl Drop for BackpressuredDelivery {
+    fn drop(&mut self) {
+        if let Some(pending) = self.attempt.take() {
+            pending.resolve_as_cancelled_drop();
+        }
+    }
+}
+
 impl BackpressuredDelivery {
-    /// Take ownership of the pending state for normal resolution, defusing the
-    /// drop-path accounting.
+    /// Take ownership of the accounting state for normal resolution, defusing
+    /// the drop-path accounting.
     ///
     /// Returns `None` on double resolution, which cannot occur through the
-    /// shipped API (the only caller consumes `self`); the caller fails closed
+    /// shipped API (the only caller resolves once); the caller fails closed
     /// instead of panicking, per the server's panic policy.
-    fn into_parts(mut self) -> Option<BackpressuredDeliveryInner> {
-        self.inner.take()
+    fn resolve_attempt(&mut self) -> Option<ParkedDeliveryAttempt> {
+        self.attempt.take()
     }
 }
 
@@ -1532,20 +1548,22 @@ pub(crate) fn start_message_delivery_in_room(
         .map(CapacityReleaseWitness::full_observed_at)
         .unwrap_or_else(tokio::time::Instant::now);
     DeliveryStart::Backpressured(BackpressuredDelivery {
-        inner: Some(BackpressuredDeliveryInner {
+        attempt: Some(ParkedDeliveryAttempt {
             player_id: *player_id,
             handle: handle.clone(),
             metrics: Arc::clone(metrics),
-            delivery,
-            room_id,
-            deadline: crate::deadline::after(full_observed_at, slow_consumer_timeout),
-            capacity_witness,
-            timeout: slow_consumer_timeout,
             connection_stats,
             pending_class: offered_class,
             #[cfg(feature = "trace-validation")]
             trace_delivery_id,
         }),
+        wait: BackpressuredDeliveryWait {
+            delivery,
+            room_id,
+            deadline: crate::deadline::after(full_observed_at, slow_consumer_timeout),
+            capacity_witness,
+            timeout: slow_consumer_timeout,
+        },
     })
 }
 
@@ -1558,58 +1576,77 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
         TimedOut,
     }
 
-    let BackpressuredDeliveryInner {
+    let mut pending = pending;
+    // The accounting token stays ARMED across the whole wait below. If this
+    // future is cancelled mid-select, dropping `pending` resolves the attempt
+    // as an accounted drop; the token is only taken after every await point
+    // has been passed, so no cancellation window exists past that point.
+    // (Defusing up front used to lose the resolution entirely when the wait
+    // itself was dropped mid-await.)
+    let Some(attempt) = pending.attempt.as_ref() else {
+        // Double resolution is a programming error and unreachable through
+        // the shipped API; fail closed without panicking. The delivery was
+        // already accounted by whichever path resolved it first.
+        tracing::error!("BackpressuredDelivery resolved more than once");
+        return (
+            PlayerId::nil(),
+            DeliverySender::from(tokio::sync::mpsc::channel(1).0),
+            DeliveryOutcome::Canceled,
+        );
+    };
+    let sender = attempt.handle.sender.clone();
+    let timeout = pending.wait.timeout;
+    // The send and deadline-retry paths each need their own delivery handle:
+    // the blocking send consumes one copy while parked, and the deadline
+    // branch must still be able to retry with exact release evidence.
+    let wait_result = {
+        let deadline_retry = pending.wait.delivery.clone();
+        let send = attempt
+            .handle
+            .sender
+            .send_delivery(pending.wait.delivery.clone(), pending.wait.room_id);
+        tokio::pin!(send);
+        // Tokio's Timeout polls its inner future before its timer. A biased select
+        // deliberately polls the deadline first so capacity that returns at or
+        // after expiry cannot revive the expired logical delivery.
+        tokio::select! {
+            biased;
+            deadline = crate::deadline::wait_until(pending.wait.deadline) => {
+                match attempt.handle.sender.try_send_delivery_released_before(
+                    deadline_retry,
+                    pending.wait.room_id,
+                    pending.wait.capacity_witness.as_ref(),
+                    deadline,
+                ) {
+                    Ok(Some(outcome)) => WaitResult::Complete(Ok(outcome)),
+                    Ok(None) | Err(DeliveryTrySendError::Full(_, _)) => WaitResult::TimedOut,
+                    Err(error) => WaitResult::Complete(Err(error)),
+                }
+            },
+            result = &mut send => WaitResult::Complete(result),
+        }
+    };
+    // Past every await point. Defuse the drop guard before resolving so the
+    // normal outcome below owns the attempt exactly once.
+    let Some(attempt) = pending.resolve_attempt() else {
+        tracing::error!("BackpressuredDelivery resolved more than once");
+        return (
+            PlayerId::nil(),
+            DeliverySender::from(tokio::sync::mpsc::channel(1).0),
+            DeliveryOutcome::Canceled,
+        );
+    };
+    let ParkedDeliveryAttempt {
         player_id,
         handle,
-        // The inner Arc equals the caller-supplied `metrics`; the drop path
+        // The stored Arc equals the caller-supplied `metrics`; the drop path
         // uses the stored copy.
         metrics: _,
-        delivery,
-        room_id,
-        deadline,
-        capacity_witness,
-        timeout,
         connection_stats,
         pending_class,
         #[cfg(feature = "trace-validation")]
         trace_delivery_id,
-    } = match pending.into_parts() {
-        Some(parts) => parts,
-        None => {
-            // Double resolution is a programming error and unreachable through
-            // the shipped API; fail closed without panicking. The delivery was
-            // already accounted by whichever path resolved it first.
-            tracing::error!("BackpressuredDelivery resolved more than once");
-            return (
-                PlayerId::nil(),
-                DeliverySender::from(tokio::sync::mpsc::channel(1).0),
-                DeliveryOutcome::Canceled,
-            );
-        }
-    };
-    let sender = handle.sender.clone();
-    let deadline_retry = delivery.clone();
-    let send = handle.sender.send_delivery(delivery, room_id);
-    tokio::pin!(send);
-    // Tokio's Timeout polls its inner future before its timer. A biased select
-    // deliberately polls the deadline first so capacity that returns at or
-    // after expiry cannot revive the expired logical delivery.
-    let wait_result = tokio::select! {
-        biased;
-        deadline = crate::deadline::wait_until(deadline) => {
-            match handle.sender.try_send_delivery_released_before(
-                deadline_retry,
-                room_id,
-                capacity_witness.as_ref(),
-                deadline,
-            ) {
-                Ok(Some(outcome)) => WaitResult::Complete(Ok(outcome)),
-                Ok(None) | Err(DeliveryTrySendError::Full(_, _)) => WaitResult::TimedOut,
-                Err(error) => WaitResult::Complete(Err(error)),
-            }
-        },
-        result = &mut send => WaitResult::Complete(result),
-    };
+    } = attempt;
     let outcome = match wait_result {
         WaitResult::Complete(Ok(outcome)) => {
             #[cfg(feature = "trace-validation")]
@@ -4419,6 +4456,72 @@ mod tests {
         assert_conservation(&metrics);
     }
 
+    /// Issue #417 (window 2): cancelling the *wait* future itself — not just
+    /// dropping an unresolved parked start — must still resolve the attempt.
+    /// The wait used to defuse the drop guard before its select, so a wait
+    /// dropped mid-await lost the resolution entirely even though the park's
+    /// Drop accounting existed.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_the_parked_delivery_wait_resolves_attempt_accounting() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = test_player();
+        let (sender, mut receiver) =
+            outbound_queue::channel_with_metrics(1, 1, Arc::clone(&metrics));
+        sender.set_protocol_version(3);
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        handle
+            .sender
+            .try_send(game_data_message(None, None, None, None), None)
+            .expect("prefill the classified data lane");
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(game_data_message(None, None, None, None)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+
+        // Drive the wait into its select, then emulate cancellation of the
+        // awaiting broadcast/scalar future mid-await.
+        let mut wait = Box::pin(finish_backpressured_delivery_in_room(&metrics, pending));
+        assert!(futures_util::poll!(wait.as_mut()).is_pending());
+        drop(wait);
+
+        assert_eq!(
+            listener.requested_reason(),
+            None,
+            "a cancelled parked delivery is not a slow-consumer fault of the recipient"
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            1,
+            "the abandoned attempt must resolve as an accounted drop"
+        );
+        assert_conservation(&metrics);
+
+        // The recipient-facing queue ledger must record the abandonment so a
+        // later cumulative delivery report carries it.
+        handle.sender.try_enqueue_report_snapshot_for_test();
+        let report_item = receiver
+            .try_recv_control()
+            .expect("control item")
+            .expect("snapshot report enqueued");
+        let outbound_queue::OutboundPayload::DeliveryReport(report) = &report_item.payload else {
+            panic!("expected a delivery report, got {:?}", report_item.payload);
+        };
+        assert_eq!(
+            report.per_class.reliable.abandoned, 1,
+            "the queue ledger must count the abandoned parked delivery"
+        );
+    }
+
     /// A pre-deadline release is no longer usable when another producer fills
     /// the lane again. Historical progress alone must not revive the wait.
     #[tokio::test(start_paused = true)]
@@ -4481,6 +4584,84 @@ mod tests {
             1
         );
         assert_conservation(&metrics);
+    }
+
+    /// Issue #416: the capacity witness freezes the lane that was full when
+    /// the producer parked. A protocol upgrade while parked (v2 → v3) makes
+    /// every retry recompute a *different* target lane, and the witness used to
+    /// reject itself on that lane mismatch even though its lane genuinely
+    /// drained before the deadline — evicting a fully drained, on-rate
+    /// recipient purely for upgrading mid-backpressure. The release evidence
+    /// must be evaluated on the witness's own frozen lane.
+    #[tokio::test(start_paused = true)]
+    async fn protocol_upgrade_mid_backpressure_does_not_evict_a_drained_recipient() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = test_player();
+        // Legacy/data capacity 1, control capacity 4: one prefilled frame fills
+        // the pre-v3 legacy lane completely.
+        let (sender, mut receiver) = outbound_queue::channel(1, 4);
+        // Deliberately left at v2: the producer below observes Full on
+        // `Lane::Legacy` and its witness must freeze that lane.
+        sender
+            .try_enqueue_control(test_message())
+            .expect("prefill the single-slot legacy lane");
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(test_message()),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+
+        // The connection upgrades while the delivery stays parked; every retry
+        // from here on recomputes its target lane as `Lane::Control`.
+        handle.sender.set_protocol_version(3);
+
+        // The writer fully drains the legacy lane strictly before the deadline:
+        // real capacity returned for this on-rate recipient.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert!(
+            matches!(
+                receiver.try_recv().expect("legacy drain").payload,
+                OutboundPayload::Message(message)
+                    if matches!(message.as_ref(), ServerMessage::Pong)
+            ),
+            "the drained item must be the prefilled legacy control frame"
+        );
+
+        tokio::time::advance(Duration::from_millis(501)).await;
+        let (_, _, outcome) = finish_backpressured_delivery_in_room(&metrics, pending).await;
+
+        assert_eq!(
+            outcome,
+            DeliveryOutcome::Delivered,
+            "a drained on-rate recipient must receive its delivery after upgrading"
+        );
+        assert_eq!(
+            listener.requested_reason(),
+            None,
+            "a protocol upgrade during backpressure is not a slow-consumer fault"
+        );
+        assert_conservation(&metrics);
+
+        // The delivery must actually have been enqueued on the upgraded
+        // connection's control lane.
+        assert!(matches!(
+            receiver
+                .try_recv()
+                .expect("upgraded-lane delivery")
+                .payload,
+            OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::Pong)
+        ));
     }
 
     #[tokio::test(start_paused = true)]

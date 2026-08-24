@@ -1319,7 +1319,6 @@ mod tests {
         let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
             Arc::new(crate::coordination::InMemoryRoomOperationCoordinator::new(
                 coordinator.clone(),
-                Arc::new(crate::distributed::InMemoryDistributedLock::new()),
                 database.clone() as Arc<dyn GameDatabase>,
                 None,
             ));

@@ -294,6 +294,81 @@ async fn expired_control_capacity_waits_cannot_revive_after_capacity_returns() {
     }
 }
 
+/// Issue #417 (window 1): cancelling a parked conditional wait mid-await —
+/// the one exit no select arm controls — must still resolve the attempt as an
+/// accounted drop, and must never request a close of the healthy recipient.
+#[tokio::test(start_paused = true)]
+async fn cancelling_a_parked_conditional_wait_resolves_attempt_accounting() {
+    let cases = [
+        ControlCapacityWait::InitialTransition,
+        ControlCapacityWait::ConditionalDelivery,
+        ControlCapacityWait::ConditionalReservation,
+    ];
+    let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
+
+    for (case_index, case) in cases.into_iter().enumerate() {
+        for (kind_index, kind) in queue_kinds.into_iter().enumerate() {
+            let metrics = Arc::new(ServerMetrics::new());
+            let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+                Duration::from_secs(1),
+                Arc::clone(&metrics),
+            ));
+            let player_id = PlayerId::from_u128(
+                0x4170_0A51_BEEF_0000_0000_0000_0000_0000 + (case_index * 10 + kind_index) as u128,
+            );
+            let (handle, close_listener, _receiver) = full_control_queue(kind);
+            let mut wait =
+                start_control_capacity_wait(case, Arc::clone(&coordinator), player_id, handle);
+
+            assert!(
+                futures_util::poll!(wait.as_mut()).is_pending(),
+                "{case:?}/{kind:?} must park while the control queue is full"
+            );
+            // Emulate cancellation of the awaiting caller mid-await.
+            drop(wait);
+
+            assert_eq!(
+                close_listener.requested_reason(),
+                None,
+                "{case:?}/{kind:?} a cancelled wait is not a slow-consumer fault of the recipient"
+            );
+            assert_eq!(
+                metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+                1,
+                "{case:?}/{kind:?} the cancelled attempt must resolve as an accounted drop"
+            );
+            // The attempt counter is resolved exactly once: one attempt, one
+            // drop, nothing enqueued or canceled.
+            assert_eq!(
+                metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+                1,
+                "{case:?}/{kind:?} must have counted exactly one attempt"
+            );
+            assert_eq!(
+                metrics
+                    .websocket_deliveries_enqueued
+                    .load(Ordering::Relaxed),
+                0,
+                "{case:?}/{kind:?} must not account a cancelled delivery as enqueued"
+            );
+            assert_eq!(
+                metrics
+                    .websocket_deliveries_canceled
+                    .load(Ordering::Relaxed),
+                0,
+                "{case:?}/{kind:?} must not account a cancelled future as a logical cancel"
+            );
+            assert_eq!(
+                metrics
+                    .websocket_slow_consumer_disconnects
+                    .load(Ordering::Relaxed),
+                0,
+                "{case:?}/{kind:?} must not disconnect the recipient"
+            );
+        }
+    }
+}
+
 /// Regression for #290's deadline-arbitration class across every classified
 /// control-capacity wait: a writer release strictly before expiry remains
 /// valid even if the producer is not scheduled again until after expiry.

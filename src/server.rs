@@ -9,7 +9,7 @@ use crate::coordination::{
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
-use crate::metrics::ConnectionDeliveryStats;
+use crate::metrics::{ConnectionDeliveryStats, ServerMetrics};
 use crate::protocol::{
     room_codes, ErrorCode, GameDataEncoding, PlayerId, RoomId, RoomOperationId, ServerMessage,
     SpectatorStateChangeReason, Transport,
@@ -406,7 +406,6 @@ impl EnhancedGameServer {
         let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
             Arc::new(InMemoryRoomOperationCoordinator::new(
                 message_coordinator.clone(),
-                distributed_lock.clone(),
                 database.clone(),
                 reconnection_manager.clone(),
             ));
@@ -1304,6 +1303,53 @@ enum RoomBatchReservation {
     Canceled,
 }
 
+/// Cancellation guard for one parked conditional-delivery wait.
+///
+/// Every select arm inside a parked wait resolves the attempt (enqueued,
+/// canceled, channel-closed, or loud slow-consumer close); the one exit no arm
+/// controls is the owning future being *cancelled* mid-await. While armed,
+/// dropping this guard resolves that cancelled attempt as an accounted drop —
+/// pairing the recipient's queue ledger when the offered payload carries a
+/// delivery class — mirroring
+/// [`crate::coordination::BackpressuredDelivery`]'s drop accounting (#417).
+/// A cancelled wait is not the recipient's fault, so no close is requested.
+struct ParkedWaitAccounting<'a> {
+    metrics: &'a ServerMetrics,
+    /// Cheap `Arc` clone of the per-connection delivery stats: some wait
+    /// futures legitimately move their own copy into a reservation outcome,
+    /// so the guard cannot hold a shared borrow across the park.
+    stats: Option<Arc<ConnectionDeliveryStats>>,
+    sender: &'a DeliverySender,
+    class: Option<crate::protocol::DeliveryClass>,
+    armed: bool,
+}
+
+impl ParkedWaitAccounting<'_> {
+    fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ParkedWaitAccounting<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(class) = self.class {
+            // Pair the per-class ledger counters (attempted + abandoned): the
+            // parked item was never enqueued, so the exported conservation
+            // identity requires both halves.
+            self.sender.record_cancelled_before_enqueue(class);
+        }
+        self.metrics.increment_websocket_messages_dropped();
+        if let Some(stats) = &self.stats {
+            stats
+                .dropped_for_you
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 #[derive(Default)]
 struct StartedDeliveries {
     // Healthy queues leave both vectors empty. Only exceptional outcomes own
@@ -1855,6 +1901,23 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    /// Await `inner` under a parked-wait cancellation guard.
+    ///
+    /// Normal completion defuses the guard; cancelling the combined future
+    /// mid-await drops it armed, resolving the attempt as an accounted drop.
+    async fn account_for_cancelled_park<F>(
+        &self,
+        guard: ParkedWaitAccounting<'_>,
+        inner: F,
+    ) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let outcome = inner.await;
+        guard.defuse();
+        outcome
+    }
+
     async fn reserve_initial_transition(
         &self,
         player_id: PlayerId,
@@ -1892,71 +1955,88 @@ impl InMemoryMessageCoordinator {
             Deadline(tokio::time::Instant),
             Result(Result<DeliveryPermit, DeliveryReserveError>),
         }
-        let reservation = tokio::select! {
-            // Capacity returning at or after the deadline cannot revive an
-            // expired transition. Tokio's `timeout` polls its inner future
-            // first, so use a timer-first biased select here.
-            biased;
-            deadline = crate::deadline::wait_until(deadline) => ReservationWait::Deadline(deadline),
-            result = &mut reserve => ReservationWait::Result(result),
-        };
-        match reservation {
-            ReservationWait::Result(Ok(permit)) => Ok(permit),
-            ReservationWait::Result(Err(DeliveryReserveError::Canceled)) => {
-                self.record_canceled_delivery(player_id);
-                Err(DeliveryOutcome::Canceled)
-            }
-            ReservationWait::Result(Err(
-                DeliveryReserveError::Closed | DeliveryReserveError::Full(_),
-            )) => {
-                self.metrics.increment_websocket_deliveries_channel_closed();
-                Err(DeliveryOutcome::ChannelClosed)
-            }
-            ReservationWait::Deadline(deadline) => {
-                match delivery.sender.try_reserve_control_released_before(
-                    None,
-                    capacity_witness.as_ref(),
-                    deadline,
-                ) {
-                    Ok(Some(permit)) => Ok(permit),
-                    // A terminal queue state that became observable at the
-                    // deadline is more specific than backpressure expiry. In
-                    // particular, classified queues use `Canceled` to fence stale
-                    // generations; that fence must not be rewritten as a
-                    // slow-consumer disconnect merely because the timer is also
-                    // ready.
-                    Err(DeliveryReserveError::Canceled) => {
-                        self.record_canceled_delivery(player_id);
-                        Err(DeliveryOutcome::Canceled)
-                    }
-                    Err(DeliveryReserveError::Closed) => {
-                        self.metrics.increment_websocket_deliveries_channel_closed();
-                        Err(DeliveryOutcome::ChannelClosed)
-                    }
-                    Ok(None) | Err(DeliveryReserveError::Full(_)) => {
-                        let initiated_close =
-                            delivery.close.request_close(CloseReason::SlowConsumer);
-                        if initiated_close {
-                            self.metrics.increment_websocket_slow_consumer_disconnects();
+        let reservation = self
+            .account_for_cancelled_park(
+                ParkedWaitAccounting {
+                    metrics: &self.metrics,
+                    stats: stats.clone(),
+                    sender: &delivery.sender,
+                    // Control-capacity waits carry no delivery class, so the
+                    // ledger pairing is skipped exactly like a parked control
+                    // message; the global drop counter still resolves.
+                    class: None,
+                    armed: true,
+                },
+                async {
+                    let reservation = tokio::select! {
+                        // Capacity returning at or after the deadline cannot revive an
+                        // expired transition. Tokio's `timeout` polls its inner future
+                        // first, so use a timer-first biased select here.
+                        biased;
+                        deadline = crate::deadline::wait_until(deadline) => ReservationWait::Deadline(deadline),
+                        result = &mut reserve => ReservationWait::Result(result),
+                    };
+                    match reservation {
+                        ReservationWait::Result(Ok(permit)) => Ok(permit),
+                        ReservationWait::Result(Err(DeliveryReserveError::Canceled)) => {
+                            self.record_canceled_delivery(player_id);
+                            Err(DeliveryOutcome::Canceled)
                         }
-                        self.metrics.increment_websocket_messages_dropped();
-                        if let Some(stats) = &stats {
-                            stats
-                                .dropped_for_you
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        ReservationWait::Result(Err(
+                            DeliveryReserveError::Closed | DeliveryReserveError::Full(_),
+                        )) => {
+                            self.metrics.increment_websocket_deliveries_channel_closed();
+                            Err(DeliveryOutcome::ChannelClosed)
                         }
-                        tracing::warn!(
-                            %player_id,
-                            timeout_ms = u64::try_from(self.slow_consumer_timeout.as_millis())
-                                .unwrap_or(u64::MAX),
-                            initiated_close,
-                            "Initial room transition queue stayed full; closing recipient"
-                        );
-                        Err(DeliveryOutcome::SlowConsumer)
+                        ReservationWait::Deadline(deadline) => {
+                            match delivery.sender.try_reserve_control_released_before(
+                                None,
+                                capacity_witness.as_ref(),
+                                deadline,
+                            ) {
+                                Ok(Some(permit)) => Ok(permit),
+                                // A terminal queue state that became observable at the
+                                // deadline is more specific than backpressure expiry. In
+                                // particular, classified queues use `Canceled` to fence stale
+                                // generations; that fence must not be rewritten as a
+                                // slow-consumer disconnect merely because the timer is also
+                                // ready.
+                                Err(DeliveryReserveError::Canceled) => {
+                                    self.record_canceled_delivery(player_id);
+                                    Err(DeliveryOutcome::Canceled)
+                                }
+                                Err(DeliveryReserveError::Closed) => {
+                                    self.metrics.increment_websocket_deliveries_channel_closed();
+                                    Err(DeliveryOutcome::ChannelClosed)
+                                }
+                                Ok(None) | Err(DeliveryReserveError::Full(_)) => {
+                                    let initiated_close =
+                                        delivery.close.request_close(CloseReason::SlowConsumer);
+                                    if initiated_close {
+                                        self.metrics.increment_websocket_slow_consumer_disconnects();
+                                    }
+                                    self.metrics.increment_websocket_messages_dropped();
+                                    if let Some(stats) = &stats {
+                                        stats
+                                            .dropped_for_you
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    tracing::warn!(
+                                        %player_id,
+                                        timeout_ms = u64::try_from(self.slow_consumer_timeout.as_millis())
+                                            .unwrap_or(u64::MAX),
+                                        initiated_close,
+                                        "Initial room transition queue stayed full; closing recipient"
+                                    );
+                                    Err(DeliveryOutcome::SlowConsumer)
+                                }
+                            }
+                        }
                     }
-                }
-            }
-        }
+                },
+            )
+            .await;
+        reservation
     }
 
     fn commit_initial_transition(
@@ -2028,7 +2108,10 @@ impl InMemoryMessageCoordinator {
             .map(|witness| witness.full_observed_at())
             .unwrap_or_else(tokio::time::Instant::now);
         let deadline = crate::deadline::after(full_observed_at, self.slow_consumer_timeout);
+        // Class is captured before the park so a cancelled wait can pair the
+        // queue ledger exactly like the parked-delivery drop path.
         let (message, _) = message.into_parts();
+        let offered_class = handle.sender.effective_data_class(&message);
 
         self.metrics.increment_websocket_backpressure_events();
         if let Some(stats) = &connection_stats {
@@ -2042,110 +2125,122 @@ impl InMemoryMessageCoordinator {
         let timeout = crate::deadline::wait_until(deadline);
         tokio::pin!(timeout);
 
-        tokio::select! {
-            // Drain completion retains cancellation precedence. The timeout
-            // branch then wins when capacity and expiry are both ready.
-            biased;
-            changed = drain.changed() => {
-                if changed.is_ok() && *drain.borrow() {
-                    tracing::debug!(%player_id, "Conditional delivery canceled for shutdown drain");
-                }
-                self.record_canceled_delivery(player_id);
-                None
-            }
-            deadline = &mut timeout => {
-                if *drain.borrow() || !should_send() {
-                    self.record_canceled_delivery(player_id);
-                    return None;
-                }
-                match handle.sender.try_reserve_control_released_before(
-                    None,
-                    capacity_witness.as_ref(),
-                    deadline,
-                ) {
-                    Ok(Some(permit)) =>
-                    {
-                        let outcome = match permit.send(message) {
-                            Ok(outcome) if outcome.enqueued => outcome,
-                            Ok(_) => {
+        self.account_for_cancelled_park(
+            ParkedWaitAccounting {
+                metrics: &self.metrics,
+                stats: connection_stats.clone(),
+                sender: &handle.sender,
+                class: offered_class,
+                armed: true,
+            },
+            async {
+                tokio::select! {
+                    // Drain completion retains cancellation precedence. The timeout
+                    // branch then wins when capacity and expiry are both ready.
+                    biased;
+                    changed = drain.changed() => {
+                        if changed.is_ok() && *drain.borrow() {
+                            tracing::debug!(%player_id, "Conditional delivery canceled for shutdown drain");
+                        }
+                        self.record_canceled_delivery(player_id);
+                        None
+                    }
+                    deadline = &mut timeout => {
+                        if *drain.borrow() || !should_send() {
+                            self.record_canceled_delivery(player_id);
+                            return None;
+                        }
+                        match handle.sender.try_reserve_control_released_before(
+                            None,
+                            capacity_witness.as_ref(),
+                            deadline,
+                        ) {
+                            Ok(Some(permit)) =>
+                            {
+                                let outcome = match permit.send(message) {
+                                    Ok(outcome) if outcome.enqueued => outcome,
+                                    Ok(_) => {
+                                        self.record_canceled_delivery(player_id);
+                                        return Some(DeliveryOutcome::Canceled);
+                                    }
+                                    Err(_) => {
+                                        self.metrics.increment_websocket_deliveries_channel_closed();
+                                        return Some(DeliveryOutcome::ChannelClosed);
+                                    }
+                                };
+                                return Some(crate::coordination::record_queue_outcome(
+                                    &self.metrics,
+                                    connection_stats.as_ref(),
+                                    outcome,
+                                ));
+                            }
+                            Err(DeliveryReserveError::Canceled) => {
                                 self.record_canceled_delivery(player_id);
                                 return Some(DeliveryOutcome::Canceled);
                             }
-                            Err(_) => {
+                            Err(DeliveryReserveError::Closed) => {
                                 self.metrics.increment_websocket_deliveries_channel_closed();
                                 return Some(DeliveryOutcome::ChannelClosed);
                             }
-                        };
-                        return Some(crate::coordination::record_queue_outcome(
-                            &self.metrics,
-                            connection_stats.as_ref(),
-                            outcome,
-                        ));
-                    }
-                    Err(DeliveryReserveError::Canceled) => {
-                        self.record_canceled_delivery(player_id);
-                        return Some(DeliveryOutcome::Canceled);
-                    }
-                    Err(DeliveryReserveError::Closed) => {
-                        self.metrics.increment_websocket_deliveries_channel_closed();
-                        return Some(DeliveryOutcome::ChannelClosed);
-                    }
-                    Ok(None) | Err(DeliveryReserveError::Full(_)) => {}
-                }
-                let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
-                if initiated_close {
-                    self.metrics.increment_websocket_slow_consumer_disconnects();
-                }
-                self.metrics.increment_websocket_messages_dropped();
-                if let Some(stats) = &connection_stats {
-                    stats
-                        .dropped_for_you
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                tracing::warn!(
-                    %player_id,
-                    timeout_ms = u64::try_from(self.slow_consumer_timeout.as_millis())
-                        .unwrap_or(u64::MAX),
-                    initiated_close,
-                    "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
-                     instead of silently dropping messages"
-                );
-                Some(DeliveryOutcome::SlowConsumer)
-            }
-            result = &mut reserve => match result {
-                Ok(permit) => {
-                    if *drain.borrow() || !should_send() {
-                        self.record_canceled_delivery(player_id);
-                        return None;
-                    }
-                    let outcome = match permit.send(message) {
-                        Ok(outcome) if outcome.enqueued => outcome,
-                        Ok(_) => {
-                            self.record_canceled_delivery(player_id);
-                            return Some(DeliveryOutcome::Canceled);
+                            Ok(None) | Err(DeliveryReserveError::Full(_)) => {}
                         }
-                        Err(_) => {
+                        let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
+                        if initiated_close {
+                            self.metrics.increment_websocket_slow_consumer_disconnects();
+                        }
+                        self.metrics.increment_websocket_messages_dropped();
+                        if let Some(stats) = &connection_stats {
+                            stats
+                                .dropped_for_you
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        tracing::warn!(
+                            %player_id,
+                            timeout_ms = u64::try_from(self.slow_consumer_timeout.as_millis())
+                                .unwrap_or(u64::MAX),
+                            initiated_close,
+                            "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
+                             instead of silently dropping messages"
+                        );
+                        Some(DeliveryOutcome::SlowConsumer)
+                    }
+                    result = &mut reserve => match result {
+                        Ok(permit) => {
+                            if *drain.borrow() || !should_send() {
+                                self.record_canceled_delivery(player_id);
+                                return None;
+                            }
+                            let outcome = match permit.send(message) {
+                                Ok(outcome) if outcome.enqueued => outcome,
+                                Ok(_) => {
+                                    self.record_canceled_delivery(player_id);
+                                    return Some(DeliveryOutcome::Canceled);
+                                }
+                                Err(_) => {
+                                    self.metrics.increment_websocket_deliveries_channel_closed();
+                                    return Some(DeliveryOutcome::ChannelClosed);
+                                }
+                            };
+                            Some(crate::coordination::record_queue_outcome(
+                                &self.metrics,
+                                connection_stats.as_ref(),
+                                outcome,
+                            ))
+                        }
+                        Err(DeliveryReserveError::Closed | DeliveryReserveError::Full(_)) => {
                             self.metrics.increment_websocket_deliveries_channel_closed();
-                            return Some(DeliveryOutcome::ChannelClosed);
+                            tracing::debug!(%player_id, "Recipient connection closed while backpressured");
+                            Some(DeliveryOutcome::ChannelClosed)
                         }
-                    };
-                    Some(crate::coordination::record_queue_outcome(
-                        &self.metrics,
-                        connection_stats.as_ref(),
-                        outcome,
-                    ))
-                }
-                Err(DeliveryReserveError::Closed | DeliveryReserveError::Full(_)) => {
-                    self.metrics.increment_websocket_deliveries_channel_closed();
-                    tracing::debug!(%player_id, "Recipient connection closed while backpressured");
-                    Some(DeliveryOutcome::ChannelClosed)
-                }
-                Err(DeliveryReserveError::Canceled) => {
-                    self.record_canceled_delivery(player_id);
-                    Some(DeliveryOutcome::Canceled)
+                        Err(DeliveryReserveError::Canceled) => {
+                            self.record_canceled_delivery(player_id);
+                            Some(DeliveryOutcome::Canceled)
+                        }
+                    },
                 }
             },
-        }
+        )
+        .await
     }
 
     async fn reserve_one_if(
@@ -2201,7 +2296,18 @@ impl InMemoryMessageCoordinator {
                 let timeout = crate::deadline::wait_until(deadline);
                 tokio::pin!(timeout);
 
-                tokio::select! {
+                self.account_for_cancelled_park(
+                    ParkedWaitAccounting {
+                        metrics: &self.metrics,
+                        stats: stats.clone(),
+                        sender: &sender,
+                        // Control-capacity reservations carry no delivery
+                        // class; only the global drop counter resolves.
+                        class: None,
+                        armed: true,
+                    },
+                    async {
+                        tokio::select! {
                     // Drain completion retains cancellation precedence. Expiry
                     // then wins an exact-boundary race with returned capacity.
                     biased;
@@ -2295,6 +2401,9 @@ impl InMemoryMessageCoordinator {
                         }
                     },
                 }
+                    },
+                )
+                .await
             }
         }
     }

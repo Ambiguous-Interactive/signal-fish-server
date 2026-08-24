@@ -2637,6 +2637,7 @@ mod tests {
     use crate::server::ServerConfig;
     use std::net::SocketAddr;
     use std::sync::atomic::AtomicBool;
+    use std::task::Context;
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     async fn test_server() -> Arc<EnhancedGameServer> {
@@ -3511,6 +3512,10 @@ mod tests {
 
     impl UpgradedSocketPair {
         async fn connect() -> Self {
+            Self::connect_with_small_client_recv_buffer(None).await
+        }
+
+        async fn connect_with_small_client_recv_buffer(clamped_recv_buffer: Option<u32>) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind upgraded-pair listener");
@@ -3536,9 +3541,30 @@ mod tests {
             let serve_task = tokio::spawn(async move {
                 let _ = axum::serve(listener, app).await;
             });
-            let (client, _response) = connect_async(format!("ws://{addr}/ws"))
-                .await
-                .expect("client upgrade");
+            let client = match clamped_recv_buffer {
+                Some(recv_buffer_bytes) => {
+                    let socket = tokio::net::TcpSocket::new_v4()
+                        .expect("create IPv4 TCP socket for upgraded pair");
+                    socket
+                        .set_recv_buffer_size(recv_buffer_bytes)
+                        .expect("clamp SO_RCVBUF before upgraded-pair connect");
+                    let stream = socket.connect(addr).await.expect("upgraded-pair connect");
+                    let url = format!("ws://{addr}/ws");
+                    tokio_tungstenite::client_async(
+                        url,
+                        tokio_tungstenite::MaybeTlsStream::Plain(stream),
+                    )
+                    .await
+                    .expect("clamped upgraded-pair client upgrade")
+                    .0
+                }
+                None => {
+                    connect_async(format!("ws://{addr}/ws"))
+                        .await
+                        .expect("client upgrade")
+                        .0
+                }
+            };
             let socket = socket_rx.await.expect("server socket handoff");
             let (server_sink, server_stream) = socket.split();
             Self {
@@ -3703,6 +3729,137 @@ mod tests {
             );
             pair.shutdown().await;
         }
+    }
+
+    /// Issue #415: teardown after an abandoned in-flight write must never hand
+    /// the client a corrupt byte stream.
+    ///
+    /// A large binary frame's write is cancelled mid-flight on a real upgraded
+    /// socket (the client clamps its receive buffer tiny and never reads, so
+    /// on backpressure-applying platforms part of the frame stays unflushed),
+    /// the queue is fenced
+    /// exactly as
+    /// `SendAccounting::drop` does in production, and then the slow-consumer
+    /// teardown — farewell Error plus coded close — writes onto the same sink.
+    /// The client must observe the abandoned frame COMPLETE (never truncated),
+    /// every later frame on a clean frame boundary, and a decodable stream all
+    /// the way through the close handshake.
+    /// Client-side SO_RCVBUF clamp used to make kernel buffering (and hence a
+    /// cancelled-mid-flush write) deterministic across platforms.
+    const CLIENT_CLAMPED_RECV_BUFFER_BYTES: u32 = 4 << 10;
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn teardown_behind_an_abandoned_write_still_delivers_a_clean_stream() {
+        const PAYLOAD_BYTES: usize = 8 << 20;
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (_tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+
+        // The client clamps SO_RCVBUF tiny before connecting and then never
+        // reads, so the server's socket buffers saturate inside the very first
+        // flush on every supported OS and the huge frame cannot complete.
+        let mut pair = UpgradedSocketPair::connect_with_small_client_recv_buffer(Some(
+            CLIENT_CLAMPED_RECV_BUFFER_BYTES,
+        ))
+        .await;
+
+        // Drive one flush poll, then cancel the write exactly as the close
+        // select cancels the live loop: wherever the cancellation lands (part
+        // of the frame still unflushed on kernels that apply backpressure,
+        // fully accepted into buffers elsewhere), the wire position is unknown
+        // to the accounting layer — which is precisely the state teardown must
+        // handle cleanly.
+        let send =
+            pair.server_sink
+                .send(axum::extract::ws::Message::Binary(axum::body::Bytes::from(
+                    vec![0xAB_u8; PAYLOAD_BYTES],
+                )));
+        tokio::pin!(send);
+        let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+        let _polled = send.as_mut().poll(&mut context);
+        // Dropping the pinned send future cancels it mid-flight.
+        let _cancelled = send;
+
+        // The production fence: a socket write owned one payload and its
+        // future was dropped before resolving.
+        let accounting = crate::websocket::sending::SendAccounting::new(
+            &rx,
+            &server,
+            &probe_state,
+            player_id,
+            Some(crate::protocol::DeliveryClass::Reliable),
+        );
+        drop(accounting);
+        assert!(
+            rx.abandoned_in_flight_write(),
+            "the dropped write must fence the connection"
+        );
+
+        // Split the pair so the client half drains concurrently while the
+        // server half runs teardown: the bounded farewell writes need an
+        // active reader to make progress, exactly like production.
+        let UpgradedSocketPair {
+            mut server_sink,
+            mut client,
+            serve_task,
+            ..
+        } = pair;
+        let drain = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(frame) = client.next().await {
+                match frame.expect("client stream must stay decodable") {
+                    TungsteniteMessage::Close(_) => break,
+                    other => frames.push(other),
+                }
+            }
+            frames
+        });
+
+        let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+        let mut batcher = MessageBatcher::new(1, 1);
+        finalize_closed_connection(
+            &mut server_sink,
+            &mut rx,
+            &mut batcher,
+            Some(CloseReason::SlowConsumer),
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let frames = tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("client drain must finish in time")
+            .expect("client drain task must not panic");
+        serve_task.abort();
+        let _ = serve_task.await;
+
+        // The abandoned frame must arrive whole: tungstenite retains any
+        // unflushed tail inside the sink, so appended teardown bytes continue
+        // behind it instead of truncating it.
+        assert!(
+            matches!(
+                frames.first(),
+                Some(TungsteniteMessage::Binary(data)) if data.len() == PAYLOAD_BYTES
+            ),
+            "first client frame must be the complete abandoned binary payload, got {:?}",
+            frames.first().map(|frame| match frame {
+                TungsteniteMessage::Binary(data) => format!("binary len {}", data.len()),
+                other => format!("other {other:?}"),
+            })
+        );
+        // The farewell Error frame must follow on a clean boundary...
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, TungsteniteMessage::Text(_))),
+            "the slow-consumer farewell must reach the client"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
