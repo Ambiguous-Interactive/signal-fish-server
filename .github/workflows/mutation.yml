@@ -83,12 +83,12 @@ jobs:
           shared-key: "mutants"
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.86.3
+        uses: taiki-e/install-action@v2.86.5
         with:
           tool: cargo-mutants
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.86.3
+        uses: taiki-e/install-action@v2.86.5
         with:
           tool: cargo-nextest
 
@@ -206,14 +206,14 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.86.3
+        uses: taiki-e/install-action@v2.86.5
         with:
           tool: cargo-mutants
 
       - name: Install cargo-nextest
         # The mutation oracle uses nextest process isolation plus the dedicated
         # profile's per-test termination for progress-removing mutants.
-        uses: taiki-e/install-action@v2.86.3
+        uses: taiki-e/install-action@v2.86.5
         with:
           tool: cargo-nextest
 
