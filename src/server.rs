@@ -406,7 +406,6 @@ impl EnhancedGameServer {
         let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
             Arc::new(InMemoryRoomOperationCoordinator::new(
                 message_coordinator.clone(),
-                distributed_lock.clone(),
                 database.clone(),
                 reconnection_manager.clone(),
             ));

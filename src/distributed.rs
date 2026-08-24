@@ -125,8 +125,13 @@ impl DistributedLock for InMemoryDistributedLock {
         if self.should_fail_acquire_for_test(key).await {
             anyhow::bail!("injected lock acquisition failure for {key}");
         }
-        // Use common retry executor with a persistent profile (10 attempts)
-        let executor = crate::retry::RetryExecutor::new(crate::retry::RetryConfig::persistent());
+        // Retry while the key is held, but never past it: the whole scheduled
+        // backoff stays strictly inside this lease's TTL, so a waiter can
+        // neither abandon acquisition after the key already expired nor race a
+        // later acquirer that took the re-expired key (issue #414).
+        let executor = crate::retry::RetryExecutor::new(
+            crate::retry::RetryConfig::persistent().clamped_to_total_backoff(ttl),
+        );
 
         executor
             .execute_with_condition(
@@ -483,6 +488,39 @@ impl CircuitBreaker {
 mod tests {
     use super::{DistributedLock, InMemoryDistributedLock};
     use std::time::Duration;
+
+    /// Issue #414: `acquire` retries while the key it wants is held, and that
+    /// whole scheduled backoff must fit strictly inside the lease TTL itself
+    /// (the join-path locks use 10 s): a waiter still backing off *after* its
+    /// key may have expired would give up on — or race — an already-free or
+    /// re-taken resource.
+    #[test]
+    fn lock_acquire_backoff_cannot_outlive_the_lease_it_waits_for() {
+        const SHORTEST_PRODUCTION_LOCK_TTL: Duration = Duration::from_secs(10);
+        // The untrimmed persistent profile really does overrun the lease (its
+        // worst case is ~22.5 s once jitter pushes delays onto the cap), which
+        // is exactly why acquire must clamp.
+        let unclamped = crate::retry::RetryConfig::persistent();
+        assert!(
+            unclamped.worst_case_total_backoff() >= SHORTEST_PRODUCTION_LOCK_TTL,
+            "precondition: the raw persistent budget exceeds the shortest production \
+             lock TTL; this test guards the clamp"
+        );
+
+        let effective = unclamped.clamped_to_total_backoff(SHORTEST_PRODUCTION_LOCK_TTL);
+        assert!(
+            effective.worst_case_total_backoff() < SHORTEST_PRODUCTION_LOCK_TTL,
+            "acquire backoff ({:?}) must stay below the shortest production lock TTL \
+             ({SHORTEST_PRODUCTION_LOCK_TTL:?})",
+            effective.worst_case_total_backoff()
+        );
+        assert!(
+            effective.max_attempts >= 2,
+            "trimming must keep meaningful retries instead of a single probe"
+        );
+        assert_eq!(effective.initial_delay, unclamped.initial_delay);
+        assert_eq!(effective.max_delay, unclamped.max_delay);
+    }
 
     #[tokio::test]
     async fn try_acquire_starts_ttl_after_internal_lock_contention() {

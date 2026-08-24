@@ -63,6 +63,36 @@ impl RetryConfig {
             jitter_factor: 0.15,
         }
     }
+
+    /// Worst-case total time this budget spends sleeping across a full attempt
+    /// sequence (every delay at its maximum jitter).
+    ///
+    /// Callers that retry against TTL-bounded resources use this to prove the
+    /// whole retry budget fits inside the lease they wait for: a waiter that
+    /// can still be backing off *after* the key may have expired would give up
+    /// on (or race) an already-free resource (issue #414).
+    pub fn worst_case_total_backoff(&self) -> Duration {
+        let mut total = bounded_initial_delay(self);
+        let mut current = bounded_initial_delay(self);
+        for _ in 1..self.max_attempts.max(1) {
+            current = bounded_next_delay(self, current, 1.0);
+            total = total.saturating_add(current);
+        }
+        total
+    }
+
+    /// Trim `max_attempts` so [`Self::worst_case_total_backoff`] stays strictly
+    /// below `budget`, keeping every other knob unchanged.
+    ///
+    /// Used by lease-style callers whose retry window must never outlive the
+    /// TTL they contend on.
+    pub fn clamped_to_total_backoff(&self, budget: Duration) -> Self {
+        let mut trimmed = self.clone();
+        while trimmed.max_attempts > 1 && trimmed.worst_case_total_backoff() >= budget {
+            trimmed.max_attempts -= 1;
+        }
+        trimmed
+    }
 }
 
 /// Error types that can be retried

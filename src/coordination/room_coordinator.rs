@@ -8,21 +8,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::database::{AuthorityDenial, AuthorityOutcome};
-use crate::distributed::{DistributedLock, LockHandle};
 use crate::protocol::{PeerConnectionInfo, PlayerId, PlayerInfo, RoomId};
 
 use super::{
     MessageCoordinator, RoomEventCompletion, RoomEventMutationGuard, RoomMessageTransactionOutcome,
     RoomRecipientMessages,
 };
-
-const LOBBY_TRANSITION_LOCK_TTL: Duration = Duration::from_secs(10);
-const ROOM_OPERATION_LOCK_TTL: Duration = Duration::from_secs(5);
 
 /// Snapshot of a room at finalization, used to build the capability-aware
 /// `GameStarting` and v3 `SessionPlan` publication from one member snapshot.
@@ -233,7 +228,6 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
 #[derive(Clone)]
 pub struct InMemoryRoomOperationCoordinator {
     coordinator: Arc<dyn MessageCoordinator>,
-    distributed_lock: Arc<dyn DistributedLock>,
     database: Arc<dyn crate::database::GameDatabase>,
     /// Track ready players per room for in-memory coordinator
     ready_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
@@ -249,13 +243,11 @@ impl InMemoryRoomOperationCoordinator {
     /// Create a new in-memory room operation coordinator
     pub fn new(
         coordinator: Arc<dyn MessageCoordinator>,
-        distributed_lock: Arc<dyn DistributedLock>,
         database: Arc<dyn crate::database::GameDatabase>,
         reconnection_manager: Option<Arc<crate::reconnection::ReconnectionManager>>,
     ) -> Self {
         Self {
             coordinator,
-            distributed_lock,
             database,
             ready_players: Arc::new(RwLock::new(HashMap::new())),
             reconnection_manager,
@@ -355,111 +347,10 @@ impl InMemoryRoomOperationCoordinator {
     }
 }
 
-struct RoomOperationLockGuard {
-    distributed_lock: Arc<dyn DistributedLock>,
-    handle: Option<LockHandle>,
-    operation: &'static str,
-}
-
-impl RoomOperationLockGuard {
-    async fn acquire(
-        distributed_lock: Arc<dyn DistributedLock>,
-        lock_key: String,
-        ttl: Duration,
-        operation: &'static str,
-    ) -> Result<Self> {
-        let handle = distributed_lock.acquire(&lock_key, ttl).await?;
-        Ok(Self {
-            distributed_lock,
-            handle: Some(handle),
-            operation,
-        })
-    }
-
-    async fn release(mut self) {
-        if let Some(handle) = self.handle.clone() {
-            Self::release_handle(Arc::clone(&self.distributed_lock), handle, self.operation).await;
-            self.handle = None;
-        }
-    }
-
-    async fn release_handle(
-        distributed_lock: Arc<dyn DistributedLock>,
-        handle: LockHandle,
-        operation: &'static str,
-    ) {
-        match distributed_lock.release(&handle).await {
-            Ok(true) => {
-                tracing::trace!(
-                    operation,
-                    lock_key = %handle.key,
-                    "Released room operation lock"
-                );
-            }
-            Ok(false) => {
-                tracing::warn!(
-                    operation,
-                    lock_key = %handle.key,
-                    "Room operation lock was already absent during release"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    operation,
-                    lock_key = %handle.key,
-                    error = ?error,
-                    "Failed to release room operation lock"
-                );
-            }
-        }
-    }
-}
-
-impl Drop for RoomOperationLockGuard {
-    fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
-
-        let distributed_lock = Arc::clone(&self.distributed_lock);
-        let operation = self.operation;
-
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                tracing::trace!(
-                    operation,
-                    lock_key = %handle.key,
-                    "Scheduling async release for dropped room operation lock guard"
-                );
-                let release_task = runtime.spawn(async move {
-                    Self::release_handle(distributed_lock, handle, operation).await;
-                });
-                std::mem::drop(release_task);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    operation,
-                    lock_key = %handle.key,
-                    error = ?error,
-                    "Unable to schedule async release for dropped room operation lock guard"
-                );
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
-        let lock_key = format!("room_lobby_transition:{room_id}");
-        let lock_guard = RoomOperationLockGuard::acquire(
-            Arc::clone(&self.distributed_lock),
-            lock_key,
-            LOBBY_TRANSITION_LOCK_TTL,
-            "transition_room_to_lobby",
-        )
-        .await?;
 
         // Enter the lobby exactly once. All fallible snapshot work happens
         // before persistence changes. The room-event guard keeps membership
@@ -469,17 +360,14 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             Ok(Some(room)) if room.lobby_state == crate::protocol::LobbyState::Waiting => {}
             Ok(Some(_)) => {
                 drop(mutation_guard);
-                lock_guard.release().await;
                 return Ok(false);
             }
             Ok(None) => {
                 drop(mutation_guard);
-                lock_guard.release().await;
                 return Err(anyhow::anyhow!("Room not found"));
             }
             Err(error) => {
                 drop(mutation_guard);
-                lock_guard.release().await;
                 return Err(anyhow::anyhow!("Failed to get room: {error}"));
             }
         }
@@ -517,9 +405,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             all_ready,
         };
 
-        // From the first durable mutation onward this task owns the room guard
-        // and distributed lock. Dropping the caller only detaches its join
-        // handle; the transition still reaches the synchronous FIFO enqueue.
+        // From the first durable mutation onward this task owns the room
+        // mutation guard. Dropping the caller only detaches its join handle;
+        // the transition still reaches the synchronous FIFO enqueue.
         let coordinator = self.clone();
         let room_id = *room_id;
         let transaction = tokio::spawn(async move {
@@ -532,14 +420,12 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                     coordinator.enqueue_replayable_room_event(&room_id, message, mutation_guard)
                 }
                 Err(error) => {
-                    lock_guard.release().await;
                     return Err(error);
                 }
             };
 
-            // Delivery backpressure must not extend the TTL-bounded operation
-            // lock; the FIFO job itself retains the room mutation guard.
-            lock_guard.release().await;
+            // Delivery backpressure never holds the room mutation gate; the
+            // FIFO job itself retains it.
             completion.await?;
             tracing::info!(%room_id, "Room transitioned to lobby state (in-memory)");
             Ok(true)
@@ -557,14 +443,6 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
     ) -> Result<bool> {
         // For in-memory implementation, just simulate the operation
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
-        let lock_key = format!("authority_transfer:{room_id}:{new_authority}");
-        let lock_guard = RoomOperationLockGuard::acquire(
-            Arc::clone(&self.distributed_lock),
-            lock_key,
-            ROOM_OPERATION_LOCK_TTL,
-            "coordinate_authority_transfer",
-        )
-        .await?;
 
         let message = crate::protocol::ServerMessage::AuthorityChanged {
             authority_player: Some(*new_authority),
@@ -572,10 +450,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         };
         let completion = self.enqueue_replayable_room_event(room_id, message, mutation_guard);
 
-        // Nothing to mutate for the in-memory simulation; enqueue before
-        // releasing the ordering gate, then await delivery outside the
-        // TTL-bounded room-operation lock.
-        lock_guard.release().await;
+        // Nothing to mutate for the in-memory simulation; enqueue under the
+        // ordering gate, then await delivery outside of it.
         completion.await?;
         tracing::info!(%room_id, %new_authority, "Authority transferred (in-memory)");
         Ok(true)
@@ -583,17 +459,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 
     async fn execute_distributed_operation(&self, operation: &str, room_id: &RoomId) -> Result<()> {
         // For in-memory implementation, just log the operation
-        let lock_key = format!("distributed_op:{room_id}:{operation}");
-        let lock_guard = RoomOperationLockGuard::acquire(
-            Arc::clone(&self.distributed_lock),
-            lock_key,
-            ROOM_OPERATION_LOCK_TTL,
-            "execute_distributed_operation",
-        )
-        .await?;
-
         tracing::info!(%room_id, %operation, "Executed distributed operation (in-memory)");
-        lock_guard.release().await;
         Ok(())
     }
 
@@ -604,18 +470,10 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
-        let lock_key = format!("room_authority:{room_id}");
-        let lock_guard = RoomOperationLockGuard::acquire(
-            Arc::clone(&self.distributed_lock),
-            lock_key,
-            ROOM_OPERATION_LOCK_TTL,
-            "handle_authority_request",
-        )
-        .await?;
 
-        // From the first durable mutation onward this owned task retains both
-        // operation guards. Dropping the caller only detaches its join handle;
-        // the database result still reaches the synchronous FIFO enqueue.
+        // From the first durable mutation onward this owned task retains the
+        // room mutation guard. Dropping the caller only detaches its join
+        // handle; the database result still reaches the synchronous FIFO enqueue.
         let coordinator = self.clone();
         let room_id = *room_id;
         let player_id = *player_id;
@@ -675,10 +533,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 mutation_guard,
             );
 
-            // Delivery backpressure must not extend the TTL-bounded operation
-            // lock. The FIFO job owns the room mutation guard and sends exactly
-            // one response before any room-scoped AuthorityChanged.
-            lock_guard.release().await;
+            // Delivery backpressure never holds the room mutation gate. The
+            // FIFO job owns it and sends exactly one response before any
+            // room-scoped AuthorityChanged.
             if let Err(error) = completion.await {
                 tracing::error!(%room_id, %player_id, %error, "Failed to emit authority result");
             }
@@ -698,15 +555,6 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
     ) -> std::result::Result<(), PlayerReadyError> {
         // For in-memory implementation, simulate player ready toggle
         let mut mutation_guard = Some(self.coordinator.lock_room_event_mutation(room_id).await);
-        let lock_key = format!("room_ready_state:{room_id}");
-        let lock_guard = RoomOperationLockGuard::acquire(
-            Arc::clone(&self.distributed_lock),
-            lock_key,
-            ROOM_OPERATION_LOCK_TTL,
-            "handle_player_ready",
-        )
-        .await
-        .map_err(PlayerReadyError::Internal)?;
 
         let mut completion = None;
         let result = async {
@@ -804,10 +652,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         }
         .await;
 
-        // Broadcast outside the TTL-bounded critical section: delivery can be
-        // backpressured by a slow recipient and must never hold the room lock.
+        // Broadcast outside the critical section: delivery can be
+        // backpressured by a slow recipient and must never hold the room gate.
         drop(mutation_guard);
-        lock_guard.release().await;
 
         match result {
             Ok((_ready_players, _all_ready)) => {
@@ -852,14 +699,6 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         build_publication: StartGamePublicationBuilder,
     ) -> Result<StartGameOutcome> {
         let mut mutation_guard = Some(self.coordinator.lock_room_event_mutation(room_id).await);
-        let lock_key = format!("room_ready_state:{room_id}");
-        let lock_guard = RoomOperationLockGuard::acquire(
-            Arc::clone(&self.distributed_lock),
-            lock_key,
-            ROOM_OPERATION_LOCK_TTL,
-            "handle_start_game",
-        )
-        .await?;
 
         // Captured under the lock for the post-release broadcast.
         let mut relay_type_for_broadcast: Option<String> = None;
@@ -926,11 +765,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         let completion = if let Ok(StartGameOutcome::Started(finalized)) = &result {
             let Some(lobby_state) = lobby_state_for_finalize.take() else {
                 drop(mutation_guard);
-                lock_guard.release().await;
                 anyhow::bail!("start candidate omitted its pre-finalization lobby state");
             };
             let Some(start_guard) = mutation_guard.take() else {
-                lock_guard.release().await;
                 anyhow::bail!("start mutation guard was unavailable before publication");
             };
             let relay_type = relay_type_for_broadcast.take().unwrap_or_default();
@@ -1029,11 +866,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             None
         };
 
-        // Release the TTL-bounded distributed lock before awaiting any
-        // backpressured delivery. On the start path the detached FIFO job owns
-        // the local mutation guard through persistence + broadcast.
-        lock_guard.release().await;
-
+        // Before awaiting any backpressured delivery: on the start path the
+        // detached FIFO job owns the local mutation guard through persistence
+        // and broadcast.
         if let Ok(StartGameOutcome::Started(_finalized)) = &result {
             let Some(completion) = completion else {
                 anyhow::bail!("successful game start did not enqueue its publication");
@@ -1108,15 +943,14 @@ mod tests {
         RoomEventCompletion, RoomEventJob, RoomEventMutationGuard, RoomEventSequencer,
     };
     use crate::database::{GameDatabase, InMemoryDatabase};
-    use crate::distributed::{
-        DistributedLock, InMemoryDistributedLock, LockHandle, SequencedMessage,
-    };
+    use crate::distributed::{DistributedLock, InMemoryDistributedLock, SequencedMessage};
     use crate::protocol::{ConnectionInfo, LobbyState, PeerConnectionInfo, ServerMessage};
     use async_trait::async_trait;
     use std::collections::{BTreeMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     use tokio::sync::{mpsc, Mutex, Notify};
-    use tokio::time::{sleep, timeout};
+    use tokio::time::timeout;
 
     use crate::protocol::ErrorCode;
 
@@ -1147,9 +981,7 @@ mod tests {
         // backstop; this verifies the shared removal mechanism.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let coord =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock, database.clone(), None);
+        let coord = InMemoryRoomOperationCoordinator::new(coordinator, database.clone(), None);
 
         let player = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
         let room = database
@@ -1209,12 +1041,7 @@ mod tests {
             )
             .await
             .expect("room creation succeeds");
-        let coord = InMemoryRoomOperationCoordinator::new(
-            messages.clone(),
-            Arc::new(InMemoryDistributedLock::new()),
-            database,
-            None,
-        );
+        let coord = InMemoryRoomOperationCoordinator::new(messages.clone(), database, None);
 
         coord
             .handle_player_ready(&room.id, &player, None)
@@ -1252,7 +1079,6 @@ mod tests {
                 Arc::clone(&metrics),
             ),
         );
-        let lock = Arc::new(InMemoryDistributedLock::new());
         let player = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9901);
         let room = database
             .create_room(
@@ -1280,7 +1106,7 @@ mod tests {
             .await
             .expect("route ready recipient");
         let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
-            messages, lock, database, None,
+            messages, database, None,
         ));
 
         let first = {
@@ -1357,7 +1183,6 @@ mod tests {
                 Arc::clone(&metrics),
             ),
         );
-        let lock = Arc::new(InMemoryDistributedLock::new());
         let authority = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9911);
         let claimant = PlayerId::from_u128(0x1111_2222_3333_4444_5555_6666_7777_9912);
         let room = database
@@ -1413,7 +1238,7 @@ mod tests {
             .await
             .expect("route claimant");
         let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
-            messages, lock, database, None,
+            messages, database, None,
         ));
 
         let release = {
@@ -1497,7 +1322,6 @@ mod tests {
     async fn aborted_authority_request_after_commit_still_publishes_exactly_once() {
         let database = Arc::new(InMemoryDatabase::new());
         let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
-        let lock = Arc::new(InMemoryDistributedLock::new());
         let replay = Arc::new(crate::reconnection::ReconnectionManager::new(
             30,
             8,
@@ -1532,7 +1356,6 @@ mod tests {
             .await;
         let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
             messages,
-            lock.clone(),
             database.clone(),
             Some(replay.clone()),
         ));
@@ -1603,13 +1426,6 @@ mod tests {
                 .count(),
             1,
             "the committed authority change is recorded exactly once"
-        );
-        assert!(
-            !lock
-                .is_locked(&format!("room_authority:{}", room.id))
-                .await
-                .expect("lock state is readable"),
-            "delivery wait must not retain the TTL-bounded authority lock"
         );
     }
 
@@ -2039,37 +1855,53 @@ mod tests {
         }
     }
 
-    struct NoopDistributedLock;
+    /// Issue #414: a leaked room-operation key must not block or fail room
+    /// operations. The shipped lock backend is in-memory and cannot coordinate
+    /// server processes, and every coordinator critical section already holds
+    /// the per-room event mutation gate (which has no TTL), so the distributed
+    /// key contributes no exclusion here — only head-of-line blocking: a stale
+    /// key makes every subsequent operation on that room burn the full retry
+    /// storm (~7.5 s of scheduled backoff) and then surface INTERNAL_ERROR to
+    /// a player although no operator holds or needs the key.
+    #[tokio::test(start_paused = true)]
+    async fn a_leaked_operation_key_cannot_block_or_fail_room_operations() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let player = PlayerId::from_u128(0x4141_0000_0000_0000_0000_0000_0000_0001);
+        let room = database
+            .create_room(
+                "leaked-key-room".to_string(),
+                None,
+                2,
+                true,
+                player,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
 
-    #[async_trait]
-    impl DistributedLock for NoopDistributedLock {
-        async fn acquire(&self, key: &str, ttl: Duration) -> Result<LockHandle> {
-            Ok(LockHandle::new(key.to_string(), ttl))
-        }
+        let lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+        // A lease "leaked" by a holder whose task died before release: it stays
+        // present for the whole test horizon.
+        let _leaked = lock
+            .try_acquire(
+                &format!("room_ready_state:{}", room.id),
+                Duration::from_secs(3_600),
+            )
+            .await
+            .expect("try_acquire succeeds")
+            .expect("the leaked key is acquired");
 
-        async fn try_acquire(&self, key: &str, ttl: Duration) -> Result<Option<LockHandle>> {
-            Ok(Some(LockHandle::new(key.to_string(), ttl)))
-        }
-
-        async fn extend(&self, _handle: &LockHandle, _ttl: Duration) -> Result<bool> {
-            Ok(true)
-        }
-
-        async fn release(&self, _handle: &LockHandle) -> Result<bool> {
-            Ok(true)
-        }
-
-        async fn is_locked(&self, _key: &str) -> Result<bool> {
-            Ok(false)
-        }
-
-        async fn cleanup_expired_locks(&self) -> Result<usize> {
-            Ok(0)
-        }
-
-        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
-            self
-        }
+        let coord = InMemoryRoomOperationCoordinator::new(messages, database, None);
+        coord
+            .handle_player_ready(&room.id, &player, None)
+            .await
+            .expect(
+                "a leaked operation key must not fail a room operation: the mutation gate \
+                 already serializes operators in-process, so the key excludes nobody",
+            );
     }
 
     #[derive(Debug, PartialEq)]
@@ -2130,115 +1962,12 @@ mod tests {
             .collect()
     }
 
-    async fn wait_until_unlocked(lock: &InMemoryDistributedLock, lock_key: &str) {
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if !lock
-                    .is_locked(lock_key)
-                    .await
-                    .expect("lock state can be read")
-                {
-                    break;
-                }
-
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("lock should release before the operation lock TTL");
-    }
-
-    #[tokio::test]
-    async fn room_operations_release_distributed_locks_immediately() {
-        let database = Arc::new(InMemoryDatabase::new());
-        let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let room_coordinator = InMemoryRoomOperationCoordinator::new(
-            coordinator,
-            lock.clone(),
-            database.clone(),
-            None,
-        );
-        let player_id = PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb);
-
-        // The lobby transition now persists and is idempotent, so it needs a real
-        // Waiting room to transition (the other operations below simulate success
-        // independent of room existence).
-        let room = database
-            .create_room(
-                "lock-release-game".to_string(),
-                Some("LOCK01".to_string()),
-                4,
-                true,
-                player_id,
-                "matchbox".to_string(),
-                "test-region".to_string(),
-                None,
-            )
-            .await
-            .expect("room creation succeeds");
-        let room_id = room.id;
-
-        room_coordinator
-            .transition_room_to_lobby(&room_id)
-            .await
-            .expect("lobby transition succeeds");
-        assert!(
-            !lock
-                .is_locked(&format!("room_lobby_transition:{room_id}"))
-                .await
-                .expect("lock state can be read"),
-            "lobby transition lock should be released before TTL expiry"
-        );
-
-        room_coordinator
-            .coordinate_authority_transfer(&room_id, &player_id)
-            .await
-            .expect("authority transfer succeeds");
-        assert!(
-            !lock
-                .is_locked(&format!("authority_transfer:{room_id}:{player_id}"))
-                .await
-                .expect("lock state can be read"),
-            "authority transfer lock should be released before TTL expiry"
-        );
-
-        room_coordinator
-            .execute_distributed_operation("test_operation", &room_id)
-            .await
-            .expect("distributed operation succeeds");
-        assert!(
-            !lock
-                .is_locked(&format!("distributed_op:{room_id}:test_operation"))
-                .await
-                .expect("lock state can be read"),
-            "distributed operation lock should be released before TTL expiry"
-        );
-
-        room_coordinator
-            .handle_authority_request(&room_id, &player_id, true)
-            .await
-            .expect("authority request handles missing room as denial");
-        assert!(
-            !lock
-                .is_locked(&format!("room_authority:{room_id}"))
-                .await
-                .expect("lock state can be read"),
-            "authority request lock should be released before TTL expiry"
-        );
-    }
-
     #[tokio::test]
     async fn aborting_lobby_transition_after_commit_does_not_strand_its_event() {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(BlockingBroadcastMessageCoordinator::new());
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let room_coordinator = InMemoryRoomOperationCoordinator::new(
-            coordinator.clone(),
-            lock.clone(),
-            database.clone(),
-            None,
-        );
+        let room_coordinator =
+            InMemoryRoomOperationCoordinator::new(coordinator.clone(), database.clone(), None);
         let player_id = PlayerId::from_u128(0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc);
         let room = database
             .create_room(
@@ -2283,41 +2012,29 @@ mod tests {
         .await
         .expect("owned event finishes and releases its room mutation guard");
         drop(room_guard);
-        wait_until_unlocked(&lock, &format!("room_lobby_transition:{}", room.id)).await;
     }
 
     #[tokio::test]
-    async fn room_operations_release_locks_after_broadcast_failures() {
+    async fn room_operations_propagate_broadcast_failures() {
         let room_id = RoomId::from_u128(0x1234567890abcdef1234567890abcdef);
         let player_id = PlayerId::from_u128(0xabcdef1234567890abcdef1234567890);
 
+        // Lobby transition propagates its broadcast failure.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         coordinator.fail_broadcast_on(1).await;
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let room_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database, None);
-
+        let room_coordinator = InMemoryRoomOperationCoordinator::new(coordinator, database, None);
         let result = room_coordinator.transition_room_to_lobby(&room_id).await;
         assert!(
             result.is_err(),
             "lobby transition should propagate broadcast failure"
         );
-        assert!(
-            !lock
-                .is_locked(&format!("room_lobby_transition:{room_id}"))
-                .await
-                .expect("lock state can be read"),
-            "lobby transition lock should release after broadcast failure"
-        );
 
+        // Authority transfer propagates its broadcast failure.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         coordinator.fail_broadcast_on(1).await;
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let room_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database, None);
-
+        let room_coordinator = InMemoryRoomOperationCoordinator::new(coordinator, database, None);
         let result = room_coordinator
             .coordinate_authority_transfer(&room_id, &player_id)
             .await;
@@ -2325,24 +2042,13 @@ mod tests {
             result.is_err(),
             "authority transfer should propagate broadcast failure"
         );
-        assert!(
-            !lock
-                .is_locked(&format!("authority_transfer:{room_id}:{player_id}"))
-                .await
-                .expect("lock state can be read"),
-            "authority transfer lock should release after broadcast failure"
-        );
 
+        // Ready toggle propagates its lobby-broadcast failure.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         coordinator.fail_broadcast_on(1).await;
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
-            coordinator,
-            lock.clone(),
-            database.clone(),
-            None,
-        );
+        let ready_coordinator =
+            InMemoryRoomOperationCoordinator::new(coordinator, database.clone(), None);
         let authority = PlayerId::from_u128(0xaaaaaaaa11111111aaaaaaaa11111111);
         let peer = PlayerId::from_u128(0xbbbbbbbb22222222bbbbbbbb22222222);
 
@@ -2376,94 +2082,13 @@ mod tests {
             result.is_err(),
             "ready toggle should propagate lobby broadcast failure"
         );
-        assert!(
-            !lock
-                .is_locked(&format!("room_ready_state:{}", room.id))
-                .await
-                .expect("lock state can be read"),
-            "ready-state lock should release after broadcast failure"
-        );
-
-        let database = Arc::new(InMemoryDatabase::new());
-        let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        coordinator.fail_broadcast_on(3).await;
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
-            coordinator,
-            lock.clone(),
-            database.clone(),
-            None,
-        );
-        let authority = PlayerId::from_u128(0xcccccccc33333333cccccccc33333333);
-        let peer = PlayerId::from_u128(0xdddddddd44444444dddddddd44444444);
-
-        let room = database
-            .create_room(
-                "ready-final-broadcast-failure-game".to_string(),
-                Some("FAIL02".to_string()),
-                2,
-                true,
-                authority,
-                "test-relay".to_string(),
-                "test-region".to_string(),
-                None,
-            )
-            .await
-            .expect("room creation succeeds");
-
-        assert!(database
-            .add_player_to_room(&room.id, player_fixture(peer, "Peer", false, None),)
-            .await
-            .expect("adding peer succeeds"));
-        database
-            .transition_room_to_lobby(&room.id)
-            .await
-            .expect("lobby transition succeeds");
-
-        // Both ready toggles succeed (broadcasts 1 and 2); the third broadcast —
-        // the GameStarting from the explicit StartGame — is the one set to fail.
-        ready_coordinator
-            .handle_player_ready(&room.id, &peer, None)
-            .await
-            .expect("first ready toggle succeeds");
-        ready_coordinator
-            .handle_player_ready(&room.id, &authority, None)
-            .await
-            .expect("second ready toggle succeeds");
-
-        let result = ready_coordinator
-            .handle_start_game(&room.id, &authority)
-            .await;
-        assert!(
-            result.is_err(),
-            "StartGame should propagate the GameStarting broadcast failure"
-        );
-        let persisted = database
-            .get_room_by_id(&room.id)
-            .await
-            .expect("room lookup succeeds")
-            .expect("room remains present");
-        assert_eq!(
-            persisted.lobby_state,
-            crate::protocol::LobbyState::Lobby,
-            "a pre-commit publication failure must not finalize durable state"
-        );
-        assert!(
-            !lock
-                .is_locked(&format!("room_ready_state:{}", room.id))
-                .await
-                .expect("lock state can be read"),
-            "ready-state lock should release after finalization broadcast failure"
-        );
     }
 
     #[tokio::test]
-    async fn handle_player_ready_releases_lock_on_error() {
+    async fn handle_player_ready_rejects_missing_room() {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let ready_coordinator =
-            InMemoryRoomOperationCoordinator::new(coordinator, lock.clone(), database, None);
+        let ready_coordinator = InMemoryRoomOperationCoordinator::new(coordinator, database, None);
         let room_id = RoomId::from_u128(0xcccccccccccccccccccccccccccccccc);
         let player_id = PlayerId::from_u128(0xdddddddddddddddddddddddddddddddd);
 
@@ -2472,23 +2097,14 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "missing room should reject ready toggles");
-        assert!(
-            !lock
-                .is_locked(&format!("room_ready_state:{room_id}"))
-                .await
-                .expect("lock state can be read"),
-            "ready-state lock should be released even when the operation fails"
-        );
     }
 
     #[tokio::test]
-    async fn aborted_player_ready_releases_ready_state_lock_without_waiting_for_ttl() {
+    async fn aborted_player_ready_does_not_hold_the_room_mutation_gate_for_delivery() {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(BlockingBroadcastMessageCoordinator::new());
-        let lock = Arc::new(InMemoryDistributedLock::new());
         let ready_coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
             coordinator.clone(),
-            lock.clone(),
             database.clone(),
             None,
         ));
@@ -2519,7 +2135,6 @@ mod tests {
             .expect("lobby transition succeeds");
 
         let room_id = room.id;
-        let lock_key = format!("room_ready_state:{room_id}");
         let ready_task = {
             let ready_coordinator = Arc::clone(&ready_coordinator);
             tokio::spawn(async move {
@@ -2534,19 +2149,7 @@ mod tests {
             coordinator.wait_for_broadcast_start(),
         )
         .await
-        .expect("ready operation should reach the post-release broadcast");
-        // Delivery can be backpressured by a slow recipient (bounded by the
-        // slow-consumer timeout), so the TTL-bounded room-operation lock must
-        // be released BEFORE any coordinator send starts — otherwise a slow
-        // consumer could stretch the critical section past the lock TTL and
-        // break mutual exclusion for concurrent room operations.
-        assert!(
-            !lock
-                .is_locked(&lock_key)
-                .await
-                .expect("lock state can be read"),
-            "ready-state lock must be released before the lobby broadcast starts"
-        );
+        .expect("ready operation should reach its committed publication");
 
         ready_task.abort();
         let abort_error = ready_task
@@ -2554,8 +2157,17 @@ mod tests {
             .expect_err("aborted ready task should not complete normally");
         assert!(abort_error.is_cancelled(), "ready task should be aborted");
 
-        wait_until_unlocked(lock.as_ref(), &lock_key).await;
         coordinator.release_broadcast();
+
+        // Aborting only the caller must not strand the room mutation gate: the
+        // detached FIFO job owns it through publication and releases it.
+        let room_guard = timeout(
+            Duration::from_secs(1),
+            coordinator.lock_room_event_mutation(&room_id),
+        )
+        .await
+        .expect("owned event finishes and releases its room mutation gate");
+        drop(room_guard);
     }
 
     #[tokio::test]
@@ -2564,7 +2176,6 @@ mod tests {
         let coordinator = Arc::new(BlockingBroadcastMessageCoordinator::new());
         let ready_coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
             coordinator.clone(),
-            Arc::new(InMemoryDistributedLock::new()),
             database.clone(),
             None,
         ));
@@ -2630,12 +2241,8 @@ mod tests {
     async fn ready_membership_read_failure_does_not_mutate_or_publish_empty_state() {
         let database = Arc::new(InMemoryDatabase::new());
         let messages = Arc::new(RecordingMessageCoordinator::default());
-        let coordinator = InMemoryRoomOperationCoordinator::new(
-            messages.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coordinator =
+            InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
         let player = PlayerId::from_u128(0x9101);
         let room = database
             .create_room(
@@ -2666,12 +2273,8 @@ mod tests {
     async fn start_membership_read_failure_is_infrastructure_error_not_not_ready() {
         let database = Arc::new(InMemoryDatabase::new());
         let messages = Arc::new(RecordingMessageCoordinator::default());
-        let coordinator = InMemoryRoomOperationCoordinator::new(
-            messages.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coordinator =
+            InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
         let player = PlayerId::from_u128(0x9102);
         let room = database
             .create_room(
@@ -2714,72 +2317,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_player_ready_does_not_wait_for_previous_ready_lock_ttl() {
-        let database = Arc::new(InMemoryDatabase::new());
-        let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let lock = Arc::new(InMemoryDistributedLock::new());
-        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
-            coordinator,
-            lock.clone(),
-            database.clone(),
-            None,
-        );
-        let authority = PlayerId::from_u128(0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee);
-        let peer = PlayerId::from_u128(0xffffffffffffffffffffffffffffffff);
-
-        let room = database
-            .create_room(
-                "ready-lock-release-game".to_string(),
-                Some("LOCK01".to_string()),
-                2,
-                true,
-                authority,
-                "test-relay".to_string(),
-                "test-region".to_string(),
-                None,
-            )
-            .await
-            .expect("room creation succeeds");
-
-        assert!(database
-            .add_player_to_room(&room.id, player_fixture(peer, "Peer", false, None),)
-            .await
-            .expect("adding peer succeeds"));
-        database
-            .transition_room_to_lobby(&room.id)
-            .await
-            .expect("lobby transition succeeds");
-
-        ready_coordinator
-            .handle_player_ready(&room.id, &authority, None)
-            .await
-            .expect("first ready toggle succeeds");
-        assert!(
-            !lock
-                .is_locked(&format!("room_ready_state:{}", room.id))
-                .await
-                .expect("lock state can be read"),
-            "first ready toggle should release the ready-state lock immediately"
-        );
-
-        timeout(
-            Duration::from_secs(1),
-            ready_coordinator.handle_player_ready(&room.id, &peer, None),
-        )
-        .await
-        .expect("second ready toggle should not wait for ready-state lock TTL")
-        .expect("second ready toggle succeeds");
-
-        assert!(
-            !lock
-                .is_locked(&format!("room_ready_state:{}", room.id))
-                .await
-                .expect("lock state can be read"),
-            "final ready toggle should release the ready-state lock immediately"
-        );
-    }
-
-    #[tokio::test]
     async fn start_game_rejects_until_database_and_published_membership_match() {
         let database = Arc::new(InMemoryDatabase::new());
         let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
@@ -2812,12 +2349,7 @@ mod tests {
             )
             .await
             .expect("publish authority route");
-        let coord = InMemoryRoomOperationCoordinator::new(
-            messages.clone(),
-            Arc::new(InMemoryDistributedLock::new()),
-            database.clone(),
-            None,
-        );
+        let coord = InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
         coord
             .ready_players
             .write()
@@ -2890,12 +2422,8 @@ mod tests {
     async fn degraded_start_commit_still_publishes_state_and_clears_ready_snapshot() {
         let database = Arc::new(InMemoryDatabase::new());
         let messages = Arc::new(RecordingMessageCoordinator::default());
-        let coordinator = InMemoryRoomOperationCoordinator::new(
-            messages.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coordinator =
+            InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
         let player = PlayerId::from_u128(0xd301);
         let room = database
             .create_room(
@@ -2962,12 +2490,8 @@ mod tests {
     async fn handle_player_ready_finalizes_with_member_snapshot_matching_game_starting_peers() {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let ready_coordinator = InMemoryRoomOperationCoordinator::new(
-            coordinator.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let ready_coordinator =
+            InMemoryRoomOperationCoordinator::new(coordinator.clone(), database.clone(), None);
         let authority = PlayerId::from_u128(0x11111111111111111111111111111111);
         let peer_a = PlayerId::from_u128(0x22222222222222222222222222222222);
         let peer_b = PlayerId::from_u128(0x33333333333333333333333333333333);
@@ -3111,12 +2635,8 @@ mod tests {
     async fn start_game_enforces_readiness_and_authorization() {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let coord = InMemoryRoomOperationCoordinator::new(
-            coordinator.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coord =
+            InMemoryRoomOperationCoordinator::new(coordinator.clone(), database.clone(), None);
         let authority = PlayerId::from_u128(0xa1);
         let peer = PlayerId::from_u128(0xb2);
 
@@ -3183,12 +2703,8 @@ mod tests {
     async fn start_game_allows_solo_and_any_member_without_authority() {
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let coord = InMemoryRoomOperationCoordinator::new(
-            coordinator.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coord =
+            InMemoryRoomOperationCoordinator::new(coordinator.clone(), database.clone(), None);
         let solo = PlayerId::from_u128(0xc3);
 
         // No authority (supports_authority=false): any member may start, and a
@@ -3232,12 +2748,8 @@ mod tests {
         // player that departs before StartGame is never named as a phantom peer.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let coord = InMemoryRoomOperationCoordinator::new(
-            coordinator.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coord =
+            InMemoryRoomOperationCoordinator::new(coordinator.clone(), database.clone(), None);
         let authority = PlayerId::from_u128(0xa1);
         let leaver = PlayerId::from_u128(0xb2);
         let room = database
@@ -3311,7 +2823,6 @@ mod tests {
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
             coordinator.clone(),
-            Arc::new(InMemoryDistributedLock::new()),
             database.clone(),
             None,
         ));
@@ -3384,7 +2895,6 @@ mod tests {
         );
         let coord = Arc::new(InMemoryRoomOperationCoordinator::new(
             message_coordinator.clone(),
-            Arc::new(NoopDistributedLock),
             database.clone(),
             None,
         ));
@@ -3522,12 +3032,8 @@ mod tests {
         // room is not locked into Forbidden forever.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let coord = InMemoryRoomOperationCoordinator::new(
-            coordinator.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coord =
+            InMemoryRoomOperationCoordinator::new(coordinator.clone(), database.clone(), None);
         let authority = PlayerId::from_u128(0xc1);
         let member = PlayerId::from_u128(0xc2);
         let room = database
@@ -3582,12 +3088,8 @@ mod tests {
         // never finalize a not-all-ready room.
         let database = Arc::new(InMemoryDatabase::new());
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
-        let coord = InMemoryRoomOperationCoordinator::new(
-            coordinator.clone(),
-            Arc::new(NoopDistributedLock),
-            database.clone(),
-            None,
-        );
+        let coord =
+            InMemoryRoomOperationCoordinator::new(coordinator.clone(), database.clone(), None);
         let a = PlayerId::from_u128(0xd1);
         let b = PlayerId::from_u128(0xd2);
         let room = database

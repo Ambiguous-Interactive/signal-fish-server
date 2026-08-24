@@ -118,7 +118,6 @@ async fn create_test_server_with_message_coordinator_and_lock(
     let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
         Arc::new(InMemoryRoomOperationCoordinator::new(
             Arc::clone(&message_coordinator),
-            Arc::clone(&distributed_lock),
             Arc::clone(&database),
             reconnection_manager.clone(),
         ));
