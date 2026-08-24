@@ -841,11 +841,16 @@ impl CapacityReleaseWitness {
         &self,
         shared: &Arc<SharedQueue>,
         state: &QueueState,
-        lane: Lane,
         deadline: Instant,
     ) -> bool {
+        // Release evidence is evaluated on the lane this witness froze when it
+        // observed Full — not on the caller's currently computed target lane.
+        // A protocol upgrade while parked (v2 → v3) legitimately changes the
+        // target lane mid-wait; requiring lane identity here would discard
+        // genuine pre-deadline release evidence and evict a drained, on-rate
+        // recipient purely for upgrading (#416). Actual space on the current
+        // target lane is still enforced separately via `has_capacity`.
         Arc::ptr_eq(&self.shared, shared)
-            && self.lane == lane
             && state
                 .capacity_available_since
                 .get(self.lane.index())
@@ -1076,7 +1081,7 @@ impl OutboundSender {
             return Ok(EnqueueOutcome::CANCELED);
         }
         if admission.is_some_and(|(witness, deadline)| {
-            !witness.permits_locked(&self.shared, &state, lane, deadline)
+            !witness.permits_locked(&self.shared, &state, deadline)
         }) || !self.shared.has_capacity(&state, lane)
         {
             return Err(TryEnqueueError::Full(message, self.full_witness(lane)));
@@ -1190,7 +1195,7 @@ impl OutboundSender {
             return Ok(EnqueueOutcome::CANCELED);
         }
         if admission.is_some_and(|(witness, deadline)| {
-            !witness.permits_locked(&self.shared, &state, Lane::Legacy, deadline)
+            !witness.permits_locked(&self.shared, &state, deadline)
         }) || !self.shared.has_capacity(&state, Lane::Legacy)
         {
             return Err(TryEnqueueError::Full(data, self.full_witness(Lane::Legacy)));
@@ -1218,7 +1223,7 @@ impl OutboundSender {
             return Ok(EnqueueOutcome::CANCELED);
         }
         if admission.is_some_and(|(witness, deadline)| {
-            !witness.permits_locked(&self.shared, &state, Lane::Data, deadline)
+            !witness.permits_locked(&self.shared, &state, deadline)
         }) || !self.shared.has_capacity(&state, Lane::Data)
         {
             return Err(TryEnqueueError::Full(data, self.full_witness(Lane::Data)));
@@ -1466,7 +1471,7 @@ impl OutboundSender {
             return Ok(EnqueueOutcome::CANCELED);
         }
         if admission.is_some_and(|(witness, deadline)| {
-            !witness.permits_locked(&self.shared, &state, lane, deadline)
+            !witness.permits_locked(&self.shared, &state, deadline)
         }) || !self.shared.has_capacity(&state, lane)
         {
             return Err(TryEnqueueError::Full(message, self.full_witness(lane)));
@@ -1559,7 +1564,7 @@ impl OutboundSender {
         }) {
             return Err(ReserveError::Canceled);
         }
-        if !witness.permits_locked(&self.shared, &state, lane, deadline)
+        if !witness.permits_locked(&self.shared, &state, deadline)
             || !self.shared.has_capacity(&state, lane)
         {
             return Ok(None);

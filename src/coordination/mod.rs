@@ -4483,6 +4483,84 @@ mod tests {
         assert_conservation(&metrics);
     }
 
+    /// Issue #416: the capacity witness freezes the lane that was full when
+    /// the producer parked. A protocol upgrade while parked (v2 → v3) makes
+    /// every retry recompute a *different* target lane, and the witness used to
+    /// reject itself on that lane mismatch even though its lane genuinely
+    /// drained before the deadline — evicting a fully drained, on-rate
+    /// recipient purely for upgrading mid-backpressure. The release evidence
+    /// must be evaluated on the witness's own frozen lane.
+    #[tokio::test(start_paused = true)]
+    async fn protocol_upgrade_mid_backpressure_does_not_evict_a_drained_recipient() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = test_player();
+        // Legacy/data capacity 1, control capacity 4: one prefilled frame fills
+        // the pre-v3 legacy lane completely.
+        let (sender, mut receiver) = outbound_queue::channel(1, 4);
+        // Deliberately left at v2: the producer below observes Full on
+        // `Lane::Legacy` and its witness must freeze that lane.
+        sender
+            .try_enqueue_control(test_message())
+            .expect("prefill the single-slot legacy lane");
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(test_message()),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+
+        // The connection upgrades while the delivery stays parked; every retry
+        // from here on recomputes its target lane as `Lane::Control`.
+        handle.sender.set_protocol_version(3);
+
+        // The writer fully drains the legacy lane strictly before the deadline:
+        // real capacity returned for this on-rate recipient.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert!(
+            matches!(
+                receiver.try_recv().expect("legacy drain").payload,
+                OutboundPayload::Message(message)
+                    if matches!(message.as_ref(), ServerMessage::Pong)
+            ),
+            "the drained item must be the prefilled legacy control frame"
+        );
+
+        tokio::time::advance(Duration::from_millis(501)).await;
+        let (_, _, outcome) = finish_backpressured_delivery_in_room(&metrics, pending).await;
+
+        assert_eq!(
+            outcome,
+            DeliveryOutcome::Delivered,
+            "a drained on-rate recipient must receive its delivery after upgrading"
+        );
+        assert_eq!(
+            listener.requested_reason(),
+            None,
+            "a protocol upgrade during backpressure is not a slow-consumer fault"
+        );
+        assert_conservation(&metrics);
+
+        // The delivery must actually have been enqueued on the upgraded
+        // connection's control lane.
+        assert!(matches!(
+            receiver
+                .try_recv()
+                .expect("upgraded-lane delivery")
+                .payload,
+            OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::Pong)
+        ));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn classified_full_retry_preserves_the_logical_relay_cache() {
         let metrics = Arc::new(ServerMetrics::new());
