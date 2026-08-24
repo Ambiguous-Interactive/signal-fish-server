@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin the teardown-behind-an-abandoned-write wire contract with an end-to-end
+  regression test on a real upgraded socket: a cancelled mid-flush write must
+  still deliver every already-buffered byte whole, keep later frames on clean
+  frame boundaries, and preserve the coded close handshake (verified behavior;
+  no functional change) (issue #415).
 - Add a startup warning when token binding is enabled but optional without an
   effective built-in TLS listener: over plaintext `ws://` the v2 connection
   key is publicly derivable, so proofs provide replay ordering only, not
@@ -164,14 +169,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serializer); for the join-path locks that remain, acquisition backoff is
   now clamped strictly inside the lease TTL instead of potentially outliving
   it (worst case measured ~22.5 s against 10 s leases) (issue #414).
-
-### Added
-
-- Pin the teardown-behind-an-abandoned-write wire contract with an end-to-end
-  regression test on a real upgraded socket: a cancelled mid-flush write must
-  still deliver every already-buffered byte whole, keep later frames on clean
-  frame boundaries, and preserve the coded close handshake (verified behavior;
-  no functional change) (issue #415).
 - Fix the `CircuitBreaker` open-state window restarting on every late
   closed-era straggler failure while already open, which could starve the
   half-open probe indefinitely; the window is now anchored at the transition

@@ -89,7 +89,7 @@ impl RetryConfig {
     pub fn clamped_to_total_backoff(&self, budget: Duration) -> Self {
         let mut trimmed = self.clone();
         while trimmed.max_attempts > 1 && trimmed.worst_case_total_backoff() >= budget {
-            trimmed.max_attempts -= 1;
+            trimmed.max_attempts = trimmed.max_attempts.saturating_sub(1);
         }
         trimmed
     }
