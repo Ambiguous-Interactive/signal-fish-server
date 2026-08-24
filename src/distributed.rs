@@ -287,7 +287,15 @@ pub enum CircuitState {
 struct CircuitBreakerInner {
     state: CircuitState,
     failure_count: u32,
-    last_failure_time: Option<chrono::DateTime<chrono::Utc>>,
+    /// Monotonic timestamp of the transition into [`CircuitState::Open`].
+    ///
+    /// Wall-clock steps (NTP correction, manual clock change, host
+    /// suspend/resume) must not shorten or extend the open window; the same
+    /// discipline is pinned for reconnect windows and client pings.
+    opened_at_monotonic: Option<tokio::time::Instant>,
+    /// Bumped by [`CircuitBreaker::reset`] so outcomes from calls admitted
+    /// before the reset cannot mutate the freshly cleared state.
+    epoch: u64,
 }
 
 /// Circuit breaker extension seam for fallible coordination operations.
@@ -298,6 +306,10 @@ struct CircuitBreakerInner {
 /// - After the open timeout elapses, exactly one call is admitted as a probe.
 ///   Concurrent calls are rejected while a probe is outstanding.
 /// - A successful probe closes the circuit; a failed probe reopens it.
+///
+/// [`Self::reset`] invalidates every call admitted before it: outcomes from
+/// such calls are discarded rather than applied to the cleared state, so a
+/// stale probe failing after a reset does not reopen the circuit.
 ///
 /// Concurrency notes: exactly one probe is admitted at a time and only that
 /// probe resolves the half-open state, so its outcome stays authoritative even
@@ -321,7 +333,8 @@ impl CircuitBreaker {
             inner: Arc::new(Mutex::new(CircuitBreakerInner {
                 state: CircuitState::Closed,
                 failure_count: 0,
-                last_failure_time: None,
+                opened_at_monotonic: None,
+                epoch: 0,
             })),
             probe_in_flight: AtomicBool::new(false),
             failure_threshold,
@@ -336,17 +349,14 @@ impl CircuitBreaker {
     {
         // Check circuit state (single lock acquisition for all state reads/transitions)
         let probing;
+        let admitted_epoch;
         {
             let mut inner = self.inner.lock().await;
+            admitted_epoch = inner.epoch;
             match inner.state {
                 CircuitState::Open => {
-                    if let Some(last_failure_time) = inner.last_failure_time {
-                        let elapsed = chrono::Utc::now()
-                            .signed_duration_since(last_failure_time)
-                            .to_std()
-                            .unwrap_or(Duration::ZERO);
-
-                        if elapsed < self.timeout {
+                    if let Some(opened_at) = inner.opened_at_monotonic {
+                        if opened_at.elapsed() < self.timeout {
                             return Err(E::from(anyhow::anyhow!("Circuit breaker is open")));
                         }
                     }
@@ -389,6 +399,12 @@ impl CircuitBreaker {
         match operation.await {
             Ok(result) => {
                 let mut inner = self.inner.lock().await;
+                if inner.epoch != admitted_epoch {
+                    // A reset() invalidated this call's admission: its outcome
+                    // belongs to a superseded era and must not mutate the
+                    // freshly cleared state.
+                    return Ok(result);
+                }
                 if probing {
                     // The probe outcome is authoritative: close the circuit
                     // even if a concurrent straggler failure reopened it while
@@ -406,6 +422,11 @@ impl CircuitBreaker {
             }
             Err(error) => {
                 let mut inner = self.inner.lock().await;
+                if inner.epoch != admitted_epoch {
+                    // A reset() invalidated this call's admission; see the
+                    // success arm above.
+                    return Err(error);
+                }
                 inner.failure_count = inner.failure_count.saturating_add(1);
 
                 // A straggler failure from the closed epoch counts toward the
@@ -414,8 +435,15 @@ impl CircuitBreaker {
                     inner.state == CircuitState::HalfOpen && !probing;
                 if !straggler_failure_during_probe && inner.failure_count >= self.failure_threshold
                 {
+                    // Stamp the open-window start only on a transition INTO
+                    // Open. Failures observed while already open (late closed-
+                    // epoch stragglers) must not restart the window: each one
+                    // would otherwise push the half-open probe further out and
+                    // starve recovery.
+                    if inner.state != CircuitState::Open {
+                        inner.opened_at_monotonic = Some(tokio::time::Instant::now());
+                    }
                     inner.state = CircuitState::Open;
-                    inner.last_failure_time = Some(chrono::Utc::now());
                 }
 
                 Err(error)
@@ -435,11 +463,19 @@ impl CircuitBreaker {
         self.inner.lock().await.state.clone()
     }
 
+    /// Clear the breaker state and invalidate every call admitted so far.
+    ///
+    /// Outcomes from in-flight calls are discarded rather than applied to the
+    /// cleared state: a late straggler failure after an administrative reset
+    /// must not reopen the circuit. The probe slot is intentionally left to the
+    /// outstanding probe's own guard: clearing it here could free the slot for
+    /// a second concurrent probe while the first still runs.
     pub async fn reset(&self) {
         let mut inner = self.inner.lock().await;
         inner.state = CircuitState::Closed;
         inner.failure_count = 0;
-        inner.last_failure_time = None;
+        inner.opened_at_monotonic = None;
+        inner.epoch = inner.epoch.wrapping_add(1);
     }
 }
 

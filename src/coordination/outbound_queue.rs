@@ -990,6 +990,16 @@ impl OutboundSender {
         self.record_abandoned(class, 1);
     }
 
+    /// Count one classified item as attempted-then-abandoned without it ever
+    /// entering the queue and without requesting a close: drop-path accounting
+    /// for parked deliveries whose owning future was cancelled before
+    /// resolution. Pairs both halves so the exported per-class conservation
+    /// identity stays intact.
+    pub(crate) fn record_cancelled_before_enqueue(&self, class: DeliveryClass) {
+        self.shared.record_attempted(class);
+        self.record_abandoned(class, 1);
+    }
+
     pub fn set_protocol_version(&self, version: u16) {
         self.shared
             .protocol_version

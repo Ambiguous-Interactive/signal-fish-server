@@ -7346,3 +7346,81 @@ async fn departing_authority_notifies_remaining_members() {
         "storage clears authority on departure"
     );
 }
+
+/// A room deleted between the join path's lane-held recheck and the membership
+/// write (inactive-room GC winning the race) must surface as `ROOM_NOT_FOUND`,
+/// not `ROOM_CREATION_FAILED`: the client asked for a room that existed and is
+/// now gone, which is exactly what the not-found code means.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn join_racing_room_deletion_reports_room_not_found() {
+    let server = create_test_server().await;
+    let creator = PlayerId::new_v4();
+    let room = server
+        .database
+        .create_room(
+            "gc-race-game".to_string(),
+            Some("GCRAC1".to_string()),
+            4,
+            true,
+            creator,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("fixture room should be created");
+    let (player, mut receiver) = register_client(&server, "127.0.0.1:48123".parse().unwrap()).await;
+
+    let database = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    database.pause_next_add_player_for_test();
+
+    let join_server = Arc::clone(&server);
+    let join_task = tokio::spawn(async move {
+        join_server
+            .handle_join_room(
+                &player,
+                "gc-race-game".to_string(),
+                Some("GCRAC1".to_string()),
+                "Joiner".to_string(),
+                Some(4),
+                Some(true),
+                None,
+            )
+            .await;
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_add_player_for_test(),
+    )
+    .await
+    .expect("the join should reach the parked membership write");
+
+    // The GC sweep deletes the room while the membership write is parked.
+    let deleted = server.database.delete_room(&room.id).await.expect("delete");
+    assert!(deleted, "the fixture room should be deletable");
+
+    database.release_paused_add_player_for_test();
+    timeout(Duration::from_secs(2), join_task)
+        .await
+        .expect("the join task should finish after release")
+        .expect("join task should not panic");
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("join failure should answer the client")
+        .expect("client channel should stay open for the farewell error");
+    let ServerMessage::RoomJoinFailed { reason, error_code } = response.as_ref() else {
+        panic!("expected a RoomJoinFailed frame for the raced join, got {response:?}");
+    };
+    assert_eq!(
+        *error_code,
+        Some(ErrorCode::RoomNotFound),
+        "a join racing deletion must classify as ROOM_NOT_FOUND"
+    );
+    assert_eq!(reason, "Room not found");
+}

@@ -460,6 +460,20 @@ pub struct InMemoryDatabase {
     rooms: std::sync::Arc<tokio::sync::RwLock<HashMap<RoomId, Room>>>,
     /// Maps (game_name, room_code) -> room_id to allow same room codes across different games
     room_codes: std::sync::Arc<tokio::sync::RwLock<HashMap<(String, String), RoomId>>>,
+    /// Monotonic per-room activity used for garbage-collection decisions.
+    ///
+    /// A wall-clock step (NTP correction, manual clock change, host
+    /// suspend/resume) must not reap occupied rooms whose members are
+    /// monotonic-fresh, nor retain idle rooms past their timeout. This mirrors
+    /// the discipline already pinned for reconnect windows and client pings:
+    /// liveness decisions key off `tokio::time::Instant`, while the wall-clock
+    /// `Room::last_activity` remains the operator-facing observability record.
+    /// Entries are refreshed by every production path that refreshes
+    /// `last_activity` and removed wherever the room row is removed.
+    ///
+    /// Lock ordering with the other maps is always `rooms`, then
+    /// `room_codes`, then this map.
+    room_liveness_monotonic: std::sync::Arc<tokio::sync::RwLock<HashMap<RoomId, RoomLiveness>>>,
     /// Tracks claimed cleanup operations for idempotency (cleanup_id -> entry)
     cleanup_events: std::sync::Arc<tokio::sync::RwLock<HashMap<String, CleanupEventEntry>>>,
     #[cfg(test)]
@@ -492,6 +506,15 @@ pub struct InMemoryDatabase {
     fail_remove_player_from_room: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
+    /// Join-race determinism gate: used only by repository-only test modules
+    /// (`room_service_tests`), so it is gated out of packaged builds together
+    /// with them.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pause_add_player_to_room: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    add_player_reached: tokio::sync::Notify,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    release_add_player: tokio::sync::Notify,
     #[cfg(test)]
     pause_authority_request_after_commit: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -507,6 +530,7 @@ impl InMemoryDatabase {
         Self {
             rooms: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            room_liveness_monotonic: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cleanup_events: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             #[cfg(test)]
             fail_get_room_players: std::sync::atomic::AtomicBool::new(false),
@@ -538,6 +562,12 @@ impl InMemoryDatabase {
             fail_remove_player_from_room: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_remove_spectator_from_room: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            pause_add_player_to_room: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            add_player_reached: tokio::sync::Notify::new(),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            release_add_player: tokio::sync::Notify::new(),
             #[cfg(test)]
             pause_authority_request_after_commit: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -629,6 +659,22 @@ impl InMemoryDatabase {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_next_add_player_for_test(&self) {
+        self.pause_add_player_to_room
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn wait_for_paused_add_player_for_test(&self) {
+        self.add_player_reached.notified().await;
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn release_paused_add_player_for_test(&self) {
+        self.release_add_player.notify_one();
+    }
+
     #[cfg(test)]
     pub(crate) async fn wait_for_paused_get_room_by_id_for_test(&self) {
         self.get_room_by_id_reached.notified().await;
@@ -695,12 +741,94 @@ impl InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let room = rooms.get_mut(room_id).expect("room exists");
         room.last_activity = chrono::Utc::now() - age;
+        // Emulate GENUINE inactivity: both the wall-clock observability record
+        // and the monotonic GC stamp move together, exactly as they would if no
+        // activity had occurred for `age`. The emulated idle duration is stored
+        // directly rather than subtracted from the clock, which would panic on
+        // hosts whose monotonic epoch is younger than `age` (fresh CI virtual
+        // machines).
+        self.room_liveness_monotonic.write().await.insert(
+            *room_id,
+            RoomLiveness::AgedFor(age.to_std().expect("test ages are positive")),
+        );
+    }
+
+    /// Move only the monotonic GC liveness stamp forward to "now", leaving the
+    /// wall-clock `last_activity` untouched.
+    ///
+    /// Test-only emulation of a wall-clock step: production activity keeps both
+    /// stamps in lockstep, so this one-sided refresh reproduces the exact state
+    /// in which an NTP correction or host resume has made every wall timestamp
+    /// look stale while members are monotonic-fresh.
+    #[cfg(test)]
+    pub(crate) async fn refresh_room_monotonic_liveness_for_test(&self, room_id: &RoomId) {
+        self.room_liveness_monotonic
+            .write()
+            .await
+            .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
     }
 }
 
 impl Default for InMemoryDatabase {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A room's monotonic GC liveness state.
+#[derive(Debug, Clone)]
+enum RoomLiveness {
+    /// Real activity: the stamp of the last observed activity instant.
+    Live(tokio::time::Instant),
+    /// Test-only emulation of a room that has been idle for exactly this long.
+    ///
+    /// Emulating age by subtracting it from the current clock would panic on
+    /// hosts whose monotonic epoch is younger than the simulated age (fresh
+    /// CI virtual machines), so tests store the emulated idle duration
+    /// directly; production refreshes replace this state wholesale.
+    #[cfg(test)]
+    AgedFor(std::time::Duration),
+}
+
+impl RoomLiveness {
+    /// Elapsed idle time this state represents.
+    fn idle_for(&self) -> chrono::Duration {
+        match self {
+            Self::Live(stamp) => {
+                chrono::Duration::from_std(stamp.elapsed()).unwrap_or(chrono::Duration::MAX)
+            }
+            #[cfg(test)]
+            Self::AgedFor(idle) => {
+                chrono::Duration::from_std(*idle).unwrap_or(chrono::Duration::MAX)
+            }
+        }
+    }
+}
+
+/// Elapsed time since a room's last activity without consulting the current
+/// wall clock for the decision itself.
+///
+/// The elapsed value comes from the room's monotonic liveness stamp when one
+/// exists. Wall-clock steps (NTP correction, manual clock change, host
+/// suspend/resume) must not reap occupied rooms whose members are
+/// monotonic-fresh, nor keep an idle room alive because its wall-clock stamp
+/// happens to look fresh; the same discipline is pinned for reconnect windows
+/// and client pings.
+///
+/// A missing stamp falls back to the wall-clock difference so rooms created by
+/// paths that predate the stamp cannot become immortal; every shipped creation
+/// path stamps at insert time.
+fn room_idle_for(
+    activity: Option<RoomLiveness>,
+    last_activity_wall: chrono::DateTime<chrono::Utc>,
+) -> chrono::Duration {
+    match activity {
+        Some(liveness) => liveness.idle_for(),
+        // Defensive only: rooms whose row exists without a liveness stamp.
+        // Every shipped creation path stamps at insert time under the same
+        // lock, so this arm cannot occur through the shipped API; it keeps a
+        // foreign row insertion from becoming an immortal room.
+        None => chrono::Utc::now().signed_duration_since(last_activity_wall),
     }
 }
 
@@ -832,6 +960,10 @@ impl GameDatabase for InMemoryDatabase {
         // Insert into both maps atomically while holding both locks
         rooms.insert(room_id, room.clone());
         room_codes.insert(game_room_key, room_id);
+        self.room_liveness_monotonic
+            .write()
+            .await
+            .insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
         Ok(room)
     }
@@ -874,6 +1006,14 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn add_player_to_room(&self, room_id: &RoomId, mut player: PlayerInfo) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .pause_add_player_to_room
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.add_player_reached.notify_one();
+            self.release_add_player.notified().await;
+        }
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if room.players.len() < room.max_players as usize {
@@ -910,6 +1050,10 @@ impl GameDatabase for InMemoryDatabase {
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
                 room.last_activity = chrono::Utc::now();
+                self.room_liveness_monotonic
+                    .write()
+                    .await
+                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
                 Ok(true)
             } else {
                 Ok(false) // Room is full
@@ -945,6 +1089,10 @@ impl GameDatabase for InMemoryDatabase {
             // activity and must not keep an otherwise-stale room alive.
             if removed_player.is_some() {
                 room.last_activity = chrono::Utc::now();
+                self.room_liveness_monotonic
+                    .write()
+                    .await
+                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
             }
 
             // Prune the departed player's ready entry so it cannot linger in
@@ -1137,13 +1285,14 @@ impl GameDatabase for InMemoryDatabase {
         } else {
             empty_timeout
         };
-        let cutoff = chrono::Utc::now()
-            .checked_sub_signed(effective_timeout)
-            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+        let mut liveness = self.room_liveness_monotonic.write().await;
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
-            if !room.has_occupants() && room.last_activity <= cutoff && !protected.contains(room_id)
+            if !room.has_occupants()
+                && !protected.contains(room_id)
+                && room_idle_for(liveness.get(room_id).cloned(), room.last_activity)
+                    > effective_timeout
             {
                 to_remove.push((*room_id, room.game_name.clone(), room.code.clone()));
             }
@@ -1153,6 +1302,7 @@ impl GameDatabase for InMemoryDatabase {
         for (room_id, game_name, room_code) in to_remove {
             rooms.remove(&room_id);
             room_codes.remove(&(game_name, room_code));
+            liveness.remove(&room_id);
             deleted_ids.push(room_id);
         }
 
@@ -1167,16 +1317,25 @@ impl GameDatabase for InMemoryDatabase {
     ) -> Result<RoomCleanupOutcome> {
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
-            if room.is_expired(empty_timeout, inactive_timeout) && !protected.contains(room_id) {
-                let was_empty = !room.has_occupants();
+            if protected.contains(room_id) {
+                continue;
+            }
+            let idle_for = room_idle_for(liveness.get(room_id).cloned(), room.last_activity);
+            let expired = if room.has_occupants() {
+                idle_for > inactive_timeout
+            } else {
+                idle_for > empty_timeout
+            };
+            if expired {
                 to_remove.push((
                     *room_id,
                     room.game_name.clone(),
                     room.code.clone(),
-                    was_empty,
+                    !room.has_occupants(),
                 ));
             }
         }
@@ -1185,6 +1344,7 @@ impl GameDatabase for InMemoryDatabase {
         for (room_id, game_name, room_code, was_empty) in to_remove {
             rooms.remove(&room_id);
             room_codes.remove(&(game_name, room_code));
+            liveness.remove(&room_id);
 
             if was_empty {
                 outcome.empty_rooms_cleaned = outcome.empty_rooms_cleaned.saturating_add(1);
@@ -1200,6 +1360,10 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             room.last_activity = chrono::Utc::now();
+            self.room_liveness_monotonic
+                .write()
+                .await
+                .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         }
         Ok(())
     }
@@ -1211,6 +1375,7 @@ impl GameDatabase for InMemoryDatabase {
         if let Some(room) = rooms.remove(room_id) {
             let game_room_key = (room.game_name.clone(), room.code);
             room_codes.remove(&game_room_key);
+            self.room_liveness_monotonic.write().await.remove(room_id);
             Ok(true)
         } else {
             Ok(false)
@@ -1414,7 +1579,17 @@ impl GameDatabase for InMemoryDatabase {
     ) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            Ok(room.add_spectator(spectator))
+            let admitted = room.add_spectator(spectator);
+            if admitted {
+                // A spectator join is activity: `Room::add_spectator` already
+                // refreshed the wall-clock record, so the monotonic GC stamp
+                // must move in lockstep.
+                self.room_liveness_monotonic
+                    .write()
+                    .await
+                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+            }
+            Ok(admitted)
         } else {
             Ok(false)
         }
@@ -1435,7 +1610,16 @@ impl GameDatabase for InMemoryDatabase {
 
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            Ok(room.remove_spectator(spectator_id))
+            let removed = room.remove_spectator(spectator_id);
+            if removed.is_some() {
+                // A real departure is activity and starts the empty-room clock:
+                // refresh the monotonic stamp alongside the wall-clock record.
+                self.room_liveness_monotonic
+                    .write()
+                    .await
+                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+            }
+            Ok(removed)
         } else {
             Ok(None)
         }
@@ -1796,10 +1980,22 @@ mod tests {
     /// wall-clock time. Reaches the in-memory map directly (same module).
     async fn age_room(db: &InMemoryDatabase, room_id: &RoomId, age: chrono::Duration) {
         let now = chrono::Utc::now();
-        let mut rooms = db.rooms.write().await;
-        let room = rooms.get_mut(room_id).expect("room exists");
-        room.created_at = now - age;
-        room.last_activity = now - age;
+        {
+            let mut rooms = db.rooms.write().await;
+            let room = rooms.get_mut(room_id).expect("room exists");
+            room.created_at = now - age;
+            room.last_activity = now - age;
+        }
+        // Emulate genuine aging: the monotonic GC stamp moves in lockstep so
+        // cleanup decisions see a room that has truly been idle for `age`.
+        // The emulated idle duration is stored directly rather than subtracted
+        // from the clock, which would panic on hosts with a young monotonic
+        // epoch.
+        let mut liveness = db.room_liveness_monotonic.write().await;
+        liveness.insert(
+            *room_id,
+            RoomLiveness::AgedFor(age.to_std().expect("test ages are positive")),
+        );
     }
 
     fn is_fresh(ts: chrono::DateTime<chrono::Utc>) -> bool {
@@ -2080,6 +2276,237 @@ mod tests {
             assert_eq!(
                 survives, expect_survives,
                 "protect={protect}: a reconnection-protected room must survive GC"
+            );
+        }
+    }
+
+    /// A wall-clock step (NTP correction, manual clock change, host
+    /// suspend/resume) must not reap an occupied room whose members are
+    /// monotonic-fresh. The stale-looking wall stamp is exactly what every
+    /// member's continued activity leaves behind after the step: production
+    /// refreshes both stamps in lockstep, so only the monotonic one can decide
+    /// liveness. Pinned for both sweeps.
+    #[tokio::test]
+    async fn wall_clock_step_cannot_reap_monotonic_fresh_occupied_room() {
+        for empty_only in [false, true] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "wall_step", "WSTEP01")
+                .await
+                .expect("room creation should succeed");
+            // Emulate genuine idleness first (both stamps rewind), then real
+            // ongoing activity after a forward wall step (only the monotonic
+            // stamp returns to fresh).
+            db.backdate_room_activity_for_test(&room.id, chrono::Duration::hours(2))
+                .await;
+            db.refresh_room_monotonic_liveness_for_test(&room.id).await;
+
+            if empty_only {
+                let deleted = db
+                    .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                    .await
+                    .expect("cleanup_empty_rooms should not error");
+                assert!(
+                    deleted.is_empty(),
+                    "a wall-clock step must not delete a monotonic-fresh room"
+                );
+            } else {
+                let outcome = db
+                    .cleanup_expired_rooms(
+                        chrono::Duration::seconds(300),
+                        chrono::Duration::seconds(3600),
+                        &HashSet::new(),
+                    )
+                    .await
+                    .expect("cleanup_expired_rooms should not error");
+                assert!(
+                    outcome.is_empty(),
+                    "a wall-clock step must not classify a monotonic-fresh room as inactive"
+                );
+            }
+            assert!(db.get_room_by_id(&room.id).await.expect("lookup").is_some());
+        }
+    }
+
+    /// The inverse contract: genuinely idle rooms are reaped by elapsed
+    /// monotonic time even though their wall-clock stamps look fresh, which is
+    /// exactly the state a backward wall-clock step (or suspended host clock)
+    /// produces.
+    #[tokio::test(start_paused = true)]
+    async fn monotonic_idle_rooms_are_reaped_despite_fresh_wall_stamps() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "mono_reap", "MREAP01")
+            .await
+            .expect("room creation should succeed");
+        let creator = *room.players.keys().next().expect("creator present");
+        db.remove_player_from_room(&room.id, &creator)
+            .await
+            .expect("departure should not error");
+
+        tokio::time::advance(std::time::Duration::from_secs(7200)).await;
+
+        let deleted = db
+            .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+            .await
+            .expect("cleanup_empty_rooms should not error");
+        assert_eq!(
+            deleted,
+            vec![room.id],
+            "monotonic-idle empty rooms must be reclaimed"
+        );
+        assert!(db.get_room_by_id(&room.id).await.expect("lookup").is_none());
+
+        let second = create_test_room(&db, "mono_reap", "MREAP02")
+            .await
+            .expect("second room creation should succeed");
+        tokio::time::advance(std::time::Duration::from_secs(7200)).await;
+        let outcome = db
+            .cleanup_expired_rooms(
+                chrono::Duration::seconds(300),
+                chrono::Duration::seconds(3600),
+                &HashSet::new(),
+            )
+            .await
+            .expect("cleanup_expired_rooms should not error");
+        assert_eq!(
+            outcome.inactive_rooms_cleaned, 1,
+            "monotonic-idle occupied rooms must be classified inactive"
+        );
+        assert!(
+            db.get_room_by_id(&second.id)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "an occupied room past its monotonic inactivity timeout is reaped"
+        );
+    }
+
+    /// Every activity path that refreshes the wall record must move the
+    /// monotonic GC stamp too; otherwise a room could look active on the wall
+    /// clock yet be reaped mid-game.
+    #[tokio::test(start_paused = true)]
+    async fn every_activity_path_refreshes_monotonic_liveness() {
+        const INACTIVE_TIMEOUT: chrono::Duration = chrono::Duration::seconds(60);
+
+        // A fresh monotonic stamp survives cleanup with no elapsed time; a
+        // stale one (activity path failed to refresh) is reaped immediately.
+        async fn survives_cleanup(db: &InMemoryDatabase) -> bool {
+            let outcome = db
+                .cleanup_expired_rooms(
+                    chrono::Duration::seconds(300),
+                    INACTIVE_TIMEOUT,
+                    &HashSet::new(),
+                )
+                .await
+                .expect("cleanup should not error");
+            outcome.is_empty()
+        }
+
+        // Baseline: with no activity after aging, the room does NOT survive.
+        {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "parity", "PAR0001")
+                .await
+                .expect("room creation should succeed");
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            assert!(
+                !survives_cleanup(&db).await,
+                "aged room without activity must be reaped"
+            );
+        }
+
+        // Joining a player after aging keeps the room alive.
+        {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "parity", "PAR0002")
+                .await
+                .expect("room creation should succeed");
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            let joined = crate::protocol::PlayerInfo {
+                id: Uuid::new_v4(),
+                name: "Joiner".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: "us-east-1".to_string(),
+            };
+            assert!(db
+                .add_player_to_room(&room.id, joined)
+                .await
+                .expect("join should not error"));
+            assert!(
+                survives_cleanup(&db).await,
+                "player join must refresh the monotonic GC stamp"
+            );
+        }
+
+        // A spectator join after aging keeps the room alive...
+        {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "parity", "PAR0003")
+                .await
+                .expect("room creation should succeed");
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            let watcher = spectator("Watcher");
+            let watcher_id = watcher.id;
+            assert!(db
+                .add_spectator_to_room(&room.id, watcher)
+                .await
+                .expect("spectator join should not error"));
+            assert!(
+                survives_cleanup(&db).await,
+                "spectator join must refresh the monotonic GC stamp"
+            );
+
+            // ...and its detach starts a fresh empty-room window rather than
+            // inheriting whatever age the room had before the join.
+            db.remove_player_from_room(
+                &room.id,
+                room.players.keys().next().expect("creator present"),
+            )
+            .await
+            .expect("creator departure should not error");
+            let detached = db
+                .remove_spectator_from_room(&room.id, &watcher_id)
+                .await
+                .expect("spectator detach should not error");
+            assert!(detached.is_some(), "spectator must be removable");
+            tokio::time::advance(std::time::Duration::from_secs(299)).await;
+            let deleted = db
+                .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                .await
+                .expect("empty cleanup should not error");
+            assert!(
+                deleted.is_empty(),
+                "spectator detach must start a fresh monotonic empty-room window"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+            let deleted = db
+                .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                .await
+                .expect("empty cleanup should not error");
+            assert_eq!(
+                deleted,
+                vec![room.id],
+                "the empty-room window opened by the detach must eventually close"
+            );
+        }
+
+        // Explicit activity refreshes keep the room alive.
+        {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "parity", "PAR0004")
+                .await
+                .expect("room creation should succeed");
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            db.update_room_activity(&room.id)
+                .await
+                .expect("activity update should not error");
+            assert!(
+                survives_cleanup(&db).await,
+                "update_room_activity must refresh the monotonic GC stamp"
             );
         }
     }

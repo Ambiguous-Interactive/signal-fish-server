@@ -1161,6 +1161,159 @@ async fn test_circuit_breaker_straggler_success_does_not_resolve_half_open() {
     );
 }
 
+/// Wait until the breaker reaches `target`, driving the paused clock forward
+/// while yielding so spawned admission tasks get scheduled.
+async fn wait_for_state_paused(breaker: &CircuitBreaker, target: &CircuitState) {
+    for _ in 0..10_000 {
+        if &breaker.get_state().await == target {
+            return;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    panic!("the breaker never reached {target:?}");
+}
+
+/// C22: A straggler failure resolving while the circuit is already open must
+/// not restart the open-state window.
+///
+/// Each late closed-epoch failure that restamped `last_failure_time` would
+/// push the half-open probe a full timeout further out, letting an endless
+/// trickle of stragglers starve recovery. The window starts when the circuit
+/// transitions into Open and stays anchored there.
+#[tokio::test(start_paused = true)]
+async fn test_circuit_breaker_straggler_failure_does_not_extend_open_window() {
+    let breaker = Arc::new(CircuitBreaker::new(2, Duration::from_secs(60)));
+
+    // Admit three gated operations while the circuit is still closed.
+    let mut started_rxs = Vec::new();
+    let mut release_txs = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..3 {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let breaker_for_task = Arc::clone(&breaker);
+        tasks.push(tokio::spawn(async move {
+            let _: Result<(), anyhow::Error> = breaker_for_task
+                .call(async move {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    Err(anyhow::anyhow!("straggler {i} failure"))
+                })
+                .await;
+        }));
+        started_rxs.push(started_rx);
+        release_txs.push(release_tx);
+    }
+    for rx in started_rxs {
+        rx.await.expect("each operation should be admitted");
+    }
+
+    // First failure: counted, circuit still closed.
+    release_txs
+        .remove(0)
+        .send(())
+        .expect("operation 0 must still be waiting");
+    tasks.remove(0).await.expect("task should join");
+
+    // Second failure at t=30s: trips the threshold and anchors the window.
+    tokio::time::advance(Duration::from_secs(30)).await;
+    release_txs
+        .remove(0)
+        .send(())
+        .expect("operation 1 must still be waiting");
+    tasks.remove(0).await.expect("task should join");
+    assert_eq!(breaker.get_state().await, CircuitState::Open);
+
+    // Third failure at t=60s: a late straggler resolving while already open.
+    // Without the fix it would restamp the window here.
+    tokio::time::advance(Duration::from_secs(30)).await;
+    release_txs
+        .remove(0)
+        .send(())
+        .expect("operation 2 must still be waiting");
+    tasks
+        .pop()
+        .expect("task should join")
+        .await
+        .expect("task should join");
+    assert_eq!(breaker.get_state().await, CircuitState::Open);
+
+    // At t=91s the anchored window (opened at t=30s) has elapsed.
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let recovery: Result<(), anyhow::Error> = breaker.call(async { Ok(()) }).await;
+    assert!(
+        recovery.is_ok(),
+        "the probe must be admitted when the anchored window elapses; got {:?}",
+        recovery.err().map(|e| e.to_string())
+    );
+    assert_eq!(
+        breaker.get_state().await,
+        CircuitState::Closed,
+        "a successful recovery probe must close the circuit"
+    );
+}
+
+/// C23: reset() discards outcomes from calls admitted before the reset.
+///
+/// A probe in flight when an administrative reset lands must not reopen the
+/// freshly cleared circuit when it later fails; its outcome belongs to a
+/// superseded era.
+#[tokio::test(start_paused = true)]
+async fn test_circuit_breaker_reset_discards_outstanding_probe_outcome() {
+    let breaker = Arc::new(CircuitBreaker::new(1, Duration::from_secs(60)));
+
+    // Open the circuit with one fast failure.
+    let _: Result<(), anyhow::Error> = breaker
+        .call(async { Err(anyhow::anyhow!("failure")) })
+        .await;
+    assert_eq!(breaker.get_state().await, CircuitState::Open);
+
+    // A gated failing call becomes the probe once it starts AFTER the window
+    // elapses. The explicit enter gate guarantees the call is admitted under
+    // the already-elapsed window instead of racing the paused clock.
+    let (probe_enter_tx, probe_enter_rx) = tokio::sync::oneshot::channel::<()>();
+    let (probe_release_tx, probe_release_rx) = tokio::sync::oneshot::channel::<()>();
+    let breaker_for_probe = Arc::clone(&breaker);
+    let probe = tokio::spawn(async move {
+        let _ = probe_enter_rx.await;
+        breaker_for_probe
+            .call(async move {
+                let _ = probe_release_rx.await;
+                Result::<(), anyhow::Error>::Err(anyhow::anyhow!("stale probe failure"))
+            })
+            .await
+    });
+    tokio::time::advance(Duration::from_secs(61)).await;
+    probe_enter_tx
+        .send(())
+        .expect("the probe task must be waiting to enter");
+    wait_for_state_paused(&breaker, &CircuitState::HalfOpen).await;
+
+    // Administrative reset clears the state while the probe is outstanding.
+    breaker.reset().await;
+    assert_eq!(breaker.get_state().await, CircuitState::Closed);
+
+    // The stale probe fails on release; its outcome must be discarded.
+    probe_release_tx
+        .send(())
+        .expect("the blocked probe must still be waiting");
+    let probe_result = probe.await.expect("probe task should join");
+    assert!(
+        probe_result.is_err(),
+        "the stale probe's caller sees its error"
+    );
+    assert_eq!(
+        breaker.get_state().await,
+        CircuitState::Closed,
+        "a stale probe failure must not reopen a freshly reset circuit"
+    );
+
+    // Normal operation continues after the reset.
+    let result: Result<(), anyhow::Error> = breaker.call(async { Ok(()) }).await;
+    assert!(result.is_ok(), "operations should work after reset");
+}
+
 // ===========================================================================
 // F. InMemoryMessageCoordinator lock ordering tests
 // ===========================================================================

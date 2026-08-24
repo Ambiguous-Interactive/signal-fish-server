@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** The public coordination delivery entry point
+  `deliver_or_disconnect` now takes `&Arc<ServerMetrics>` instead of
+  `&ServerMetrics` (the `_in_room` variants are crate-internal and changed
+  identically). Embedders already holding the server's metrics Arc pass it
+  through unchanged; drop-path accounting needs the owned handle so a
+  cancelled parked delivery resolves the same counters as ordinary outcomes
+  even on queues without an embedded metrics handle.
 - **Breaking:** Bind the `EncryptedSecret` metadata (`key_id`, `created_at`) of
   `EnvelopeEncryptor` as AES-256-GCM associated data. Bundles encrypted by a
   previous version no longer decrypt — they carry no authenticated metadata —
@@ -114,6 +121,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix inactive-room garbage collection deciding liveness from the wall clock
+  while every other reaper (client pings, reconnect windows) uses monotonic
+  time: an NTP correction, manual clock change, or host suspend/resume that
+  stepped the wall clock past `server.inactive_room_timeout` deleted occupied,
+  actively-playing rooms (farewell `RoomInactive`, close code `4005`), and a
+  backward step kept idle rooms alive past their timeout. GC decisions now key
+  off a per-room monotonic activity stamp refreshed in lockstep by every
+  production activity path (create, player/spectator join, departure, explicit
+  refresh); the wall-clock `last_activity` remains the observability record.
+- Fix a parked backpressured delivery vanishing without any accounting when
+  the `BackpressuredDelivery` value itself is dropped unresolved (the owning
+  broadcast future is cancelled while parked): the attempt counter never
+  resolved, no drop was counted, and the recipient's queue ledger never
+  learned of the loss. Dropping that value now resolves the attempt as an
+  accounted drop (global counter, per-connection ledger, and the queue's
+  attempted+abandoned pairing), records a trace-validation event, and leaves
+  the healthy recipient connected. Cancellation windows elsewhere in the
+  delivery pipeline (scalar inline waits) remain tracked for follow-up.
+- Fix the `CircuitBreaker` open-state window restarting on every late
+  closed-era straggler failure while already open, which could starve the
+  half-open probe indefinitely; the window is now anchored at the transition
+  into Open. `reset()` also invalidates outcomes from calls admitted before
+  it, so a stale probe failing after an administrative reset can no longer
+  reopen the freshly cleared circuit, and open-window timing uses the
+  monotonic clock like the rest of the server's liveness decisions.
+- Fix a join racing inactive-room deletion reporting
+  `ROOM_CREATION_FAILED` instead of `ROOM_NOT_FOUND`: when the room row
+  disappears between the join path's recheck and its membership write (GC
+  winning the race), the failure is now classified by a fresh existence check
+  so clients see the accurate wire code.
 - Fix TURN credential minting silently emitting an empty (always-rejected)
   credential if HMAC initialization ever failed: the ICE builder now refuses
   the whole TURN entry (fail closed, STUN/static entries unaffected) rather

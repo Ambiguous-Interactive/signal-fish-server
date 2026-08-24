@@ -765,6 +765,29 @@ impl DeliverySender {
         }
     }
 
+    /// Count one classified item as attempted-then-abandoned queue-side
+    /// without requesting a close. Used by drop-path accounting for parked
+    /// deliveries that were cancelled before they could be enqueued, keeping
+    /// the exported per-class conservation identity intact.
+    pub(crate) fn record_cancelled_before_enqueue(&self, class: crate::protocol::DeliveryClass) {
+        if let DeliverySenderKind::Classified { sender, .. } = &self.0 {
+            sender.record_cancelled_before_enqueue(class);
+        }
+    }
+
+    /// Test-only seam: enqueue a counter-only cumulative delivery report so
+    /// tests can observe the shared queue ledger (including drop-path
+    /// abandonment counts) through the receiver side.
+    #[cfg(test)]
+    pub(crate) fn try_enqueue_report_snapshot_for_test(&self) {
+        let DeliverySenderKind::Classified { sender, .. } = &self.0 else {
+            panic!("report snapshots are only defined for classified queues");
+        };
+        sender
+            .try_enqueue_report_snapshot()
+            .expect("the control lane has room for the counter-only report");
+    }
+
     pub(crate) fn try_send(
         &self,
         message: Arc<ServerMessage>,
@@ -1241,7 +1264,7 @@ pub enum DeliveryOutcome {
 ///   [`DeliveryOutcome::SlowConsumer`]. The message is abandoned only with
 ///   the connection itself, never silently.
 pub async fn deliver_or_disconnect(
-    metrics: &crate::metrics::ServerMetrics,
+    metrics: &std::sync::Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: std::time::Duration,
     player_id: &PlayerId,
     handle: &ClientDeliveryHandle,
@@ -1259,7 +1282,7 @@ pub async fn deliver_or_disconnect(
 }
 
 pub(crate) async fn deliver_or_disconnect_in_room(
-    metrics: &crate::metrics::ServerMetrics,
+    metrics: &std::sync::Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: std::time::Duration,
     player_id: &PlayerId,
     handle: &ClientDeliveryHandle,
@@ -1278,7 +1301,7 @@ pub(crate) async fn deliver_or_disconnect_in_room(
 }
 
 pub(crate) async fn deliver_message_or_disconnect_in_room(
-    metrics: &crate::metrics::ServerMetrics,
+    metrics: &std::sync::Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: std::time::Duration,
     player_id: &PlayerId,
     handle: &ClientDeliveryHandle,
@@ -1313,8 +1336,19 @@ pub(crate) enum DeliveryStart {
 /// recipients without allocating one async future per recipient, while the
 /// scalar wrapper above still uses the exact same delivery state machine.
 pub(crate) struct BackpressuredDelivery {
+    /// `None` once [`BackpressuredDelivery::resolve`] has taken ownership for
+    /// normal resolution; `Some` means the delivery is still unresolved and
+    /// dropping the struct must account for it.
+    inner: Option<BackpressuredDeliveryInner>,
+}
+
+struct BackpressuredDeliveryInner {
     player_id: PlayerId,
     handle: ClientDeliveryHandle,
+    /// Server metrics shared by every outcome of this attempt, so drop-path
+    /// accounting resolves the same counter set as normal resolution even for
+    /// queues that carry no embedded metrics handle.
+    metrics: std::sync::Arc<crate::metrics::ServerMetrics>,
     delivery: DeliveryMessage,
     room_id: Option<RoomId>,
     deadline: Option<tokio::time::Instant>,
@@ -1326,8 +1360,55 @@ pub(crate) struct BackpressuredDelivery {
     trace_delivery_id: Option<u64>,
 }
 
+impl Drop for BackpressuredDelivery {
+    fn drop(&mut self) {
+        let Some(pending) = self.inner.take() else {
+            return;
+        };
+        // The parked delivery was cancelled before it could be enqueued (its
+        // owning broadcast/scalar future was dropped mid-await). Resolve the
+        // attempt as a drop so conservation holds, and record the abandonment
+        // in the recipient's queue ledger. The recipient is NOT closed here:
+        // unlike a slow-consumer timeout this is not the recipient's fault,
+        // and latest/volatile losses are already part of the delivery model.
+        if let Some(class) = pending.pending_class {
+            // Pair the per-class ledger counters (attempted + abandoned): the
+            // parked item was never enqueued, so nothing recorded its attempt
+            // queue-side yet, and the exported conservation identity requires
+            // both halves.
+            pending.handle.sender.record_cancelled_before_enqueue(class);
+        }
+        pending.metrics.increment_websocket_messages_dropped();
+        if let Some(stats) = &pending.connection_stats {
+            stats
+                .dropped_for_you
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(feature = "trace-validation")]
+        pending.handle.close.record_trace(
+            crate::trace_validation::DeliveryTraceAction::Unsupported,
+            pending.trace_delivery_id,
+            Some("parked-delivery-cancelled"),
+        );
+        tracing::debug!(
+            player_id = %pending.player_id,
+            "Parked outbound delivery abandoned before resolution; counted as dropped"
+        );
+    }
+}
+
+impl BackpressuredDelivery {
+    /// Take ownership of the pending state for normal resolution, defusing the
+    /// drop-path accounting.
+    fn resolve(mut self) -> BackpressuredDeliveryInner {
+        self.inner
+            .take()
+            .expect("a parked delivery must resolve exactly once")
+    }
+}
+
 pub(crate) fn start_message_delivery_in_room(
-    metrics: &crate::metrics::ServerMetrics,
+    metrics: &std::sync::Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: std::time::Duration,
     player_id: &PlayerId,
     handle: &ClientDeliveryHandle,
@@ -1449,17 +1530,20 @@ pub(crate) fn start_message_delivery_in_room(
         .map(CapacityReleaseWitness::full_observed_at)
         .unwrap_or_else(tokio::time::Instant::now);
     DeliveryStart::Backpressured(BackpressuredDelivery {
-        player_id: *player_id,
-        handle: handle.clone(),
-        delivery,
-        room_id,
-        deadline: crate::deadline::after(full_observed_at, slow_consumer_timeout),
-        capacity_witness,
-        timeout: slow_consumer_timeout,
-        connection_stats,
-        pending_class: offered_class,
-        #[cfg(feature = "trace-validation")]
-        trace_delivery_id,
+        inner: Some(BackpressuredDeliveryInner {
+            player_id: *player_id,
+            handle: handle.clone(),
+            metrics: Arc::clone(metrics),
+            delivery,
+            room_id,
+            deadline: crate::deadline::after(full_observed_at, slow_consumer_timeout),
+            capacity_witness,
+            timeout: slow_consumer_timeout,
+            connection_stats,
+            pending_class: offered_class,
+            #[cfg(feature = "trace-validation")]
+            trace_delivery_id,
+        }),
     })
 }
 
@@ -1472,9 +1556,12 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
         TimedOut,
     }
 
-    let BackpressuredDelivery {
+    let BackpressuredDeliveryInner {
         player_id,
         handle,
+        // The inner Arc equals the caller-supplied `metrics`; the drop path
+        // uses the stored copy.
+        metrics: _,
         delivery,
         room_id,
         deadline,
@@ -1484,7 +1571,7 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
         pending_class,
         #[cfg(feature = "trace-validation")]
         trace_delivery_id,
-    } = pending;
+    } = pending.resolve();
     let sender = handle.sender.clone();
     let deadline_retry = delivery.clone();
     let send = handle.sender.send_delivery(delivery, room_id);
@@ -4011,7 +4098,7 @@ mod tests {
     /// immediately — no backpressure, no drops, conservation exact.
     #[tokio::test(start_paused = true)]
     async fn fast_path_delivery_is_enqueued_without_backpressure() {
-        let metrics = ServerMetrics::new();
+        let metrics = Arc::new(ServerMetrics::new());
         let (handle, mut rx, _listener) = delivery_handle(4);
 
         let outcome = deliver_or_disconnect(
@@ -4191,6 +4278,68 @@ mod tests {
             1
         );
         assert_conservation(&metrics);
+    }
+
+    /// A parked delivery dropped without resolution (its owning broadcast or
+    /// scalar future was cancelled mid-await) must still resolve the attempt:
+    /// the drop is counted globally, the queue ledger records the abandonment,
+    /// and no close is requested of the healthy recipient.
+    #[tokio::test]
+    async fn dropping_a_parked_delivery_resolves_attempt_accounting() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let player_id = test_player();
+        let (sender, mut receiver) =
+            outbound_queue::channel_with_metrics(1, 1, Arc::clone(&metrics));
+        sender.set_protocol_version(3);
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        handle
+            .sender
+            .try_send(game_data_message(None, None, None, None), None)
+            .expect("prefill the classified data lane");
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &player_id,
+            &handle,
+            DeliveryMessage::new(game_data_message(None, None, None, None)),
+            None,
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+
+        // Emulate cancellation of the awaiting broadcast/scalar future.
+        drop(pending);
+
+        assert_eq!(
+            listener.requested_reason(),
+            None,
+            "a cancelled parked delivery is not a slow-consumer fault of the recipient"
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            1,
+            "the abandoned attempt must resolve as an accounted drop"
+        );
+        assert_conservation(&metrics);
+
+        // The recipient-facing queue ledger must record the abandonment so a
+        // later cumulative delivery report carries it.
+        handle.sender.try_enqueue_report_snapshot_for_test();
+        let report_item = receiver
+            .try_recv_control()
+            .expect("control item")
+            .expect("snapshot report enqueued");
+        let outbound_queue::OutboundPayload::DeliveryReport(report) = &report_item.payload else {
+            panic!("expected a delivery report, got {:?}", report_item.payload);
+        };
+        assert_eq!(
+            report.per_class.reliable.abandoned, 1,
+            "the queue ledger must count the abandoned parked delivery"
+        );
     }
 
     /// The witness records the first full-to-non-full transition, not the most
@@ -4629,7 +4778,7 @@ mod tests {
     /// reported as `ChannelClosed`, never counted as a drop.
     #[tokio::test(start_paused = true)]
     async fn receiver_dropped_before_send_is_channel_closed_not_a_drop() {
-        let metrics = ServerMetrics::new();
+        let metrics = Arc::new(ServerMetrics::new());
         let (handle, rx, _listener) = delivery_handle(1);
         drop(rx);
 
