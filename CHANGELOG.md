@@ -121,6 +121,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix outbound capacity-release witnesses discarding their own evidence after
+  a protocol upgrade while parked: `CapacityReleaseWitness::permits_locked`
+  required lane identity between the lane frozen when Full was observed and
+  the caller's freshly recomputed target lane. A v2→v3 negotiation completing
+  mid-backpressure changed that lane, so genuine pre-deadline release evidence
+  was discarded and a fully drained, on-rate recipient was evicted as a slow
+  consumer purely for upgrading. Release evidence is now evaluated on the
+  witness's own lane; actual space on the current target lane remains enforced
+  by the separate capacity check (issue #416).
 - Fix inactive-room garbage collection deciding liveness from the wall clock
   while every other reaper (client pings, reconnect windows) uses monotonic
   time: an NTP correction, manual clock change, or host suspend/resume that
@@ -137,8 +146,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   learned of the loss. Dropping that value now resolves the attempt as an
   accounted drop (global counter, per-connection ledger, and the queue's
   attempted+abandoned pairing), records a trace-validation event, and leaves
-  the healthy recipient connected. Cancellation windows elsewhere in the
-  delivery pipeline (scalar inline waits) remain tracked for follow-up.
+  the healthy recipient connected.
+- Fix the remaining cancellation windows in the delivery pipeline: cancelling
+  the parked-delivery wait itself (`finish_backpressured_delivery_in_room`)
+  used to defuse the drop guard before its select, and the three conditional
+  waits (`reserve_initial_transition`, `deliver_to_one_if`, `reserve_one_if`)
+  had no cancellation accounting at all. A cancelled wait now resolves its
+  attempt exactly once as an accounted drop with attempted+abandoned queue-
+  ledger pairing, without requesting a close of the healthy recipient
+  (issue #417).
+- Fix room-operation coordination failing with `INTERNAL_ERROR` behind a
+  leaked lock key: the per-operation distributed keys could not coordinate
+  server processes while every coordinator critical section already holds the
+  TTL-free per-room mutation gate first, so the keys excluded nobody while a
+  leaked key burned the full ~22.5 s retry storm before failing. The
+  coordinator-level locks are removed (the mutation gate is the single
+  serializer); for the join-path locks that remain, acquisition backoff is
+  now clamped strictly inside the lease TTL instead of potentially outliving
+  it (worst case measured ~22.5 s against 10 s leases) (issue #414).
+
+### Added
+
+- Pin the teardown-behind-an-abandoned-write wire contract with an end-to-end
+  regression test on a real upgraded socket: a cancelled mid-flush write must
+  still deliver every already-buffered byte whole, keep later frames on clean
+  frame boundaries, and preserve the coded close handshake (verified behavior;
+  no functional change) (issue #415).
 - Fix the `CircuitBreaker` open-state window restarting on every late
   closed-era straggler failure while already open, which could starve the
   half-open probe indefinitely; the window is now anchored at the transition
