@@ -2057,6 +2057,22 @@ impl EnhancedGameServer {
                                 }
                             }
                             Err(error) => {
+                                // A room deleted between the lane-held
+                                // recheck above and this membership write
+                                // (inactive-room GC) surfaces as a storage
+                                // error here. Reclassify by re-checking
+                                // existence so the client sees the accurate
+                                // ROOM_NOT_FOUND wire code instead of
+                                // ROOM_CREATION_FAILED; anything else stays
+                                // internal.
+                                let classified = if matches!(
+                                    self.database.get_room_by_id(&room.id).await,
+                                    Ok(None)
+                                ) {
+                                    JoinRoomError::RoomNotFound
+                                } else {
+                                    JoinRoomError::Internal(error)
+                                };
                                 if let Some(rollback) = application_claim_rollback.as_ref() {
                                     match self
                                         .rollback_or_queue_room_application_claim(
@@ -2064,11 +2080,11 @@ impl EnhancedGameServer {
                                         )
                                         .await
                                     {
-                                        Ok(()) => Err(error.into()),
+                                        Ok(()) => Err(classified),
                                         Err(rollback_error) => Err(rollback_error),
                                     }
                                 } else {
-                                    Err(error.into())
+                                    Err(classified)
                                 }
                             }
                         }

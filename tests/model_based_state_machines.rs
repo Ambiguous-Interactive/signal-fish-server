@@ -361,7 +361,7 @@ proptest! {
             .build()
             .expect("current-thread paused runtime must build");
         runtime.block_on(async move {
-            let metrics = ServerMetrics::new();
+            let metrics = Arc::new(ServerMetrics::new());
             let player_id = Uuid::from_u128(0xDE11);
             let (tx, rx) = mpsc::channel::<Arc<ServerMessage>>(capacity);
             #[cfg(feature = "trace-validation")]
