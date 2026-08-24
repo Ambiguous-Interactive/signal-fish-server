@@ -30305,6 +30305,8 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
     }
     let installs_cargo_tool = |body: &str, tool: &str| -> bool {
         let tool_line = format!("tool: {tool}");
+        // A trailing `@<version>` pin is accepted (and encouraged): the
+        // mutation-inventory guard depends on the installed tool version.
         let mut uses_install_action = false;
 
         for line in body.lines() {
@@ -30313,7 +30315,9 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
                 uses_install_action = false;
             } else if line.starts_with("uses:") {
                 uses_install_action = line.starts_with("uses: taiki-e/install-action@");
-            } else if uses_install_action && line == tool_line {
+            } else if uses_install_action
+                && (line == tool_line || line.strip_prefix(&format!("{tool_line}@")).is_some())
+            {
                 return true;
             }
         }
