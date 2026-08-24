@@ -126,6 +126,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix the last published member's departure deleting a finalized room's sticky
+  session decision while storage still holds an admitted member whose route
+  has not committed (a failed finalized publication spawns its teardown only
+  after releasing the room mutation gate). Deleting the plan in that window
+  downgraded that member's whole room generation to the relay floor on its
+  next committed route, contradicting sticky topology/transport for the
+  session lifetime; the decision now survives until storage empties too, so
+  the pending member's publication repairs the session (re-electing a capable
+  host) instead.
 - Fix outbound capacity-release witnesses discarding their own evidence after
   a protocol upgrade while parked: `CapacityReleaseWitness::permits_locked`
   required lane identity between the lane frozen when Full was observed and

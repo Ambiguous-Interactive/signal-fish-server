@@ -3061,6 +3061,11 @@ async fn host_departure_with_no_electable_member_drops_plan_without_replan() {
             host: Some(host),
         },
     );
+    // Publish every member's route: with all members routed, the departure
+    // below exercises the no-electable repair-drop arm itself (remaining
+    // members exist but none can run the stored session), not the
+    // last-published-member shortcut.
+    publish_room_members(&server, &room_id, &[host, legacy, relay_only]).await;
 
     server
         .database
@@ -3294,6 +3299,10 @@ async fn departure_with_unpairable_host_and_no_qualifier_drops_plan() {
             host: Some(host),
         },
     );
+    // Publish every member's route so the legacy departure below exercises
+    // the no-qualifier repair-drop arm itself (a routed, downgraded ex-host
+    // remains), not the last-published-member shortcut.
+    publish_room_members(&server, &room_id, &[host, legacy]).await;
 
     server
         .database
@@ -3529,6 +3538,111 @@ async fn departure_from_non_finalized_room_does_nothing() {
             .session_replans_emitted
             .load(Ordering::Relaxed),
         0
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn last_member_departure_keeps_sticky_decision_while_storage_holds_an_unrouted_member() {
+    // A failed finalized publication can leave an admitted member whose route
+    // never committed while its teardown is still pending (the teardown task
+    // is spawned only after the room mutation gate is released), and a
+    // join/reconnect transaction commits its route on its own pass. When the
+    // last PUBLISHED member departs in that state, the sticky decision must
+    // survive so that member's eventual committed route repairs this session
+    // instead of downgrading the whole generation to the relay floor. Only
+    // once storage empties too is the session over.
+    let server = create_server_with_session(host_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (pending, mut pending_rx) = register_client(&server).await;
+    for id in [&host, &pending] {
+        server.set_client_protocol(id, v3_webrtc());
+    }
+
+    // Finalized room with both members admitted, but only the host's route
+    // published: `pending` is exactly an admitted-but-unrouted member. The
+    // emission is computed over the routed view, mirroring production
+    // publications, which resolve live members from routing.
+    let room_id = finalized_db_room_with(&server, host, &[(pending, "Pending")]).await;
+    let routed_view: Vec<_> = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players")
+        .into_iter()
+        .filter(|member| member.id == host)
+        .collect();
+    publish_room_members(&server, &room_id, &[host]).await;
+    server
+        .emit_session_plan(&room_id, &finalized("host-game", routed_view, Some(host)))
+        .await;
+    let _ = expect_plan(&mut host_rx, "host").await;
+
+    // The host departs: no routed member remains, but storage still holds the
+    // unrouted `pending`.
+    server
+        .database
+        .remove_player_from_room(&room_id, &host)
+        .await
+        .expect("remove host");
+    unpublish_room_member(&server, &host).await;
+    server
+        .handle_session_member_departure(&room_id, &host)
+        .await;
+
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut pending_rx).await;
+    let stored = server.active_session_plan(&room_id);
+    assert!(
+        stored.is_some(),
+        "the sticky decision survives while storage still holds a member"
+    );
+
+    // `pending`'s eventual committed route must repair this session to the
+    // same sticky (topology, transport) with `pending` elected host — not the
+    // relay floor a missing decision would produce.
+    let pending_info = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players")
+        .into_iter()
+        .find(|member| member.id == pending)
+        .expect("pending member still stored");
+    let resolved = membership_session_decision(
+        stored,
+        None,
+        server.session_members_from(std::slice::from_ref(&pending_info)),
+    );
+    assert!(resolved.is_replan, "a surviving invalid-host plan replans");
+    assert_eq!(resolved.decision.topology, Topology::Host);
+    assert_eq!(resolved.decision.transport, Transport::WebRtc);
+    assert_eq!(
+        resolved.decision.host,
+        Some(pending),
+        "the remaining capable member is elected host"
+    );
+    assert_eq!(
+        resolved.active_plan_update,
+        Some(Some(ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(pending),
+        }))
+    );
+
+    // Once storage empties too, the departure drops the entry.
+    server
+        .database
+        .remove_player_from_room(&room_id, &pending)
+        .await
+        .expect("remove pending");
+    server
+        .handle_session_member_departure(&room_id, &pending)
+        .await;
+    assert!(
+        server.active_session_plan(&room_id).is_none(),
+        "an empty storage ends the session and drops the entry"
     );
 }
 
