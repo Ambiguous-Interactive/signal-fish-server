@@ -364,7 +364,7 @@ The `relay-clean-v1` cohort decides issue #274's lane placement:
 
 The full per-allocation audit (manifests, toolchain/workload pins, and the
 per-OS distributions, including the final cohort allocation) lives in issue
-#274.
+#274's comment history.
 
 P56's H14 validation uses the existing `scenario-profiles` job in
 `Verification Nightly`, preserving the same profile-CI runner and precursor
