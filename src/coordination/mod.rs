@@ -1400,10 +1400,12 @@ impl Drop for BackpressuredDelivery {
 impl BackpressuredDelivery {
     /// Take ownership of the pending state for normal resolution, defusing the
     /// drop-path accounting.
-    fn resolve(mut self) -> BackpressuredDeliveryInner {
-        self.inner
-            .take()
-            .expect("a parked delivery must resolve exactly once")
+    ///
+    /// Returns `None` on double resolution, which cannot occur through the
+    /// shipped API (the only caller consumes `self`); the caller fails closed
+    /// instead of panicking, per the server's panic policy.
+    fn into_parts(mut self) -> Option<BackpressuredDeliveryInner> {
+        self.inner.take()
     }
 }
 
@@ -1571,7 +1573,20 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
         pending_class,
         #[cfg(feature = "trace-validation")]
         trace_delivery_id,
-    } = pending.resolve();
+    } = match pending.into_parts() {
+        Some(parts) => parts,
+        None => {
+            // Double resolution is a programming error and unreachable through
+            // the shipped API; fail closed without panicking. The delivery was
+            // already accounted by whichever path resolved it first.
+            tracing::error!("BackpressuredDelivery resolved more than once");
+            return (
+                PlayerId::nil(),
+                DeliverySender::from(tokio::sync::mpsc::channel(1).0),
+                DeliveryOutcome::Canceled,
+            );
+        }
+    };
     let sender = handle.sender.clone();
     let deadline_retry = delivery.clone();
     let send = handle.sender.send_delivery(delivery, room_id);
