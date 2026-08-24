@@ -367,18 +367,6 @@ impl fmt::Display for DashboardHistoryField {
 // Coordination Defaults
 // =============================================================================
 
-pub const fn default_dedup_cache_capacity() -> usize {
-    100_000
-}
-
-pub const fn default_dedup_cache_ttl_secs() -> u64 {
-    60
-}
-
-pub const fn default_dedup_cache_cleanup_interval_secs() -> u64 {
-    30
-}
-
 pub const fn default_membership_snapshot_interval_secs() -> u64 {
     30
 }

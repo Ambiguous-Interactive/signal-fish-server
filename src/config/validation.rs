@@ -198,9 +198,9 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     // is on). Rejecting a zero here turns an operator typo into a loud startup
     // error; the use sites below ALSO clamp defensively (the server is
     // constructible directly via the public API, bypassing this check). Loud
-    // rejection is reserved for these panic-prone periods — other interval sites
-    // that already clamp and therefore never panic (e.g. the dedup sweep) keep
-    // their non-fatal use-site handling.
+    // rejection is reserved for these panic-prone periods — other interval
+    // sites that already clamp and therefore never panic keep their non-fatal
+    // use-site handling.
     if config.server.room_cleanup_interval == 0 {
         anyhow::bail!(
             "server.room_cleanup_interval must be greater than 0 seconds \

@@ -1032,10 +1032,18 @@ impl EnhancedGameServer {
             .cloned()
             .collect();
 
-        // Last published member left: the session is over; DB membership may
-        // still contain a join/reconnect whose route has not committed yet.
+        // Last published member left. Storage may still hold an admitted
+        // member whose route has not committed yet — a failed finalized
+        // publication spawns its teardown after releasing this guard, and a
+        // join/reconnect transaction commits its route on its own pass. Keep
+        // the sticky decision so that member's committed route repairs this
+        // session instead of downgrading the whole generation to the relay
+        // floor; the maintenance prune drops the entry if the room itself is
+        // removed first.
         if remaining.is_empty() {
-            self.active_session_plans.remove(room_id);
+            if room.players.is_empty() {
+                self.active_session_plans.remove(room_id);
+            }
             return;
         }
 

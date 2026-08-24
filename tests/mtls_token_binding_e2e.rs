@@ -421,13 +421,10 @@ async fn authenticate(
         ))
         .await
         .expect("send token-bound authentication");
-    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+    tokio::time::timeout(Duration::from_secs(5), next_json_message(socket))
         .await
         .expect("server response deadline")
-        .expect("server response frame")
-        .expect("read server response");
-    serde_json::from_str(frame.to_text().expect("text server response"))
-        .expect("parse server response")
+        .expect("authentication response before close")
 }
 
 async fn send_signed(
@@ -444,18 +441,32 @@ async fn send_signed(
         .expect("send token-bound client message");
 }
 
+/// Next JSON application message from the server, skipping interleaved
+/// non-JSON control traffic: ping probes carry an opaque nonce payload and
+/// close frames carry a plain reason string, and loaded sanitizer builds can
+/// surface either ahead of the awaited frame. Returns `None` once the socket
+/// closes or errors.
+async fn next_json_message(socket: &mut TestSocket) -> Option<Value> {
+    loop {
+        let frame = socket.next().await?.ok()?;
+        let Ok(text) = frame.to_text() else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            return Some(value);
+        }
+    }
+}
+
 async fn next_message_of_type(socket: &mut TestSocket, expected: &str) -> Value {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let frame = socket
-                .next()
-                .await
-                .expect("server response frame")
-                .expect("read server response");
-            let value: Value = serde_json::from_str(frame.to_text().expect("text response"))
-                .expect("parse server response");
-            if value.get("type").and_then(Value::as_str) == Some(expected) {
-                return value;
+            match next_json_message(socket).await {
+                Some(value) if value.get("type").and_then(Value::as_str) == Some(expected) => {
+                    return value;
+                }
+                Some(_) => {}
+                None => panic!("server closed before sending {expected}"),
             }
         }
     })
@@ -588,13 +599,10 @@ async fn required_mtls_without_token_binding_keeps_unsigned_json_and_binary_path
         ))
         .await
         .expect("send unsigned authentication");
-    let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+    let first = tokio::time::timeout(Duration::from_secs(5), next_json_message(&mut socket))
         .await
         .expect("ordinary authentication deadline")
-        .expect("ordinary authentication frame")
-        .expect("read ordinary authentication frame");
-    let first: Value = serde_json::from_str(first.to_text().expect("text authentication response"))
-        .expect("parse authentication response");
+        .expect("authentication response before close");
     assert_eq!(
         first.get("type").and_then(Value::as_str),
         Some("Authenticated"),
@@ -652,26 +660,20 @@ async fn challenge_precedes_post_upgrade_registration_rejection() {
     let (mut rejected, _) = connect_upgraded(server.port, None, None, true)
         .await
         .expect("post-upgrade IP-limit rejection socket");
-    let first = tokio::time::timeout(Duration::from_secs(5), rejected.next())
+    let first = tokio::time::timeout(Duration::from_secs(5), next_json_message(&mut rejected))
         .await
         .expect("challenge deadline")
-        .expect("challenge frame")
-        .expect("read challenge frame");
-    let first: Value = serde_json::from_str(first.to_text().expect("text challenge"))
-        .expect("parse challenge frame");
+        .expect("challenge response before close");
     assert_eq!(
         first.get("type").and_then(Value::as_str),
         Some("TokenBindingChallenge"),
         "the negotiated challenge must be the first application frame: {first}"
     );
 
-    let second = tokio::time::timeout(Duration::from_secs(5), rejected.next())
+    let second = tokio::time::timeout(Duration::from_secs(5), next_json_message(&mut rejected))
         .await
         .expect("registration error deadline")
-        .expect("registration error frame")
-        .expect("read registration error frame");
-    let second: Value = serde_json::from_str(second.to_text().expect("text registration error"))
-        .expect("parse registration error");
+        .expect("registration error before close");
     assert_eq!(second.get("type").and_then(Value::as_str), Some("Error"));
     assert_eq!(
         second
@@ -850,18 +852,17 @@ async fn reconnect_token_is_bound_to_issuing_certificate_without_consuming_misma
         .await;
         let response = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let frame = recovered
-                    .next()
-                    .await
-                    .expect("rotation recovery response")
-                    .expect("read rotation recovery response");
-                let value: Value = serde_json::from_str(frame.to_text().expect("text response"))
-                    .expect("parse rotation recovery response");
-                if matches!(
-                    value.get("type").and_then(Value::as_str),
-                    Some("Reconnected" | "ReconnectionFailed")
-                ) {
-                    break value;
+                match next_json_message(&mut recovered).await {
+                    Some(value)
+                        if matches!(
+                            value.get("type").and_then(Value::as_str),
+                            Some("Reconnected" | "ReconnectionFailed")
+                        ) =>
+                    {
+                        break value;
+                    }
+                    Some(_) => {}
+                    None => panic!("server closed before the rotation recovery response"),
                 }
             }
         })
@@ -911,16 +912,12 @@ async fn fingerprint_bound_connections_reject_unsigned_binary_frames() {
 
     let response = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let frame = socket
-                .next()
-                .await
-                .expect("server response frame")
-                .expect("read server response");
-            let response: Value =
-                serde_json::from_str(frame.to_text().expect("text server response"))
-                    .expect("parse server response");
-            if response.get("type").and_then(Value::as_str) == Some("Error") {
-                return response;
+            match next_json_message(&mut socket).await {
+                Some(response) if response.get("type").and_then(Value::as_str) == Some("Error") => {
+                    break response;
+                }
+                Some(_) => {}
+                None => panic!("server closed without an error response"),
             }
         }
     })
@@ -981,14 +978,9 @@ async fn fingerprint_bound_authentication_advertises_signed_messagepack() {
     let (authenticated, advertised_formats) = tokio::time::timeout(Duration::from_secs(5), async {
         let mut authenticated = false;
         loop {
-            let frame = socket
-                .next()
-                .await
-                .expect("server response frame")
-                .expect("read server response");
-            let response: Value =
-                serde_json::from_str(frame.to_text().expect("text server response"))
-                    .expect("parse server response");
+            let Some(response) = next_json_message(&mut socket).await else {
+                panic!("server closed before ProtocolInfo");
+            };
             match response.get("type").and_then(Value::as_str) {
                 Some("Authenticated") => authenticated = true,
                 Some("ProtocolInfo") => {

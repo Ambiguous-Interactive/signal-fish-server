@@ -345,6 +345,27 @@ retains at least 2x headroom (at most 125 ms). Otherwise the platform stays
 correctness-only. A new ceiling must not be invented from one outlier or one
 shared-runner sample.
 
+The `relay-clean-v1` cohort decides issue #274's lane placement:
+
+- **macOS stays correctness-only**, permanently. Its dedicated-process
+  distribution contains observations above the 125 ms headroom ceiling (worst
+  p99 ≈ 165 ms) while every correctness oracle stayed green — direct evidence
+  that hosted-macOS wall clock tracks shared-tenancy scheduling, not relay
+  behavior.
+- **Linux and Windows keep their existing 250 ms p99 wall-clock ceiling** in
+  the broad Nextest matrix, unchanged (the gate excludes only macOS). The
+  cohort validates keeping it: worst dedicated-process observations were
+  ≈ 12 ms (Linux) and ≈ 24 ms (Windows) with zero backpressure, at least 5x
+  inside the 125 ms candidacy bar.
+- **No new dedicated isolated PR timing job is added for any platform**: no
+  platform needs more gating than it already has, correctness oracles run
+  everywhere, and per-PR allocation budget is governed by issue #379's
+  evidence rules.
+
+Issue #274's comment history retains the full per-allocation audit
+(manifests, toolchain/workload pins, and the per-OS distributions, including
+the final cohort allocation).
+
 P56's H14 validation uses the existing `scenario-profiles` job in
 `Verification Nightly`, preserving the same profile-CI runner and precursor
 context as the post-fix baseline. The exact

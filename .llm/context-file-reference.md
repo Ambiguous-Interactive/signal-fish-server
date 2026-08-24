@@ -66,7 +66,6 @@
 | `src/database/mod.rs`                 | GameDatabase trait + InMemory     |
 | `src/coordination/mod.rs`             | Coordination module root          |
 | `src/coordination/room_coordinator.rs`| InMemoryRoomOperationCoordinator  |
-| `src/coordination/dedup.rs`           | DedupCache (LRU)                  |
 | `src/distributed.rs`                  | InMemoryDistributedLock           |
 | `src/metrics.rs`                      | AtomicU64 + HDR histograms        |
 | `src/rate_limit.rs`                   | In-memory RoomRateLimiter         |

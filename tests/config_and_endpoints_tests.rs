@@ -363,21 +363,6 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("[]"),
     },
     ConfigReferenceRow {
-        env: "SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CAPACITY",
-        path: "coordination.dedup_cache.capacity",
-        default: Some("100000"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__COORDINATION__DEDUP_CACHE__TTL_SECS",
-        path: "coordination.dedup_cache.ttl_secs",
-        default: Some("60"),
-    },
-    ConfigReferenceRow {
-        env: "SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CLEANUP_INTERVAL_SECS",
-        path: "coordination.dedup_cache.cleanup_interval_secs",
-        default: Some("30"),
-    },
-    ConfigReferenceRow {
         env: "SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS",
         path: "coordination.membership_snapshot_interval_secs",
         default: Some("30"),

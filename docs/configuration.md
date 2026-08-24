@@ -169,9 +169,6 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SUBPROTOCOL` | `security.transport.token_binding.subprotocol` | `signalfish.tokenbinding.v2` | Replay-resistant token-binding WebSocket subprotocol |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SCHEME` | `security.transport.token_binding.scheme` | `server_nonce_hkdf_sha256` | Server-fresh token-binding signing scheme |
 | `SIGNAL_FISH__SECURITY__ALLOWED_APPS` | `security.allowed_apps` | `[]` | JSON array of public app-ID registrations and accounting limits |
-| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CAPACITY` | `coordination.dedup_cache.capacity` | `100000` | In-memory coordinator dedup cache capacity (future-backend seam; not cross-process coordination) |
-| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__TTL_SECS` | `coordination.dedup_cache.ttl_secs` | `60` | In-memory coordinator dedup cache TTL |
-| `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__CLEANUP_INTERVAL_SECS` | `coordination.dedup_cache.cleanup_interval_secs` | `30` | In-memory coordinator dedup cache cleanup interval |
 | `SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS` | `coordination.membership_snapshot_interval_secs` | `30` | Reserved membership-snapshot seam; the shipped coordinator is process-local |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_REFRESH_INTERVAL_SECS` | `metrics.dashboard_cache_refresh_interval_secs` | `5` | Dashboard metrics refresh interval |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_TTL_SECS` | `metrics.dashboard_cache_ttl_secs` | `30` | Dashboard metrics cache TTL |
