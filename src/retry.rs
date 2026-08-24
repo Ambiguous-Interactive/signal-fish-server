@@ -67,16 +67,21 @@ impl RetryConfig {
     /// Worst-case total time this budget spends sleeping across a full attempt
     /// sequence (every delay at its maximum jitter).
     ///
+    /// The executor performs `max_attempts` attempts with exactly
+    /// `max_attempts - 1` sleeps between them, so this sums precisely those
+    /// sleeps.
+    ///
     /// Callers that retry against TTL-bounded resources use this to prove the
     /// whole retry budget fits inside the lease they wait for: a waiter that
     /// can still be backing off *after* the key may have expired would give up
     /// on (or race) an already-free resource (issue #414).
     pub fn worst_case_total_backoff(&self) -> Duration {
-        let mut total = bounded_initial_delay(self);
+        let sleeps = self.max_attempts.saturating_sub(1);
+        let mut total = Duration::ZERO;
         let mut current = bounded_initial_delay(self);
-        for _ in 1..self.max_attempts.max(1) {
-            current = bounded_next_delay(self, current, 1.0);
+        for _ in 0..sleeps {
             total = total.saturating_add(current);
+            current = bounded_next_delay(self, current, 1.0);
         }
         total
     }

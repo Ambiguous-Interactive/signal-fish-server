@@ -167,8 +167,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaked key burned the full ~22.5 s retry storm before failing. The
   coordinator-level locks are removed (the mutation gate is the single
   serializer); for the join-path locks that remain, acquisition backoff is
-  now clamped strictly inside the lease TTL instead of potentially outliving
-  it (worst case measured ~22.5 s against 10 s leases) (issue #414).
+  now provably bounded strictly inside the lease TTL it contends on via
+  `RetryConfig::worst_case_total_backoff` / `clamped_to_total_backoff`
+  (issue #414).
 - Fix the `CircuitBreaker` open-state window restarting on every late
   closed-era straggler failure while already open, which could starve the
   half-open probe indefinitely; the window is now anchored at the transition
