@@ -3512,6 +3512,10 @@ mod tests {
 
     impl UpgradedSocketPair {
         async fn connect() -> Self {
+            Self::connect_with_small_client_recv_buffer(None).await
+        }
+
+        async fn connect_with_small_client_recv_buffer(clamped_recv_buffer: Option<u32>) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind upgraded-pair listener");
@@ -3537,9 +3541,30 @@ mod tests {
             let serve_task = tokio::spawn(async move {
                 let _ = axum::serve(listener, app).await;
             });
-            let (client, _response) = connect_async(format!("ws://{addr}/ws"))
-                .await
-                .expect("client upgrade");
+            let client = match clamped_recv_buffer {
+                Some(recv_buffer_bytes) => {
+                    let socket = tokio::net::TcpSocket::new_v4()
+                        .expect("create IPv4 TCP socket for upgraded pair");
+                    socket
+                        .set_recv_buffer_size(recv_buffer_bytes)
+                        .expect("clamp SO_RCVBUF before upgraded-pair connect");
+                    let stream = socket.connect(addr).await.expect("upgraded-pair connect");
+                    let url = format!("ws://{addr}/ws");
+                    tokio_tungstenite::client_async(
+                        url,
+                        tokio_tungstenite::MaybeTlsStream::Plain(stream),
+                    )
+                    .await
+                    .expect("clamped upgraded-pair client upgrade")
+                    .0
+                }
+                None => {
+                    connect_async(format!("ws://{addr}/ws"))
+                        .await
+                        .expect("client upgrade")
+                        .0
+                }
+            };
             let socket = socket_rx.await.expect("server socket handoff");
             let (server_sink, server_stream) = socket.split();
             Self {
@@ -3710,13 +3735,18 @@ mod tests {
     /// the client a corrupt byte stream.
     ///
     /// A large binary frame is cancelled mid-flush on a real upgraded socket
-    /// (the client is not reading yet, so the first poll leaves part of the
-    /// frame unflushed and the future pending), the queue is fenced exactly as
+    /// (the client clamps its receive buffer tiny and never reads, so the
+    /// flush parks with part of the frame unflushed), the queue is fenced
+    /// exactly as
     /// `SendAccounting::drop` does in production, and then the slow-consumer
     /// teardown — farewell Error plus coded close — writes onto the same sink.
     /// The client must observe the abandoned frame COMPLETE (never truncated),
     /// every later frame on a clean frame boundary, and a decodable stream all
     /// the way through the close handshake.
+    /// Client-side SO_RCVBUF clamp used to make kernel buffering (and hence a
+    /// cancelled-mid-flush write) deterministic across platforms.
+    const CLIENT_CLAMPED_RECV_BUFFER_BYTES: u32 = 4 << 10;
+
     #[tokio::test(flavor = "multi_thread")]
     #[cfg_attr(miri, ignore)]
     async fn teardown_behind_an_abandoned_write_still_delivers_a_clean_stream() {
@@ -3726,11 +3756,17 @@ mod tests {
         let (_tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
         let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
 
-        let mut pair = UpgradedSocketPair::connect().await;
+        // The client clamps SO_RCVBUF tiny before connecting and then never
+        // reads, so the server's socket buffers saturate inside the very first
+        // flush on every supported OS and the huge frame cannot complete.
+        let mut pair = UpgradedSocketPair::connect_with_small_client_recv_buffer(Some(
+            CLIENT_CLAMPED_RECV_BUFFER_BYTES,
+        ))
+        .await;
 
-        // Cancel a huge binary write mid-flush: with the client not yet
-        // reading, the first poll cannot flush the whole frame, so dropping
-        // here reproduces "wire position unknown" at a real sink.
+        // Cancel a huge binary write mid-flush: with the client's receive path
+        // clamped and silent, the flush cannot complete, so dropping here
+        // reproduces "wire position unknown" at a real sink deterministically.
         let send =
             pair.server_sink
                 .send(axum::extract::ws::Message::Binary(axum::body::Bytes::from(
@@ -3738,9 +3774,15 @@ mod tests {
                 )));
         tokio::pin!(send);
         let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+        for _ in 0..64 {
+            if matches!(send.as_mut().poll(&mut context), Poll::Pending) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         assert!(
             matches!(send.as_mut().poll(&mut context), Poll::Pending),
-            "an 8 MiB frame must not flush completely while the client is silent"
+            "an 8 MiB frame must not flush completely into a clamped, silent client"
         );
         // Dropping the pinned send future cancels it mid-flush.
         let _cancelled = send;
