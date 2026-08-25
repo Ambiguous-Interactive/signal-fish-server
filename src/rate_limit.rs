@@ -246,10 +246,11 @@ impl RoomRateLimiter {
     ///
     /// This is only a preflight; callers must still use [`Self::check_signal`]
     /// immediately before dispatch because another task can consume the final
-    /// slot between the preflight and the send. The preflight observes
-    /// availability only — it consumes no slot and records no rejection, so one
-    /// dropped event is never counted twice when the consuming check also
-    /// fails behind it.
+    /// slot between the preflight and the send. It consumes no budget slot,
+    /// but it DOES record its rejection: a failed preflight means the caller
+    /// drops the event right here (the consuming check is never reached), so
+    /// this gate owns that drop's attribution. Whichever gate fires, a dropped
+    /// fan-out is counted exactly once.
     pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.entries.write().await;
         let entry = entries
@@ -260,6 +261,7 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            self.record_rejection(crate::metrics::RateLimitRejection::Signal);
             Err(RateLimitError::SignalLimitExceeded {
                 retry_after: reset_time,
             })
@@ -504,20 +506,20 @@ mod tests {
             2,
             "over-budget preflight must still leave consumed count unchanged"
         );
-        // A non-consuming preflight observes the over-budget state but must not
-        // record the rejection: the consuming check that actually drops an
-        // event owns the rejection accounting. Otherwise one dropped fan-out
-        // (preflight + losing race) counts twice.
+        // The preflight consumes no slot, but a failed preflight IS a drop:
+        // the caller returns immediately and its consuming check is never
+        // reached, so this gate owns the attribution. Whichever gate fires,
+        // each dropped event counts exactly once.
         assert_eq!(
             metrics.snapshot().await.rate_limiting.signal_rejections,
-            0,
-            "over-budget preflight must not record a Signal rejection"
+            1,
+            "a preflight-dropped fan-out is attributed exactly once"
         );
         assert!(limiter.check_signal(&player_id).await.is_err());
         assert_eq!(
             metrics.snapshot().await.rate_limiting.signal_rejections,
-            1,
-            "the consuming check records exactly one Signal rejection"
+            2,
+            "a consuming-check-dropped event adds its own single attribution"
         );
     }
 

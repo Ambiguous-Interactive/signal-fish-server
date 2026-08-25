@@ -156,11 +156,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail-closed stamp contract for v3 cohorts (production senders stamp or
   suppress, so no legitimate flow changes), and the text failure path gained
   per-error diagnostics instead of a generic serialization message.
-- Fix one dropped `PeerTransportStatus` fan-out counting two signal-limit
-  rejections: the non-consuming availability preflight recorded a rejection,
-  and the consuming check behind it recorded again when it lost the race for
-  the final slot. The preflight now observes availability only; the consuming
-  drop owns the rejection accounting.
 - Fix readiness snapshots fabricating stale state when room membership cannot
   be loaded: `current_ready_players` fell back to the unfiltered recorded set
   on a storage error, reporting departed members as still ready in
