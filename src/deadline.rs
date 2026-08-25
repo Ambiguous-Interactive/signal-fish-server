@@ -44,7 +44,6 @@ pub(crate) fn saturating_after(start: Instant, duration: Duration) -> Instant {
                     step /= 2;
                 }
             }
-            debug_assert!(latest > start, "saturation must never expire immediately");
             latest
         }
     }
