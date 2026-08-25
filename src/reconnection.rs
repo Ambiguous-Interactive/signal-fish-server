@@ -165,10 +165,7 @@ fn expiration_from_unsigned(now: DateTime<Utc>, validity_seconds: u64) -> DateTi
 /// Saturates rather than panicking: an absurd configured window becomes a
 /// practically unreachable deadline instead of an overflow.
 fn monotonic_deadline(now: Instant, window_seconds: u64) -> Instant {
-    const SATURATED_WINDOW: StdDuration = StdDuration::from_secs(100 * 365 * 24 * 60 * 60);
-    now.checked_add(StdDuration::from_secs(window_seconds))
-        .or_else(|| now.checked_add(SATURATED_WINDOW))
-        .unwrap_or(now)
+    crate::deadline::saturating_after(now, StdDuration::from_secs(window_seconds))
 }
 
 /// Event buffer for a room
@@ -2074,6 +2071,33 @@ mod tests {
         assert!(
             claim.is_ok(),
             "the join-time token must stay claimable after re-registration: {claim:?}"
+        );
+    }
+
+    /// An unrepresentable reconnection window saturates to a deadline beyond
+    /// any realistic horizon instead of inverting into an already-expired
+    /// instant (the same failure class `deadline::after` exists to prevent).
+    /// The saturated result must also exceed the retired fixed 100-year
+    /// fallback so this pin distinguishes the two saturation strategies.
+    #[test]
+    fn absurd_reconnect_windows_never_expire_immediately() {
+        let now = Instant::now();
+        let saturated = monotonic_deadline(now, u64::MAX);
+        assert!(
+            saturated > now,
+            "an unrepresentable window is beyond the process lifetime, not elapsed"
+        );
+        assert!(
+            saturated
+                > now
+                    .checked_add(StdDuration::from_secs(150 * 365 * 24 * 60 * 60))
+                    .expect("150-year horizon is representable on every supported platform"),
+            "saturation must reach past the retired 100-year fallback"
+        );
+        assert_eq!(
+            monotonic_deadline(now, 300),
+            now + StdDuration::from_secs(300),
+            "representable windows keep their exact absolute instant"
         );
     }
 
