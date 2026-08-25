@@ -278,7 +278,8 @@ and the authenticated WebSocket relay floor remains available independently.
 ```
 
 - `max_room_creations` - Max room creations per player per time window (must be > 0)
-- `max_join_attempts` - Shared max room-creation, `JoinRoom`, and `JoinAsSpectator` attempts per player per time window (must be > 0)
+- `max_join_attempts` - Shared max room-creation, `JoinRoom`, and `JoinAsSpectator` attempts
+  per player per time window (must be > 0)
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per time window (must be > 0)
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 - `time_window` - Rate limit window in seconds
