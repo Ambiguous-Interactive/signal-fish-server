@@ -1289,10 +1289,8 @@ impl ServerMetrics {
     /// non-relay session's sticky pair, observed during one plan publication
     /// (a mixed-path membership; issue #421).
     pub fn add_mixed_path_members_observed(&self, count: u64) {
-        if count > 0 {
-            self.mixed_path_members_observed
-                .fetch_add(count, Ordering::Relaxed);
-        }
+        self.mixed_path_members_observed
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// Record that a client reported an established P2P data path for the first

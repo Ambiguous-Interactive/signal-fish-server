@@ -226,6 +226,14 @@ can see how often the relay floor is upgraded to a peer-to-peer path:
 - `signal_fish_transport_ice_pregather_emitted_total` — `RoomJoined` /
   `Reconnected` payloads that carried a non-empty ICE pre-gather list (one per
   carrying payload).
+- `signal_fish_transport_seat_fills_rejected_incompatible_total` — seat-fill
+  joins rejected because the room's finalized non-relay session requires
+  capabilities the joiner did not negotiate (`ROOM_SESSION_INCOMPATIBLE`;
+  issue #421).
+- `signal_fish_transport_mixed_path_members_observed_total` — seated members
+  observed during non-relay plan publications whose capabilities exclude the
+  session pair (an empty-peer mixed-path membership, e.g. a drifted reconnect;
+  counted once per publication event).
 
 ## Related documents
 

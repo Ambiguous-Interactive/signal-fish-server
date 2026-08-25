@@ -576,6 +576,7 @@ components:
         - SERVER_DRAINING
         - INVALID_DELIVERY_CLASS
         - UNSUPPORTED_PROTOCOL_VERSION
+        - ROOM_SESSION_INCOMPATIBLE
 
     ReliableDeliveryCounters:
       type: object

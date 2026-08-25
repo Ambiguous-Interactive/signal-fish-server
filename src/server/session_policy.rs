@@ -1380,10 +1380,11 @@ impl EnhancedGameServer {
     ///
     /// Post-admission-gate this can only arise from an incumbent reconnecting
     /// with downgraded capabilities (a reconnect owns its seat and is never
-    /// rejected); each publication counts every such member it observes so
-    /// operators can quantify residual path-splitting. Finalize needs no call:
-    /// a non-relay selection requires `all_support`, and the relay floor is
-    /// not observed by definition.
+    /// rejected); each publication counts every such member it observes —
+    /// exactly once per publication event, not per delivery retry or outcome.
+    /// Finalize needs no call:
+    /// a non-relay selection requires [`all_support`](fn@all_support), and the
+    /// relay floor is not observed by definition.
     pub(crate) fn observe_mixed_path_members(
         &self,
         room_id: &RoomId,

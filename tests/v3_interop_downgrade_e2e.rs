@@ -1008,6 +1008,13 @@ async fn host_downgrade_reconnect_reelects_and_empties_downgraded_plan() {
     )
     .await;
     let _ = id_b;
+    // The reconnect publication observed exactly one mixed-path member: the
+    // downgraded reconnector (issue #421 observability).
+    let transport = server.metrics().snapshot().await.transport;
+    assert_eq!(
+        transport.mixed_path_members_observed, 1,
+        "the drifted reconnect must be observed exactly once"
+    );
     running_server.shutdown().await;
 }
 
@@ -1214,6 +1221,14 @@ async fn mesh_member_reconnects_as_v2_without_plan_or_peer_leakage() {
 
     relay_one_game_data(&mut reconnector, &mut peer_a, departing_id, "peer_a").await;
     relay_one_game_data(&mut peer_a, &mut reconnector, id_a, legacy_who).await;
+    // The reconnect publication observed exactly one mixed-path member: the
+    // v2 reconnector seated in the mesh+webrtc session (issue #421
+    // observability).
+    let transport = server.metrics().snapshot().await.transport;
+    assert_eq!(
+        transport.mixed_path_members_observed, 1,
+        "the drifted reconnect must be observed exactly once"
+    );
     running_server.shutdown().await;
 }
 

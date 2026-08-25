@@ -645,6 +645,18 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "RoomJoined/Reconnected payloads that carried a non-empty ICE pre-gather list (one per carrying payload)",
         snapshot.transport.ice_pregather_emitted,
     );
+    counter(
+        &mut buf,
+        "signal_fish_transport_seat_fills_rejected_incompatible_total",
+        "Seat-fill joins rejected because the room's finalized non-relay session requires capabilities the joiner did not negotiate (ROOM_SESSION_INCOMPATIBLE)",
+        snapshot.transport.seat_fills_rejected_incompatible,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_transport_mixed_path_members_observed_total",
+        "Seated members observed during non-relay plan publications whose capabilities exclude the session pair (empty-peer mixed-path membership, e.g. a drifted reconnect)",
+        snapshot.transport.mixed_path_members_observed,
+    );
 
     let cache_age_seconds = {
         let last_refresh = snapshot.dashboard_cache.last_refresh_timestamp;
@@ -1017,6 +1029,10 @@ mod tests {
         for _ in 0..6 {
             metrics.increment_ice_pregather_emitted();
         }
+        for _ in 0..7 {
+            metrics.increment_seat_fills_rejected_incompatible();
+        }
+        metrics.add_mixed_path_members_observed(8);
 
         let snapshot = metrics.snapshot().await;
         let rendered = render_prometheus_metrics(&snapshot);
@@ -1100,6 +1116,16 @@ mod tests {
                 "signal_fish_transport_ice_pregather_emitted_total",
                 "RoomJoined/Reconnected payloads that carried a non-empty ICE pre-gather list (one per carrying payload)",
                 6,
+            ),
+            (
+                "signal_fish_transport_seat_fills_rejected_incompatible_total",
+                "Seat-fill joins rejected because the room's finalized non-relay session requires capabilities the joiner did not negotiate (ROOM_SESSION_INCOMPATIBLE)",
+                7,
+            ),
+            (
+                "signal_fish_transport_mixed_path_members_observed_total",
+                "Seated members observed during non-relay plan publications whose capabilities exclude the session pair (empty-peer mixed-path membership, e.g. a drifted reconnect)",
+                8,
             ),
         ];
 

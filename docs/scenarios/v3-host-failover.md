@@ -146,8 +146,9 @@ trickle and `TransportStatus` reporting proceed as before.
   exchanging `GameData` over the relay (the universal `fallback`). Failover never interrupts the session's data
   path.
 - **If no member qualifies**, no plan is re-issued — the session is over and the relay floor carries the room. For
-  example, if the only other member were a relay-only seat-filler, the server would not name it host of a session
-  it cannot run.
+  example, if the only other member were a relay-only member (possible only through a reconnect with downgraded
+  capabilities — new seat-fills into a running session are rejected with `ROOM_SESSION_INCOMPATIBLE`), the server
+  would not name it host of a session it cannot run.
 - **An ex-host that reconnects** is paired as a client of the re-elected host, because the stored host is now the
   new one. The reconnecting member learns this from the fresh `SessionPlan` it receives on entry (see the
   [reconnection scenario](reconnection.md)).
