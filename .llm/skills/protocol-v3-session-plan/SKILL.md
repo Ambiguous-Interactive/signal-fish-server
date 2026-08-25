@@ -82,9 +82,12 @@ Per path:
 
 ## Peer lists are capability-filtered on both sides (`plan_for`)
 
-Re-issued and late-join member lists can contain members that never negotiated
-the session's sticky pair (`add_player_to_room` gates only on fullness — e.g. a
-v3 relay-only client can seat-fill a `mesh + webrtc` room).
+New seat-fills cannot weaken this shape: a joiner into a finalized room that
+runs a stored non-relay session is rejected at admission unless it negotiated
+v3 plus the sticky topology and transport (`ROOM_SESSION_INCOMPATIBLE`, issue
+#421). Re-issued and reconnect member lists can still contain members that
+never negotiated the session's sticky pair — an incumbent reconnecting with
+downgraded capabilities keeps its seat.
 `SessionPlanDecision::plan_for` — the single peer-list seam every emission path
 shares (finalize, failover/heal re-plan, late join / reconnect) — filters
 `peers[]` with `SessionMember::supports_session` (v3 + sticky topology + sticky

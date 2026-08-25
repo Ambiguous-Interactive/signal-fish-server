@@ -1725,6 +1725,10 @@ mod tests {
         ));
     }
 
+    // Miri skips this one like the near-limit serializers below: it asserts
+    // encoded-size limits over large aggregate snapshots (pure serde_json
+    // byte-exactness, minutes under the interpreter, no UB surface). Native
+    // CI runs it at full size.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn aggregate_reconnect_snapshot_and_replay_obey_the_encoded_message_limit() {

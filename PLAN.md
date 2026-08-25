@@ -28,8 +28,6 @@ to risk.
 - Open a focused GitHub issue for newly discovered work that cannot be closed
   completely in the current change.
 
-## Active hosted evidence
-
 ## External acceptance
 
 ### Reviewer capacity for a literal all-green pull request (#377)

@@ -2056,6 +2056,10 @@ async fn non_pairable_recipient_receives_no_minted_turn_credentials() {
 /// members that include one which cannot run the sticky pair counts that
 /// member exactly once per publication; the relay floor and fully capable
 /// memberships count nothing.
+///
+/// Miri skips this: the observer is plain counting over an in-memory decision
+/// (no unsafe, no concurrency); the production wiring is pinned end to end by
+/// the drifted-reconnect e2e metric assertions, which run natively.
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn mixed_path_membership_is_observed_per_publication() {
