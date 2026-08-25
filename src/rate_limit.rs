@@ -246,7 +246,10 @@ impl RoomRateLimiter {
     ///
     /// This is only a preflight; callers must still use [`Self::check_signal`]
     /// immediately before dispatch because another task can consume the final
-    /// slot between the preflight and the send.
+    /// slot between the preflight and the send. The preflight observes
+    /// availability only — it consumes no slot and records no rejection, so one
+    /// dropped event is never counted twice when the consuming check also
+    /// fails behind it.
     pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.entries.write().await;
         let entry = entries
@@ -257,7 +260,6 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
-            self.record_rejection(crate::metrics::RateLimitRejection::Signal);
             Err(RateLimitError::SignalLimitExceeded {
                 retry_after: reset_time,
             })
@@ -475,7 +477,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_signal_available_preflight_does_not_consume_signal_budget() {
-        let limiter = RoomRateLimiter::new(create_test_config());
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let limiter = RoomRateLimiter::with_metrics(create_test_config(), Arc::clone(&metrics));
         let player_id = Uuid::new_v4();
 
         assert!(limiter.check_signal_available(&player_id).await.is_ok());
@@ -500,6 +503,21 @@ mod tests {
                 .signals,
             2,
             "over-budget preflight must still leave consumed count unchanged"
+        );
+        // A non-consuming preflight observes the over-budget state but must not
+        // record the rejection: the consuming check that actually drops an
+        // event owns the rejection accounting. Otherwise one dropped fan-out
+        // (preflight + losing race) counts twice.
+        assert_eq!(
+            metrics.snapshot().await.rate_limiting.signal_rejections,
+            0,
+            "over-budget preflight must not record a Signal rejection"
+        );
+        assert!(limiter.check_signal(&player_id).await.is_err());
+        assert_eq!(
+            metrics.snapshot().await.rate_limiting.signal_rejections,
+            1,
+            "the consuming check records exactly one Signal rejection"
         );
     }
 
