@@ -502,7 +502,11 @@ mod tests {
         assert_eq!(result.unwrap(), 42);
     }
 
+    // Miri skips these executor paths: their interpreted cost is dominated
+    // by tokio timer/jitter machinery, not by anything they assert (plain
+    // Ok/Err outcomes over safe code). Native CI covers them.
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_retry_until_success() {
         let counter = StdArc::new(AtomicU32::new(0));
         let executor = RetryExecutor::new(RetryConfig::fast());
@@ -527,7 +531,11 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 3);
     }
 
+    // Miri skips these executor paths: their interpreted cost is dominated
+    // by tokio timer/jitter machinery, not by anything they assert (plain
+    // Ok/Err outcomes over safe code). Native CI covers them.
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_max_attempts_exceeded() {
         let executor = RetryExecutor::new(RetryConfig {
             max_attempts: 2,
@@ -543,7 +551,11 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Miri skips these executor paths: their interpreted cost is dominated
+    // by tokio timer/jitter machinery, not by anything they assert (plain
+    // Ok/Err outcomes over safe code). Native CI covers them.
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn test_non_retryable_error() {
         let executor = RetryExecutor::new(RetryConfig::fast());
 

@@ -1991,8 +1991,10 @@ mod tests {
 
         let final_value = metrics.active_connections.load(Ordering::Relaxed);
         assert_eq!(
-            final_value, 50,
-            "After 100 increments and 50 decrements, active_connections should be 50, got {final_value}"
+            final_value,
+            increments - decrements,
+            "after all increments and decrements, active_connections should be their \
+             difference, got {final_value}"
         );
 
         // total_connections is monotonic (only incremented, never decremented)
