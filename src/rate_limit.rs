@@ -246,7 +246,11 @@ impl RoomRateLimiter {
     ///
     /// This is only a preflight; callers must still use [`Self::check_signal`]
     /// immediately before dispatch because another task can consume the final
-    /// slot between the preflight and the send.
+    /// slot between the preflight and the send. It consumes no budget slot,
+    /// but it DOES record its rejection: a failed preflight means the caller
+    /// drops the event right here (the consuming check is never reached), so
+    /// this gate owns that drop's attribution. Whichever gate fires, a dropped
+    /// fan-out is counted exactly once.
     pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.entries.write().await;
         let entry = entries
@@ -475,7 +479,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_signal_available_preflight_does_not_consume_signal_budget() {
-        let limiter = RoomRateLimiter::new(create_test_config());
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let limiter = RoomRateLimiter::with_metrics(create_test_config(), Arc::clone(&metrics));
         let player_id = Uuid::new_v4();
 
         assert!(limiter.check_signal_available(&player_id).await.is_ok());
@@ -500,6 +505,21 @@ mod tests {
                 .signals,
             2,
             "over-budget preflight must still leave consumed count unchanged"
+        );
+        // The preflight consumes no slot, but a failed preflight IS a drop:
+        // the caller returns immediately and its consuming check is never
+        // reached, so this gate owns the attribution. Whichever gate fires,
+        // each dropped event counts exactly once.
+        assert_eq!(
+            metrics.snapshot().await.rate_limiting.signal_rejections,
+            1,
+            "a preflight-dropped fan-out is attributed exactly once"
+        );
+        assert!(limiter.check_signal(&player_id).await.is_err());
+        assert_eq!(
+            metrics.snapshot().await.rate_limiting.signal_rejections,
+            2,
+            "a consuming-check-dropped event adds its own single attribution"
         );
     }
 

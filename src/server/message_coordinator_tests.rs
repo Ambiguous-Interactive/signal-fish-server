@@ -1225,7 +1225,7 @@ async fn terminal_unroute_captures_every_stamp_allocated_before_player_left() {
                     room_id,
                     Box::new(move || {
                         connection_manager
-                            .clear_room_assignment_with_tail(&sender_id)
+                            .clear_room_assignment_with_tail(&sender_id, &room_id)
                             .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
                     }),
                 )

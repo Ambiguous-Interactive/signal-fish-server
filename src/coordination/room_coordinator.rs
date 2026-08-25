@@ -895,13 +895,22 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             }
         };
         // Filter to present members so an id that departed without a toggle is
-        // never reported as ready.
+        // never reported as ready. A failed membership read fails closed to an
+        // empty set: reporting the unfiltered set would fabricate readiness for
+        // departed members precisely when the data is known-stale.
         match self.database.get_room_players(room_id).await {
             Ok(players) => {
                 let current: HashSet<PlayerId> = players.iter().map(|p| p.id).collect();
                 set.into_iter().filter(|id| current.contains(id)).collect()
             }
-            Err(_) => set.into_iter().collect(),
+            Err(error) => {
+                tracing::warn!(
+                    %room_id,
+                    error = %error,
+                    "Failed to load room members for the readiness snapshot; failing closed to an empty set"
+                );
+                Vec::new()
+            }
         }
     }
 
@@ -2269,6 +2278,52 @@ mod tests {
         assert!(messages.broadcasts().await.is_empty());
     }
 
+    /// When membership cannot be loaded, the readiness snapshot must fail
+    /// closed to an EMPTY set. Falling back to the unfiltered coordinator set
+    /// would report departed members as still ready in room snapshots
+    /// (`RoomJoined` / `Reconnected` / `SpectatorJoined`) exactly when the
+    /// server knows its data is stale.
+    #[tokio::test]
+    async fn ready_snapshot_membership_read_failure_fails_closed_to_empty() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let coordinator =
+            InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
+        let present = PlayerId::from_u128(0x9103);
+        let departed = PlayerId::from_u128(0x9104);
+        let room = database
+            .create_room(
+                "ready-snapshot-failure".to_string(),
+                Some("RSNAP1".to_string()),
+                2,
+                false,
+                present,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        // A departed member was never filtered out of the recorded set.
+        coordinator
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([present, departed]));
+        database.fail_get_room_players_for_test(true);
+
+        assert!(
+            coordinator.current_ready_players(&room.id).await.is_empty(),
+            "a failed membership read must not fabricate a ready list"
+        );
+        database.fail_get_room_players_for_test(false);
+        assert_eq!(
+            coordinator.current_ready_players(&room.id).await,
+            vec![present],
+            "once membership reads recover, filtering resumes normally"
+        );
+    }
+
     #[tokio::test]
     async fn start_membership_read_failure_is_infrastructure_error_not_not_ready() {
         let database = Arc::new(InMemoryDatabase::new());
@@ -2309,9 +2364,17 @@ mod tests {
                 .lobby_state,
             LobbyState::Waiting
         );
+        // Reads fail closed to an empty snapshot while the member load is
+        // erroring; the recorded coordinator state stays intact for recovery.
+        assert!(
+            coordinator.current_ready_players(&room.id).await.is_empty(),
+            "a failed membership read must not fabricate a ready list"
+        );
+        database.fail_get_room_players_for_test(false);
         assert_eq!(
             coordinator.current_ready_players(&room.id).await,
-            vec![player]
+            vec![player],
+            "the failed start must leave the recorded readiness recoverable"
         );
         assert!(messages.broadcasts().await.is_empty());
     }

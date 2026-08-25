@@ -1107,10 +1107,32 @@ impl EnhancedGameServer {
         };
 
         // Update client connection to use the reconnecting player's original id.
+        // The resumed epoch is folded into the reassignment: `last_epoch + 1`
+        // (the pre-disconnect epoch survived in the reconnection record) is the
+        // epoch of the entry from the moment it becomes visible, so a recipient
+        // that stayed connected sees the per-(sender, room) `(epoch, seq)`
+        // stream strictly INCREASE across the reconnect instead of an ambiguous
+        // reset to (1, 1) — and no provisional epoch is ever observable between
+        // reassignment and a separate override. (Epoch is tracked server-side
+        // for EVERY sender — it bumps on each join regardless of the sender's
+        // own protocol version. It is still stripped per-recipient, so a v2
+        // recipient never sees it while a v3 recipient gets a correct monotonic
+        // stamp.)
+        let resumed_epoch = disconnected.last_epoch.saturating_add(1);
+        if disconnected.last_epoch == u32::MAX {
+            // Saturation reuses the terminal incarnation (seq restarts at 1),
+            // which is the ambiguity `epoch` exists to remove. Unreachable in
+            // practice (~2^32 reconnects of one sender), but never silent.
+            tracing::error!(
+                %reconnect_player_id,
+                "Reconnect epoch saturated at u32::MAX; the resumed stream reuses it"
+            );
+        }
         let Some(reassigned_delivery) = self.connection_manager.reassign_connection(
             current_player_id,
             reconnect_player_id,
             *room_id,
+            resumed_epoch,
         ) else {
             return self
                 .reject_claimed_reconnect(
@@ -1133,22 +1155,6 @@ impl EnhancedGameServer {
         #[cfg(test)]
         self.trigger_owned_room_operation_panic_for_test(
             super::OwnedRoomOperationPanicPoint::ReconnectAfterReassignment,
-        );
-
-        // `reassign_connection` rebuilt the connection from the transient
-        // reconnect socket, whose epoch resets to 1. Restore the sender's real
-        // incarnation lineage: resume at `last_epoch + 1` (the pre-disconnect
-        // epoch survived in the reconnection record), so a recipient that stayed
-        // connected sees the per-(sender, room) `(epoch, seq)` stream strictly
-        // INCREASE across the reconnect instead of an ambiguous reset to (1, 1).
-        // (Epoch is tracked server-side for EVERY sender — it bumps on each join
-        // regardless of the sender's own protocol version — so `last_epoch` is
-        // the sender's true pre-disconnect value, not necessarily 0 for a v2
-        // sender. It is still stripped per-recipient, so a v2 recipient never
-        // sees it while a v3 recipient gets a correct monotonic stamp.)
-        self.connection_manager.set_game_data_epoch(
-            reconnect_player_id,
-            disconnected.last_epoch.saturating_add(1),
         );
 
         // Update database last_seen

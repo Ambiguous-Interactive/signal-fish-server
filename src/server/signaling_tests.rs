@@ -1782,13 +1782,11 @@ async fn signal_waiting_on_plan_gate_cannot_cross_target_incarnations() {
     assert!(timeout(Duration::from_millis(20), &mut signal_task)
         .await
         .is_err());
-    let old_epoch = server
-        .connection_manager
-        .game_data_epoch(&bob)
-        .expect("target has an incarnation");
+    // Force an incarnation bump so the parked signal's captured target stamp
+    // can no longer match the live assignment.
     server
         .connection_manager
-        .set_game_data_epoch(&bob, old_epoch.saturating_add(1));
+        .bump_game_data_epoch_for_test(&bob);
     drop(publication_guard);
     signal_task.await.expect("signal task must not panic");
 
