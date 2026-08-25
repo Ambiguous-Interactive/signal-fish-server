@@ -423,7 +423,19 @@ impl ConnectionManager {
         // Fresh room membership => fresh per-(sender, room) relay stamp stream.
         client.game_data_seq = 0;
         // Saturation cannot regress an epoch, unlike wrapping at u32::MAX.
-        client.game_data_epoch = client.game_data_epoch.saturating_add(1);
+        let prior_epoch = client.game_data_epoch;
+        client.game_data_epoch = prior_epoch.saturating_add(1);
+        if prior_epoch == u32::MAX {
+            // The terminal incarnation is reused with seq restarting at 1 —
+            // the ambiguity `epoch` exists to remove. Unreachable in practice
+            // (~2^32 joins of one sender), but never silent (mirrors the
+            // reconnect-path saturation log).
+            tracing::error!(
+                %player_id,
+                %room_id,
+                "Join epoch saturated at u32::MAX; the new stream reuses it"
+            );
+        }
         client.sender = client.sender.next_generation();
         let stamp = RelayStamp {
             seq: client.game_data_seq,

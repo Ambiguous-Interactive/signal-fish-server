@@ -154,7 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carrier serialized the frame as-is, breaking recipient-side gap
   accountability without any signal. Both carriers now enforce the same
   fail-closed stamp contract for v3 cohorts (production senders stamp or
-  suppress, so no legitimate flow changes), and the text close path gained
+  suppress, so no legitimate flow changes), and the text failure path gained
   per-error diagnostics instead of a generic serialization message.
 - Fix one dropped `PeerTransportStatus` fan-out counting two signal-limit
   rejections: the non-consuming availability preflight recorded a rejection,
