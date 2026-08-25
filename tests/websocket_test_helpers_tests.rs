@@ -88,6 +88,33 @@ async fn wait_for_partial_destination_write(proxy: &ChaosProxy, total: u64) -> u
     })
 }
 
+/// Wait for the direction's frontier counter to reach `total`.
+///
+/// The pumps bump the shared counter AFTER each socket write returns, while a
+/// client reader wakes as soon as the bytes reach the socket buffer, so
+/// completed client reads do not linearize with the final bookkeeping
+/// increment (observed as a one-byte-short frontier on a loaded macOS runner).
+/// Polling for the total keeps the assertion synchronized with the pump task.
+async fn wait_for_destination_write_total(proxy: &ChaosProxy, total: u64) {
+    let result = tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+        loop {
+            if proxy.destination_write_bytes(Direction::ServerToClient) >= total {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    result.unwrap_or_else(|_elapsed| {
+        panic!(
+            "destination-write accounting never reached the payload total: \
+             destination_write_bytes={}, total={total}, terminations={:?}",
+            proxy.destination_write_bytes(Direction::ServerToClient),
+            proxy.terminations()
+        )
+    });
+}
+
 async fn wait_for_kill_termination(proxy: &ChaosProxy) {
     let result = tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
         loop {
@@ -326,6 +353,7 @@ async fn chaos_pause_freezes_direction_write_frontier_with_multiple_connections(
 
     assert!(received_a.iter().all(|byte| *byte == 0xA5));
     assert!(received_b.iter().all(|byte| *byte == 0x5A));
+    wait_for_destination_write_total(&proxy, total).await;
     assert_eq!(
         proxy.destination_write_bytes(Direction::ServerToClient),
         total
