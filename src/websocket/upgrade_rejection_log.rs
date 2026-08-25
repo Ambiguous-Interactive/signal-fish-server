@@ -317,7 +317,12 @@ mod tests {
 
     /// At capacity, expired windows are reclaimed before any live window is
     /// evicted, so steady-state churn never disturbs actively warning sources.
+    // Miri skips the full-capacity (4096-source) eviction scenarios: they are
+    // pure safe-code HashMap bookkeeping whose cost under the interpreter is
+    // minutes each, with no unsafe or concurrency to check. Native CI runs
+    // them at production capacity.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn expired_windows_are_reclaimed_before_live_eviction() {
         let capacity =
             u32::try_from(UPGRADE_REJECTION_LOG_MAX_TRACKED_SOURCES).expect("capacity fits u32");
@@ -368,7 +373,12 @@ mod tests {
 
     /// When no window has expired, capacity eviction deterministically drops
     /// the least recently useful live window and memory stays bounded.
+    // Miri skips the full-capacity (4096-source) eviction scenarios: they are
+    // pure safe-code HashMap bookkeeping whose cost under the interpreter is
+    // minutes each, with no unsafe or concurrency to check. Native CI runs
+    // them at production capacity.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn capacity_eviction_drops_the_oldest_live_window_when_none_expired() {
         let capacity =
             u32::try_from(UPGRADE_REJECTION_LOG_MAX_TRACKED_SOURCES).expect("capacity fits u32");
@@ -423,7 +433,12 @@ mod tests {
     /// Mixed live and expired windows at capacity: reclaiming expired
     /// windows must spare a live neighbor that just crossed its boundary,
     /// so an insertion-heavy flood cannot reset actively warning sources.
+    // Miri skips the full-capacity (4096-source) eviction scenarios: they are
+    // pure safe-code HashMap bookkeeping whose cost under the interpreter is
+    // minutes each, with no unsafe or concurrency to check. Native CI runs
+    // them at production capacity.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mixed_capacity_reclaim_spares_refreshed_live_windows() {
         let capacity =
             u32::try_from(UPGRADE_REJECTION_LOG_MAX_TRACKED_SOURCES).expect("capacity fits u32");

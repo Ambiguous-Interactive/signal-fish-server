@@ -1943,10 +1943,18 @@ mod tests {
     async fn test_concurrent_increment_decrement_active_connections() {
         let metrics = Arc::new(ServerMetrics::new());
 
-        // Phase 1: 100 concurrent increments
-        let inc_barrier = Arc::new(tokio::sync::Barrier::new(100));
-        let mut handles = Vec::with_capacity(100);
-        for _ in 0..100 {
+        // Miri scales the fan-out down: barrier-synchronized tasks cost minutes
+        // under the interpreter; the atomic-conservation claim itself does not
+        // depend on the participant count.
+        let increments: u64 = if cfg!(miri) { 20 } else { 100 };
+        let decrements: u64 = if cfg!(miri) { 10 } else { 50 };
+
+        // Phase 1: concurrent increments
+        let inc_barrier = Arc::new(tokio::sync::Barrier::new(
+            increments.try_into().expect("fan-out fits usize"),
+        ));
+        let mut handles = Vec::with_capacity(increments.try_into().expect("fan-out fits usize"));
+        for _ in 0..increments {
             let metrics = Arc::clone(&metrics);
             let barrier = Arc::clone(&inc_barrier);
             handles.push(tokio::spawn(async move {
@@ -1960,14 +1968,16 @@ mod tests {
 
         let after_inc = metrics.active_connections.load(Ordering::Relaxed);
         assert_eq!(
-            after_inc, 100,
-            "After 100 increments, active_connections should be 100, got {after_inc}"
+            after_inc, increments,
+            "After all increments, active_connections should match them, got {after_inc}"
         );
 
-        // Phase 2: 50 concurrent decrements
-        let dec_barrier = Arc::new(tokio::sync::Barrier::new(50));
-        let mut handles = Vec::with_capacity(50);
-        for _ in 0..50 {
+        // Phase 2: concurrent decrements
+        let dec_barrier = Arc::new(tokio::sync::Barrier::new(
+            decrements.try_into().expect("fan-out fits usize"),
+        ));
+        let mut handles = Vec::with_capacity(decrements.try_into().expect("fan-out fits usize"));
+        for _ in 0..decrements {
             let metrics = Arc::clone(&metrics);
             let barrier = Arc::clone(&dec_barrier);
             handles.push(tokio::spawn(async move {
@@ -1988,14 +1998,19 @@ mod tests {
         // total_connections is monotonic (only incremented, never decremented)
         let total = metrics.total_connections.load(Ordering::Relaxed);
         assert_eq!(
-            total, 100,
-            "total_connections should be 100 (never decremented), got {total}"
+            total, increments,
+            "total_connections should equal the increment count (never decremented), got {total}"
         );
     }
 
     #[tokio::test]
     async fn rate_limit_aggregate_is_conserved_during_concurrent_updates() {
         let metrics = Arc::new(ServerMetrics::new());
+        // Miri scales the loop counts down: the conservation claim is checked
+        // at every snapshot, so fewer interleavings still cover it without
+        // minutes of interpretation.
+        let writes = if cfg!(miri) { 1_000 } else { 10_000 };
+        let snapshots = if cfg!(miri) { 100 } else { 1_000 };
         let writer_metrics = Arc::clone(&metrics);
         let writer = tokio::spawn(async move {
             let kinds = [
@@ -2005,7 +2020,7 @@ mod tests {
                 RateLimitRejection::Signal,
                 RateLimitRejection::SignalError,
             ];
-            for index in 0..10_000 {
+            for index in 0..writes {
                 writer_metrics.record_rate_limit_rejection(kinds[index % kinds.len()]);
                 if index.is_multiple_of(32) {
                     tokio::task::yield_now().await;
@@ -2013,7 +2028,7 @@ mod tests {
             }
         });
 
-        for _ in 0..1_000 {
+        for _ in 0..snapshots {
             let rate_limits = metrics.snapshot().await.rate_limiting;
             assert_eq!(
                 rate_limits.rate_limit_rejections,

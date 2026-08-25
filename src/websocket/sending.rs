@@ -1726,6 +1726,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn aggregate_reconnect_snapshot_and_replay_obey_the_encoded_message_limit() {
         let player = PlayerInfo {
             id: player_a(),
@@ -2693,7 +2694,13 @@ mod tests {
         }
     }
 
+    // Miri skips the near-limit serializer boundary tests below: they are pure
+    // serde_json byte-exactness/capacity assertions over tens of thousands of
+    // elements (no unsafe, no concurrency), and interpreting them costs
+    // minutes each for zero additional UB coverage. Native CI runs them at
+    // full size.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn json_fallback_preallocation_preserves_wire_bytes_across_growth_paths() {
         let data = serde_json::json!({
             "escaped": "\"\\\n".repeat(300),
@@ -2776,6 +2783,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn numeric_dense_near_limit_json_relay_does_not_retain_amplified_capacity() {
         const DEFAULT_MESSAGE_LIMIT: usize = 64 * 1_024;
 
@@ -2812,6 +2820,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn escape_dense_near_limit_json_relay_does_not_retain_growth_slack() {
         const DEFAULT_MESSAGE_LIMIT: usize = 64 * 1_024;
 
