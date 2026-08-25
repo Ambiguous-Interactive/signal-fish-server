@@ -1652,6 +1652,12 @@ impl EnhancedGameServer {
                             authority_player,
                             server_for_publication.session_members_from(&live_players),
                         );
+                        if finalized {
+                            server_for_publication.observe_mixed_path_members(
+                                &room_id_for_publication,
+                                &resolved.decision,
+                            );
+                        }
                         let expected_members: Vec<_> = resolved
                             .decision
                             .members

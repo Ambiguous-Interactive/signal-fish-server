@@ -99,6 +99,10 @@ pub enum ErrorCode {
     /// `StartGame` was sent by a player not permitted to start the game (the
     /// room has a designated authority and the sender is not it).
     GameStartForbidden,
+    /// The room already finalized a peer-to-peer session whose sticky
+    /// topology/transport pair this connection did not negotiate, so it cannot
+    /// seat-fill that running session (issue #421).
+    RoomSessionIncompatible,
 
     // Connection lifecycle errors (1xxx category, appended at the END — see
     // the signaling-errors note above).
@@ -314,6 +318,9 @@ impl ErrorCode {
             Self::GameStartForbidden => {
                 "You are not permitted to start the game. Only the room's authority player may start it."
             }
+            Self::RoomSessionIncompatible => {
+                "The room is already running a peer-to-peer session on a topology/transport this connection did not negotiate, so it cannot be joined mid-session. Reconnect advertising the session's capabilities or join another room."
+            }
 
             // Connection lifecycle errors (1xxx), continued
             Self::SlowConsumer => {
@@ -402,6 +409,7 @@ mod tests {
             ErrorCode::ServerDraining,
             ErrorCode::InvalidDeliveryClass,
             ErrorCode::UnsupportedProtocolVersion,
+            ErrorCode::RoomSessionIncompatible,
         ];
 
         for error_code in &error_codes {

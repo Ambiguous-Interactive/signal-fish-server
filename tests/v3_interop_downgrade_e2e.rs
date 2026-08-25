@@ -9,11 +9,13 @@
 //! "Late-join decision table" and "SessionPlan re-issue" sections pin but which
 //! have no end-to-end coverage:
 //!
-//! 1. `v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage` — a v2
-//!    (relay-only) member joins a FINALIZED `mesh + webrtc` room: it receives
-//!    `RoomJoined` but never a `SessionPlan`/`NewPeer`/`Signal`, existing v3
-//!    members receive complete plans that omit it, and its `GameData` still
-//!    relays to the v3 members (the relay floor is its shared data path).
+//! 1. `incompatible_seat_fills_of_a_running_session_are_rejected` — a joiner
+//!    that did not negotiate a finalized `mesh + webrtc` room's sticky pair (a
+//!    pure-v2 client, then a relay-only v3 client) is REJECTED at admission
+//!    with `ROOM_SESSION_INCOMPATIBLE`; the running session and its incumbents
+//!    observe nothing. A session-capable v3 joiner still seat-fills with the
+//!    full late-join plan refresh (issue #421: admitting an incapable joiner
+//!    would silently split the room's data path).
 //! 2. `sticky_relay_floor_survives_v2_leave_then_v3_full_join` — a room that
 //!    finalized to the relay floor (a v2 member at finalize) stays relay after
 //!    the v2 member leaves and a fresh v3-full member fills the seat: the ladder
@@ -47,7 +49,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use signal_fish_server::config::{AppRegistrationEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
-    ClientMessage, IceServer, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage,
+    ClientMessage, ErrorCode, IceServer, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage,
     SessionPlanPayload, Topology, Transport,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
@@ -451,21 +453,46 @@ async fn relay_one_game_data(from: &mut WsStream, to: &mut WsStream, from_id: Pl
 }
 
 // ===========================================================================
-// 1. v2 late-join into a FINALIZED mesh+webrtc room: no v3 leakage either way,
-//    relay floor still carries the v2 member's GameData.
+// 1. Seat-fill admission into a RUNNING session. A joiner that did not
+//    negotiate the session's sticky (topology, transport) pair is rejected at
+//    the door with `ROOM_SESSION_INCOMPATIBLE` — admitting it would silently
+//    split the data path: its WebSocket-relayed GameData reaches the room,
+//    but the capable members' peer-to-peer traffic never reaches it, so it
+//    would play on permanently divergent state (issue #421). The rejected
+//    attempts change nothing for the incumbents; a session-capable joiner
+//    still seat-fills with the full late-join plan refresh.
 // ===========================================================================
+
+/// Expect the next terminal join response to be a rejection with `expected`.
+async fn expect_join_rejected(ws: &mut WsStream, who: &str, expected: ErrorCode) {
+    next_matching_server_message_within(ws, SERVER_MESSAGE_TIMEOUT, "join rejection", |message| {
+        match message {
+            ServerMessage::RoomJoinFailed { error_code, .. } => {
+                assert_eq!(
+                    error_code.as_ref(),
+                    Some(&expected),
+                    "{who} must be rejected with {expected:?}"
+                );
+                Some(())
+            }
+            ServerMessage::RoomJoined(_) => {
+                panic!("{who} must be rejected from a session it cannot run")
+            }
+            _ => None,
+        }
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage() {
-    let (running_server, _server) = start_server_with_session(mesh_session_config()).await;
+async fn incompatible_seat_fills_of_a_running_session_are_rejected() {
+    let (running_server, server) = start_server_with_session(mesh_session_config()).await;
     let addr = running_server.addr();
-    let game = "interop-v2-into-mesh";
-    let legacy_who = "legacy (v2)";
+    let game = "interop-seat-fill-gate";
 
     // A room finalizes only when it is FULL and all present members ready
-    // (`Room::should_enter_lobby`), so a v2 cannot late-join a 2-seat mesh room
-    // (already full). Finalize a FULL 3-seat mesh+webrtc room with three v3
-    // members, then have one leave to open a seat for the v2 joiner — the same
-    // seat-fill shape as `mesh_n3_seat_fill_late_join`.
+    // (`Room::should_enter_lobby`). Finalize a FULL 3-seat mesh+webrtc room
+    // with three v3 members, then have one leave to open a seat.
     let mut peer_a = connect(addr).await;
     authenticate_v3_full(&mut peer_a).await;
     let joined_a = join_room(&mut peer_a, game, None, "PeerA", 3).await;
@@ -497,18 +524,28 @@ async fn v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage() {
 
     // One v3 member leaves the live session, opening a seat (a mesh departure
     // re-plans nothing for the survivors).
-    leaver.close(None).await.expect("close leaver socket");
+    send(&mut leaver, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut leaver,
+        SERVER_MESSAGE_TIMEOUT,
+        "RoomLeft",
+        |message| match message {
+            ServerMessage::RoomLeft => Some(()),
+            other => panic!("leaver expected RoomLeft, got {other:?}"),
+        },
+    )
+    .await;
     expect_player_left(&mut peer_a, leaver_id, "peer_a").await;
     expect_player_left(&mut peer_b, leaver_id, "peer_b").await;
 
-    // A v2 (relay-only) client fills the freed seat in the finalized room.
+    // Incompatible seat-fill #1: a pure-v2 (relay-only) client.
     let mut legacy = connect(addr).await;
     authenticate_v2(&mut legacy).await;
     send(
         &mut legacy,
         &ClientMessage::JoinRoom {
             game_name: game.to_string(),
-            room_code: Some(room_code),
+            room_code: Some(room_code.clone()),
             player_name: "Legacy".to_string(),
             max_players: Some(3),
             supports_authority: Some(false),
@@ -516,59 +553,99 @@ async fn v2_late_join_into_finalized_mesh_webrtc_room_no_v3_leakage() {
         },
     )
     .await;
-    let legacy_joined = next_matching_v2_only(
+    expect_join_rejected(
         &mut legacy,
-        "v2 room join response",
-        legacy_who,
-        |message| match message {
-            ServerMessage::RoomJoined(payload) => Some(payload),
-            ServerMessage::RoomJoinFailed { reason, error_code } => {
-                panic!("v2 room join failed: {reason} ({error_code:?})")
-            }
-            _ => None,
+        "legacy (v2)",
+        ErrorCode::RoomSessionIncompatible,
+    )
+    .await;
+
+    // Incompatible seat-fill #2: a v3 client that is relay-only on both axes
+    // (v3 version alone does not satisfy a mesh+webrtc session).
+    let mut relay_only = connect(addr).await;
+    authenticate_v3_relay_only(&mut relay_only).await;
+    send(
+        &mut relay_only,
+        &ClientMessage::JoinRoom {
+            game_name: game.to_string(),
+            room_code: Some(room_code.clone()),
+            player_name: "RelayOnly".to_string(),
+            max_players: Some(3),
+            supports_authority: Some(false),
+            relay_transport: None,
         },
     )
     .await;
-    let legacy_id = legacy_joined.player_id;
-    // The seat-filling v2 joiner sees the running session's persisted state.
+    expect_join_rejected(
+        &mut relay_only,
+        "relay-only (v3)",
+        ErrorCode::RoomSessionIncompatible,
+    )
+    .await;
+
+    // Neither rejection touched the running session: no PlayerJoined, no plan
+    // refresh, nothing.
+    expect_no_server_message_within(&mut peer_a, SILENCE_WINDOW, "peer_a through rejections").await;
+    expect_no_server_message_within(&mut peer_b, SILENCE_WINDOW, "peer_b through rejections").await;
+
+    // A session-capable v3 joiner still seat-fills normally and receives the
+    // full late-join pairing.
+    let mut joiner = connect(addr).await;
+    authenticate_v3_full(&mut joiner).await;
+    let joiner_joined = join_room(&mut joiner, game, Some(room_code), "Joiner", 3).await;
+    let joiner_id = joiner_joined.player_id;
     assert_eq!(
-        legacy_joined.lobby_state,
+        joiner_joined.lobby_state,
         LobbyState::Finalized,
         "a seat-filling joiner of a finalized room must see lobby_state: finalized"
     );
+    let joiner_plan = expect_session_plan_strict(&mut joiner, "joiner").await;
+    assert_eq!(joiner_plan.topology, Topology::Mesh);
+    assert_eq!(joiner_plan.transport, Transport::WebRtc);
+    let joiner_peer_ids: BTreeSet<PlayerId> = joiner_plan
+        .peers
+        .iter()
+        .map(|peer| peer.player_id)
+        .collect();
+    assert_eq!(
+        joiner_peer_ids,
+        BTreeSet::from([id_a, id_b]),
+        "the capable joiner's plan lists exactly the two incumbents"
+    );
 
-    // The v2 joiner NEVER receives a SessionPlan/NewPeer/Signal (the v2-only
-    // guard would panic on any of them); strict silence after RoomJoined.
-    expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 joiner after RoomJoined")
-        .await;
-
-    // Existing v3 members see PlayerJoined(legacy), then complete refreshed
-    // mesh plans that omit the v2 joiner from both peer lists.
-    for (socket, member_id, other_id, who) in [
-        (&mut peer_a, id_a, id_b, "peer_a"),
-        (&mut peer_b, id_b, id_a, "peer_b"),
-    ] {
-        expect_player_joined(socket, legacy_id, who).await;
+    // The incumbents observe exactly the capable joiner's membership event and
+    // refreshed plans naming every member.
+    for (socket, member_id, who) in [(&mut peer_a, id_a, "peer_a"), (&mut peer_b, id_b, "peer_b")] {
+        expect_player_joined(socket, joiner_id, who).await;
         let plan = expect_session_plan_strict(socket, who).await;
         assert_eq!(plan.topology, Topology::Mesh);
-        assert_eq!(plan.transport, Transport::WebRtc);
-        assert_eq!(plan.peers.len(), 1, "{who} sees only the capable v3 peer");
-        assert_eq!(plan.peers[0].player_id, other_id);
-        assert_eq!(plan.peers[0].initiate, member_id < other_id);
-        assert!(plan.peers.iter().all(|peer| peer.player_id != legacy_id));
+        let expected: BTreeSet<PlayerId> = [id_a, id_b, joiner_id]
+            .into_iter()
+            .filter(|id| *id != member_id)
+            .collect();
+        let seen: BTreeSet<PlayerId> = plan.peers.iter().map(|peer| peer.player_id).collect();
+        assert_eq!(
+            seen, expected,
+            "{who}'s refreshed plan lists the other two members"
+        );
         expect_no_server_message_within(
             socket,
             SILENCE_WINDOW,
-            &format!("{who} after its v2-join membership refresh"),
+            &format!("{who} after its capable-fill refresh"),
         )
         .await;
     }
 
-    // The relay floor is the v2 member's data path: its GameData still reaches
-    // the v3 members byte-identically (and vice versa).
-    relay_one_game_data(&mut legacy, &mut peer_a, legacy_id, "peer_a").await;
-    relay_one_game_data(&mut peer_b, &mut legacy, id_b, legacy_who).await;
-    let _ = id_a;
+    // Both incompatible attempts were counted; the admitted fill was not.
+    let transport = server.metrics().snapshot().await.transport;
+    assert_eq!(
+        transport.seat_fills_rejected_incompatible, 2,
+        "each rejected incompatible seat-fill counts once"
+    );
+    assert_eq!(
+        transport.mixed_path_members_observed, 0,
+        "a gated room never publishes a mixed-path membership"
+    );
     running_server.shutdown().await;
 }
 

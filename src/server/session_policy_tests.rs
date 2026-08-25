@@ -28,8 +28,8 @@ use tokio::time::{timeout, Duration};
 
 use super::session_policy::{
     choose_session_plan, desired_topology_for, elect_host, ice_pregather_eligible, is_valid_pair,
-    membership_session_decision, ActiveSessionPlan, SessionMember, SessionPlanDecision,
-    RELAY_FLOOR, UPGRADE_LADDER,
+    joiner_supports_sticky_plan, membership_session_decision, ActiveSessionPlan, SessionMember,
+    SessionPlanDecision, RELAY_FLOOR, UPGRADE_LADDER,
 };
 
 const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
@@ -1063,9 +1063,10 @@ fn plan_for_host_host_recipient_targets_all_clients() {
 // ---------------------------------------------------------------------------
 // plan_for: capability filter (re-issued / late-join peer lists).
 //
-// Rehydrated member lists (host failover, self-heal, late join / reconnect)
-// can contain members that never negotiated the session's sticky pair —
-// `add_player_to_room` gates only on fullness. A WebRTC pair is doomed unless
+// Rehydrated member lists (host failover, self-heal, reconnect) can contain
+// members that never negotiated the session's sticky pair — new seat-fills
+// are gated at admission (issue #421), but an incumbent reconnecting with
+// downgraded capabilities keeps its seat. A WebRTC pair is doomed unless
 // BOTH sides negotiated the transport (`handle_signal` rejects either
 // direction and the offers burn signal rate-limit budget), so `plan_for`
 // filters `peers[]` on both sides with the shared session-capability predicate.
@@ -1187,6 +1188,90 @@ fn plan_for_host_filters_peers_to_session_capable_members_on_both_sides() {
         client_plan.peers.is_empty(),
         "a stale unpairable host must fail closed instead of being advertised"
     );
+}
+
+// ---------------------------------------------------------------------------
+// seat-fill admission predicate (issue #421).
+//
+// A finalized non-relay session runs one (topology, transport) pair every
+// finalize-time member negotiated. `joiner_supports_sticky_plan` is the
+// admission gate's predicate: it must demand v3 plus BOTH sticky axes (the
+// exact membership shape selection required at finalize) while staying
+// endpoint-agnostic — only an elected host needs a validated Direct endpoint.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn seat_fill_predicate_tracks_version_and_both_sticky_axes() {
+    let mesh_webrtc = ActiveSessionPlan {
+        topology: Topology::Mesh,
+        transport: Transport::WebRtc,
+        host: None,
+    };
+    let host_direct = ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::Direct,
+        host: None,
+    };
+
+    // (label, protocol, stored pair, expected verdict)
+    let cases: &[(&str, NegotiatedProtocol, ActiveSessionPlan, bool)] = &[
+        (
+            "v3 full supports the mesh+webrtc rung",
+            v3_webrtc(),
+            mesh_webrtc,
+            true,
+        ),
+        (
+            "v3 full supports host+direct as a client: no endpoint needed for admission",
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::Direct],
+                topologies: vec![Topology::Relay, Topology::Host],
+            },
+            host_direct,
+            true,
+        ),
+        (
+            "v3 relay-only cannot join a mesh+webrtc session",
+            v3_relay_only(),
+            mesh_webrtc,
+            false,
+        ),
+        (
+            "negotiating the transport without the topology is not enough",
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay],
+            },
+            mesh_webrtc,
+            false,
+        ),
+        (
+            "negotiating the topology without the transport is not enough",
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+            mesh_webrtc,
+            false,
+        ),
+        (
+            "a v2 connection can never satisfy a non-relay sticky pair",
+            NegotiatedProtocol::default(),
+            mesh_webrtc,
+            false,
+        ),
+    ];
+
+    for (label, protocol, stored, expected) in cases {
+        assert_eq!(
+            joiner_supports_sticky_plan(protocol, stored),
+            *expected,
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -1964,6 +2049,79 @@ async fn non_pairable_recipient_receives_no_minted_turn_credentials() {
     assert_eq!(
         minted, 0,
         "no TURN credential may be issued to a recipient that cannot join the session"
+    );
+}
+
+/// The mixed-path observation seam (issue #421): a non-relay publication over
+/// members that include one which cannot run the sticky pair counts that
+/// member exactly once per publication; the relay floor and fully capable
+/// memberships count nothing.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn mixed_path_membership_is_observed_per_publication() {
+    let server =
+        create_server_with_session_and_turn(mesh_config_no_static_ice(), enabled_turn()).await;
+    let room_id = RoomId::new_v4();
+
+    let mesh_webrtc = ActiveSessionPlan {
+        topology: Topology::Mesh,
+        transport: Transport::WebRtc,
+        host: None,
+    };
+    let capable = v3_full(PlayerId::new_v4(), "Capable");
+    let drifted = relay_only_member(PlayerId::new_v4(), "DriftedReconnector");
+    let decision = mesh_webrtc.decision_with(vec![capable.clone(), drifted.clone()]);
+
+    server.observe_mixed_path_members(&room_id, &decision);
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .transport
+            .mixed_path_members_observed,
+        1,
+        "one incapable member in a non-relay publication counts once"
+    );
+
+    // A second publication over the same membership observes them again.
+    server.observe_mixed_path_members(
+        &room_id,
+        &mesh_webrtc.decision_with(vec![capable.clone(), drifted.clone()]),
+    );
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .transport
+            .mixed_path_members_observed,
+        2,
+        "each publication counts the members it observed"
+    );
+
+    // A fully capable non-relay membership counts nothing.
+    let all_capable =
+        mesh_webrtc.decision_with(vec![capable.clone(), v3_full(PlayerId::new_v4(), "B")]);
+    server.observe_mixed_path_members(&room_id, &all_capable);
+    // ...and the relay floor is never observed by definition.
+    let floor = SessionPlanDecision {
+        generation: uuid::Uuid::new_v4(),
+        topology: Topology::Relay,
+        transport: Transport::Relay,
+        host: None,
+        members: vec![capable, drifted],
+    };
+    server.observe_mixed_path_members(&room_id, &floor);
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .transport
+            .mixed_path_members_observed,
+        2,
+        "capable memberships and the relay floor must not move the counter"
     );
 }
 

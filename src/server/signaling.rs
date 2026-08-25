@@ -545,6 +545,8 @@ impl EnhancedGameServer {
                             publication_room.authority_player,
                             server.session_members_from(&live_players),
                         );
+                        server
+                            .observe_mixed_path_members(&room_id, &resolved.decision);
                         let now_unix = resolved
                             .decision
                             .uses_webrtc_signaling()

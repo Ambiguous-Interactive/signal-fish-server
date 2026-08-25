@@ -1,5 +1,6 @@
 use super::{
-    EnhancedGameServer, MaxPlayersPerApplicationExceededError, MaxRoomsPerApplicationExceededError,
+    session_policy::joiner_supports_sticky_plan, EnhancedGameServer,
+    MaxPlayersPerApplicationExceededError, MaxRoomsPerApplicationExceededError,
     MaxRoomsPerGameExceededError, PendingApplicationClaimRollback,
 };
 use crate::coordination::RoomEventMutationGuard;
@@ -78,6 +79,12 @@ pub(super) enum JoinRoomError {
     /// The room is at capacity — a business rejection (→ `ROOM_FULL`).
     #[error("Room is full")]
     RoomFull,
+    /// The room already finalized a non-relay session whose sticky
+    /// topology/transport pair the joiner did not negotiate — a business
+    /// rejection (→ `ROOM_SESSION_INCOMPATIBLE`). Admitting the joiner would
+    /// silently split the room's data path (issue #421).
+    #[error("Room is running a session this connection's capabilities do not cover")]
+    SessionIncompatible,
     /// The per-game room cap is reached — a business rejection
     /// (→ `MAX_ROOMS_PER_GAME_EXCEEDED`).
     #[error(transparent)]
@@ -117,6 +124,7 @@ impl JoinRoomError {
     pub(super) fn error_code(&self) -> ErrorCode {
         match self {
             Self::RoomFull => ErrorCode::RoomFull,
+            Self::SessionIncompatible => ErrorCode::RoomSessionIncompatible,
             Self::MaxRoomsPerGameExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
             Self::MaxRoomsPerApplicationExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
             Self::MaxPlayersPerApplicationExceeded(_) => ErrorCode::InvalidMaxPlayers,
@@ -1962,6 +1970,29 @@ impl EnhancedGameServer {
                         });
                     if room.players.len() >= usize::from(effective_max_players) {
                         Err(JoinRoomError::RoomFull)
+                    } else if room.lobby_state == LobbyState::Finalized
+                        && self.active_session_plan(&room.id).is_some_and(|stored| {
+                            !joiner_supports_sticky_plan(&self.client_protocol(player_id), &stored)
+                        })
+                    {
+                        // Running-session capability gate (issue #421): a
+                        // finalized non-relay session runs one
+                        // (topology, transport) pair every finalize-time
+                        // member negotiated. Admitting a joiner that cannot
+                        // run that pair would silently split the data path —
+                        // its relayed `GameData` reaches the room, but P2P
+                        // traffic between capable members never reaches it —
+                        // so the joiner is rejected instead of seated.
+                        // Relay-floored rooms store no sticky plan and stay
+                        // open to everyone (the floor never closes).
+                        self.metrics.increment_seat_fills_rejected_incompatible();
+                        tracing::warn!(
+                            %player_id,
+                            room_id = %room.id,
+                            "Rejected seat-fill: the room's running session requires \
+                             capabilities this connection did not negotiate"
+                        );
+                        Err(JoinRoomError::SessionIncompatible)
                     } else {
                         let claimed_application =
                             room.application_id.is_none() && client_app_id.is_some();

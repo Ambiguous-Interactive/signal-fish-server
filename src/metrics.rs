@@ -288,6 +288,19 @@ pub struct ServerMetrics {
     /// `session_replans_emitted`), and counted even when no co-member
     /// negotiated v3 (the event still happened; zero deliveries).
     pub transport_status_fanout: AtomicU64,
+    /// Seat-fill joins rejected because the target room had already finalized
+    /// a non-relay session whose sticky topology/transport pair the joiner did
+    /// not negotiate (`ROOM_SESSION_INCOMPATIBLE`, issue #421). One per
+    /// rejected join attempt. The gate keeps a running session's membership
+    /// uniformly capable of its data path.
+    pub seat_fills_rejected_incompatible: AtomicU64,
+    /// Seated members observed — during any non-relay plan publication — whose
+    /// negotiated capabilities exclude the session's sticky pair, so their plan
+    /// carries an empty `peers` list and capable members' plans omit them (a
+    /// mixed-path membership; issue #421). Post-gate this can only arise from
+    /// an incumbent reconnecting with downgraded capabilities; each
+    /// publication counts every such member it observes.
+    pub mixed_path_members_observed: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,6 +552,8 @@ pub struct TransportMetrics {
     pub turn_credentials_issued: u64,
     pub transport_status_fanout: u64,
     pub ice_pregather_emitted: u64,
+    pub seat_fills_rejected_incompatible: u64,
+    pub mixed_path_members_observed: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -662,6 +677,8 @@ impl ServerMetrics {
             turn_credentials_issued: AtomicU64::new(0),
             transport_status_fanout: AtomicU64::new(0),
             ice_pregather_emitted: AtomicU64::new(0),
+            seat_fills_rejected_incompatible: AtomicU64::new(0),
+            mixed_path_members_observed: AtomicU64::new(0),
         }
     }
 
@@ -1261,6 +1278,23 @@ impl ServerMetrics {
         self.session_plans_late_join.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one seat-fill join rejected by the running-session capability
+    /// gate (`ROOM_SESSION_INCOMPATIBLE`). One per rejected join attempt.
+    pub fn increment_seat_fills_rejected_incompatible(&self) {
+        self.seat_fills_rejected_incompatible
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record `count` seated members whose negotiated capabilities exclude a
+    /// non-relay session's sticky pair, observed during one plan publication
+    /// (a mixed-path membership; issue #421).
+    pub fn add_mixed_path_members_observed(&self, count: u64) {
+        if count > 0 {
+            self.mixed_path_members_observed
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
     /// Record that a client reported an established P2P data path for the first
     /// time or as a state transition (`TransportStatus` with a P2P transport and
     /// `connected: true`).
@@ -1548,6 +1582,12 @@ impl ServerMetrics {
                 turn_credentials_issued: self.turn_credentials_issued.load(Ordering::Relaxed),
                 transport_status_fanout: self.transport_status_fanout.load(Ordering::Relaxed),
                 ice_pregather_emitted: self.ice_pregather_emitted.load(Ordering::Relaxed),
+                seat_fills_rejected_incompatible: self
+                    .seat_fills_rejected_incompatible
+                    .load(Ordering::Relaxed),
+                mixed_path_members_observed: self
+                    .mixed_path_members_observed
+                    .load(Ordering::Relaxed),
             },
         }
     }

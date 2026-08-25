@@ -1278,6 +1278,10 @@ fn golden_enum_error_code_all_variants() {
             ErrorCode::UnsupportedProtocolVersion,
             r#""UNSUPPORTED_PROTOCOL_VERSION""#,
         ),
+        (
+            ErrorCode::RoomSessionIncompatible,
+            r#""ROOM_SESSION_INCOMPATIBLE""#,
+        ),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1339,12 +1343,13 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::ActivityTimeout
         | ErrorCode::ServerDraining
         | ErrorCode::InvalidDeliveryClass
-        | ErrorCode::UnsupportedProtocolVersion => (),
+        | ErrorCode::UnsupportedProtocolVersion
+        | ErrorCode::RoomSessionIncompatible => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        53,
+        54,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

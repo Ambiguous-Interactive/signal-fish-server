@@ -116,6 +116,7 @@ Errors related to room lifecycle, capacity, and membership.
 | `INVALID_ROOM_STATE` | The room is in an invalid state for this operation. |
 | `GAME_START_NOT_READY` | `StartGame` was sent before every current player was ready. |
 | `GAME_START_FORBIDDEN` | `StartGame` was sent by a player not permitted to start (the room has a designated authority and the sender is not it). |
+| `ROOM_SESSION_INCOMPATIBLE` | The room already finalized a peer-to-peer session whose sticky topology/transport pair this connection did not negotiate, so it cannot be joined mid-session (a seat-fill would silently split the room's data path). Reconnect advertising the session's capabilities or join another room; rooms that finalized to the relay floor remain open to everyone. |
 
 ### Authority Errors (4xxx)
 

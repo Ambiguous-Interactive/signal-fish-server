@@ -63,8 +63,11 @@ use super::types::{
 //     never regress room state, and post-finalize `PlayerReady` toggles are
 //     rejected with `INVALID_ROOM_STATE`
 //   - A Finalized room with an open seat (a member departed) still accepts
-//     joins — `add_player_to_room` gates only on fullness — so seat-filling
-//     late joins enter the running session without replaying the lobby cycle
+//     joins — `add_player_to_room` gates on fullness, plus the running-session
+//     capability gate (issue #421: a joiner that cannot run the finalized
+//     non-relay session is rejected with `ROOM_SESSION_INCOMPATIBLE`) — so
+//     capable seat-filling late joins enter the running session without
+//     replaying the lobby cycle
 //
 // ## Key State Transitions and Protocol Messages
 //
