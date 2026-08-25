@@ -53,7 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (issue #430). The same failure class is closed for `server.max_rooms_per_game`,
   `rate_limit.max_room_creations`, `rate_limit.max_join_attempts`,
   `rate_limit.max_signals`, `protocol.max_game_name_length`,
-  `protocol.max_player_name_length`, and `protocol.max_players_limit`; each
+  `protocol.max_player_name_length`, and `protocol.max_players_limit`, and for
+  per-app allowlist overrides (`security.allowed_apps[*].max_rooms`,
+  `.max_players_per_room`, `.rate_limit_per_minute`) where zero silently
+  rejects every creation, join, or authentication for exactly that app; each
   field's documentation now states the `> 0` requirement. Default
   configurations are unaffected.
 - **Breaking:** Remove the never-wired cross-instance deduplication seam. The

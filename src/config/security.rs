@@ -233,13 +233,19 @@ pub struct AppRegistrationEntry {
     pub app_id: String,
     /// Human-readable name returned to the client after app identification.
     pub app_name: String,
-    /// Optional maximum number of rooms this application may create.
+    /// Optional maximum number of rooms this application may create. Must be
+    /// `> 0` when set: a zero cap rejects every creation for this app
+    /// (startup validation rejects it).
     #[serde(default)]
     pub max_rooms: Option<u32>,
-    /// Optional maximum number of players per room for this application.
+    /// Optional maximum number of players per room for this application. Must
+    /// be `> 0` when set: a zero cap rejects every join for this app (startup
+    /// validation rejects it).
     #[serde(default)]
     pub max_players_per_room: Option<u8>,
-    /// Optional per-minute request rate limit for this application.
+    /// Optional per-minute request rate limit for this application. Must be
+    /// `> 0` when set: a zero budget rejects every `Authenticate` for this
+    /// app (startup validation rejects it).
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
 }

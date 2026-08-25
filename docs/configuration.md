@@ -62,7 +62,7 @@ SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
 
 ```
 
-- `max_rooms_per_game` - Maximum concurrent rooms per game name
+- `max_rooms_per_game` - Maximum concurrent rooms per game name (must be > 0)
 - `empty_room_timeout` - Seconds before an empty room is cleaned up (default: 300)
 - `inactive_room_timeout` - Seconds before an inactive room is removed (default: 3600)
 
@@ -168,7 +168,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__REQUIRE_CLIENT_FINGERPRINT` | `security.transport.token_binding.require_client_fingerprint` | `false` | Require each proof to carry the authenticated mTLS leaf certificate's lowercase hex SHA-256 fingerprint and privately bind each newly issued reconnect credential to that identity; requires `token_binding.required=true`, built-in TLS, and `client_auth=optional` or `require` |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SUBPROTOCOL` | `security.transport.token_binding.subprotocol` | `signalfish.tokenbinding.v2` | Replay-resistant token-binding WebSocket subprotocol |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SCHEME` | `security.transport.token_binding.scheme` | `server_nonce_hkdf_sha256` | Server-fresh token-binding signing scheme |
-| `SIGNAL_FISH__SECURITY__ALLOWED_APPS` | `security.allowed_apps` | `[]` | JSON array of public app-ID registrations and accounting limits |
+| `SIGNAL_FISH__SECURITY__ALLOWED_APPS` | `security.allowed_apps` | `[]` | JSON array of public app-ID registrations and accounting limits (`max_rooms`, `max_players_per_room`, and `rate_limit_per_minute` must be > 0 when set) |
 | `SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS` | `coordination.membership_snapshot_interval_secs` | `30` | Reserved membership-snapshot seam; the shipped coordinator is process-local |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_REFRESH_INTERVAL_SECS` | `metrics.dashboard_cache_refresh_interval_secs` | `5` | Dashboard metrics refresh interval |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_TTL_SECS` | `metrics.dashboard_cache_ttl_secs` | `30` | Dashboard metrics cache TTL |
@@ -277,9 +277,9 @@ and the authenticated WebSocket relay floor remains available independently.
 
 ```
 
-- `max_room_creations` - Max room creations per player per time window
-- `max_join_attempts` - Shared max room-creation, `JoinRoom`, and `JoinAsSpectator` attempts per player per time window
-- `max_signals` - Max validated WebRTC Signal dispatch attempts per player per time window
+- `max_room_creations` - Max room creations per player per time window (must be > 0)
+- `max_join_attempts` - Shared max room-creation, `JoinRoom`, and `JoinAsSpectator` attempts per player per time window (must be > 0)
+- `max_signals` - Max validated WebRTC Signal dispatch attempts per player per time window (must be > 0)
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 - `time_window` - Rate limit window in seconds
 
