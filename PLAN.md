@@ -30,23 +30,6 @@ to risk.
 
 ## Active hosted evidence
 
-### P53 — Hosted relay timing evidence (#274)
-
-- Evaluate the first 20 consecutive eligible scheduled attempts per operating
-  system, counting red, cancelled, missing, and incomplete attempts under the
-  rules in `docs/development.md`.
-- Remaining: confirm allocation 20 (due ~2026-08-25 05:45 UTC) preserves the
-  audited pattern; 19/20 per OS are already collected and audited in the issue
-  (all manifests complete/eligible, toolchain pinned, zero backpressure,
-  exact-complete deliveries). The lane decision is committed in
-  `docs/development.md` (macOS correctness-only; Linux/Windows keep the
-  existing broad-job ceiling; no new isolated PR job); close #274 once the
-  full cohort stands.
-
-Acceptance: 100 requested observations per matrix cell are reviewable for each
-operating system, semantic failures are not censored, and the resulting lane
-placement matches the observed execution context.
-
 ## External acceptance
 
 ### Reviewer capacity for a literal all-green pull request (#377)
