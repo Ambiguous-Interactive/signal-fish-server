@@ -1118,11 +1118,21 @@ impl EnhancedGameServer {
         // own protocol version. It is still stripped per-recipient, so a v2
         // recipient never sees it while a v3 recipient gets a correct monotonic
         // stamp.)
+        let resumed_epoch = disconnected.last_epoch.saturating_add(1);
+        if disconnected.last_epoch == u32::MAX {
+            // Saturation reuses the terminal incarnation (seq restarts at 1),
+            // which is the ambiguity `epoch` exists to remove. Unreachable in
+            // practice (~2^32 reconnects of one sender), but never silent.
+            tracing::error!(
+                %reconnect_player_id,
+                "Reconnect epoch saturated at u32::MAX; the resumed stream reuses it"
+            );
+        }
         let Some(reassigned_delivery) = self.connection_manager.reassign_connection(
             current_player_id,
             reconnect_player_id,
             *room_id,
-            disconnected.last_epoch.saturating_add(1),
+            resumed_epoch,
         ) else {
             return self
                 .reject_claimed_reconnect(

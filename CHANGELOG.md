@@ -148,6 +148,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix protocol-v3 text game data silently delivering without a complete relay
+  stamp. The binary carrier already failed closed with `InvalidV3Stamp` when a
+  v3 recipient would have observed a partial `(seq, epoch)` stamp, but the text
+  carrier serialized the frame as-is, breaking recipient-side gap
+  accountability without any signal. Both carriers now enforce the same
+  fail-closed stamp contract for v3 cohorts (production senders stamp or
+  suppress, so no legitimate flow changes), and the text close path gained
+  per-error diagnostics instead of a generic serialization message.
+- Fix one dropped `PeerTransportStatus` fan-out counting two signal-limit
+  rejections: the non-consuming availability preflight recorded a rejection,
+  and the consuming check behind it recorded again when it lost the race for
+  the final slot. The preflight now observes availability only; the consuming
+  drop owns the rejection accounting.
+- Fix readiness snapshots fabricating stale state when room membership cannot
+  be loaded: `current_ready_players` fell back to the unfiltered recorded set
+  on a storage error, reporting departed members as still ready in
+  `RoomJoined` / `Reconnected` / `SpectatorJoined` exactly when the server knew
+  its view was stale. Failed membership reads now fail closed to an empty
+  snapshot (with a warning) and recover normally once storage responds;
+  start-game gating is unaffected (it validates membership independently and
+  already surfaced such failures as infrastructure errors).
+- Fix a reconnecting sender's incarnation epoch passing through a provisional
+  value between connection reassignment and its override: readers of the
+  reassigned entry could observe the transient socket's epoch before the real
+  `last_epoch + 1` was applied. The resumed epoch is now part of the
+  reassignment itself — atomically visible from the first metadata read — and
+  the unchecked standalone epoch-overwrite seam that could regress a sender's
+  `(epoch, seq)` stream is gone.
+- Fix a stale terminal unroute being able to publish a foreign room's live
+  relay stamp as a phantom `PlayerLeft` terminal watermark:
+  `clear_room_assignment_with_tail` now verifies the player is still assigned
+  to the expected room under the same entry lock and refuses mismatches
+  untouched instead of capturing whatever assignment happens to be present.
+- Fix unregistered player ids bypassing the heartbeat persistence throttle:
+  in-flight frames racing a teardown took the "unknown client" branch on every
+  message, inflating the `heartbeat_updates` metric and retrying a futile
+  last-seen write per frame instead of at most once per player per throttle
+  window. Unknown ids are now suppressed; any live seated player or spectator
+  keeps an entry, so legitimate refreshes are unchanged.
+
 - Fix a `1009 outbound_message_too_large` teardown silently discarding still-
   writable coalesced unsupported-format omission reports. A queued
   `DeliveryReport` carrier pops with its post-write flush deliberately still

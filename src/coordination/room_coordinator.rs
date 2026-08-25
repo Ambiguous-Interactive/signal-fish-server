@@ -2370,6 +2370,12 @@ mod tests {
             coordinator.current_ready_players(&room.id).await.is_empty(),
             "a failed membership read must not fabricate a ready list"
         );
+        database.fail_get_room_players_for_test(false);
+        assert_eq!(
+            coordinator.current_ready_players(&room.id).await,
+            vec![player],
+            "the failed start must leave the recorded readiness recoverable"
+        );
         assert!(messages.broadcasts().await.is_empty());
     }
 
