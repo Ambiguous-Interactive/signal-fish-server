@@ -47,21 +47,6 @@ Acceptance: 100 requested observations per matrix cell are reviewable for each
 operating system, semantic failures are not censored, and the resulting lane
 placement matches the observed execution context.
 
-### P56 — Compatible-control hosted eviction closure (#290)
-
-- Complete the unchanged `h14-capacity-v1` cohort through 20 eligible scheduled
-  first attempts, retaining red, cancelled, missing, and incomplete outcomes.
-- Remaining: confirm allocation 20 (due ~2026-08-25 03:25 UTC); 19/20 are
-  collected and audited in the issue (exact fallback accounting, complete
-  compatible delivery, ≤0.02x amplification, zero unintended evictions on
-  every instrumented attempt). Close #290 once the cohort completes.
-
-Acceptance: all 20 first attempts preserve exact fallback accounting, complete
-compatible delivery, 0.01x-class amplification, and zero unintended eviction.
-A counterexample must be retained, converted into a deterministic
-repository-local reproduction, and used to refine #290, but does not satisfy
-this acceptance criterion.
-
 ## External acceptance
 
 ### Reviewer capacity for a literal all-green pull request (#377)
