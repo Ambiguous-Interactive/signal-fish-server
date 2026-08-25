@@ -53,8 +53,10 @@ async fn handle_immediate_send_error(
     }
 }
 
+/// Convert a relative duration into an absolute deadline without changing an
+/// overflow into an already-expired instant.
 fn checked_deadline(start: Instant, duration: Duration) -> Instant {
-    start.checked_add(duration).unwrap_or(start)
+    crate::deadline::saturating_after(start, duration)
 }
 
 fn random_ping_nonce() -> u64 {
@@ -810,6 +812,18 @@ async fn finalize_closed_connection(
                 abandoned_messages = abandoned,
                 "Closing after oversized outbound message; abandoning later queued messages"
             );
+            // An oversized queued report carrier dies before its own
+            // post-write flush, so coalesced omissions can still be pending
+            // and writable here. They remain exact and describe frames this
+            // recipient already saw skipped; a report never advances the data
+            // sequence, so flushing them cannot open a hole of its own.
+            flush_pending_unsupported_report(
+                sender,
+                rx,
+                player_id,
+                server.config().max_outbound_message_size,
+            )
+            .await;
         }
         Some(
             CloseReason::Shutdown
@@ -3141,6 +3155,23 @@ mod tests {
     }
 
     #[test]
+    fn extreme_deadlines_do_not_invert_into_immediate_expiry() {
+        let start = Instant::now();
+        let unrepresentable = Duration::from_secs(u64::MAX);
+
+        assert!(
+            checked_deadline(start, unrepresentable) > start,
+            "an unrepresentable positive duration is beyond the process lifetime, \
+             not already expired"
+        );
+        assert_eq!(
+            checked_deadline(start, Duration::from_secs(30)),
+            start + Duration::from_secs(30),
+            "representable deadlines keep their exact absolute instant"
+        );
+    }
+
+    #[test]
     fn ping_write_timeout_uses_delivery_budget_after_outbound_progress() {
         let max_sojourn = Duration::from_secs(15);
         let slow_consumer_timeout = Duration::from_secs(5);
@@ -3729,6 +3760,116 @@ mod tests {
             );
             pair.shutdown().await;
         }
+    }
+
+    /// A 1009 teardown must flush coalesced unsupported-format omission
+    /// reports like every other finalize branch.
+    ///
+    /// A queued `DeliveryReport` carrier pops with its post-write flush still
+    /// ahead of it (`flush_before` is deliberately false for carriers), so an
+    /// oversized carrier's own TooLarge failure lands in the
+    /// `OutboundMessageTooLarge` finalize branch with writable coalesced
+    /// omissions still pending. The recipient already observed those frames
+    /// being skipped; letting them die silently leaves them unreported even
+    /// though the socket remained writable, contradicting the documented
+    /// close-flush promise ("a closing connection flushes them too").
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn too_large_close_still_flushes_coalesced_omission_reports() {
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+        tx.set_protocol_version(3);
+        let omitted = |seq| crate::coordination::outbound_queue::DataDeliveryMetadata {
+            class: crate::protocol::DeliveryClass::Volatile,
+            key: None,
+            from_player: PlayerId::from_u128(4),
+            room_id: crate::protocol::RoomId::from_u128(11),
+            epoch: 1,
+            seq,
+        };
+        assert!(rx.record_unsupported_format(omitted(7)));
+        assert!(rx.record_unsupported_format(omitted(8)));
+        assert!(
+            rx.pending_unsupported_report().is_some(),
+            "precondition: coalesced omissions must be pending before teardown"
+        );
+
+        let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let mut pair = UpgradedSocketPair::connect().await;
+        let mut batcher = MessageBatcher::new(1, 1);
+        finalize_closed_connection(
+            &mut pair.server_sink,
+            &mut rx,
+            &mut batcher,
+            Some(CloseReason::OutboundMessageTooLarge),
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // The oracle is the bytes the client received: the omission report
+        // must reach the writable socket BEFORE the coded close frame.
+        let (reports, close_frame) = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut reports = Vec::new();
+            let mut close_frame = None;
+            while let Some(frame) = pair.client.next().await {
+                match frame.expect("client frame") {
+                    TungsteniteMessage::Text(text) => {
+                        if matches!(
+                            serde_json::from_str::<ServerMessage>(&text),
+                            Ok(ServerMessage::DeliveryReport(_))
+                        ) {
+                            reports.push(text);
+                        }
+                    }
+                    TungsteniteMessage::Close(close) => {
+                        close_frame =
+                            Some(close.expect("the semantic close frame carries its code"));
+                        break;
+                    }
+                    _other_frame => continue,
+                }
+            }
+            (reports, close_frame)
+        })
+        .await
+        .expect("server never closed the upgraded socket");
+        assert_eq!(
+            reports.len(),
+            1,
+            "the coalesced omission report must be flushed exactly once on a 1009 close"
+        );
+        let report: ServerMessage =
+            serde_json::from_str(&reports[0]).expect("flushed report decodes");
+        let ServerMessage::DeliveryReport(report) = report else {
+            panic!("only a DeliveryReport was collected");
+        };
+        assert_eq!(report.gaps.len(), 1, "contiguous omissions stay one range");
+        let gap = &report.gaps[0];
+        assert_eq!(gap.from_player, PlayerId::from_u128(4));
+        assert_eq!((gap.from_seq, gap.to_seq), (7, 8));
+        assert_eq!(
+            gap.reason,
+            crate::protocol::DeliveryGapReason::UnsupportedFormat,
+            "the flushed ranges must be exactly the omissions seeded before teardown"
+        );
+        let close_frame = close_frame.expect("the teardown ends in its coded close frame");
+        assert_eq!(
+            close_frame.code,
+            1009.into(),
+            "the oversized-message close code is unchanged by the flush"
+        );
+        assert!(
+            rx.pending_unsupported_report().is_none(),
+            "a flushed report must be retired from pending accounting"
+        );
+        drop(tx);
+        pair.shutdown().await;
     }
 
     /// Issue #415: teardown after an abandoned in-flight write must never hand

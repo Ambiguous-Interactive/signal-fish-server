@@ -148,6 +148,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix a `1009 outbound_message_too_large` teardown silently discarding still-
+  writable coalesced unsupported-format omission reports. A queued
+  `DeliveryReport` carrier pops with its post-write flush deliberately still
+  ahead of it, so when the carrier itself exceeded the configured outbound
+  message-size limit, the finalize branch abandoned the queue and closed
+  without ever flushing pending ranges — leaving omissions the recipient had
+  observed unreported even though the socket remained writable, and breaking
+  the documented "a closing connection flushes them too" promise. Every close
+  path now flushes coalesced omission reports (the report never advances the
+  data sequence, so it cannot open a hole of its own).
+- Fix overflowed duration configurations inverting into already-expired
+  deadlines on three WebSocket seams (ping write bound, Pong probe deadline,
+  authentication window) and on the reconnection-window deadline: an absurd
+  configured timeout previously closed every fresh connection immediately with
+  an authentication/activity code instead of behaving as effectively
+  unbounded, contradicting the repository doctrine that an overflow must never
+  become immediate expiry. All such seams now saturate to the platform's
+  maximal representable instant via a shared canonical helper.
+
 - Fix the last published member's departure deleting a finalized room's sticky
   session decision while storage still holds an admitted member whose route
   has not committed (a failed finalized publication spawns its teardown only
