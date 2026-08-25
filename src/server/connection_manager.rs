@@ -602,14 +602,29 @@ impl ConnectionManager {
     }
 
     /// Capture the terminal relay watermark and clear membership under one
-    /// connection-entry lock. The coordinator calls this while holding its
-    /// room-routing write lock, making stamp allocation and terminal unroute
-    /// mutually exclusive.
+    /// connection-entry lock, but only while the player is still assigned to
+    /// `expected_room`. On any other room (a stale leave racing a room switch)
+    /// this returns `None` untouched instead of publishing that room's live
+    /// stamp as a foreign room's phantom terminal watermark. The coordinator
+    /// calls this while holding its room-routing write lock, making stamp
+    /// allocation and terminal unroute mutually exclusive.
     pub fn clear_room_assignment_with_tail(
         &self,
         player_id: &PlayerId,
+        expected_room: &RoomId,
     ) -> Option<(ClientDeliveryHandle, RelayStamp)> {
-        self.clients.get_mut(player_id).map(|mut client| {
+        self.clear_room_assignment_guarded(player_id, Some(expected_room))
+    }
+
+    fn clear_room_assignment_guarded(
+        &self,
+        player_id: &PlayerId,
+        expected_room: Option<&RoomId>,
+    ) -> Option<(ClientDeliveryHandle, RelayStamp)> {
+        self.clients.get_mut(player_id).and_then(|mut client| {
+            if expected_room.is_some_and(|expected| client.room_id != Some(*expected)) {
+                return None;
+            }
             let tail = RelayStamp {
                 seq: client.game_data_seq,
                 epoch: client.game_data_epoch,
@@ -620,12 +635,12 @@ impl ConnectionManager {
             // fresh stamp stream (see the `game_data_seq` field doc).
             client.game_data_seq = 0;
             client.sender = client.sender.next_generation();
-            (client.delivery_handle(), tail)
+            Some((client.delivery_handle(), tail))
         })
     }
 
     pub fn clear_room_assignment(&self, player_id: &PlayerId) -> Option<ClientDeliveryHandle> {
-        self.clear_room_assignment_with_tail(player_id)
+        self.clear_room_assignment_guarded(player_id, None)
             .map(|(delivery, _)| delivery)
     }
 
@@ -722,16 +737,13 @@ impl ConnectionManager {
             .map(|client| client.game_data_epoch)
     }
 
-    /// Override the incarnation [`epoch`](ClientConnection::game_data_epoch) for
-    /// a reconnected connection. [`Self::reassign_connection`] derives the epoch
-    /// from the transient reconnect socket (which never joined a room, so it
-    /// would reset to 1); the reconnect path calls this with `last_epoch + 1`
-    /// from the surviving [`DisconnectedPlayer`](crate::reconnection::DisconnectedPlayer)
-    /// record so the sender's `(epoch, seq)` stream stays strictly increasing
-    /// for a recipient that never left. No-op if the connection is gone.
-    pub fn set_game_data_epoch(&self, player_id: &PlayerId, epoch: u32) {
+    /// Force an incarnation bump in unit tests (simulates what a reconnect
+    /// reassignment does). Production epochs only move through join/reassign.
+    #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
+    pub fn bump_game_data_epoch_for_test(&self, player_id: &PlayerId) {
         if let Some(mut client) = self.clients.get_mut(player_id) {
-            client.game_data_epoch = epoch;
+            client.game_data_epoch = client.game_data_epoch.saturating_add(1);
         }
     }
 
@@ -765,8 +777,14 @@ impl ConnectionManager {
 
             should_update
         } else {
-            // Client not found, allow update (will fail at DB level anyway)
-            true
+            // Unknown player: suppress. A missing entry can never take a
+            // throttle stamp, so allowing the update would fire the heartbeat
+            // metric and the persistence attempt on every in-flight frame that
+            // races its teardown, breaking the once-per-player-per-window
+            // throttle contract. Any live connection (seated player or
+            // spectator) has an entry; a refused lookup here means the socket
+            // is unregistering and no refresh can land anywhere meaningful.
+            false
         }
     }
 
@@ -806,6 +824,7 @@ impl ConnectionManager {
         current_player_id: &PlayerId,
         reconnect_player_id: &PlayerId,
         room_id: RoomId,
+        game_data_epoch: u32,
     ) -> Option<ClientDeliveryHandle> {
         // Atomically remove the old entry (no separate get-then-remove race)
         if let Some((_, old_connection)) = self.clients.remove(current_player_id) {
@@ -840,15 +859,14 @@ impl ConnectionManager {
                 // stream starts over at 1; recipients treat its
                 // `PlayerReconnected` as a seq reset (field doc above).
                 game_data_seq: 0,
-                // PROVISIONAL epoch. `old_connection` is the transient reconnect
-                // socket (never joined a room ⇒ epoch 0), so this alone would
-                // reset the incarnation to 1 and collide with the sender's first
-                // incarnation. The reconnect path in `reconnection_service`
-                // OVERRIDES this via `set_game_data_epoch` with the surviving
-                // record's `last_epoch + 1` (see `DisconnectedPlayer::last_epoch`);
-                // the `+1` here is only a non-zero fallback for a standalone
-                // reassign that never calls the override.
-                game_data_epoch: old_connection.game_data_epoch.saturating_add(1),
+                // The caller supplies the resumed incarnation epoch (the
+                // surviving reconnection record's `last_epoch + 1`), so the
+                // sender's `(epoch, seq)` stream is strictly increasing for a
+                // recipient that never left from the moment this entry becomes
+                // visible — no provisional value is ever observable. The
+                // transient socket itself never joined a room (epoch 0); the
+                // reconnect path always dominates it.
+                game_data_epoch,
             };
 
             // IP slot is already reserved from the old entry -- no need to
@@ -939,7 +957,7 @@ impl ConnectionManager {
         // Test fixtures use this convenience to simulate a complete departure;
         // honor the production ordering invariant by clearing membership (and
         // therefore capturing/resetting its tail) before physical removal.
-        let _ = self.clear_room_assignment_with_tail(player_id);
+        let _ = self.clear_room_assignment_guarded(player_id, None);
         self.remove_client_for_unregistration(player_id, || false)
             .map(|(connection, _)| connection)
     }
@@ -1378,7 +1396,7 @@ mod tests {
         );
         assert!(manager.has_client(&player_id));
         let (_, terminal_tail) = manager
-            .clear_room_assignment_with_tail(&player_id)
+            .clear_room_assignment_with_tail(&player_id, &room_id)
             .expect("terminal unroute retains the connection and tail");
         assert_eq!(terminal_tail, RelayStamp { epoch: 1, seq: 1 });
         assert!(
@@ -1387,6 +1405,78 @@ mod tests {
                 .is_some(),
             "connection removal becomes valid after terminal capture"
         );
+    }
+
+    /// The resumed reconnect epoch is part of the reassignment itself: no
+    /// provisional value (the transient socket's epoch+1) may ever be visible
+    /// between reassignment and the caller's epoch resume.
+    #[tokio::test]
+    async fn reassign_connection_applies_the_resumed_epoch_immediately() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:5003".parse().unwrap();
+        let (tx, _rx) = channel();
+        let transient_id = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+        let restored_id = PlayerId::new_v4();
+        let room_id = RoomId::new_v4();
+
+        manager.reassign_connection(&transient_id, &restored_id, room_id, 7);
+
+        // The very first metadata read through the room-scoped projection API
+        // already observes the final incarnation.
+        assert_eq!(
+            manager.current_relay_stamp_in_room(&restored_id, &room_id),
+            Some(RelayStamp { epoch: 7, seq: 0 }),
+            "reassignment must publish the resumed epoch atomically"
+        );
+        // And the next allocated stamp continues that incarnation.
+        assert_eq!(
+            manager.next_relay_stamp_in_room(&restored_id, &room_id),
+            Some(RelayStamp { epoch: 7, seq: 1 }),
+        );
+    }
+
+    /// A stale terminal unroute for a room the player no longer (or never did)
+    /// belongs to must be refused untouched — publishing the current
+    /// assignment's live stamp as a foreign room's terminal watermark would
+    /// fabricate a phantom `PlayerLeft` tail and sever live membership.
+    #[tokio::test]
+    async fn clear_room_assignment_with_tail_refuses_a_foreign_room() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:5004".parse().unwrap();
+        let (tx, _rx) = channel();
+        let player_id = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+        let room_a = RoomId::new_v4();
+        let room_b = RoomId::new_v4();
+        manager.assign_client_to_room(&player_id, room_a).await;
+        assert_eq!(
+            manager.next_relay_stamp_in_room(&player_id, &room_a),
+            Some(RelayStamp { epoch: 1, seq: 1 })
+        );
+
+        // Wrong-room capture: refused, nothing consumed or cleared.
+        assert!(
+            manager
+                .clear_room_assignment_with_tail(&player_id, &room_b)
+                .is_none(),
+            "a foreign expected_room must not capture a tail"
+        );
+        assert_eq!(
+            manager.current_relay_stamp_in_room(&player_id, &room_a),
+            Some(RelayStamp { epoch: 1, seq: 1 }),
+            "membership and stamp stream stay intact after the refusal"
+        );
+
+        // Correct-room capture still works exactly as before.
+        let (_, tail) = manager
+            .clear_room_assignment_with_tail(&player_id, &room_a)
+            .expect("matching expected_room captures the terminal tail");
+        assert_eq!(tail, RelayStamp { epoch: 1, seq: 1 });
     }
 
     /// GAP-3 regression: a 16-player session behind a single NAT must be
@@ -1468,16 +1558,32 @@ mod tests {
         );
     }
 
-    /// A missing player is treated as "allow update" (the DB layer rejects it).
-    /// Clock-independent (the not-found branch never reads the clock), so this
-    /// pins the throttle's else-branch without needing a paused runtime.
+    /// A missing player must be throttled OFF, not waved through: an unregistered
+    /// id can never take a throttle stamp, so "allow" would fire the metric
+    /// increment and persistence attempt on every in-flight frame racing its
+    /// teardown — violating the once-per-player-per-window invariant. A player
+    /// registered afterwards starts with a clean throttle baseline.
+    /// Clock-independent (the not-found branch never reads the clock).
     #[tokio::test]
-    async fn should_update_last_seen_allows_unknown_player() {
+    async fn should_update_last_seen_suppresses_unknown_player() {
         let manager = make_manager(4);
         let unknown = Uuid::new_v4();
         assert!(
-            manager.should_update_last_seen(&unknown, std::time::Duration::from_secs(30)),
-            "unknown player defaults to allowing the update"
+            !manager.should_update_last_seen(&unknown, std::time::Duration::from_secs(30)),
+            "unknown player must be suppressed, not allowed"
+        );
+
+        // The suppression is not sticky state: a player registered after the
+        // refused lookups still observes a normal first-update release.
+        let addr: SocketAddr = "127.0.0.1:7101".parse().unwrap();
+        let (tx, _rx) = channel();
+        let late_id = manager
+            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+        assert!(
+            manager.should_update_last_seen(&late_id, std::time::Duration::from_secs(30)),
+            "freshly registered player keeps the first-update release"
         );
     }
 
@@ -1641,7 +1747,7 @@ mod tests {
         let room_id = RoomId::new_v4();
         let new_player_id = Uuid::new_v4();
 
-        let reassigned = manager.reassign_connection(&original_id, &new_player_id, room_id);
+        let reassigned = manager.reassign_connection(&original_id, &new_player_id, room_id, 1);
         assert!(reassigned.is_some(), "Reassignment should succeed");
 
         // Original player should be gone
@@ -1727,7 +1833,7 @@ mod tests {
             .expect("registered connection has lifecycle identity");
 
         manager
-            .reassign_connection(&transient_id, &restored_id, RoomId::new_v4())
+            .reassign_connection(&transient_id, &restored_id, RoomId::new_v4(), 1)
             .expect("reassignment succeeds");
         let reassigned_lifecycle = manager
             .client_lifecycle(&restored_id)
@@ -1835,7 +1941,7 @@ mod tests {
         let new_pid = Uuid::new_v4();
         let room = RoomId::new_v4();
         assert!(manager
-            .reassign_connection(&original, &new_pid, room)
+            .reassign_connection(&original, &new_pid, room, 1)
             .is_some());
 
         // The migrated connection keeps its negotiated v3 capabilities.

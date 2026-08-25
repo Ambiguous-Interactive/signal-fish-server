@@ -1408,6 +1408,7 @@ impl EnhancedGameServer {
         // respect to relay allocation and recipient snapshots.
         let connection_manager = Arc::clone(&self.connection_manager);
         let departed_player = *player_id;
+        let leaving_room = room_id;
         let terminal_tail = match self
             .message_coordinator
             .unroute_local_client_with_tail(
@@ -1415,7 +1416,7 @@ impl EnhancedGameServer {
                 room_id,
                 Box::new(move || {
                     connection_manager
-                        .clear_room_assignment_with_tail(&departed_player)
+                        .clear_room_assignment_with_tail(&departed_player, &leaving_room)
                         .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
                 }),
             )
