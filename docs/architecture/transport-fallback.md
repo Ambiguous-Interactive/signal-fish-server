@@ -32,10 +32,15 @@ longer capable of the session after a capability-downgrading reconnect) and on
 every finalized-room **join / reconnect**. Each event refreshes every current
 v3 member with a complete plan; delivery remains version-gated. Re-issued plan peer lists name
 only peers that can run the session — that negotiated the session's topology and
-transport: a member that did not (for example a v3 relay-only client that
-seat-filled a `mesh + webrtc` room) receives its plan with an **empty** `peers`
+transport. A **new** joiner that cannot run a finalized room's non-relay
+session is rejected at admission with `ROOM_SESSION_INCOMPATIBLE` — admitting
+it would silently split the data path, because its WebSocket-relayed traffic
+reaches the room while P2P traffic between capable members never reaches it.
+What can remain is an incumbent reconnecting with downgraded capabilities: it
+receives its plan with an **empty** `peers`
 list — truthful, it has no P2P peers; the relay floor is its data path — and
-never appears in other members' `peers`. (At
+never appears in other members' `peers`; every publication observes this
+mixed-path shape (`mixed_path_members_observed` + a warn log). (At
 finalization this filter is vacuous: a plan is only selected when every member
 supports it.) Topology and transport never change across re-issues —
 they are sticky for the session lifetime — so the client rule is simple: **the
@@ -221,6 +226,14 @@ can see how often the relay floor is upgraded to a peer-to-peer path:
 - `signal_fish_transport_ice_pregather_emitted_total` — `RoomJoined` /
   `Reconnected` payloads that carried a non-empty ICE pre-gather list (one per
   carrying payload).
+- `signal_fish_transport_seat_fills_rejected_incompatible_total` — seat-fill
+  joins rejected because the room's finalized non-relay session requires
+  capabilities the joiner did not negotiate (`ROOM_SESSION_INCOMPATIBLE`;
+  issue #421).
+- `signal_fish_transport_mixed_path_members_observed_total` — seated members
+  observed during non-relay plan publications whose capabilities exclude the
+  session pair (an empty-peer mixed-path membership, e.g. a drifted reconnect;
+  counted once per publication event).
 
 ## Related documents
 

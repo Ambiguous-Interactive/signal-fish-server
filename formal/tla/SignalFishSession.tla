@@ -32,7 +32,9 @@
 (*                                      publish_finalized_join_membership             *)
 (*   CapabilityReconnect             <-> reconnect publication in                     *)
 (*                                       server/reconnection_service.rs               *)
-(*   Join fullness gate              <-> src/database/mod.rs add_player_to_room       *)
+(*   Join fullness + capability      <-> src/database/mod.rs add_player_to_room       *)
+(*                                       gate and room_service.rs join_room_with_     *)
+(*                                       coordination (issue #421)                    *)
 (*   Depart authority clearing       <-> src/database/mod.rs remove_player_from_room  *)
 (*                                                                                    *)
 (* Intentionally NOT modeled (rationale in formal/README.md): rate limits, the        *)
@@ -203,13 +205,16 @@ CapabilityProfiles ==
 \* Scenario capability assignments (one per .cfg):
 \* Mesh scenario: two full members, a mesh-only member, a host-only member and
 \* a v3 relay-only member — reaches the mesh rung, the host-under-mesh-ceiling
-\* fallback rung, the relay floor, and both "v3 but not session-capable"
-\* seat-fill shapes.
+\* fallback rung, and the relay floor. The session-incapable members can no
+\* longer seat-fill a stored non-relay room (issue #421), so the empty-peer
+\* "v3 but not session-capable" shapes are reached through the reconnect
+\* capability-replacement action instead.
 MeshScenarioCaps ==
     (1 :> ProfileV3Full) @@ (2 :> ProfileV3Full) @@ (3 :> ProfileV3MeshWebRtc) @@
     (4 :> ProfileV3HostWebRtcOnly) @@ (5 :> ProfileV3RelayOnly)
 \* Host scenario: host+webrtc sessions with a v2 member for v3 capability gating
-\* (a v2 seat-filler must observe nothing) and host-failover re-election.
+\* at finalize (a v2 presence floors the room; a post-finalize v2 seat-fill is
+\* rejected by the issue-#421 gate) and host-failover re-election.
 HostScenarioCaps ==
     (1 :> ProfileV3Full) @@ (2 :> ProfileV3Full) @@
     (3 :> ProfileV3HostWebRtcOnly) @@ (4 :> ProfileV2)
@@ -474,16 +479,24 @@ Init ==
     /\ expectedReconnectAuthority = NoPlayer
 
 \* A player joins (room_service.rs handle_join_room; database
-\* add_player_to_room gates ONLY on fullness, so seat-filling a Finalized
-\* non-full room is legal). Joining an active session runs the late-join
-\* semantics atomically. Reconnect capability replacement has its own action
-\* below because production preserves the restored member's original
-\* connected_at instead of appending it as a new join.
+\* add_player_to_room gates on fullness, and the running-session capability
+\* gate (issue #421) rejects a joiner that cannot run the stored non-relay
+\* sticky pair with ROOM_SESSION_INCOMPATIBLE — a rejected join is a no-op).
+\* Joining an active session runs the late-join semantics atomically.
+\* Reconnect capability replacement has its own action below because
+\* production preserves the restored member's original connected_at instead of
+\* appending it as a new join.
 Join(p) ==
     /\ churn > 0
     /\ p # pendingReconnect
     /\ p \notin MemberSet
     /\ Len(members) < MAX_PLAYERS
+    \* Relay-floor rooms store NoPlan and admit anyone (the floor never
+    \* closes); a stored non-relay session keeps its membership uniformly
+    \* capable.
+    \* IF/THEN keeps TLC from touching plan.topology when no plan is stored.
+    /\ IF storedPlan = NoPlan THEN TRUE
+       ELSE Pairable(caps, storedPlan, p)
     /\ members' = Append(members, p)
     /\ LET result == LateJoinResult(caps, connectionGeneration,
                                     Append(members, p), authority)

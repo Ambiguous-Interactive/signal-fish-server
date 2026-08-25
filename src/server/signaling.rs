@@ -467,6 +467,11 @@ impl EnhancedGameServer {
             Box::new(move || {
                 Box::pin(async move {
                     let mut attempts_remaining = baseline_room.players.len().saturating_add(1);
+                    // Mixed-path membership is a fact about the room snapshot
+                    // this publication resolved, not about its delivery
+                    // outcome: observe it exactly once per event, not once per
+                    // reservation retry.
+                    let mut mixed_path_observed = false;
                     loop {
                         let publication_room = match server.database.get_room_by_id(&room_id).await {
                             Ok(Some(room))
@@ -545,6 +550,10 @@ impl EnhancedGameServer {
                             publication_room.authority_player,
                             server.session_members_from(&live_players),
                         );
+                        if !mixed_path_observed {
+                            server.observe_mixed_path_members(&room_id, &resolved.decision);
+                            mixed_path_observed = true;
+                        }
                         let now_unix = resolved
                             .decision
                             .uses_webrtc_signaling()

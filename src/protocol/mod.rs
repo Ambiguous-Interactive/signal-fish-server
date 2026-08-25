@@ -282,13 +282,16 @@ mod tests {
         assert!(!clean_code.contains('I'));
         assert!(!clean_code.contains('1'));
 
-        // Generate multiple codes to test uniqueness probability
+        // Generate multiple codes to test uniqueness probability. Miri scales
+        // the loop down: the uniqueness claim is probabilistic and the
+        // interpreter adds no value per extra sample.
+        let samples = if cfg!(miri) { 10 } else { 100 };
         let mut codes = std::collections::HashSet::new();
-        for _ in 0..100 {
+        for _ in 0..samples {
             codes.insert(generate_clean_room_code());
         }
         // Should generate many unique codes (high probability)
-        assert!(codes.len() > 90);
+        assert!(codes.len() > samples * 9 / 10);
     }
 
     #[test]
@@ -874,7 +877,11 @@ mod tests {
                     continue;
                 }
 
-                for _ in 0..32 {
+                // Miri scales the rounds down: this is a probabilistic
+                // generator/validator cross-check over pure safe code, and the
+                // interpreter adds no value per extra sample.
+                let rounds = if cfg!(miri) { 4 } else { 32 };
+                for _ in 0..rounds {
                     let code = room_codes::generate_region_room_code(&config, prefix);
                     assert!(
                         validate_room_code_with_config(&code, &config).is_ok(),

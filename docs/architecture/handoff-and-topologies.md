@@ -106,8 +106,11 @@ the room is **actually running**. A non-relay active plan is rehydrated over the
 current members, never selected again from the ladder; absence of a sticky plan
 derives the explicit relay floor. Every current v3 member receives a complete,
 tailored `SessionPlan`: current peers, glare-correct `initiate` flags, the stored
-host, and freshly minted ICE for WebRTC. A v3 member that cannot run the session
-still receives an empty-peer plan and participates through relay. Protocol-v2
+host, and freshly minted ICE for WebRTC. A **new** joiner that cannot run the
+session's sticky pair is rejected at admission with `ROOM_SESSION_INCOMPATIBLE`
+(a running session must not split its data path); an incumbent that
+reconnects with downgraded capabilities keeps its seat, receives an empty-peer
+plan, and participates through relay. Protocol-v2
 members receive only their frozen lifecycle traffic.
 
 The full refresh replaces the old additive `NewPeer` membership delta. It gives
@@ -160,9 +163,9 @@ check for it:
 
 Re-election is **execution-aware**: only members that negotiated v3 plus the
 stored sticky (topology, transport) pair are electable, and a Direct candidate
-must still expose a validated endpoint — a seat-filling v2 or
-v3-relay-only member (which can even hold authority) is never named host of a
-session it cannot run. The authority preference passes the same filter; among
+must still expose a validated endpoint — a member that cannot run the session
+(which can even hold authority) is never named host of
+a session it cannot run. The authority preference passes the same filter; among
 qualifying members the rule is unchanged (authority preferred, else earliest
 joiner, smaller-UUID tie-break). If **no** member qualifies, the stored plan is
 dropped and the relay floor carries the room. Direct endpoints are repeated on
@@ -172,10 +175,14 @@ relay is not upgraded mid-game.
 
 Re-issued and late-join plan **peer lists use the session-capability predicate**:
 `peers[]` names only members that negotiated v3 plus the session's topology and
-transport, so a member that did not (e.g. a v3-relay-only
-seat-filler, or one lacking the session's topology) receives its plan with an
+transport. New seat-fills cannot weaken this shape: a joiner that cannot run
+the stored non-relay session is rejected at admission with
+`ROOM_SESSION_INCOMPATIBLE` (issue #421) rather than seated on a split data
+path. An incumbent reconnecting with downgraded capabilities keeps its seat,
+receives its plan with an
 empty `peers` list — it participates via the relay floor, with `host` kept as
-elected, informational — and never appears in other members' lists. At
+elected, informational — never appears in other members' lists, and every
+publication observes it (`mixed_path_members_observed` + a warn log). At
 finalization the filter is vacuous for non-relay plans, because an upgrade is
 selected only when every member supports it. Host election uses a deliberately
 stricter predicate: for Direct, the candidate must additionally have a

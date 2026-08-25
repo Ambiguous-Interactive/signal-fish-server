@@ -288,6 +288,19 @@ pub struct ServerMetrics {
     /// `session_replans_emitted`), and counted even when no co-member
     /// negotiated v3 (the event still happened; zero deliveries).
     pub transport_status_fanout: AtomicU64,
+    /// Seat-fill joins rejected because the target room had already finalized
+    /// a non-relay session whose sticky topology/transport pair the joiner did
+    /// not negotiate (`ROOM_SESSION_INCOMPATIBLE`, issue #421). One per
+    /// rejected join attempt. The gate keeps a running session's membership
+    /// uniformly capable of its data path.
+    pub seat_fills_rejected_incompatible: AtomicU64,
+    /// Seated members observed — during any non-relay plan publication — whose
+    /// negotiated capabilities exclude the session's sticky pair, so their plan
+    /// carries an empty `peers` list and capable members' plans omit them (a
+    /// mixed-path membership; issue #421). Post-gate this can only arise from
+    /// an incumbent reconnecting with downgraded capabilities; each
+    /// publication counts every such member it observes.
+    pub mixed_path_members_observed: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,6 +552,8 @@ pub struct TransportMetrics {
     pub turn_credentials_issued: u64,
     pub transport_status_fanout: u64,
     pub ice_pregather_emitted: u64,
+    pub seat_fills_rejected_incompatible: u64,
+    pub mixed_path_members_observed: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -662,6 +677,8 @@ impl ServerMetrics {
             turn_credentials_issued: AtomicU64::new(0),
             transport_status_fanout: AtomicU64::new(0),
             ice_pregather_emitted: AtomicU64::new(0),
+            seat_fills_rejected_incompatible: AtomicU64::new(0),
+            mixed_path_members_observed: AtomicU64::new(0),
         }
     }
 
@@ -1261,6 +1278,21 @@ impl ServerMetrics {
         self.session_plans_late_join.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one seat-fill join rejected by the running-session capability
+    /// gate (`ROOM_SESSION_INCOMPATIBLE`). One per rejected join attempt.
+    pub fn increment_seat_fills_rejected_incompatible(&self) {
+        self.seat_fills_rejected_incompatible
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record `count` seated members whose negotiated capabilities exclude a
+    /// non-relay session's sticky pair, observed during one plan publication
+    /// (a mixed-path membership; issue #421).
+    pub fn add_mixed_path_members_observed(&self, count: u64) {
+        self.mixed_path_members_observed
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
     /// Record that a client reported an established P2P data path for the first
     /// time or as a state transition (`TransportStatus` with a P2P transport and
     /// `connected: true`).
@@ -1548,6 +1580,12 @@ impl ServerMetrics {
                 turn_credentials_issued: self.turn_credentials_issued.load(Ordering::Relaxed),
                 transport_status_fanout: self.transport_status_fanout.load(Ordering::Relaxed),
                 ice_pregather_emitted: self.ice_pregather_emitted.load(Ordering::Relaxed),
+                seat_fills_rejected_incompatible: self
+                    .seat_fills_rejected_incompatible
+                    .load(Ordering::Relaxed),
+                mixed_path_members_observed: self
+                    .mixed_path_members_observed
+                    .load(Ordering::Relaxed),
             },
         }
     }
@@ -1905,10 +1943,18 @@ mod tests {
     async fn test_concurrent_increment_decrement_active_connections() {
         let metrics = Arc::new(ServerMetrics::new());
 
-        // Phase 1: 100 concurrent increments
-        let inc_barrier = Arc::new(tokio::sync::Barrier::new(100));
-        let mut handles = Vec::with_capacity(100);
-        for _ in 0..100 {
+        // Miri scales the fan-out down: barrier-synchronized tasks cost minutes
+        // under the interpreter; the atomic-conservation claim itself does not
+        // depend on the participant count.
+        let increments: u64 = if cfg!(miri) { 20 } else { 100 };
+        let decrements: u64 = if cfg!(miri) { 10 } else { 50 };
+
+        // Phase 1: concurrent increments
+        let inc_barrier = Arc::new(tokio::sync::Barrier::new(
+            increments.try_into().expect("fan-out fits usize"),
+        ));
+        let mut handles = Vec::with_capacity(increments.try_into().expect("fan-out fits usize"));
+        for _ in 0..increments {
             let metrics = Arc::clone(&metrics);
             let barrier = Arc::clone(&inc_barrier);
             handles.push(tokio::spawn(async move {
@@ -1922,14 +1968,16 @@ mod tests {
 
         let after_inc = metrics.active_connections.load(Ordering::Relaxed);
         assert_eq!(
-            after_inc, 100,
-            "After 100 increments, active_connections should be 100, got {after_inc}"
+            after_inc, increments,
+            "After all increments, active_connections should match them, got {after_inc}"
         );
 
-        // Phase 2: 50 concurrent decrements
-        let dec_barrier = Arc::new(tokio::sync::Barrier::new(50));
-        let mut handles = Vec::with_capacity(50);
-        for _ in 0..50 {
+        // Phase 2: concurrent decrements
+        let dec_barrier = Arc::new(tokio::sync::Barrier::new(
+            decrements.try_into().expect("fan-out fits usize"),
+        ));
+        let mut handles = Vec::with_capacity(decrements.try_into().expect("fan-out fits usize"));
+        for _ in 0..decrements {
             let metrics = Arc::clone(&metrics);
             let barrier = Arc::clone(&dec_barrier);
             handles.push(tokio::spawn(async move {
@@ -1943,21 +1991,28 @@ mod tests {
 
         let final_value = metrics.active_connections.load(Ordering::Relaxed);
         assert_eq!(
-            final_value, 50,
-            "After 100 increments and 50 decrements, active_connections should be 50, got {final_value}"
+            final_value,
+            increments - decrements,
+            "after all increments and decrements, active_connections should be their \
+             difference, got {final_value}"
         );
 
         // total_connections is monotonic (only incremented, never decremented)
         let total = metrics.total_connections.load(Ordering::Relaxed);
         assert_eq!(
-            total, 100,
-            "total_connections should be 100 (never decremented), got {total}"
+            total, increments,
+            "total_connections should equal the increment count (never decremented), got {total}"
         );
     }
 
     #[tokio::test]
     async fn rate_limit_aggregate_is_conserved_during_concurrent_updates() {
         let metrics = Arc::new(ServerMetrics::new());
+        // Miri scales the loop counts down: the conservation claim is checked
+        // at every snapshot, so fewer interleavings still cover it without
+        // minutes of interpretation.
+        let writes = if cfg!(miri) { 1_000 } else { 10_000 };
+        let snapshots = if cfg!(miri) { 100 } else { 1_000 };
         let writer_metrics = Arc::clone(&metrics);
         let writer = tokio::spawn(async move {
             let kinds = [
@@ -1967,7 +2022,7 @@ mod tests {
                 RateLimitRejection::Signal,
                 RateLimitRejection::SignalError,
             ];
-            for index in 0..10_000 {
+            for index in 0..writes {
                 writer_metrics.record_rate_limit_rejection(kinds[index % kinds.len()]);
                 if index.is_multiple_of(32) {
                     tokio::task::yield_now().await;
@@ -1975,7 +2030,7 @@ mod tests {
             }
         });
 
-        for _ in 0..1_000 {
+        for _ in 0..snapshots {
             let rate_limits = metrics.snapshot().await.rate_limiting;
             assert_eq!(
                 rate_limits.rate_limit_rejections,

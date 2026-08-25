@@ -1529,7 +1529,8 @@ discovery, authenticate it as a network identity, or prove it reachable.
   `host`, fresh per-recipient ICE for WebRTC, or the replacement host's
   validated endpoint for Direct. Only members that negotiated v3 plus the
   session's sticky topology/transport pair are electable, and Direct candidates
-  must also expose a usable endpoint (a seat-filling relay-only member is never named host of a session it
+  must also expose a usable endpoint (a member that cannot run the session is never named host of a
+  session it
   cannot run); among those the rule is authority preferred, else earliest joiner, smaller-UUID tie-break. If no
   member qualifies, no plan is re-issued — the session is over and the relay floor carries the room. A host
   departure itself is still signaled by `PlayerLeft` (with the v3 terminal
@@ -1543,10 +1544,15 @@ The topology and transport of a session are **sticky for its lifetime**: the sel
 finalization and is never re-run mid-session, even when departures widen the capability intersection. A re-issued
 plan only ever changes membership-derived fields (`peers`, `host`, `ice_servers`). Re-issued and late-join plan
 peer lists contain only peers that can run the session — that negotiated v3 plus the session's topology **and**
-transport: a v3 member that did not (e.g. a relay-only seat-filler, or one with the `webrtc` transport but not the
-session's topology) still receives its plan, but with an **empty** `peers` list — it has no P2P peers and
+transport. A joiner that cannot run the session is rejected at admission with
+`ROOM_SESSION_INCOMPATIBLE` (see below), so a live non-relay session's membership stays uniformly capable; what
+can remain is an incumbent that **reconnected** with downgraded capabilities (a reconnect owns its seat and is
+never rejected). Such a member still receives its plan, but with an **empty** `peers`
+list — it has no P2P peers and
 participates via the relay floor (`host` stays as elected, informational) — and never appears in other members'
-`peers`. At finalization this filter is vacuous for non-relay decisions, because an upgrade is selected only when
+`peers`. Every publication observes this mixed-path shape (the `mixed_path_members_observed` counter plus a warn
+log) so operators can quantify residual path-splitting. At finalization this filter is vacuous for non-relay
+decisions, because an upgrade is selected only when
 every member supports it. The client contract is uniform: **the latest
 `SessionPlan` wins**. A changed generation is a connection-attempt barrier:
 tear down and rebuild even retained WebRTC pairs with the new ICE credentials,
@@ -1729,18 +1735,30 @@ member; v2 members receive only their frozen lifecycle traffic:
 |---|---|---|---|
 | not `Finalized` | any | nothing (initial pairing is owned by the finalize-time `SessionPlan`) | nothing |
 | `Finalized` | none (relay floor / pre-v3 room) | v3: explicit `relay + relay` plan; v2: nothing | each v3 incumbent: explicit `relay + relay` plan; v2: nothing |
-| `Finalized` | `mesh + webrtc` | `SessionPlan` (every session-capable current peer, glare `initiate`, fresh ICE) | every v3 incumbent: complete refreshed `SessionPlan` |
-| `Finalized` | `host + webrtc` | `SessionPlan` (star view: client targets the stored host; a rejoining host targets all clients) | every v3 incumbent: complete refreshed `SessionPlan` |
-| `Finalized` | `host + direct` | `SessionPlan` (empty `ice_servers`) | every v3 incumbent: complete refreshed `SessionPlan` |
+| `Finalized` | `mesh + webrtc` | capable: `SessionPlan` (every session-capable current peer, glare `initiate`, fresh ICE); incapable: rejected with `ROOM_SESSION_INCOMPATIBLE` | every v3 incumbent: complete refreshed `SessionPlan` |
+| `Finalized` | `host + webrtc` | capable: `SessionPlan` (star view: client targets the stored host; a rejoining host targets all clients); incapable: rejected with `ROOM_SESSION_INCOMPATIBLE` | every v3 incumbent: complete refreshed `SessionPlan` |
+| `Finalized` | `host + direct` | capable: `SessionPlan` (empty `ice_servers`); incapable: rejected with `ROOM_SESSION_INCOMPATIBLE` | every v3 incumbent: complete refreshed `SessionPlan` |
 
-Every plan is v3-gated. The session predicate (v3 plus the session's topology **and** transport) filters peer lists,
-so members are never told to pair with a peer that cannot run the session. In particular, a v3 joiner that cannot
-run the session — a relay-only client, or one that negotiated the
-`webrtc` transport but **not** the session's topology (e.g. `topologies: ["relay"]` entering a `mesh + webrtc`
-session) — still receives the (v3-gated) `SessionPlan` describing the running session — with an **empty** `peers`
-list, since every pair with it sits outside the session contract (a relay-only peer would additionally be rejected
-by `Signal` validation); `fallback: "relay"` is its data path. Symmetrically, a session-incapable member already
-seated in the room is omitted from a capable joiner's `peers`. A `host + direct`
+"Capable" means the joiner negotiated v3 plus the stored session's topology
+and transport — exactly the membership shape selection required at finalize.
+
+Every plan is v3-gated. A **new** joiner that cannot run the stored non-relay
+session — one that did not negotiate v3 plus the session's topology **and**
+transport (a relay-only client, a pure-v2 client, or one that negotiated the
+`webrtc` transport but not the session's topology) — is rejected at admission
+with `ROOM_SESSION_INCOMPATIBLE`: admitting it would silently split the data
+path, because its WebSocket-relayed `GameData` reaches the room while P2P
+traffic between capable members never reaches it. Rooms that finalized to the
+relay floor store no sticky plan and stay open to everyone (the floor never
+closes). The session predicate (v3 plus the session's topology **and**
+transport) still filters peer lists on every publication, so members are never
+told to pair with a peer that cannot run the session: an incumbent that
+reconnects with downgraded capabilities keeps its seat but receives an
+**empty** `peers` list (every pair with it sits outside the session contract;
+a relay-only peer would additionally be rejected by `Signal`
+validation); `fallback: "relay"` is its data path. Symmetrically, such a
+member is omitted from capable members' `peers`, and every publication
+observes it via the `mixed_path_members_observed` counter. A `host + direct`
 (LAN) plan names its topology/transport and peers, carries the elected host's
 validated `direct_endpoint`, and carries no ICE because there is no WebRTC
 signaling to broker. The endpoint originates from `ProvideConnectionInfo`,

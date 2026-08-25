@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a running-session capability gate for seat-fill joins into finalized
+  rooms: a joiner that did not negotiate the room's sticky session pair
+  (protocol v3 plus its topology **and** transport) is rejected with a new
+  `ROOM_SESSION_INCOMPATIBLE` wire code instead of being seated on a silently
+  split data path, where its WebSocket-relayed traffic reaches the room while
+  peer-to-peer traffic between capable members never reaches it. Relay-floored
+  rooms stay open to everyone (the floor never closes), reconnects of seated
+  incumbents are unchanged, and every plan publication now observes residual
+  mixed-path memberships (a drifted reconnect) via the new
+  `seat_fills_rejected_incompatible` and `mixed_path_members_observed`
+  transport metrics plus a warn log (issue #421).
 - Pin the teardown-behind-an-abandoned-write wire contract with an end-to-end
   regression test on a real upgraded socket: a cancelled mid-flush write must
   still deliver every already-buffered byte whole, keep later frames on clean

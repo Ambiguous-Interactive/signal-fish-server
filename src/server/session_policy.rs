@@ -65,8 +65,11 @@ use super::{EnhancedGameServer, NegotiatedProtocol};
 /// and departure re-planning consult it rather than re-running
 /// [`choose_session_plan`] over the current member list, because the live
 /// membership can drift from the finalize-time membership (departures open
-/// seats; `add_player_to_room` gates only on fullness) and a recompute could
-/// contradict the session every member already configured.
+/// seats; reconnects can re-seat an incumbent with downgraded capabilities)
+/// and a recompute could contradict the session every member already
+/// configured. New seat-fills cannot drift the membership: the admission gate
+/// ([`joiner_supports_sticky_plan`], issue #421) rejects joiners that cannot
+/// run the stored pair.
 ///
 /// Topology and transport are immutable for the session lifetime; only `host`
 /// is rewritten (by host failover re-election when the host departs).
@@ -269,6 +272,31 @@ fn all_support(members: &[SessionMember], topology: Topology, transport: Transpo
         && members
             .iter()
             .all(|member| member.supports_session(topology, transport))
+}
+
+/// Whether a joiner's negotiated capabilities satisfy a stored sticky session
+/// — the seat-fill admission predicate (issue #421).
+///
+/// A finalized non-relay session runs one (topology, transport) pair every
+/// finalize-time member negotiated (`all_support`). Admitting a joiner that
+/// cannot run that pair would silently split the room's data path: the
+/// joiner's WebSocket-relayed `GameData` reaches everyone, but the capable
+/// members' peer-to-peer traffic never reaches it ([`SessionPlanDecision::plan_for`]
+/// filters both sides), so it would play on permanently divergent state. The
+/// admission gate therefore applies the same membership predicate selection
+/// used at finalize: protocol v3 plus both axes. Direct endpoints are NOT part
+/// of this predicate (only an elected host needs one), matching
+/// [`SessionMember::supports_session`].
+///
+/// Relay-floored rooms store no sticky plan (`emit_session_plan` removes the
+/// entry), so they never reach this check: the universal floor admits anyone.
+pub(crate) fn joiner_supports_sticky_plan(
+    protocol: &NegotiatedProtocol,
+    stored: &ActiveSessionPlan,
+) -> bool {
+    protocol.version >= 3
+        && protocol.topologies.contains(&stored.topology)
+        && protocol.transports.contains(&stored.transport)
 }
 
 /// Whether a capability-compatible rung has every piece needed to execute it.
@@ -531,12 +559,16 @@ impl SessionPlanDecision {
     /// predicate, because only a Direct host needs to expose an endpoint.
     ///
     /// Re-issued and late-join member lists can contain members that never
-    /// negotiated the session's sticky pair (`add_player_to_room` gates only on
-    /// fullness, so e.g. a v3 relay-only client can seat-fill a `mesh + webrtc`
-    /// room). A WebRTC pair is doomed unless BOTH sides negotiated the
-    /// transport — `handle_signal` rejects either direction and the wasted
-    /// offers burn signal rate-limit budget — so [`Self::plan_for`] filters the
-    /// peer list on both sides using the shared capability predicate.
+    /// negotiated the session's sticky pair. New seat-fills cannot: the
+    /// admission gate (`joiner_supports_sticky_plan`, issue #421) rejects a
+    /// joiner that cannot run the stored pair with
+    /// `ROOM_SESSION_INCOMPATIBLE`, so a running session never splits its data
+    /// path. What remains is an incumbent reconnecting with downgraded
+    /// capabilities — a reconnect owns its seat and is never rejected. A
+    /// WebRTC pair is doomed unless BOTH sides negotiated the transport —
+    /// `handle_signal` rejects either direction and the wasted offers burn
+    /// signal rate-limit budget — so [`Self::plan_for`] still filters the peer
+    /// list on both sides using the shared capability predicate.
     pub(crate) fn pairable(&self, member: &SessionMember) -> bool {
         member.supports_session(self.topology, self.transport)
     }
@@ -1082,9 +1114,10 @@ impl EnhancedGameServer {
     ///
     /// Election is **execution-aware**: only members that negotiated v3 AND
     /// the stored sticky (topology, transport) pair are electable, and Direct
-    /// candidates must expose a validated endpoint. A weaker
-    /// member can legitimately sit in a finalized room (a seat-filling join
-    /// gates only on fullness) and can even hold authority (plain v2
+    /// candidates must expose a validated endpoint. A weaker member can
+    /// legitimately sit in a finalized room (an incumbent reconnecting with
+    /// downgraded capabilities keeps its seat; new seat-fills are gated by
+    /// [`joiner_supports_sticky_plan`]) and can even hold authority (plain v2
     /// `RequestAuthority` has no version gate), but it must never be named host
     /// of a session it cannot run — the v3 members would receive a failover
     /// plan naming a host that cannot anchor the selected transport. The member slice is
@@ -1158,6 +1191,7 @@ impl EnhancedGameServer {
         );
 
         let decision = updated.decision_with(members);
+        self.observe_mixed_path_members(room_id, &decision);
         let now_unix = decision
             .uses_webrtc_signaling()
             .then(|| chrono::Utc::now().timestamp());
@@ -1274,8 +1308,8 @@ impl EnhancedGameServer {
     ///
     /// Defense-in-depth v3 gate: a non-v3 connection is never sent a
     /// plan — at finalize all members are v3 by construction (`all_support`),
-    /// but late-join/replan member lists can include weaker-capability members
-    /// because `add_player_to_room` gates only on fullness. Returns `None` when
+    /// but a drifted incumbent (a reconnect with downgraded capabilities) can
+    /// still lack the session pair. Returns `None` when
     /// gated off (nothing sent), otherwise `Some(minted)` — the number of TURN
     /// credentials minted into the delivered plan.
     #[cfg(test)]
@@ -1335,6 +1369,49 @@ impl EnhancedGameServer {
         };
         let plan = decision.plan_for(recipient, ice_servers);
         Some((Arc::new(ServerMessage::SessionPlan(Box::new(plan))), minted))
+    }
+
+    /// Observe a mixed-path membership during a non-relay plan publication
+    /// (issue #421): seated members whose negotiated capabilities exclude the
+    /// session's sticky pair. Their own plans carry an empty `peers` list and
+    /// capable members' plans omit them — the server relays their
+    /// WebSocket traffic to everyone, but peer-to-peer traffic between
+    /// capable members never reaches them.
+    ///
+    /// Post-admission-gate this can only arise from an incumbent reconnecting
+    /// with downgraded capabilities (a reconnect owns its seat and is never
+    /// rejected); each publication counts every such member it observes —
+    /// exactly once per publication event, not per delivery retry or outcome.
+    /// Finalize needs no call:
+    /// a non-relay selection requires [`all_support`](fn@all_support), and the
+    /// relay floor is not observed by definition.
+    pub(crate) fn observe_mixed_path_members(
+        &self,
+        room_id: &RoomId,
+        decision: &SessionPlanDecision,
+    ) {
+        if decision.is_relay() {
+            return;
+        }
+        let mixed: Vec<PlayerId> = decision
+            .members
+            .iter()
+            .filter(|member| !decision.pairable(member))
+            .map(|member| member.player_id)
+            .collect();
+        if mixed.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            %room_id,
+            topology = ?decision.topology,
+            transport = ?decision.transport,
+            ?mixed,
+            "Mixed-path session membership: these members cannot run the sticky \
+             topology/transport and only see WebSocket-relayed traffic"
+        );
+        self.metrics
+            .add_mixed_path_members_observed(mixed.len() as u64);
     }
 
     /// Compose `recipient`'s full ICE list — the operator's static
