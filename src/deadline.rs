@@ -35,14 +35,20 @@ pub(crate) fn saturating_after(start: Instant, duration: Duration) -> Instant {
     match start.checked_add(duration) {
         Some(deadline) => deadline,
         None => {
+            // Advance by the largest representable chunks: each successful
+            // addition moves the deadline further out, each overflow halves
+            // the chunk until it fits. The chunk reaches zero after finitely
+            // many halvings, and every accepted chunk keeps `latest` strictly
+            // increasing, so this saturates instead of expiring immediately.
+            // Halving uses `checked_div` because the crate denies arithmetic
+            // with panic potential even where overflow is impossible.
             let mut step = Duration::from_secs(u64::MAX);
             let mut latest = start;
             while step > Duration::ZERO {
                 if let Some(candidate) = latest.checked_add(step) {
                     latest = candidate;
-                } else {
-                    step /= 2;
                 }
+                step = step.checked_div(2).unwrap_or(Duration::ZERO);
             }
             latest
         }
