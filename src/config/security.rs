@@ -60,7 +60,13 @@ pub struct SecurityConfig {
     /// dead config: such a frame is rejected by the frame cap first).
     #[serde(default = "default_max_signal_bytes")]
     pub max_signal_bytes: usize,
-    /// Maximum connections per IP address
+    /// Maximum concurrent connections per IP address.
+    ///
+    /// Sized to cover a full client behind one NAT egress (a 16-player
+    /// session plus spectators and reconnect churn). Must be `> 0`: a zero
+    /// cap rejects every registration with `IpLimitExceeded` (there is no
+    /// "unlimited" convention here; a deliberate lockdown is expressed by
+    /// shutting the listener down), and startup validation rejects it.
     #[serde(default = "default_max_connections_per_ip")]
     pub max_connections_per_ip: usize,
     /// Transport-level security configuration (TLS, mTLS, token binding scaffolding)

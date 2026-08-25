@@ -25,16 +25,22 @@ pub const SERVER_MIN_PROTOCOL_VERSION: u16 = 2;
 /// Protocol configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProtocolConfig {
-    /// Maximum length for game names
+    /// Maximum length in bytes for game names. Must be `> 0`: a zero cap
+    /// rejects every game name, so no room can ever be created (startup
+    /// validation rejects it).
     #[serde(default = "default_max_game_name_length")]
     pub max_game_name_length: usize,
     /// Length of room codes
     #[serde(default = "default_room_code_length")]
     pub room_code_length: usize,
-    /// Maximum length for player names
+    /// Maximum length in bytes for player names. Must be `> 0`: a zero cap
+    /// rejects every player name, so no client can ever join (startup
+    /// validation rejects it).
     #[serde(default = "default_max_player_name_length")]
     pub max_player_name_length: usize,
-    /// Maximum number of players allowed in a room
+    /// Maximum number of players allowed in a room. Must be `> 0`: a zero
+    /// ceiling rejects every requested room capacity (startup validation
+    /// rejects it).
     #[serde(default = "default_max_players_limit")]
     pub max_players_limit: u8,
     /// Allow MessagePack (binary) payloads for game data transport.
