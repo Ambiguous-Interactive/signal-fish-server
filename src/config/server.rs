@@ -29,7 +29,8 @@ pub struct ServerConfig {
     /// Set to 0 to retain legacy immediate shutdown behavior.
     #[serde(default = "default_drain_grace_secs")]
     pub drain_grace_secs: u64,
-    /// Maximum number of rooms per game
+    /// Maximum number of rooms per game. Must be `> 0`: a zero cap rejects
+    /// every room creation (startup validation rejects it).
     #[serde(default = "default_max_rooms_per_game")]
     pub max_rooms_per_game: usize,
     /// Time after creation when empty rooms expire (seconds)
@@ -86,17 +87,20 @@ impl Default for ServerConfig {
 /// Rate limiting configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RateLimitConfig {
-    /// Maximum number of room creation requests per time window
+    /// Maximum number of room creation requests per time window. Must be
+    /// `> 0`: a zero budget rejects every creation (startup validation rejects it).
     #[serde(default = "default_max_room_creations")]
     pub max_room_creations: u32,
     /// Time window for rate limiting (seconds)
     #[serde(default = "default_rate_limit_time_window")]
     pub time_window: u64,
     /// Shared maximum room-creation, seated-join, and spectator-join attempts
-    /// per time window.
+    /// per time window. Must be `> 0`: a zero budget rejects every attempt
+    /// (startup validation rejects it).
     #[serde(default = "default_max_join_attempts")]
     pub max_join_attempts: u32,
-    /// Maximum number of WebRTC signaling messages per time window
+    /// Maximum number of WebRTC signaling messages per time window. Must be
+    /// `> 0`: a zero budget rejects every Signal (startup validation rejects it).
     #[serde(default = "default_max_signals")]
     pub max_signals: u32,
     /// Detailed rejected-signal responses before generic rate-limit errors.

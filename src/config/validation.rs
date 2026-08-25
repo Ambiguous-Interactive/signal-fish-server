@@ -79,6 +79,29 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         if app.app_name.trim().is_empty() {
             anyhow::bail!("security.allowed_apps[{index}].app_name must not be blank");
         }
+        // Per-app overrides of the total-rejection caps above share their
+        // failure shape: an override of `0` silently rejects every creation,
+        // join, or authentication for exactly this app while reading like the
+        // conventional "unlimited" value. A deliberate lockdown is expressed
+        // by removing the entry from the allowlist, not by zeroing its caps.
+        if app.max_rooms == Some(0) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].max_rooms must be greater than 0 when set: a \
+                 zero cap rejects every room creation for this app"
+            );
+        }
+        if app.max_players_per_room == Some(0) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].max_players_per_room must be greater than 0 when \
+                 set: a zero cap rejects every join for this app"
+            );
+        }
+        if app.rate_limit_per_minute == Some(0) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].rate_limit_per_minute must be greater than 0 \
+                 when set: a zero budget rejects every Authenticate for this app"
+            );
+        }
     }
 
     // TLS validation
@@ -211,6 +234,62 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         anyhow::bail!(
             "rate_limit.time_window must be greater than 0 seconds \
              (it is the rate-limit window width and the limiter cleanup interval)"
+        );
+    }
+
+    // Total-rejection cap validation (#430). Each cap below shares one failure
+    // shape: a configured `0` silently rejects EVERY registration, room
+    // creation, join, or signal while reading like the conventional "unlimited"
+    // value, and the only symptom is per-connection rejection logs. None of
+    // them has a meaningful "admit nothing" deployment (a deliberate lockdown
+    // is expressed by shutting the listener down), so they must be nonzero —
+    // like the sibling size caps above.
+    if config.security.max_connections_per_ip == 0 {
+        anyhow::bail!(
+            "security.max_connections_per_ip must be greater than 0: a zero cap rejects every \
+             WebSocket registration with IpLimitExceeded"
+        );
+    }
+    if config.server.max_rooms_per_game == 0 {
+        anyhow::bail!(
+            "server.max_rooms_per_game must be greater than 0: a zero cap rejects every \
+             room creation"
+        );
+    }
+    if config.rate_limit.max_room_creations == 0 {
+        anyhow::bail!(
+            "rate_limit.max_room_creations must be greater than 0: a zero budget rejects every \
+             room creation before the per-game room cap is even consulted"
+        );
+    }
+    if config.rate_limit.max_join_attempts == 0 {
+        anyhow::bail!(
+            "rate_limit.max_join_attempts must be greater than 0: a zero budget rejects every \
+             room-creation, seated-join, and spectator-join attempt"
+        );
+    }
+    if config.rate_limit.max_signals == 0 {
+        anyhow::bail!(
+            "rate_limit.max_signals must be greater than 0: a zero budget rejects every \
+             WebRTC Signal message, so peers can never exchange connection candidates"
+        );
+    }
+    if config.protocol.max_game_name_length == 0 {
+        anyhow::bail!(
+            "protocol.max_game_name_length must be greater than 0: a zero cap rejects every \
+             game name, so no room can ever be created"
+        );
+    }
+    if config.protocol.max_player_name_length == 0 {
+        anyhow::bail!(
+            "protocol.max_player_name_length must be greater than 0: a zero cap rejects every \
+             player name, so no client can ever join a room"
+        );
+    }
+    if config.protocol.max_players_limit == 0 {
+        anyhow::bail!(
+            "protocol.max_players_limit must be greater than 0: a zero ceiling rejects every \
+             requested room capacity, so no client can ever join a room"
         );
     }
 
@@ -880,6 +959,110 @@ mod tests {
             err.to_string().contains("rate_limit.time_window"),
             "error must name the offending field: {err}"
         );
+    }
+
+    /// Zero-valued total-rejection caps fail startup with a diagnostic that
+    /// names the offending knob and states the consequence (#430). Each cap
+    /// below shares one failure shape: a configured `0` silently rejects
+    /// EVERY registration, room creation, join, or signal while reading like
+    /// the conventional "unlimited" value, and the only symptom is
+    /// per-connection rejection logs. They must be rejected as loudly as the
+    /// sibling size caps above.
+    #[test]
+    fn zero_total_rejection_caps_are_rejected_with_direct_diagnostics() {
+        fn app_entry(mutate: impl FnOnce(&mut AppRegistrationEntry)) -> AppRegistrationEntry {
+            let mut app = AppRegistrationEntry {
+                app_id: "game".to_string(),
+                app_name: "Game".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: None,
+            };
+            mutate(&mut app);
+            app
+        }
+
+        let cases: &[(&str, &str, fn(&mut Config))] = &[
+            (
+                "security.max_connections_per_ip",
+                "IpLimitExceeded",
+                |config| config.security.max_connections_per_ip = 0,
+            ),
+            (
+                "rate_limit.max_room_creations",
+                "per-game room cap",
+                |config| config.rate_limit.max_room_creations = 0,
+            ),
+            ("rate_limit.max_join_attempts", "spectator-join", |config| {
+                config.rate_limit.max_join_attempts = 0
+            }),
+            (
+                "rate_limit.max_signals",
+                "connection candidates",
+                |config| config.rate_limit.max_signals = 0,
+            ),
+            (
+                "server.max_rooms_per_game",
+                "rejects every room creation",
+                |config| config.server.max_rooms_per_game = 0,
+            ),
+            (
+                "protocol.max_game_name_length",
+                "no room can ever be created",
+                |config| config.protocol.max_game_name_length = 0,
+            ),
+            (
+                "protocol.max_player_name_length",
+                "no client can ever join",
+                |config| config.protocol.max_player_name_length = 0,
+            ),
+            (
+                "protocol.max_players_limit",
+                "requested room capacity",
+                |config| config.protocol.max_players_limit = 0,
+            ),
+            (
+                "security.allowed_apps[0].max_rooms",
+                "room creation for this app",
+                |config| {
+                    config.security.allowed_apps = vec![app_entry(|app| app.max_rooms = Some(0))]
+                },
+            ),
+            (
+                "security.allowed_apps[0].max_players_per_room",
+                "every join for this app",
+                |config| {
+                    config.security.allowed_apps =
+                        vec![app_entry(|app| app.max_players_per_room = Some(0))]
+                },
+            ),
+            (
+                "security.allowed_apps[0].rate_limit_per_minute",
+                "every Authenticate for this app",
+                |config| {
+                    config.security.allowed_apps =
+                        vec![app_entry(|app| app.rate_limit_per_minute = Some(0))]
+                },
+            ),
+        ];
+
+        for (field, consequence, set_zero) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            set_zero(&mut config);
+
+            let err = validate_config_security(&config)
+                .expect_err("a zero cap that rejects all traffic must fail startup");
+            let err = err.to_string();
+            assert!(
+                err.contains(field),
+                "error must name {field} directly: {err}"
+            );
+            assert!(
+                err.contains(consequence),
+                "error for {field} must state its consequence ({consequence}): {err}"
+            );
+        }
     }
 
     /// A zero `websocket.batch_interval_ms` is rejected ONLY when batching is

@@ -46,6 +46,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Startup validation now rejects zero-valued total-rejection
+  caps with a direct diagnostic instead of silently admitting no one:
+  `security.max_connections_per_ip = 0` rejected every WebSocket registration
+  with `IpLimitExceeded` while reading like the conventional "unlimited" value
+  (issue #430). The same failure class is closed for `server.max_rooms_per_game`,
+  `rate_limit.max_room_creations`, `rate_limit.max_join_attempts`,
+  `rate_limit.max_signals`, `protocol.max_game_name_length`,
+  `protocol.max_player_name_length`, and `protocol.max_players_limit`, and for
+  per-app allowlist overrides (`security.allowed_apps[*].max_rooms`,
+  `.max_players_per_room`, `.rate_limit_per_minute`) where zero silently
+  rejects every creation, join, or authentication for exactly that app; each
+  field's documentation now states the `> 0` requirement. Default
+  configurations are unaffected.
 - **Breaking:** Remove the never-wired cross-instance deduplication seam. The
   `DedupCache` had zero production callers, its `coordination.dedup_cache`
   configuration block (and `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__*`
