@@ -837,8 +837,13 @@ where
 
 /// Custom serde module for `bytes::Bytes` serialization
 ///
-/// This provides efficient serialization that works with both JSON (base64-like)
-/// and binary formats (direct bytes).
+/// Binary formats (MessagePack) carry the payload as direct bytes; JSON
+/// (serde_json's `ByteBuf` support) serializes it as an array of byte values
+/// and accepts either that array or a string of the raw UTF-8 bytes. It is
+/// NOT base64 — a base64-looking string decodes to the ASCII text of that
+/// string, not to the encoded payload. The wire binary path never uses this
+/// module for ingress (the strict envelope decoder in `binary.rs` owns that),
+/// so the lenient string form only affects tooling built on these types.
 mod bytes_serde {
     use bytes::Bytes;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
