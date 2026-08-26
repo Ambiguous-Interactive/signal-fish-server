@@ -7593,7 +7593,7 @@ impl DistributedLock for ReleaseErrorLock {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn accounted_release_counts_stale_handles_not_successes() {
+async fn test_accounted_release_counts_stale_handles_not_successes() {
     let server = create_test_server().await;
     let handle = server
         .distributed_lock
@@ -7656,7 +7656,7 @@ async fn accounted_release_counts_stale_handles_not_successes() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn join_flow_counts_backend_release_errors() {
+async fn test_join_flow_counts_backend_release_errors() {
     let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(ReleaseErrorLock::new());
     let server = create_test_server_with_message_coordinator_and_lock(
@@ -7710,7 +7710,7 @@ async fn join_flow_counts_backend_release_errors() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn join_flow_releases_do_not_count_as_release_failures() {
+async fn test_join_flow_releases_do_not_count_as_release_failures() {
     let server = create_test_server().await;
     let (creator_id, _receiver) =
         register_client(&server, "127.0.0.1:48142".parse().unwrap()).await;
@@ -7750,7 +7750,7 @@ async fn join_flow_releases_do_not_count_as_release_failures() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
-async fn distributed_lock_cleanup_counters_are_wired() {
+async fn test_distributed_lock_cleanup_counters_are_wired() {
     let server = create_test_server_with_config(ServerConfig {
         room_cleanup_interval: Duration::from_secs(1),
         ..ServerConfig::default()
