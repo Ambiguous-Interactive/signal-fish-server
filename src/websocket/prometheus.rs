@@ -332,58 +332,9 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
 
     counter(
         &mut buf,
-        "signal_fish_queries_total",
-        "Total queries issued via the signaling server",
-        snapshot.performance.query_count,
-    );
-    emit_latency_metrics(
-        &mut buf,
-        "signal_fish_room_creation_latency",
-        "room creation",
-        &snapshot.performance.room_creation_latency,
-    );
-    emit_latency_metrics(
-        &mut buf,
-        "signal_fish_room_join_latency",
-        "room join",
-        &snapshot.performance.room_join_latency,
-    );
-    emit_latency_metrics(
-        &mut buf,
-        "signal_fish_query_latency",
-        "query",
-        &snapshot.performance.query_latency,
-    );
-    counter(
-        &mut buf,
         "signal_fish_latency_clamped_samples_total",
         "Latency samples that exceeded the histogram tracking range",
         snapshot.performance.latency_histogram_clamped_samples,
-    );
-
-    counter(
-        &mut buf,
-        "signal_fish_errors_total",
-        "Total errors encountered since startup",
-        snapshot.errors.total_errors,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_errors_internal_total",
-        "Internal errors encountered since startup",
-        snapshot.errors.internal_errors,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_errors_websocket_total",
-        "WebSocket errors encountered since startup",
-        snapshot.errors.websocket_errors,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_errors_validation_total",
-        "Protocol validation errors encountered since startup",
-        snapshot.errors.validation_errors,
     );
 
     gauge(
@@ -760,7 +711,6 @@ mod tests {
         metrics.increment_connections();
         metrics.decrement_active_connections();
         metrics.record_rate_limit_rejection(RateLimitRejection::Auth);
-        metrics.increment_query_count();
 
         let snapshot = metrics.snapshot().await;
         let rendered = render_prometheus_metrics(&snapshot);
@@ -778,8 +728,8 @@ mod tests {
             "expected rate limit rejection counter"
         );
         assert!(
-            rendered.contains("# TYPE signal_fish_queries_total counter"),
-            "expected queries metric type"
+            !rendered.contains("signal_fish_queries_total"),
+            "unwired query counters must not be exported"
         );
         assert!(
             rendered.contains("signal_fish_websocket_messages_dropped_total 0"),
@@ -848,18 +798,20 @@ mod tests {
             rendered.contains("signal_fish_dashboard_cache_refresh_failures_total 0"),
             "expected dashboard cache failure counter"
         );
-        assert!(
-            rendered.contains("signal_fish_room_creation_latency_samples_total 0"),
-            "expected room creation latency sample counter"
-        );
-        assert!(
-            rendered.contains("signal_fish_room_join_latency_samples_total 0"),
-            "expected room join latency sample counter"
-        );
-        assert!(
-            rendered.contains("signal_fish_query_latency_samples_total 0"),
-            "expected query latency sample counter"
-        );
+        for unwired in [
+            "signal_fish_room_creation_latency",
+            "signal_fish_room_join_latency",
+            "signal_fish_query_latency",
+            "signal_fish_errors_total",
+            "signal_fish_errors_internal_total",
+            "signal_fish_errors_websocket_total",
+            "signal_fish_errors_validation_total",
+        ] {
+            assert!(
+                !rendered.contains(unwired),
+                "unwired series {unwired} must not be exported"
+            );
+        }
     }
 
     #[tokio::test]

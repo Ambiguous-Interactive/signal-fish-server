@@ -201,17 +201,6 @@ pub async fn metrics_handler(
                 "joined": metrics_snapshot.rooms.rooms_joined,
                 "deleted": metrics_snapshot.rooms.rooms_deleted
             },
-            "performance": {
-                "queries": metrics_snapshot.performance.query_count,
-                "room_creation_latency": metrics_snapshot.performance.room_creation_latency,
-                "room_join_latency": metrics_snapshot.performance.room_join_latency,
-                "query_latency": metrics_snapshot.performance.query_latency
-            },
-            "errors": {
-                "internal": metrics_snapshot.errors.internal_errors,
-                "websocket": metrics_snapshot.errors.websocket_errors,
-                "total": metrics_snapshot.errors.total_errors
-            },
             "rateLimiting": {
                 "total_rejections": metrics_snapshot.rate_limiting.rate_limit_rejections,
                 "auth_rejections": metrics_snapshot.rate_limiting.auth_rejections,

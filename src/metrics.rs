@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Per-connection delivery bookkeeping backing the protocol v3 `RelayStats`
@@ -80,7 +80,6 @@ pub struct ServerMetrics {
     pub total_connections: AtomicU64,
     pub active_connections: AtomicU64,
     pub disconnections: AtomicU64,
-    pub connection_errors: AtomicU64,
     /// HTTP requests that reached the Signal Fish WebSocket upgrade handler.
     /// At quiescence this equals the sum of all
     /// `websocket_upgrade_*` outcome counters below.
@@ -168,7 +167,6 @@ pub struct ServerMetrics {
     pub remote_membership_skipped_broadcasts: AtomicU64,
 
     // Performance metrics
-    pub query_count: AtomicU64,
     pub average_response_times: Arc<RwLock<ResponseTimeTracker>>,
     pub dashboard_cache_last_refresh_epoch: AtomicU64,
     pub dashboard_cache_refresh_failures: AtomicU64,
@@ -211,11 +209,6 @@ pub struct ServerMetrics {
     pub distributed_lock_extend_failures: AtomicU64,
     pub distributed_lock_cleanup_runs: AtomicU64,
     pub distributed_lock_cleanup_removed: AtomicU64,
-
-    // Error tracking
-    pub validation_errors: AtomicU64,
-    pub internal_errors: AtomicU64,
-    pub websocket_errors: AtomicU64,
 
     // Cleanup metrics
     pub empty_rooms_cleaned: AtomicU64,
@@ -341,7 +334,6 @@ pub struct MetricsSnapshot {
     pub dashboard_cache: DashboardCacheMetrics,
     pub rate_limiting: RateLimitingMetrics,
     pub players: PlayerMetrics,
-    pub errors: ErrorMetrics,
     pub cleanup: CleanupMetrics,
     pub reconnection: ReconnectionMetrics,
     pub distributed_lock: DistributedLockMetrics,
@@ -354,7 +346,6 @@ pub struct ConnectionMetrics {
     pub total_connections: u64,
     pub active_connections: u64,
     pub disconnections: u64,
-    pub connection_errors: u64,
     pub websocket_upgrades: WebSocketUpgradeMetrics,
     pub websocket_messages_dropped: u64,
     pub websocket_backpressure_events: u64,
@@ -457,13 +448,6 @@ pub struct CrossInstanceMetrics {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PerformanceMetrics {
-    pub query_count: u64,
-    pub average_room_creation_ms: Option<f64>,
-    pub average_room_join_ms: Option<f64>,
-    pub average_query_ms: Option<f64>,
-    pub room_creation_latency: OperationLatencyMetrics,
-    pub room_join_latency: OperationLatencyMetrics,
-    pub query_latency: OperationLatencyMetrics,
     pub latency_histogram_clamped_samples: u64,
 }
 
@@ -557,14 +541,6 @@ pub struct TransportMetrics {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ErrorMetrics {
-    pub validation_errors: u64,
-    pub internal_errors: u64,
-    pub websocket_errors: u64,
-    pub total_errors: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CleanupMetrics {
     pub empty_rooms_cleaned: u64,
     pub inactive_rooms_cleaned: u64,
@@ -585,7 +561,6 @@ impl ServerMetrics {
             total_connections: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
             disconnections: AtomicU64::new(0),
-            connection_errors: AtomicU64::new(0),
             websocket_upgrade_attempts: AtomicU64::new(0),
             websocket_upgrades_accepted: AtomicU64::new(0),
             websocket_upgrades_rejected_origin: AtomicU64::new(0),
@@ -626,7 +601,6 @@ impl ServerMetrics {
             remote_membership_known_broadcasts: AtomicU64::new(0),
             remote_membership_forced_broadcasts: AtomicU64::new(0),
             remote_membership_skipped_broadcasts: AtomicU64::new(0),
-            query_count: AtomicU64::new(0),
             average_response_times: Arc::new(RwLock::new(ResponseTimeTracker::new())),
             dashboard_cache_last_refresh_epoch: AtomicU64::new(0),
             dashboard_cache_refresh_failures: AtomicU64::new(0),
@@ -653,9 +627,6 @@ impl ServerMetrics {
             distributed_lock_extend_failures: AtomicU64::new(0),
             distributed_lock_cleanup_runs: AtomicU64::new(0),
             distributed_lock_cleanup_removed: AtomicU64::new(0),
-            validation_errors: AtomicU64::new(0),
-            internal_errors: AtomicU64::new(0),
-            websocket_errors: AtomicU64::new(0),
             empty_rooms_cleaned: AtomicU64::new(0),
             inactive_rooms_cleaned: AtomicU64::new(0),
             expired_players_cleaned: AtomicU64::new(0),
@@ -719,11 +690,6 @@ impl ServerMetrics {
             }
         };
         counter.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub fn increment_connection_errors(&self) {
-        self.connection_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn increment_websocket_messages_dropped(&self) {
@@ -929,9 +895,8 @@ impl ServerMetrics {
         self.room_join_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
-    pub fn increment_rooms_deleted(&self) {
-        self.rooms_deleted.fetch_add(1, Ordering::Relaxed);
+    pub fn add_rooms_deleted(&self, count: u64) {
+        self.rooms_deleted.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn increment_room_cap_lock_acquisitions(&self) {
@@ -1023,11 +988,6 @@ impl ServerMetrics {
     pub fn increment_remote_membership_skipped_broadcast(&self) {
         self.remote_membership_skipped_broadcasts
             .fetch_add(1, Ordering::Relaxed);
-    }
-
-    // Performance metrics
-    pub fn increment_query_count(&self) {
-        self.query_count.fetch_add(1, Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
@@ -1169,21 +1129,6 @@ impl ServerMetrics {
             self.distributed_lock_cleanup_removed
                 .fetch_add(removed as u64, Ordering::Relaxed);
         }
-    }
-
-    // Error tracking
-    #[allow(dead_code)]
-    pub fn increment_validation_errors(&self) {
-        self.validation_errors.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn increment_internal_errors(&self) {
-        self.internal_errors.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub fn increment_websocket_errors(&self) {
-        self.websocket_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     // Cleanup metrics
@@ -1344,11 +1289,6 @@ impl ServerMetrics {
     // Snapshot generation
     pub async fn snapshot(&self) -> MetricsSnapshot {
         let tracker = self.average_response_times.read().await;
-        let room_creation_latency = tracker
-            .get_latency_metrics("room_creation")
-            .unwrap_or_default();
-        let room_join_latency = tracker.get_latency_metrics("room_join").unwrap_or_default();
-        let query_latency = tracker.get_latency_metrics("query").unwrap_or_default();
         let websocket_ping_rtt = tracker
             .get_latency_metrics("websocket_ping_rtt")
             .unwrap_or_default();
@@ -1365,20 +1305,12 @@ impl ServerMetrics {
         let room_code_retry_success_rate = (room_code_retry_operations > 0)
             .then(|| (room_code_retry_successes as f64) / (room_code_retry_operations as f64));
 
-        let validation_errors = self.validation_errors.load(Ordering::Relaxed);
-        let internal_errors = self.internal_errors.load(Ordering::Relaxed);
-        let websocket_errors = self.websocket_errors.load(Ordering::Relaxed);
-        let total_errors = validation_errors
-            .saturating_add(internal_errors)
-            .saturating_add(websocket_errors);
-
         MetricsSnapshot {
             timestamp: chrono::Utc::now(),
             connections: ConnectionMetrics {
                 total_connections: self.total_connections.load(Ordering::Relaxed),
                 active_connections: self.active_connections.load(Ordering::Relaxed),
                 disconnections: self.disconnections.load(Ordering::Relaxed),
-                connection_errors: self.connection_errors.load(Ordering::Relaxed),
                 websocket_upgrades: WebSocketUpgradeMetrics {
                     attempts: self.websocket_upgrade_attempts.load(Ordering::Relaxed),
                     accepted: self.websocket_upgrades_accepted.load(Ordering::Relaxed),
@@ -1471,13 +1403,6 @@ impl ServerMetrics {
                     .load(Ordering::Relaxed),
             },
             performance: PerformanceMetrics {
-                query_count: self.query_count.load(Ordering::Relaxed),
-                average_room_creation_ms: room_creation_latency.average_ms,
-                average_room_join_ms: room_join_latency.average_ms,
-                average_query_ms: query_latency.average_ms,
-                room_creation_latency,
-                room_join_latency,
-                query_latency,
                 latency_histogram_clamped_samples: self
                     .latency_histogram_clamped_samples
                     .load(Ordering::Relaxed),
@@ -1525,12 +1450,6 @@ impl ServerMetrics {
                 game_data_messages: self.game_data_messages.load(Ordering::Relaxed),
                 heartbeat_updates: self.heartbeat_updates.load(Ordering::Relaxed),
                 heartbeat_skipped: self.heartbeat_skipped.load(Ordering::Relaxed),
-            },
-            errors: ErrorMetrics {
-                validation_errors,
-                internal_errors,
-                websocket_errors,
-                total_errors,
             },
             cleanup: CleanupMetrics {
                 empty_rooms_cleaned: self.empty_rooms_cleaned.load(Ordering::Relaxed),
@@ -1587,77 +1506,6 @@ impl ServerMetrics {
                     .mixed_path_members_observed
                     .load(Ordering::Relaxed),
             },
-        }
-    }
-
-    /// Get a human-readable health status based on metrics
-    #[allow(dead_code)]
-    pub async fn health_status(&self) -> HealthStatus {
-        let snapshot = self.snapshot().await;
-
-        let mut issues = Vec::new();
-        let mut warnings = Vec::new();
-
-        // Check error rates
-        let total_operations = snapshot
-            .rooms
-            .rooms_created
-            .saturating_add(snapshot.rooms.rooms_joined);
-        let total_failures = snapshot
-            .rooms
-            .room_creation_failures
-            .saturating_add(snapshot.rooms.room_join_failures);
-
-        if total_operations > 0 {
-            let failure_rate = (total_failures as f64) / (total_operations as f64);
-            if failure_rate > 0.1 {
-                issues.push(format!("High failure rate: {:.1}%", failure_rate * 100.0));
-            } else if failure_rate > 0.05 {
-                warnings.push(format!(
-                    "Elevated failure rate: {:.1}%",
-                    failure_rate * 100.0
-                ));
-            }
-        }
-
-        // Check race condition frequency
-        if snapshot.race_conditions.room_capacity_conflicts > 0 {
-            warnings.push(format!(
-                "Room capacity conflicts: {}",
-                snapshot.race_conditions.room_capacity_conflicts
-            ));
-        }
-
-        if snapshot.race_conditions.room_code_retry_exhaustions > 0 {
-            warnings.push(format!(
-                "Room code retry exhaustions: {}",
-                snapshot.race_conditions.room_code_retry_exhaustions
-            ));
-        }
-
-        // Check retry success rate (`None` means "never attempted" — neither
-        // a fabricated healthy rate nor a warning).
-        if let Some(rate) = snapshot
-            .race_conditions
-            .retry_success_rate
-            .filter(|rate| *rate < 0.9)
-        {
-            warnings.push(format!("Retry issues: {:.1}% success rate", rate * 100.0));
-        }
-
-        let status = if !issues.is_empty() {
-            HealthStatusLevel::Unhealthy
-        } else if !warnings.is_empty() {
-            HealthStatusLevel::Degraded
-        } else {
-            HealthStatusLevel::Healthy
-        };
-
-        HealthStatus {
-            status,
-            issues,
-            warnings,
-            metrics: snapshot,
         }
     }
 }
@@ -1806,67 +1654,6 @@ const MICROS_PER_MS: f64 = 1000.0;
 
 fn duration_to_micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct HealthStatus {
-    pub status: HealthStatusLevel,
-    pub issues: Vec<String>,
-    pub warnings: Vec<String>,
-    pub metrics: MetricsSnapshot,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub enum HealthStatusLevel {
-    Healthy,
-    Degraded,
-    Unhealthy,
-}
-
-/// Utility struct for timing operations
-#[allow(dead_code)]
-pub struct OperationTimer {
-    #[allow(dead_code)]
-    operation: String,
-    #[allow(dead_code)]
-    start: Instant,
-    #[allow(dead_code)]
-    metrics: Arc<ServerMetrics>,
-}
-
-impl OperationTimer {
-    pub fn new(operation: &str, metrics: Arc<ServerMetrics>) -> Self {
-        Self {
-            operation: operation.to_string(),
-            start: Instant::now(),
-            metrics,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub async fn finish(self) {
-        let duration = self.start.elapsed();
-        self.metrics
-            .record_response_time(&self.operation, duration)
-            .await;
-    }
-
-    #[allow(dead_code)]
-    pub async fn finish_with_result<T, E>(self, result: &Result<T, E>) {
-        let duration = self.start.elapsed();
-        self.metrics
-            .record_response_time(&self.operation, duration)
-            .await;
-
-        if result.is_err() {
-            match self.operation.as_str() {
-                "room_creation" => self.metrics.increment_room_creation_failures(),
-                "room_join" => self.metrics.increment_room_join_failures(),
-                "query" => self.metrics.increment_internal_errors(),
-                _ => {}
-            }
-        }
-    }
 }
 
 /// Live dashboard-cache health counters, all maintained by the refresh loop in
@@ -2105,27 +1892,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn recovered_room_code_collision_does_not_degrade_health() {
-        let metrics = ServerMetrics::new();
-        metrics.increment_room_code_collisions();
-        metrics.increment_room_code_retry_operations();
-        metrics.increment_room_code_retry_successes();
-
-        let health = metrics.health_status().await;
-        assert_eq!(health.status, HealthStatusLevel::Healthy);
-        assert!(health.warnings.is_empty());
-        assert_eq!(
-            health.metrics.race_conditions.room_code_retry_success_rate,
-            Some(1.0)
-        );
-
-        metrics.increment_room_code_retry_exhaustions();
-        let exhausted = metrics.health_status().await;
-        assert_eq!(exhausted.status, HealthStatusLevel::Degraded);
-        assert_eq!(exhausted.warnings, ["Room code retry exhaustions: 1"]);
-    }
-
     /// Retry-success rates must read `null` (never a fabricated `1.0`) while
     /// zero attempts exist, so alert thresholds like `< 0.9` cannot see a
     /// healthy 100% for a server that has never retried. The first recorded
@@ -2142,10 +1908,6 @@ mod tests {
             race.room_code_retry_success_rate, None,
             "an idle server must not advertise a 100% room-code retry success rate"
         );
-        // And it must stay healthy with no fabricated-rate warnings.
-        let health = metrics.health_status().await;
-        assert_eq!(health.status, HealthStatusLevel::Healthy);
-        assert!(health.warnings.is_empty());
 
         // One failed attempt defines the rate at its real (failing) value.
         metrics.increment_retry_attempts();

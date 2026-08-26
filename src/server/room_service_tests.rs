@@ -5023,6 +5023,12 @@ async fn unregister_snapshot_failure_creates_no_broken_reconnect_record() {
             .await,
         "an incomplete room snapshot must not mint an unrestorable pending record"
     );
+    assert!(
+        !reconnection_manager
+            .has_pre_issued_token(&fixture.leaver)
+            .await,
+        "an incomplete room snapshot must not leave the pre-issued token claimable past teardown"
+    );
     assert!(matches!(
         reconnection_manager
             .validate_reconnection(&fixture.leaver, &fixture.room_id, &fixture.reconnect_token,)
@@ -5434,6 +5440,123 @@ async fn draining_room_creation_rolls_back_after_create_race() {
             .expect("room cap lock check succeeds"),
         "room-cap lock must be released after rollback"
     );
+    assert_eq!(
+        server.metrics.rooms_deleted.load(Ordering::Relaxed),
+        1,
+        "drain rollback of a just-created room must count exactly one deletion"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn unpublished_created_room_rollback_counts_rooms_deleted() {
+    let server = create_test_server().await;
+    let (creator_id, creator_rx) =
+        register_client(&server, "127.0.0.1:48140".parse().unwrap()).await;
+    // Dropping the receiver makes the RoomJoined baseline undeliverable, which
+    // forces the post-admission rollback of the exclusively-created room.
+    drop(creator_rx);
+
+    let deleted_before = server.metrics.rooms_deleted.load(Ordering::Relaxed);
+    server
+        .handle_join_room(
+            &creator_id,
+            "rollback-count".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        server.get_client_room(&creator_id).await,
+        None,
+        "rollback of the unpublished creation unroutes the creator"
+    );
+    assert_eq!(
+        server.metrics.rooms_deleted.load(Ordering::Relaxed),
+        deleted_before + 1,
+        "rolling back an unpublished exclusive room creation must count exactly one deletion"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn empty_room_sweep_counts_rooms_deleted() {
+    let server = create_test_server_with_config(ServerConfig {
+        room_cleanup_interval: Duration::from_secs(1),
+        empty_room_timeout: Duration::ZERO,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (player_id, _receiver) = register_client(&server, "127.0.0.1:48141".parse().unwrap()).await;
+    let room = server
+        .database
+        .create_room(
+            "deleted-counting".to_string(),
+            Some("DELBTN".to_string()),
+            4,
+            true,
+            player_id,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    // `create_room` seats the creator; the sweep only reaps occupant-free rooms.
+    server
+        .database
+        .remove_player_from_room(&room.id, &player_id)
+        .await
+        .expect("creator removal succeeds")
+        .expect("creator existed");
+    server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory storage")
+        .backdate_room_activity_for_test(&room.id, chrono::Duration::minutes(5))
+        .await;
+
+    let deleted_before = server.metrics.rooms_deleted.load(Ordering::Relaxed);
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let deleted = server.metrics.rooms_deleted.load(Ordering::Relaxed);
+            if deleted == deleted_before + 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the empty-room sweep must count its deletion");
+    assert!(
+        server
+            .database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup succeeds")
+            .is_none(),
+        "counted deletion corresponds to a removed room"
+    );
+
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
 }
 
 #[tokio::test]

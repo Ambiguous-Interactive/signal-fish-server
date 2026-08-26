@@ -209,7 +209,10 @@ impl EnhancedGameServer {
             };
         if created_room_is_still_exclusive {
             match self.database.delete_room(&room_id).await {
-                Ok(_) => {
+                Ok(deleted) => {
+                    if deleted {
+                        self.metrics.add_rooms_deleted(1);
+                    }
                     self.room_applications.remove(&room_id);
                     let _ = self.room_coordinator.clear_ready_players(&room_id).await;
                     self.metrics.increment_players_left();
@@ -2239,7 +2242,9 @@ impl EnhancedGameServer {
 
                         if self.is_draining() {
                             match self.database.delete_room(&room.id).await {
-                                Ok(true) => {}
+                                Ok(true) => {
+                                    self.metrics.add_rooms_deleted(1);
+                                }
                                 Ok(false) => {
                                     tracing::warn!(
                                         room_id = %room.id,

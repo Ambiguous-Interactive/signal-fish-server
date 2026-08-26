@@ -556,6 +556,7 @@ impl EnhancedGameServer {
                             "Cleaned up empty rooms"
                         );
                         self.metrics.add_empty_rooms_cleaned(count as u64);
+                        self.metrics.add_rooms_deleted(count as u64);
 
                         // Process post-cleanup operations with idempotency check
                         for room_id in &deleted_room_ids {
@@ -636,6 +637,8 @@ impl EnhancedGameServer {
                         self.metrics
                             .add_inactive_rooms_cleaned(outcome.inactive_rooms_cleaned as u64);
                     }
+                    self.metrics
+                        .add_rooms_deleted(outcome.total_cleaned() as u64);
                 }
                 Ok(_) => {}
                 Err(e) => {
