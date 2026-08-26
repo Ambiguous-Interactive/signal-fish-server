@@ -2584,8 +2584,16 @@ pub(super) async fn handle_socket(
                         .record_transport_activity(&active_player_id)
                         .await;
                 }
-                _ => {
-                    // Ignore other message types
+                Message::Ping(_) => {
+                    // A compliant client keepalive is inbound transport
+                    // activity. It already suppressed this window's own probe
+                    // via the inbound-activity guard, so liveness must be
+                    // refreshed here too — otherwise a Ping-only client
+                    // starves the activity reaper and is deterministically
+                    // evicted while fully healthy.
+                    server_clone
+                        .record_transport_activity(&active_player_id)
+                        .await;
                 }
             }
         }

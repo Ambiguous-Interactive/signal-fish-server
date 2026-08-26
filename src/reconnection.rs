@@ -556,6 +556,12 @@ impl ReconnectionManager {
         self.pre_issued.write().await.remove(player_id);
     }
 
+    /// Whether a pre-issued token is currently held for `player_id`.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn has_pre_issued_token(&self, player_id: &PlayerId) -> bool {
+        self.pre_issued.read().await.contains_key(player_id)
+    }
+
     pub async fn discard_pending_reconnection(&self, player_id: &PlayerId) -> bool {
         let mut state = self.replay_state.write().await;
         let removed = state.disconnected_players.remove(player_id);

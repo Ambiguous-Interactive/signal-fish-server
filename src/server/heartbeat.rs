@@ -4,8 +4,9 @@ use std::sync::Arc;
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
-    /// Refresh liveness from a transport-level WebSocket Pong without
-    /// generating an application-level `ServerMessage::Pong` response.
+    /// Refresh liveness from transport-level WebSocket traffic (a client
+    /// Ping, or a Pong answering our probe) without generating an
+    /// application-level `ServerMessage::Pong` response.
     pub(crate) async fn record_transport_activity(&self, player_id: &PlayerId) {
         self.record_client_activity(player_id);
         self.maybe_update_last_seen(player_id).await;
@@ -32,11 +33,14 @@ impl EnhancedGameServer {
     pub(super) async fn maybe_update_last_seen(&self, player_id: &PlayerId) {
         let threshold = self.config.heartbeat_throttle;
 
-        // If throttle is disabled (Duration::ZERO), always update
-        let should_update = threshold.is_zero()
-            || self
-                .connection_manager
-                .should_update_last_seen(player_id, threshold);
+        // `should_update_last_seen` owns both policies: a disabled throttle
+        // (`Duration::ZERO`) updates every known player (its elapsed check is
+        // trivially true at zero), and unknown players are suppressed on every
+        // path so teardown-racing frames can never fire the persistence
+        // attempt or its metric.
+        let should_update = self
+            .connection_manager
+            .should_update_last_seen(player_id, threshold);
 
         if should_update {
             self.metrics.increment_heartbeat_updates();
@@ -91,6 +95,7 @@ mod tests {
     use bytes::Bytes;
     use std::collections::HashSet;
     use std::net::SocketAddr;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::Duration as StdDuration;
     use tokio::sync::mpsc;
@@ -218,6 +223,32 @@ mod tests {
         assert_eq!(
             room_activity_after, room_activity_before,
             "a rejected payload must not keep an inactive room alive"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn zero_throttle_still_suppresses_unknown_player_last_seen() {
+        let server = create_test_server_with_config(ServerConfig {
+            heartbeat_throttle: StdDuration::ZERO,
+            max_connections_per_ip: 32,
+            ..ServerConfig::default()
+        })
+        .await;
+        let unknown_player_id = crate::protocol::PlayerId::new_v4();
+
+        let updates_before = server.metrics.heartbeat_updates.load(Ordering::Relaxed);
+        server.maybe_update_last_seen(&unknown_player_id).await;
+
+        assert_eq!(
+            updates_before,
+            server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+            "a teardown-racing frame from an unregistered player must not fire the heartbeat update even with the throttle disabled"
+        );
+        assert_eq!(
+            1,
+            server.metrics.heartbeat_skipped.load(Ordering::Relaxed),
+            "the suppressed update must count as skipped"
         );
     }
 
