@@ -54,13 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inception, so they permanently exported zeros/nulls (and the JSON
   `performance`/`errors` objects did the same), making error-rate alerts and
   `created − deleted` style invariants impossible to satisfy honestly. The same
-  audit catalogued the remaining exported families whose increment sites are
+  audit catalogued several more exported families whose increment sites are
   also unreachable today (distributed-lock release/extend/cleanup counters,
-  relay client-id reuse/exhaustion, cross-instance membership cache hits/misses);
-  they are retained as reserved seams for a dedicated wire-or-remove decision
-  (issue #434). The dead
+  relay client-id reuse/exhaustion, and the cross-instance membership/coordination
+  seam counters); they are retained as reserved seams for a dedicated
+  wire-or-remove decision (issue #434). The dead
   `ServerMetrics::health_status()`/`OperationTimer` APIs, whose failure-rate
-  math divided by those permanently-zero counters, are removed with them.
+  math was built from those never-incremented counters, are removed with them.
 
 - **Breaking:** Startup validation now rejects the remaining "zero silently
   kills an enabled feature" configuration seams (issue #431, following the
