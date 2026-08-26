@@ -2322,15 +2322,15 @@ impl EnhancedGameServer {
     ///
     /// `Ok(false)` means this caller's handle had already gone stale (its lease
     /// expired or the key moved on), and an `Err` means the release itself
-    /// failed; both leave the coordination key in a state this caller did not
-    /// intend, so both count as release failures.
+    /// failed. Neither outcome confirms release of an active lease owned by
+    /// this caller, so both count as release failures.
     pub(super) async fn release_lock_accounted(&self, lock: &LockHandle) {
         match self.distributed_lock.release(lock).await {
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!(
                     key = %lock.key,
-                    "Attempted to release a stale distributed-lock handle (key absent or held by another token)"
+                    "Attempted to release a stale distributed-lock handle (lease expired, key absent, or held by another token)"
                 );
                 self.metrics.increment_distributed_lock_release_failures();
             }

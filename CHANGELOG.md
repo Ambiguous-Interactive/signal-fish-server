@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real maintenance sweep, and release failures
   (`signal_fish_distributed_lock_release_failures_total`) now count every stale
   or failed lock release on the admission paths instead of being discarded.
+  The public `DistributedLock::release` result is now defined as `true` only
+  when it removes an active matching-token lease; the in-memory backend
+  reclaims an expired matching entry but returns `false`, so callers must not
+  interpret expiry cleanup as a successful owned-lease release.
   Removed series whose producers cannot exist in this product:
   `signal_fish_distributed_lock_extend_failures_total` (no production lease
   extension path), `signal_fish_relay_client_id_reuse_total` and
@@ -73,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `signal_fish_cross_instance_membership_cache_{hits,misses}_total` (no such
   cache exists in the shipped in-memory backend; the remaining reserved
   remote-coordination seam series keep their explicit "Reserved" labeling).
+  Raw JSON consumers must also drop `distributed_lock.extend_failures`,
+  `cross_instance.membership_cache_hits`,
+  `cross_instance.membership_cache_misses`, and `relay_health`; the matching
+  public `ServerMetrics` fields/increment methods, snapshot fields, and
+  `RelayHealthMetrics` type are removed.
 
 - **Breaking:** Startup validation now rejects the remaining "zero silently
   kills an enabled feature" configuration seams (issue #431, following the

@@ -23,7 +23,12 @@ pub trait DistributedLock: Send + Sync {
     /// Extend the TTL of an existing lock
     async fn extend(&self, handle: &LockHandle, ttl: Duration) -> Result<bool>;
 
-    /// Release a lock
+    /// Release an active lock lease owned by `handle`.
+    ///
+    /// Returns `Ok(true)` only when an unexpired entry with the matching token
+    /// was removed. Returns `Ok(false)` when the key is absent, the lease has
+    /// expired, or another token owns the key. Implementations may reclaim a
+    /// matching expired entry while returning `Ok(false)`.
     async fn release(&self, handle: &LockHandle) -> Result<bool>;
 
     /// Check if a lock is held
@@ -219,8 +224,9 @@ impl DistributedLock for InMemoryDistributedLock {
 
         if let Some(entry) = locks.get(&handle.key) {
             if entry.token == handle.token {
+                let lease_active = entry.expires_at > chrono::Utc::now();
                 locks.remove(&handle.key);
-                return Ok(true);
+                return Ok(lease_active);
             }
         }
 
@@ -229,7 +235,8 @@ impl DistributedLock for InMemoryDistributedLock {
 
     async fn is_locked(&self, key: &str) -> Result<bool> {
         // Read lock is sufficient: check if key exists and is not expired.
-        // Stale expired entries are cleaned up lazily by try_acquire/extend.
+        // Stale expired entries are cleaned up lazily by
+        // try_acquire/extend/release.
         let locks = self.locks.read().await;
         let now = chrono::Utc::now();
         Ok(locks.get(key).is_some_and(|entry| entry.expires_at > now))

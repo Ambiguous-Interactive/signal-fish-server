@@ -11,6 +11,7 @@ use crate::coordination::{
 use crate::database::{
     create_database, DatabaseConfig, GameDatabase, InMemoryDatabase, RoomCleanupOutcome,
 };
+use crate::distributed::LockHandle;
 use crate::protocol::{
     ConnectionInfo, ErrorCode, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage,
     SpectatorInfo,
@@ -7547,6 +7548,49 @@ async fn join_racing_room_deletion_reports_room_not_found() {
     assert_eq!(reason, "Room not found");
 }
 
+struct ReleaseErrorLock {
+    inner: InMemoryDistributedLock,
+}
+
+impl ReleaseErrorLock {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryDistributedLock::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DistributedLock for ReleaseErrorLock {
+    async fn acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<LockHandle> {
+        self.inner.acquire(key, ttl).await
+    }
+
+    async fn try_acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<Option<LockHandle>> {
+        self.inner.try_acquire(key, ttl).await
+    }
+
+    async fn extend(&self, handle: &LockHandle, ttl: Duration) -> anyhow::Result<bool> {
+        self.inner.extend(handle, ttl).await
+    }
+
+    async fn release(&self, _handle: &LockHandle) -> anyhow::Result<bool> {
+        anyhow::bail!("injected distributed-lock release failure")
+    }
+
+    async fn is_locked(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.is_locked(key).await
+    }
+
+    async fn cleanup_expired_locks(&self) -> anyhow::Result<usize> {
+        self.inner.cleanup_expired_locks().await
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn accounted_release_counts_stale_handles_not_successes() {
@@ -7585,6 +7629,83 @@ async fn accounted_release_counts_stale_handles_not_successes() {
         1,
         "a stale-handle release must count exactly one release failure"
     );
+
+    let expired = server
+        .distributed_lock
+        .acquire("expired-release-accounting", Duration::ZERO)
+        .await
+        .expect("zero-duration lock acquisition succeeds");
+    server.release_lock_accounted(&expired).await;
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        2,
+        "an expired-handle release must count exactly one additional failure"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("expired-release-accounting")
+            .await
+            .expect("lock state check succeeds"),
+        "releasing an expired matching handle must still reclaim its stale entry"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn join_flow_counts_backend_release_errors() {
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(ReleaseErrorLock::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator,
+        distributed_lock,
+        create_test_database().await,
+    )
+    .await;
+    let (creator_id, _receiver) =
+        register_client(&server, "127.0.0.1:48143".parse().unwrap()).await;
+
+    server
+        .handle_join_room(
+            &creator_id,
+            "failed-release".to_string(),
+            Some("FAILR1".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        server.get_client_room(&creator_id).await.is_some(),
+        "release errors must not roll back an otherwise successful admission"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        2,
+        "the game-cap and room-join release errors must each count exactly once"
+    );
+    for key in [
+        "game_room_cap:failed-release",
+        "room_join:failed-release:FAILR1",
+    ] {
+        assert!(
+            server
+                .distributed_lock
+                .is_locked(key)
+                .await
+                .expect("lock state check succeeds"),
+            "an errored release must leave coordination key {key} held"
+        );
+    }
 }
 
 #[tokio::test]
@@ -7637,13 +7758,11 @@ async fn distributed_lock_cleanup_counters_are_wired() {
     .await;
     let expired = server
         .distributed_lock
-        .try_acquire("cleanup-accounting", Duration::from_millis(30))
+        .try_acquire("cleanup-accounting", Duration::ZERO)
         .await
         .expect("probe acquisition succeeds")
         .expect("probe key is free");
     drop(expired);
-    // Let the probe lease lapse so the sweep has something to remove.
-    tokio::time::sleep(Duration::from_millis(120)).await;
 
     let shutdown = Arc::new(Notify::new());
     let cleanup_task = tokio::spawn({

@@ -409,7 +409,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_distributed_lock_cleanup_runs_total",
-        "Total cleanup executions for distributed locks",
+        "Total successful cleanup executions for distributed locks",
         snapshot.distributed_lock.cleanup_runs,
     );
     counter(
@@ -797,7 +797,7 @@ mod tests {
             ),
             (
                 "signal_fish_distributed_lock_cleanup_runs_total",
-                "Total cleanup executions for distributed locks",
+                "Total successful cleanup executions for distributed locks",
             ),
             (
                 "signal_fish_distributed_lock_cleanup_removed_total",
