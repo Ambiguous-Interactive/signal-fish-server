@@ -18,7 +18,10 @@ pub struct WebSocketConfig {
     /// Enable message batching for WebSocket connections
     #[serde(default = "default_enable_batching")]
     pub enable_batching: bool,
-    /// Maximum number of messages to batch before flushing
+    /// Maximum number of messages to batch before flushing. When
+    /// `enable_batching` is true this must be `> 0`: a zero size flushes on
+    /// every message, silently disabling batching (startup validation rejects
+    /// it). With batching disabled the value is unused.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     /// Maximum time in milliseconds to wait before flushing batch
@@ -177,6 +180,17 @@ impl WebSocketConfig {
                  is true (it is the batch-flush interval, which cannot be zero)"
             );
         }
+        // A zero batch size shares the zero-interval failure shape (#431): with
+        // batching on, the receive path clamps it up to 1, so every message
+        // flushes immediately and the batching an operator explicitly enabled
+        // is silently disabled. With batching disabled the value is never read,
+        // so any value is fine — mirroring `batch_interval_ms` above.
+        if self.enable_batching && self.batch_size == 0 {
+            anyhow::bail!(
+                "websocket.batch_size must be greater than 0 when websocket.enable_batching \
+                 is true (a zero batch size flushes on every message, disabling batching)"
+            );
+        }
         // A zero-capacity queue cannot accept any message (`mpsc::channel`
         // panics on 0), and delivery semantics require at least one slot of
         // real buffering per connection.
@@ -307,6 +321,24 @@ mod tests {
             Case {
                 name: "defaults are valid",
                 mutate: |_config| {},
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "zero batch size rejected while batching enabled",
+                mutate: |config| {
+                    config.enable_batching = true;
+                    config.batch_size = 0;
+                },
+                expect_ok: false,
+                expect_error_containing: "batch_size must be greater than 0",
+            },
+            Case {
+                name: "zero batch size accepted when batching disabled",
+                mutate: |config| {
+                    config.enable_batching = false;
+                    config.batch_size = 0;
+                },
                 expect_ok: true,
                 expect_error_containing: "",
             },

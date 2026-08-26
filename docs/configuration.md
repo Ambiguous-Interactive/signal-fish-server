@@ -81,7 +81,7 @@ SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
 ```
 
 - `enable_reconnection` - Enable token-based reconnection (default: true)
-- `reconnection_window` - Seconds a reconnection token stays valid (default: 300)
+- `reconnection_window` - Seconds a reconnection token stays valid (default: 300; must be > 0)
 - `event_buffer_size` - Max events buffered for replay (default: 100; maximum: 65,536)
 
 ## Environment Variable Format
@@ -116,7 +116,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME` | `server.max_rooms_per_game` | `1000` | Max rooms allowed per game name (must be > 0) |
 | `SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT` | `server.empty_room_timeout` | `300` | Seconds before an empty room is removed |
 | `SIGNAL_FISH__SERVER__INACTIVE_ROOM_TIMEOUT` | `server.inactive_room_timeout` | `3600` | Seconds before an inactive room is removed and assigned clients close with `4005 room_inactive` |
-| `SIGNAL_FISH__SERVER__RECONNECTION_WINDOW` | `server.reconnection_window` | `300` | Seconds a reconnection token stays valid |
+| `SIGNAL_FISH__SERVER__RECONNECTION_WINDOW` | `server.reconnection_window` | `300` | Seconds a reconnection token stays valid (must be > 0) |
 | `SIGNAL_FISH__SERVER__EVENT_BUFFER_SIZE` | `server.event_buffer_size` | `100` | Max events buffered for reconnection replay (maximum: 65,536) |
 | `SIGNAL_FISH__SERVER__ENABLE_RECONNECTION` | `server.enable_reconnection` | `true` | Enable reconnection support |
 | `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS` | `server.heartbeat_throttle_secs` | `30` | Min seconds between `last_seen` heartbeat writes |
@@ -188,7 +188,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__TURN__STUN_URLS` | `turn.stun_urls` | `["stun:stun.l.google.com:19302"]` | JSON array of STUN URLs advertised on WebRTC plans |
 | `SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS` | `turn.credential_ttl_secs` | `3600` | Lifetime in seconds of a minted TURN credential |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `false` | Opt-in outbound message batching (off keeps real-time relay latency low; on trades up to `batch_interval_ms` per hop for fewer writes) |
-| `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch (maximum: 65,536) |
+| `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch (must be > 0 when `enable_batching` is true; maximum: 65,536) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Exclusive deadline for the initial app-ID/protocol handshake after connect (legacy key name) |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Exclusive inbound-frame deadline after handshake completion (`0` disables; values beyond the platform `Instant` range remain later than the process can represent) |
@@ -344,7 +344,7 @@ candidate codes or changing the behavior of explicit room-code requests.
 ```
 
 - `enable_batching` - Opt-in outbound batching (off by default; on adds up to `batch_interval_ms` latency per hop)
-- `batch_size` - Max messages per batch (maximum: 65,536)
+- `batch_size` - Max messages per batch (must be > 0 when batching is enabled; maximum: 65,536)
 - `batch_interval_ms` - Batch flush interval
 - `auth_timeout_secs` - Exclusive deadline for app-ID handshake input after
   connect

@@ -39,7 +39,10 @@ pub struct ServerConfig {
     /// Time after last activity when rooms with players or spectators expire (seconds)
     #[serde(default = "default_inactive_room_timeout")]
     pub inactive_room_timeout: u64,
-    /// Time window for reconnection after disconnection (seconds)
+    /// Time window for reconnection after disconnection (seconds). Must be
+    /// `> 0`: a zero window expires every reconnection token instantly,
+    /// silently disabling reconnection while `enable_reconnection` is true
+    /// (startup validation rejects it).
     #[serde(default = "default_reconnection_window")]
     pub reconnection_window: u64,
     /// Number of events to buffer per room for reconnection

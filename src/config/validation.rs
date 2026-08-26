@@ -237,6 +237,23 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         );
     }
 
+    // Reconnection-window validation (#431). A zero window shares the #430
+    // "zero silently kills a feature" failure shape without being a rejection
+    // cap: every reconnection token is issued already expired and every
+    // reconnect-eligibility deadline is already past, so reconnection is
+    // silently dead while `enable_reconnection` reads true and the only symptom
+    // is per-reconnect rejection logs. Deliberate disable has a dedicated
+    // switch (`server.enable_reconnection = false`), so a configured `0` has no
+    // legitimate meaning.
+    if config.server.reconnection_window == 0 {
+        anyhow::bail!(
+            "server.reconnection_window must be greater than 0 seconds: a zero window \
+             expires every reconnection token instantly, silently disabling reconnection \
+             while server.enable_reconnection is true; disable reconnection explicitly \
+             with server.enable_reconnection=false instead"
+        );
+    }
+
     // Total-rejection cap validation (#430). Each cap below shares one failure
     // shape: a configured `0` silently rejects EVERY registration, room
     // creation, join, or signal while reading like the conventional "unlimited"
@@ -958,6 +975,30 @@ mod tests {
         assert!(
             err.to_string().contains("rate_limit.time_window"),
             "error must name the offending field: {err}"
+        );
+    }
+
+    /// A zero `server.reconnection_window` is rejected (#431): every token is
+    /// issued already expired and every reconnect-eligibility deadline is
+    /// already past, so reconnection is silently dead while
+    /// `enable_reconnection` reads true. Deliberate disable has a dedicated
+    /// switch (`server.enable_reconnection=false`), so zero has no meaning.
+    #[test]
+    fn zero_reconnection_window_is_rejected() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.server.reconnection_window = 0;
+
+        let err = validate_config_security(&config)
+            .expect_err("zero reconnection_window must be rejected");
+        let err = err.to_string();
+        assert!(
+            err.contains("server.reconnection_window"),
+            "error must name the offending field: {err}"
+        );
+        assert!(
+            err.contains("enable_reconnection"),
+            "error must point at the dedicated off switch: {err}"
         );
     }
 
