@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Serialize;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tokio::time::Duration;
 
 use crate::config::DashboardHistoryField;
@@ -32,6 +34,27 @@ pub(super) struct DashboardMetricsCache {
     stale_after: chrono::Duration,
     metrics: Arc<crate::metrics::ServerMetrics>,
     history_fields: HistoryFields,
+    shutdown_tx: watch::Sender<bool>,
+    #[cfg(test)]
+    refresh_gate: Arc<RefreshGate>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct RefreshGate {
+    pause_next: AtomicBool,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl RefreshGate {
+    async fn wait_if_paused(&self) {
+        if self.pause_next.swap(false, Ordering::AcqRel) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -113,6 +136,7 @@ impl DashboardMetricsCache {
         let safe_refresh = refresh_interval.max(Duration::from_secs(1));
         let safe_stale = stale_after.max(safe_refresh);
         let history_fields = HistoryFields::from_fields(history_fields);
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             inner: RwLock::new(DashboardMetricsCacheState::new(history_capacity)),
             refresh_interval: safe_refresh,
@@ -120,6 +144,9 @@ impl DashboardMetricsCache {
             stale_after: chrono_duration_from_std(safe_stale),
             metrics,
             history_fields,
+            shutdown_tx,
+            #[cfg(test)]
+            refresh_gate: Arc::new(RefreshGate::default()),
         }
     }
 
@@ -137,18 +164,66 @@ impl DashboardMetricsCache {
             .max(1)
     }
 
-    pub(super) fn spawn(self: &Arc<Self>, database: Arc<dyn GameDatabase>) {
-        let cache = Arc::clone(self);
+    /// Spawn a refresh loop bounded by the cache and database owners.
+    ///
+    /// Each database read races the retained cache-shutdown signal without
+    /// holding a strong cache reference. A completed sample upgrades the cache
+    /// only long enough to publish it, and both owners are released before the
+    /// task sleeps. Dropping the cache therefore cancels an in-flight read or
+    /// wakes the sleeping task instead of retaining resources until the next
+    /// configured refresh.
+    pub(super) fn spawn(
+        self: &Arc<Self>,
+        database: Arc<dyn GameDatabase>,
+    ) -> tokio::task::JoinHandle<()> {
+        let cache = Arc::downgrade(self);
+        let database = Arc::downgrade(&database);
+        let mut shutdown = self.shutdown_tx.subscribe();
+        #[cfg(test)]
+        let refresh_gate = Arc::clone(&self.refresh_gate);
         tokio::spawn(async move {
             loop {
-                cache.refresh_once(database.clone()).await;
-                tokio::time::sleep(cache.refresh_interval).await;
+                if *shutdown.borrow() {
+                    break;
+                }
+                let Some(database) = database.upgrade() else {
+                    break;
+                };
+                let snapshot = tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    snapshot = async {
+                        #[cfg(test)]
+                        refresh_gate.wait_if_paused().await;
+                        Self::fetch_snapshot(database).await
+                    } => snapshot,
+                };
+
+                let Some(cache) = cache.upgrade() else {
+                    break;
+                };
+                cache.record_refresh_result(snapshot).await;
+                let refresh_interval = cache.refresh_interval;
+                drop(cache);
+
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    () = tokio::time::sleep(refresh_interval) => {}
+                }
             }
-        });
+        })
     }
 
-    async fn refresh_once(&self, database: Arc<dyn GameDatabase>) {
-        match Self::fetch_snapshot(database).await {
+    async fn record_refresh_result(&self, result: Result<DashboardMetricsSnapshot>) {
+        match result {
             Ok(snapshot) => {
                 {
                     let mut guard = self.inner.write().await;
@@ -229,6 +304,22 @@ impl DashboardMetricsCache {
             history,
         }
     }
+
+    #[cfg(test)]
+    fn pause_next_refresh_for_test(&self) {
+        self.refresh_gate.pause_next.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    async fn wait_for_paused_refresh_for_test(&self) {
+        self.refresh_gate.started.notified().await;
+    }
+}
+
+impl Drop for DashboardMetricsCache {
+    fn drop(&mut self) {
+        self.shutdown_tx.send_replace(true);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +367,106 @@ impl HistoryFields {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::InMemoryDatabase;
+
+    #[tokio::test]
+    async fn spawned_refresh_task_does_not_outlive_cache_owner() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let cache = Arc::new(DashboardMetricsCache::new(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            metrics,
+            1,
+            &[DashboardHistoryField::ActiveRooms],
+        ));
+        let database: Arc<dyn GameDatabase> = Arc::new(InMemoryDatabase::new());
+        let cache_weak = Arc::downgrade(&cache);
+        let database_weak = Arc::downgrade(&database);
+
+        let refresh_task = cache.spawn(Arc::clone(&database));
+        drop(cache);
+        drop(database);
+
+        tokio::time::timeout(Duration::from_secs(1), refresh_task)
+            .await
+            .expect("the refresh task should stop when its owner drops")
+            .expect("the refresh task should not panic");
+
+        assert!(
+            cache_weak.upgrade().is_none(),
+            "the refresh task must release the cache when its owner drops"
+        );
+        assert!(
+            database_weak.upgrade().is_none(),
+            "the refresh task must release the database when its owner drops"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawned_refresh_task_refreshes_while_cache_is_owned() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let cache = Arc::new(DashboardMetricsCache::new(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            Arc::clone(&metrics),
+            1,
+            &[DashboardHistoryField::ActiveRooms],
+        ));
+        let database: Arc<dyn GameDatabase> = Arc::new(InMemoryDatabase::new());
+        let refresh_task = cache.spawn(Arc::clone(&database));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if metrics.snapshot().await.dashboard_cache.refresh_count > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an owned cache should complete its initial refresh");
+
+        drop(cache);
+        drop(database);
+        tokio::time::timeout(Duration::from_secs(1), refresh_task)
+            .await
+            .expect("the refresh task should stop after the cache drops")
+            .expect("the refresh task should not panic");
+    }
+
+    #[tokio::test]
+    async fn in_flight_refresh_releases_owners_when_cache_drops() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let cache = Arc::new(DashboardMetricsCache::new(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            metrics,
+            1,
+            &[DashboardHistoryField::ActiveRooms],
+        ));
+        let database: Arc<dyn GameDatabase> = Arc::new(InMemoryDatabase::new());
+        let cache_weak = Arc::downgrade(&cache);
+        let database_weak = Arc::downgrade(&database);
+        cache.pause_next_refresh_for_test();
+        let refresh_task = cache.spawn(Arc::clone(&database));
+        cache.wait_for_paused_refresh_for_test().await;
+
+        drop(cache);
+        drop(database);
+        tokio::time::timeout(Duration::from_secs(1), refresh_task)
+            .await
+            .expect("dropping the cache should cancel an in-flight refresh")
+            .expect("the refresh task should not panic");
+
+        assert!(
+            cache_weak.upgrade().is_none(),
+            "an in-flight refresh must not retain the cache"
+        );
+        assert!(
+            database_weak.upgrade().is_none(),
+            "cancelling an in-flight refresh must release the database"
+        );
+    }
 
     #[test]
     fn history_capacity_scales_with_window() {

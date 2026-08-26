@@ -208,6 +208,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix dropped `EnhancedGameServer` instances retaining their dashboard cache,
+  database, metrics, and refresh task until the Tokio runtime shut down. The
+  cache refresh loop now releases its owners between samples, stops promptly
+  when the cache is dropped, and starts only after server construction has
+  completed successfully. The public `run_server` helper now also scopes its
+  room-cleanup task to the serving future, so bind failure, server return, or
+  caller cancellation cannot detach a task that retains the whole server;
+  unexpected cleanup exit now terminates `run_server` instead of silently
+  serving without maintenance (issue #396).
 - Count room deletions truthfully: the exported
   `signal_fish_rooms_deleted_total` counter (and the `rooms.deleted` JSON
   field) had no production data path and stayed at zero forever while rooms
