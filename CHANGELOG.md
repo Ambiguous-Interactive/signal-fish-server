@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin two eviction-scan guards of the v3 data lane with deterministic
+  regression tests: coalescing matches the full
+  `(from_player, room_id, key)` composition, so an equal application key from
+  another player or room never supersedes another stream's queued value, and
+  both the supersede search and the volatile-victim search see only
+  current-generation rows after a room transition, so stale frames can neither
+  be superseded nor evicted and a saturated lane reports
+  `LatestDroppedFull` instead (verified behavior; no functional change)
+  (issue #396).
 - Add a running-session capability gate for seat-fill joins into finalized
   rooms: a joiner that did not negotiate the room's sticky session pair
   (protocol v3 plus its topology **and** transport) is rejected with a new
