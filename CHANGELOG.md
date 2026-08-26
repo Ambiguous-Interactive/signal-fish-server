@@ -53,10 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `signal_fish_errors_*` family had no production increment sites since
   inception, so they permanently exported zeros/nulls (and the JSON
   `performance`/`errors` objects did the same), making error-rate alerts and
-  `created − deleted` style invariants impossible to satisfy honestly. Every
-  remaining exported series now either has a real production data path or is a
-  HELP-documented reserved coordination seam that stays zero for the shipped
-  in-memory backend. The dead
+  `created − deleted` style invariants impossible to satisfy honestly. The same
+  audit catalogued the remaining exported families whose increment sites are
+  also unreachable today (distributed-lock release/extend/cleanup counters,
+  relay client-id reuse/exhaustion, cross-instance membership cache hits/misses);
+  they are retained as reserved seams for a dedicated wire-or-remove decision
+  (issue #434). The dead
   `ServerMetrics::health_status()`/`OperationTimer` APIs, whose failure-rate
   math divided by those permanently-zero counters, are removed with them.
 

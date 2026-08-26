@@ -990,7 +990,6 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
     pub async fn record_response_time(&self, operation: &str, duration: Duration) {
         let mut tracker = self.average_response_times.write().await;
         let clamped = tracker.add_sample(operation, duration);
@@ -1537,7 +1536,6 @@ impl ResponseTimeTracker {
         }
     }
 
-    #[allow(dead_code)]
     pub fn add_sample(&mut self, operation: &str, duration: Duration) -> bool {
         let micros = duration_to_micros(duration);
         let lowest = self.lowest_discernible_micros;

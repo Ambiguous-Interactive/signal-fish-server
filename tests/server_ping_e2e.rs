@@ -704,8 +704,9 @@ async fn client_protocol_pings_refresh_activity_reaper_liveness() {
     // assertion below pins that suppression actually happened.
     let mut keepalive = tokio::time::interval(tokio::time::Duration::from_millis(100));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Comfortably past two reaper windows plus sweep granularity, with slack
-    // for hosted-runner scheduling stalls (survival-direction deadline).
+    // Regression eviction bound is ping_timeout plus one sweep (~5 s); seven
+    // seconds leaves slack for hosted-runner scheduling stalls on this
+    // survival-direction deadline.
     let keepalive_until = tokio::time::Instant::now() + tokio::time::Duration::from_millis(7_000);
     while tokio::time::Instant::now() < keepalive_until {
         tokio::select! {
