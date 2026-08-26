@@ -11,6 +11,7 @@ use crate::coordination::{
 use crate::database::{
     create_database, DatabaseConfig, GameDatabase, InMemoryDatabase, RoomCleanupOutcome,
 };
+use crate::distributed::LockHandle;
 use crate::protocol::{
     ConnectionInfo, ErrorCode, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage,
     SpectatorInfo,
@@ -7545,4 +7546,260 @@ async fn join_racing_room_deletion_reports_room_not_found() {
         "a join racing deletion must classify as ROOM_NOT_FOUND"
     );
     assert_eq!(reason, "Room not found");
+}
+
+struct ReleaseErrorLock {
+    inner: InMemoryDistributedLock,
+}
+
+impl ReleaseErrorLock {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryDistributedLock::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DistributedLock for ReleaseErrorLock {
+    async fn acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<LockHandle> {
+        self.inner.acquire(key, ttl).await
+    }
+
+    async fn try_acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<Option<LockHandle>> {
+        self.inner.try_acquire(key, ttl).await
+    }
+
+    async fn extend(&self, handle: &LockHandle, ttl: Duration) -> anyhow::Result<bool> {
+        self.inner.extend(handle, ttl).await
+    }
+
+    async fn release(&self, _handle: &LockHandle) -> anyhow::Result<bool> {
+        anyhow::bail!("injected distributed-lock release failure")
+    }
+
+    async fn is_locked(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.is_locked(key).await
+    }
+
+    async fn cleanup_expired_locks(&self) -> anyhow::Result<usize> {
+        self.inner.cleanup_expired_locks().await
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn test_accounted_release_counts_stale_handles_not_successes() {
+    let server = create_test_server().await;
+    let handle = server
+        .distributed_lock
+        .acquire("release-accounting", Duration::from_secs(60))
+        .await
+        .expect("fresh lock acquisition succeeds");
+
+    server.release_lock_accounted(&handle).await;
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        0,
+        "a successful release must not count as a release failure"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("release-accounting")
+            .await
+            .expect("lock state check succeeds"),
+        "an accounted successful release must still free the key"
+    );
+
+    // The entry is gone, so releasing the same handle again observes staleness.
+    server.release_lock_accounted(&handle).await;
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        1,
+        "a stale-handle release must count exactly one release failure"
+    );
+
+    let expired = server
+        .distributed_lock
+        .acquire("expired-release-accounting", Duration::ZERO)
+        .await
+        .expect("zero-duration lock acquisition succeeds");
+    server.release_lock_accounted(&expired).await;
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        2,
+        "an expired-handle release must count exactly one additional failure"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("expired-release-accounting")
+            .await
+            .expect("lock state check succeeds"),
+        "releasing an expired matching handle must still reclaim its stale entry"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn test_join_flow_counts_backend_release_errors() {
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(ReleaseErrorLock::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator,
+        distributed_lock,
+        create_test_database().await,
+    )
+    .await;
+    let (creator_id, _receiver) =
+        register_client(&server, "127.0.0.1:48143".parse().unwrap()).await;
+
+    server
+        .handle_join_room(
+            &creator_id,
+            "failed-release".to_string(),
+            Some("FAILR1".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        server.get_client_room(&creator_id).await.is_some(),
+        "release errors must not roll back an otherwise successful admission"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        2,
+        "the game-cap and room-join release errors must each count exactly once"
+    );
+    for key in [
+        "game_room_cap:failed-release",
+        "room_join:failed-release:FAILR1",
+    ] {
+        assert!(
+            server
+                .distributed_lock
+                .is_locked(key)
+                .await
+                .expect("lock state check succeeds"),
+            "an errored release must leave coordination key {key} held"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn test_join_flow_releases_do_not_count_as_release_failures() {
+    let server = create_test_server().await;
+    let (creator_id, _receiver) =
+        register_client(&server, "127.0.0.1:48142".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator_id,
+            "clean-release".to_string(),
+            Some("CLEAN1".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        server.get_client_room(&creator_id).await.is_some(),
+        "the admission flow under test must actually create and seat a room"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("room_join:clean-release:CLEAN1")
+            .await
+            .expect("join lock check succeeds"),
+        "the admission flow must release its room-join lock"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        0,
+        "successful admission releases must never count as release failures"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn test_distributed_lock_cleanup_counters_are_wired() {
+    let server = create_test_server_with_config(ServerConfig {
+        room_cleanup_interval: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let expired = server
+        .distributed_lock
+        .try_acquire("cleanup-accounting", Duration::ZERO)
+        .await
+        .expect("probe acquisition succeeds")
+        .expect("probe key is free");
+    drop(expired);
+
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if server
+                .metrics
+                .distributed_lock_cleanup_removed
+                .load(Ordering::Relaxed)
+                >= 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the maintenance sweep must account its removed expired locks");
+    assert!(
+        server
+            .metrics
+            .distributed_lock_cleanup_runs
+            .load(Ordering::Relaxed)
+            >= 1,
+        "every executed sweep iteration must count one cleanup run"
+    );
+
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
 }

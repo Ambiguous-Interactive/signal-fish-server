@@ -97,6 +97,10 @@ correctness evidence appears.
 - #396 — continue the correctness and performance sweep through named,
   gameplay-facing seams; require a deterministic counterexample or current
   profile before changing production behavior.
+- #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
+  split the job, accept the measured single-lane duration, or move it to the
+  weekly schedule. Preserve full native coverage and retain exact-head hosted
+  runner-time evidence for whichever allocation/latency tradeoff is selected.
 - #318 — use representative cross-platform measurements to choose the next
   hook-latency reduction without weakening fail-closed checks.
 - #378 — consolidate duplicate hosted link validation only with an atomic

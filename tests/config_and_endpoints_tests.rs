@@ -1539,6 +1539,43 @@ async fn test_metrics_endpoint_no_auth_required() {
             "signal_rejections",
         ]
     );
+
+    let metrics_snapshot = json["metricsSnapshot"]
+        .as_object()
+        .expect("raw metrics snapshot");
+    assert!(
+        !metrics_snapshot.contains_key("relay_health"),
+        "the removed relay server must not leave an always-zero relay_health snapshot"
+    );
+
+    let distributed_lock = metrics_snapshot["distributed_lock"]
+        .as_object()
+        .expect("raw distributed-lock snapshot");
+    let mut distributed_lock_keys: Vec<_> = distributed_lock.keys().map(String::as_str).collect();
+    distributed_lock_keys.sort_unstable();
+    assert_eq!(
+        distributed_lock_keys,
+        ["cleanup_removed", "cleanup_runs", "release_failures"],
+        "the JSON snapshot must expose only wired distributed-lock metrics"
+    );
+
+    let cross_instance = metrics_snapshot["cross_instance"]
+        .as_object()
+        .expect("raw cross-instance snapshot");
+    let mut cross_instance_keys: Vec<_> = cross_instance.keys().map(String::as_str).collect();
+    cross_instance_keys.sort_unstable();
+    assert_eq!(
+        cross_instance_keys,
+        [
+            "cross_instance_messages",
+            "remote_membership_forced_broadcasts",
+            "remote_membership_known_broadcasts",
+            "remote_membership_skipped_broadcasts",
+            "remote_membership_updates_published",
+            "remote_membership_updates_received",
+        ],
+        "the JSON snapshot must omit nonexistent membership-cache metrics while retaining the reserved coordination seam"
+    );
 }
 
 #[tokio::test]

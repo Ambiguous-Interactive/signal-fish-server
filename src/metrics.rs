@@ -158,8 +158,6 @@ pub struct ServerMetrics {
 
     // Reserved remote-coordination seam metrics (the shipped backend is local)
     pub cross_instance_messages: AtomicU64,
-    pub membership_cache_hits: AtomicU64,
-    pub membership_cache_misses: AtomicU64,
     pub remote_membership_updates_published: AtomicU64,
     pub remote_membership_updates_received: AtomicU64,
     pub remote_membership_known_broadcasts: AtomicU64,
@@ -206,7 +204,6 @@ pub struct ServerMetrics {
 
     // Distributed lock metrics
     pub distributed_lock_release_failures: AtomicU64,
-    pub distributed_lock_extend_failures: AtomicU64,
     pub distributed_lock_cleanup_runs: AtomicU64,
     pub distributed_lock_cleanup_removed: AtomicU64,
 
@@ -214,11 +211,6 @@ pub struct ServerMetrics {
     pub empty_rooms_cleaned: AtomicU64,
     pub inactive_rooms_cleaned: AtomicU64,
     pub expired_players_cleaned: AtomicU64,
-
-    // Relay health metrics
-    pub relay_client_id_reuse_events: AtomicU64,
-    pub relay_client_id_exhaustion_events: AtomicU64,
-    pub relay_session_timeouts: AtomicU64,
 
     // Transport / session-plan metrics (Protocol v3)
     /// Finalization-time v3 `SessionPlan` publication events. Counted once per
@@ -337,7 +329,6 @@ pub struct MetricsSnapshot {
     pub cleanup: CleanupMetrics,
     pub reconnection: ReconnectionMetrics,
     pub distributed_lock: DistributedLockMetrics,
-    pub relay_health: RelayHealthMetrics,
     pub transport: TransportMetrics,
 }
 
@@ -437,8 +428,6 @@ pub struct RaceConditionMetrics {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CrossInstanceMetrics {
     pub cross_instance_messages: u64,
-    pub membership_cache_hits: u64,
-    pub membership_cache_misses: u64,
     pub remote_membership_updates_published: u64,
     pub remote_membership_updates_received: u64,
     pub remote_membership_known_broadcasts: u64,
@@ -499,16 +488,8 @@ pub struct ReconnectionMetrics {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DistributedLockMetrics {
     pub release_failures: u64,
-    pub extend_failures: u64,
     pub cleanup_runs: u64,
     pub cleanup_removed: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RelayHealthMetrics {
-    pub client_id_reuse_events: u64,
-    pub client_id_exhaustion_events: u64,
-    pub session_timeouts: u64,
 }
 
 /// Protocol v3 transport / session-plan observability.
@@ -594,8 +575,6 @@ impl ServerMetrics {
             retry_attempts: AtomicU64::new(0),
             retry_successes: AtomicU64::new(0),
             cross_instance_messages: AtomicU64::new(0),
-            membership_cache_hits: AtomicU64::new(0),
-            membership_cache_misses: AtomicU64::new(0),
             remote_membership_updates_published: AtomicU64::new(0),
             remote_membership_updates_received: AtomicU64::new(0),
             remote_membership_known_broadcasts: AtomicU64::new(0),
@@ -624,15 +603,11 @@ impl ServerMetrics {
             reconnection_events_buffered: AtomicU64::new(0),
             reconnection_events_evicted: AtomicU64::new(0),
             distributed_lock_release_failures: AtomicU64::new(0),
-            distributed_lock_extend_failures: AtomicU64::new(0),
             distributed_lock_cleanup_runs: AtomicU64::new(0),
             distributed_lock_cleanup_removed: AtomicU64::new(0),
             empty_rooms_cleaned: AtomicU64::new(0),
             inactive_rooms_cleaned: AtomicU64::new(0),
             expired_players_cleaned: AtomicU64::new(0),
-            relay_client_id_reuse_events: AtomicU64::new(0),
-            relay_client_id_exhaustion_events: AtomicU64::new(0),
-            relay_session_timeouts: AtomicU64::new(0),
             session_plans_emitted: AtomicU64::new(0),
             session_replans_emitted: AtomicU64::new(0),
             session_plans_late_join: AtomicU64::new(0),
@@ -957,14 +932,6 @@ impl ServerMetrics {
         self.cross_instance_messages.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn increment_membership_cache_hit(&self) {
-        self.membership_cache_hits.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn increment_membership_cache_miss(&self) {
-        self.membership_cache_misses.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn increment_remote_membership_update_published(&self) {
         self.remote_membership_updates_published
             .fetch_add(1, Ordering::Relaxed);
@@ -1115,11 +1082,10 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn increment_distributed_lock_extend_failures(&self) {
-        self.distributed_lock_extend_failures
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
+    /// Account one maintenance-sweep execution. `runs` counts only sweeps that
+    /// completed with a removal count (the `Ok` arm of
+    /// `cleanup_expired_locks`); failed sweep attempts are logged but not
+    /// counted, so `removed` stays attributable to counted runs.
     pub fn record_distributed_lock_cleanup(&self, removed: usize) {
         self.distributed_lock_cleanup_runs
             .fetch_add(1, Ordering::Relaxed);
@@ -1141,25 +1107,6 @@ impl ServerMetrics {
 
     pub fn add_expired_players_cleaned(&self, count: u64) {
         self.expired_players_cleaned
-            .fetch_add(count, Ordering::Relaxed);
-    }
-
-    // Relay health metrics
-    pub fn increment_relay_client_id_reuse(&self) {
-        self.relay_client_id_reuse_events
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn increment_relay_client_id_exhaustion(&self) {
-        self.relay_client_id_exhaustion_events
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn increment_relay_session_timeouts(&self, count: u64) {
-        if count == 0 {
-            return;
-        }
-        self.relay_session_timeouts
             .fetch_add(count, Ordering::Relaxed);
     }
 
@@ -1379,8 +1326,6 @@ impl ServerMetrics {
             },
             cross_instance: CrossInstanceMetrics {
                 cross_instance_messages: self.cross_instance_messages.load(Ordering::Relaxed),
-                membership_cache_hits: self.membership_cache_hits.load(Ordering::Relaxed),
-                membership_cache_misses: self.membership_cache_misses.load(Ordering::Relaxed),
                 remote_membership_updates_published: self
                     .remote_membership_updates_published
                     .load(Ordering::Relaxed),
@@ -1463,20 +1408,10 @@ impl ServerMetrics {
                 release_failures: self
                     .distributed_lock_release_failures
                     .load(Ordering::Relaxed),
-                extend_failures: self
-                    .distributed_lock_extend_failures
-                    .load(Ordering::Relaxed),
                 cleanup_runs: self.distributed_lock_cleanup_runs.load(Ordering::Relaxed),
                 cleanup_removed: self
                     .distributed_lock_cleanup_removed
                     .load(Ordering::Relaxed),
-            },
-            relay_health: RelayHealthMetrics {
-                client_id_reuse_events: self.relay_client_id_reuse_events.load(Ordering::Relaxed),
-                client_id_exhaustion_events: self
-                    .relay_client_id_exhaustion_events
-                    .load(Ordering::Relaxed),
-                session_timeouts: self.relay_session_timeouts.load(Ordering::Relaxed),
             },
             transport: TransportMetrics {
                 session_plans_emitted: self.session_plans_emitted.load(Ordering::Relaxed),

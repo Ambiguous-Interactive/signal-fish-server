@@ -1946,11 +1946,11 @@ impl EnhancedGameServer {
                 let mut room = match self.database.get_room_by_id(&room_lane.id).await {
                     Ok(Some(room)) => room,
                     Ok(None) => {
-                        let _ = self.distributed_lock.release(&lock_handle).await;
+                        self.release_lock_accounted(&lock_handle).await;
                         return Err(JoinRoomError::RoomNotFound);
                     }
                     Err(error) => {
-                        let _ = self.distributed_lock.release(&lock_handle).await;
+                        self.release_lock_accounted(&lock_handle).await;
                         return Err(error.into());
                     }
                 };
@@ -2018,8 +2018,7 @@ impl EnhancedGameServer {
                                     {
                                         Ok(lock) => application_cap_lock = Some(lock),
                                         Err(error) => {
-                                            let _ =
-                                                self.distributed_lock.release(&lock_handle).await;
+                                            self.release_lock_accounted(&lock_handle).await;
                                             return Err(error);
                                         }
                                     }
@@ -2028,7 +2027,7 @@ impl EnhancedGameServer {
                                     self.record_room_application(&room.id, app_id).await
                                 {
                                     self.release_cap_lock(&application_cap_lock).await;
-                                    let _ = self.distributed_lock.release(&lock_handle).await;
+                                    self.release_lock_accounted(&lock_handle).await;
                                     return Err(error.into());
                                 }
                                 room.application_id = Some(app_id);
@@ -2135,7 +2134,7 @@ impl EnhancedGameServer {
                         .and_then(|app| app.max_players_per_room)
                         .filter(|limit| max_players > *limit)
                     {
-                        let _ = self.distributed_lock.release(&lock_handle).await;
+                        self.release_lock_accounted(&lock_handle).await;
                         return Err(JoinRoomError::MaxPlayersPerApplicationExceeded(
                             MaxPlayersPerApplicationExceededError {
                                 requested: max_players,
@@ -2311,7 +2310,7 @@ impl EnhancedGameServer {
 
         self.release_cap_lock(&game_cap_lock).await;
         self.release_cap_lock(&application_cap_lock).await;
-        let _ = self.distributed_lock.release(&lock_handle).await;
+        self.release_lock_accounted(&lock_handle).await;
         let (room, admission_kind) = result?;
         let guard = room_event_guard.ok_or_else(|| {
             anyhow::anyhow!("successful room admission lost its room publication guard")
@@ -2319,9 +2318,32 @@ impl EnhancedGameServer {
         Ok((room, guard, admission_kind))
     }
 
+    /// Release a distributed lock and account every non-success outcome.
+    ///
+    /// `Ok(false)` means this caller's handle had already gone stale (its lease
+    /// expired or the key moved on), and an `Err` means the release itself
+    /// failed. Neither outcome confirms release of an active lease owned by
+    /// this caller, so both count as release failures.
+    pub(super) async fn release_lock_accounted(&self, lock: &LockHandle) {
+        match self.distributed_lock.release(lock).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    key = %lock.key,
+                    "Attempted to release a stale distributed-lock handle (lease expired, key absent, or held by another token)"
+                );
+                self.metrics.increment_distributed_lock_release_failures();
+            }
+            Err(error) => {
+                tracing::warn!(key = %lock.key, %error, "Failed to release distributed lock");
+                self.metrics.increment_distributed_lock_release_failures();
+            }
+        }
+    }
+
     async fn release_cap_lock(&self, cap_lock: &Option<LockHandle>) {
         if let Some(lock) = cap_lock {
-            let _ = self.distributed_lock.release(lock).await;
+            self.release_lock_accounted(lock).await;
         }
     }
 
@@ -2343,13 +2365,13 @@ impl EnhancedGameServer {
             Ok(current) => current,
             Err(error) => {
                 tracing::error!(%app_id, %error, "Failed to count application rooms");
-                let _ = self.distributed_lock.release(&lock).await;
+                self.release_lock_accounted(&lock).await;
                 return Err(JoinRoomError::Internal(error));
             }
         };
         let limit = usize::try_from(app_limit).unwrap_or(usize::MAX);
         if current >= limit {
-            let _ = self.distributed_lock.release(&lock).await;
+            self.release_lock_accounted(&lock).await;
             return Err(JoinRoomError::MaxRoomsPerApplicationExceeded(
                 MaxRoomsPerApplicationExceededError { current, limit },
             ));

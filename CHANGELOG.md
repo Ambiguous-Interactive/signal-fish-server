@@ -53,14 +53,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `signal_fish_errors_*` family had no production increment sites since
   inception, so they permanently exported zeros/nulls (and the JSON
   `performance`/`errors` objects did the same), making error-rate alerts and
-  `created − deleted` style invariants impossible to satisfy honestly. The same
-  audit catalogued several more exported families whose increment sites are
-  also unreachable today (distributed-lock release/extend/cleanup counters,
-  relay client-id reuse/exhaustion, and the cross-instance membership/coordination
-  seam counters); they are retained as reserved seams for a dedicated
-  wire-or-remove decision (issue #434). The dead
+  `created − deleted` style invariants impossible to satisfy honestly. The dead
   `ServerMetrics::health_status()`/`OperationTimer` APIs, whose failure-rate
   math was built from those never-incremented counters, are removed with them.
+
+- **Breaking:** Close the remaining exported-but-unwired metric families
+  (issue #434, completing the #396 metrics-truthfulness sweep). The
+  distributed-lock cleanup counters (`signal_fish_distributed_lock_cleanup_runs_total`,
+  `signal_fish_distributed_lock_cleanup_removed_total`) are now wired to the
+  real maintenance sweep, and release failures
+  (`signal_fish_distributed_lock_release_failures_total`) now count every stale
+  or failed lock release on the admission paths instead of being discarded.
+  The public `DistributedLock::release` result is now defined as `true` only
+  when it removes an active matching-token lease; the in-memory backend
+  reclaims an expired matching entry but returns `false`, so callers must not
+  interpret expiry cleanup as a successful owned-lease release.
+  Removed series whose producers cannot exist in this product:
+  `signal_fish_distributed_lock_extend_failures_total` (no production lease
+  extension path), `signal_fish_relay_client_id_reuse_total` and
+  `signal_fish_relay_client_id_exhaustion_total` (the relay server was removed),
+  the JSON-only `relay_health` snapshot object including its unwired
+  `session_timeouts` field, and the cross-instance membership-cache pair
+  `signal_fish_cross_instance_membership_cache_{hits,misses}_total` (no such
+  cache exists in the shipped in-memory backend; the remaining reserved
+  remote-coordination seam series keep their explicit "Reserved" labeling).
+  Raw JSON consumers must also drop `distributed_lock.extend_failures`,
+  `cross_instance.membership_cache_hits`,
+  `cross_instance.membership_cache_misses`, and `relay_health`; the matching
+  public `ServerMetrics` fields/increment methods, snapshot fields, and
+  `RelayHealthMetrics` type are removed.
 
 - **Breaking:** Startup validation now rejects the remaining "zero silently
   kills an enabled feature" configuration seams (issue #431, following the

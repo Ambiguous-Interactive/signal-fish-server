@@ -712,6 +712,7 @@ impl EnhancedGameServer {
             // Cleanup expired distributed locks
             match self.distributed_lock.cleanup_expired_locks().await {
                 Ok(count) => {
+                    self.metrics.record_distributed_lock_cleanup(count);
                     if count > 0 {
                         tracing::info!(count, instance_id = %self.instance_id, "Cleaned up expired distributed locks");
                     }
