@@ -622,8 +622,9 @@ async fn zero_interval_disables_server_ping_frames() {
     running.shutdown().await;
 }
 
-/// Server probes effectively disabled (60 s interval) so the activity reaper
-/// (`server.ping_timeout`) is the only liveness mechanism under test.
+/// One-second server probes so their *suppression* by inbound activity is
+/// asserted alongside reaper survival; the reaper (`server.ping_timeout`) is
+/// the only liveness mechanism that can evict here.
 async fn start_server_with_reaper_window(
     ping_timeout: std::time::Duration,
 ) -> (
@@ -650,7 +651,7 @@ async fn start_server_with_reaper_window(
 #[tokio::test]
 async fn client_protocol_pings_refresh_activity_reaper_liveness() {
     let (running, server) =
-        start_server_with_reaper_window(std::time::Duration::from_millis(1_500)).await;
+        start_server_with_reaper_window(std::time::Duration::from_millis(4_000)).await;
     let mut ws = connect(running.addr()).await;
     ws.send(Message::Text(
         serde_json::to_string(&ClientMessage::JoinRoom {
@@ -703,7 +704,9 @@ async fn client_protocol_pings_refresh_activity_reaper_liveness() {
     // assertion below pins that suppression actually happened.
     let mut keepalive = tokio::time::interval(tokio::time::Duration::from_millis(100));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let keepalive_until = tokio::time::Instant::now() + tokio::time::Duration::from_millis(2_600);
+    // Comfortably past two reaper windows plus sweep granularity, with slack
+    // for hosted-runner scheduling stalls (survival-direction deadline).
+    let keepalive_until = tokio::time::Instant::now() + tokio::time::Duration::from_millis(7_000);
     while tokio::time::Instant::now() < keepalive_until {
         tokio::select! {
             _ = keepalive.tick() => {

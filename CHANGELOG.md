@@ -54,7 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inception, so they permanently exported zeros/nulls (and the JSON
   `performance`/`errors` objects did the same), making error-rate alerts and
   `created − deleted` style invariants impossible to satisfy honestly. Every
-  remaining exported series now has a real production data path. The dead
+  remaining exported series now either has a real production data path or is a
+  HELP-documented reserved coordination seam that stays zero for the shipped
+  in-memory backend. The dead
   `ServerMetrics::health_status()`/`OperationTimer` APIs, whose failure-rate
   math divided by those permanently-zero counters, are removed with them.
 
@@ -188,7 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field) had no production data path and stayed at zero forever while rooms
   were really deleted on the empty-room/inactive-room sweeps and on
   rolled-back room creations. Every deletion path now increments it exactly
-  once.
+  once; note that a creation rolled back by the shutdown-drain race counts as
+  a deletion even though its never-published creation was never counted, so
+  brief negative `created − deleted` excursions are possible during drain.
 - Client-initiated RFC 6455 Ping keepalives now refresh activity-reaper
   liveness. Previously each inbound protocol Ping suppressed the server's own
   liveness probe (inbound-activity guard) without refreshing the reaper's
@@ -200,6 +204,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a teardown-racing frame from an already-unregistered player is now suppressed
   even when the heartbeat throttle is disabled (`heartbeat_throttle = 0`),
   restoring the once-per-player-per-window throttle contract on every path.
+  Residual semantics: a client flooding protocol Pings keeps its reaper liveness
+  refreshed even if the server→client direction is dead — matching the
+  socket-level idle timeout's "any inbound frame counts" rule and still
+  backstopped by the slow-consumer disconnect.
 - Fix protocol-v3 text game data silently delivering without a complete relay
   stamp. The binary carrier already failed closed with `InvalidV3Stamp` when a
   v3 recipient would have observed a partial `(seq, epoch)` stamp, but the text

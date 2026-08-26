@@ -1044,7 +1044,6 @@ impl ServerMetrics {
         self.authority_transfers.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
     pub fn increment_game_data_messages(&self) {
         self.game_data_messages.fetch_add(1, Ordering::Relaxed);
     }
@@ -1132,18 +1131,15 @@ impl ServerMetrics {
     }
 
     // Cleanup metrics
-    #[allow(dead_code)]
     pub fn add_empty_rooms_cleaned(&self, count: u64) {
         self.empty_rooms_cleaned.fetch_add(count, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
     pub fn add_inactive_rooms_cleaned(&self, count: u64) {
         self.inactive_rooms_cleaned
             .fetch_add(count, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
     pub fn add_expired_players_cleaned(&self, count: u64) {
         self.expired_players_cleaned
             .fetch_add(count, Ordering::Relaxed);
