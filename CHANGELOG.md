@@ -46,6 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Startup validation now rejects the remaining "zero silently
+  kills an enabled feature" configuration seams (issue #431, following the
+  #430 cap sweep): `server.reconnection_window = 0` issued every reconnection
+  token already expired, silently disabling reconnection while
+  `server.enable_reconnection` read true, and `websocket.batch_size = 0` with
+  `websocket.enable_batching = true` was clamped to one by the receive path,
+  flushing on every message and silently disabling the enabled batching.
+  Both now fail startup with a direct diagnostic naming the field; deliberate
+  disable keeps its dedicated switch (`server.enable_reconnection=false`,
+  `websocket.enable_batching=false`). Default configurations are unaffected.
 - **Breaking:** Startup validation now rejects zero-valued total-rejection
   caps with a direct diagnostic instead of silently admitting no one:
   `security.max_connections_per_ip = 0` rejected every WebSocket registration
