@@ -7546,3 +7546,141 @@ async fn join_racing_room_deletion_reports_room_not_found() {
     );
     assert_eq!(reason, "Room not found");
 }
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn accounted_release_counts_stale_handles_not_successes() {
+    let server = create_test_server().await;
+    let handle = server
+        .distributed_lock
+        .acquire("release-accounting", Duration::from_secs(60))
+        .await
+        .expect("fresh lock acquisition succeeds");
+
+    server.release_lock_accounted(&handle).await;
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        0,
+        "a successful release must not count as a release failure"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("release-accounting")
+            .await
+            .expect("lock state check succeeds"),
+        "an accounted successful release must still free the key"
+    );
+
+    // The entry is gone, so releasing the same handle again observes staleness.
+    server.release_lock_accounted(&handle).await;
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        1,
+        "a stale-handle release must count exactly one release failure"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn join_flow_releases_do_not_count_as_release_failures() {
+    let server = create_test_server().await;
+    let (creator_id, _receiver) =
+        register_client(&server, "127.0.0.1:48142".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator_id,
+            "clean-release".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        server.get_client_room(&creator_id).await.is_some(),
+        "the admission flow under test must actually create and seat a room"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("room_join:clean-release")
+            .await
+            .expect("join lock check succeeds"),
+        "the admission flow must release its room-join lock"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_release_failures
+            .load(Ordering::Relaxed),
+        0,
+        "successful admission releases must never count as release failures"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn distributed_lock_cleanup_counters_are_wired() {
+    let server = create_test_server_with_config(ServerConfig {
+        room_cleanup_interval: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let expired = server
+        .distributed_lock
+        .try_acquire("cleanup-accounting", Duration::from_millis(30))
+        .await
+        .expect("probe acquisition succeeds")
+        .expect("probe key is free");
+    drop(expired);
+    // Let the probe lease lapse so the sweep has something to remove.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if server
+                .metrics
+                .distributed_lock_cleanup_removed
+                .load(Ordering::Relaxed)
+                >= 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the maintenance sweep must account its removed expired locks");
+    assert!(
+        server
+            .metrics
+            .distributed_lock_cleanup_runs
+            .load(Ordering::Relaxed)
+            >= 1,
+        "every executed sweep iteration must count one cleanup run"
+    );
+
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
+}

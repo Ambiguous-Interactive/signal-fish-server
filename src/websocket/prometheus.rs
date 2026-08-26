@@ -403,14 +403,8 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_distributed_lock_release_failures_total",
-        "Total distributed-lock release attempts that failed due to stale handles",
+        "Total distributed-lock releases that failed because the handle was stale or the release errored",
         snapshot.distributed_lock.release_failures,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_distributed_lock_extend_failures_total",
-        "Total distributed-lock extend attempts rejected due to stale handles",
-        snapshot.distributed_lock.extend_failures,
     );
     counter(
         &mut buf,
@@ -452,18 +446,6 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
-        "signal_fish_cross_instance_membership_cache_hits_total",
-        "Total membership cache hits within the message coordinator",
-        snapshot.cross_instance.membership_cache_hits,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_cross_instance_membership_cache_misses_total",
-        "Total membership cache misses within the message coordinator",
-        snapshot.cross_instance.membership_cache_misses,
-    );
-    counter(
-        &mut buf,
         "signal_fish_cross_instance_membership_updates_published_total",
         "Reserved membership updates published to a remote-coordination backend",
         snapshot.cross_instance.remote_membership_updates_published,
@@ -491,19 +473,6 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "signal_fish_cross_instance_membership_skipped_broadcasts_total",
         "Reserved remote broadcasts skipped because no listeners are known",
         snapshot.cross_instance.remote_membership_skipped_broadcasts,
-    );
-
-    counter(
-        &mut buf,
-        "signal_fish_relay_client_id_reuse_total",
-        "Total times relay client IDs were recycled to service churn",
-        snapshot.relay_health.client_id_reuse_events,
-    );
-    counter(
-        &mut buf,
-        "signal_fish_relay_client_id_exhaustion_total",
-        "Total occasions where relay client IDs were exhausted",
-        snapshot.relay_health.client_id_exhaustion_events,
     );
 
     counter(
@@ -806,6 +775,54 @@ mod tests {
             "signal_fish_errors_internal_total",
             "signal_fish_errors_websocket_total",
             "signal_fish_errors_validation_total",
+        ] {
+            assert!(
+                !rendered.contains(unwired),
+                "unwired series {unwired} must not be exported"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_render_prometheus_metrics_pins_distributed_lock_shape() {
+        let metrics = ServerMetrics::new();
+        let snapshot = metrics.snapshot().await;
+        let rendered = render_prometheus_metrics(&snapshot);
+
+        for (name, help) in [
+            (
+                "signal_fish_distributed_lock_release_failures_total",
+                "Total distributed-lock releases that failed because the handle was stale or the release errored",
+            ),
+            (
+                "signal_fish_distributed_lock_cleanup_runs_total",
+                "Total cleanup executions for distributed locks",
+            ),
+            (
+                "signal_fish_distributed_lock_cleanup_removed_total",
+                "Total expired distributed locks removed via cleanup",
+            ),
+        ] {
+            assert!(
+                rendered.contains(&format!("# HELP {name} {help}")),
+                "wired distributed-lock series {name} must be exported with its exact HELP text"
+            );
+            assert!(
+                rendered.contains(&format!("{name} 0")),
+                "wired distributed-lock series {name} must be exported as a counter line"
+            );
+        }
+
+        // Removed with the #434 wire-or-remove decisions: extend failures had
+        // no production extend path, relay client IDs have no relay server, and
+        // no membership cache exists in the shipped in-memory backend.
+        for unwired in [
+            "signal_fish_distributed_lock_extend_failures_total",
+            "signal_fish_relay_client_id_reuse_total",
+            "signal_fish_relay_client_id_exhaustion_total",
+            "signal_fish_cross_instance_membership_cache_hits_total",
+            "signal_fish_cross_instance_membership_cache_misses_total",
         ] {
             assert!(
                 !rendered.contains(unwired),
