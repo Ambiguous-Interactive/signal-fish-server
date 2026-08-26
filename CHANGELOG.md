@@ -46,6 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Remove never-wired metric exports that always reported a
+  healthier-than-real server: `signal_fish_queries_total`, the
+  `signal_fish_room_creation_latency`/`signal_fish_room_join_latency`/
+  `signal_fish_query_latency` histogram families, and the
+  `signal_fish_errors_*` family had no production increment sites since
+  inception, so they permanently exported zeros/nulls (and the JSON
+  `performance`/`errors` objects did the same), making error-rate alerts and
+  `created − deleted` style invariants impossible to satisfy honestly. Every
+  remaining exported series now has a real production data path. The dead
+  `ServerMetrics::health_status()`/`OperationTimer` APIs, whose failure-rate
+  math divided by those permanently-zero counters, are removed with them.
+
 - **Breaking:** Startup validation now rejects the remaining "zero silently
   kills an enabled feature" configuration seams (issue #431, following the
   #430 cap sweep): `server.reconnection_window = 0` issued every reconnection
@@ -171,6 +183,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Count room deletions truthfully: the exported
+  `signal_fish_rooms_deleted_total` counter (and the `rooms.deleted` JSON
+  field) had no production data path and stayed at zero forever while rooms
+  were really deleted on the empty-room/inactive-room sweeps and on
+  rolled-back room creations. Every deletion path now increments it exactly
+  once.
+- Client-initiated RFC 6455 Ping keepalives now refresh activity-reaper
+  liveness. Previously each inbound protocol Ping suppressed the server's own
+  liveness probe (inbound-activity guard) without refreshing the reaper's
+  `last_ping` stamp, so a fully healthy client that kept the connection alive
+  only with standard WebSocket pings was deterministically evicted with close
+  code `4003 activity_timeout` — contradicting the documented reaper contract
+  ("observed no inbound traffic") and the socket-level idle timeout, which
+  already counts every inbound frame. A last-seen persistence update fired by
+  a teardown-racing frame from an already-unregistered player is now suppressed
+  even when the heartbeat throttle is disabled (`heartbeat_throttle = 0`),
+  restoring the once-per-player-per-window throttle contract on every path.
 - Fix protocol-v3 text game data silently delivering without a complete relay
   stamp. The binary carrier already failed closed with `InvalidV3Stamp` when a
   v3 recipient would have observed a partial `(seq, epoch)` stamp, but the text
