@@ -96,7 +96,7 @@ async fn create_test_server_with_message_coordinator_and_lock(
         history_capacity,
         &metrics_config.dashboard_cache_history_fields,
     ));
-    dashboard_metrics_cache.spawn(Arc::clone(&database));
+    drop(dashboard_metrics_cache.spawn(Arc::clone(&database)));
 
     let rate_limiter = Arc::new(RoomRateLimiter::new(config.rate_limit_config.clone()));
     let _cleanup_task = Arc::clone(&rate_limiter).start_cleanup_task();

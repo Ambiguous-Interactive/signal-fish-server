@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use serde::Serialize;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -254,6 +255,48 @@ async fn health_check(
     }
 }
 
+/// Aborts a spawned task if the owning future exits before joining it.
+struct TaskAbortGuard(tokio::task::AbortHandle);
+
+impl Drop for TaskAbortGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn wait_for_task_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow() || shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn supervise_serve_and_cleanup(
+    serve: impl Future<Output = std::io::Result<()>>,
+    cleanup_shutdown_tx: tokio::sync::watch::Sender<bool>,
+    mut cleanup_task: tokio::task::JoinHandle<()>,
+) -> anyhow::Result<()> {
+    let _cleanup_abort = TaskAbortGuard(cleanup_task.abort_handle());
+    tokio::pin!(serve);
+
+    tokio::select! {
+        serve_result = &mut serve => {
+            let _ = cleanup_shutdown_tx.send(true);
+            (&mut cleanup_task)
+                .await
+                .map_err(|error| anyhow::anyhow!("server cleanup task failed: {error}"))?;
+            serve_result?;
+            Ok(())
+        }
+        cleanup_result = &mut cleanup_task => {
+            cleanup_result
+                .map_err(|error| anyhow::anyhow!("server cleanup task failed: {error}"))?;
+            anyhow::bail!("server cleanup task exited while the server was still running")
+        }
+    }
+}
+
 /// Start the server with both the WebSocket protocol and legacy relay support.
 #[allow(dead_code)]
 pub async fn run_server(
@@ -280,17 +323,24 @@ pub async fn run_server(
     )
     .await?;
 
-    // Start cleanup task
+    // Bind before starting background work so a port conflict cannot leave a
+    // detached task retaining the server.
+    let listener = bind_serve_listener(addr, socket_send_buffer_bytes)?;
+
+    // Keep cleanup scoped to this serving future. Normal return signals and
+    // joins it; cancellation drops the guard and aborts it.
+    let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
     let cleanup_server = game_server.clone();
-    tokio::spawn(async move {
-        cleanup_server.cleanup_task().await;
+    let cleanup_task = tokio::spawn(async move {
+        cleanup_server
+            .cleanup_task_until(wait_for_task_shutdown(cleanup_shutdown_rx))
+            .await;
     });
 
     // Create router with CORS configuration
     let app = create_standalone_router_with_origin_policy(origin_policy).with_state(game_server);
 
     // Accepted sockets are configured for low-latency relay (issue #197).
-    let listener = bind_serve_listener(addr, socket_send_buffer_bytes)?;
     tracing::info!(%addr, "Starting enhanced Signal Fish server");
     tracing::info!(
         deployment_mode = "single_instance",
@@ -300,18 +350,93 @@ pub async fn run_server(
         "Deployment contract: one process owns each room; losing the process loses its rooms"
     );
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+    supervise_serve_and_cleanup(
+        async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        },
+        cleanup_shutdown_tx,
+        cleanup_task,
     )
-    .await?;
-
-    Ok(())
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn hold_owner_forever<T>(_owner: T) {
+        std::future::pending::<()>().await;
+    }
+
+    #[tokio::test]
+    async fn serve_supervisor_propagates_cleanup_task_panics() {
+        let (cleanup_shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let cleanup_task = tokio::spawn(async {
+            panic!("injected cleanup failure");
+        });
+
+        let error = supervise_serve_and_cleanup(
+            std::future::pending::<std::io::Result<()>>(),
+            cleanup_shutdown_tx,
+            cleanup_task,
+        )
+        .await
+        .expect_err("cleanup panic must terminate the serving future");
+
+        assert!(
+            error.to_string().contains("server cleanup task failed")
+                && error.to_string().contains("panicked"),
+            "unexpected cleanup failure: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_supervisor_signals_and_joins_cleanup_after_serve_returns() {
+        let (cleanup_shutdown_tx, cleanup_shutdown_rx) = tokio::sync::watch::channel(false);
+        let cleanup_task = tokio::spawn(wait_for_task_shutdown(cleanup_shutdown_rx));
+
+        supervise_serve_and_cleanup(async { Ok(()) }, cleanup_shutdown_tx, cleanup_task)
+            .await
+            .expect("normal serve return should stop and join cleanup");
+    }
+
+    #[tokio::test]
+    async fn cancelling_polled_serve_supervisor_releases_cleanup_owner() {
+        let owner = Arc::new(());
+        let owner_weak = Arc::downgrade(&owner);
+        let task_owner = Arc::clone(&owner);
+        let cleanup_task = tokio::spawn(async move {
+            hold_owner_forever(task_owner).await;
+        });
+        let (cleanup_shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let serve_polled = Arc::new(tokio::sync::Notify::new());
+        let serve_polled_for_task = Arc::clone(&serve_polled);
+        let supervisor = tokio::spawn(supervise_serve_and_cleanup(
+            async move {
+                serve_polled_for_task.notify_one();
+                std::future::pending::<std::io::Result<()>>().await
+            },
+            cleanup_shutdown_tx,
+            cleanup_task,
+        ));
+        serve_polled.notified().await;
+        drop(owner);
+        assert!(owner_weak.upgrade().is_some());
+
+        supervisor.abort();
+        let _ = supervisor.await;
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+            while owner_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling the supervisor should abort cleanup and release its owner");
+    }
 
     #[test]
     fn fallible_router_constructors_return_invalid_origin_configuration() {

@@ -371,8 +371,6 @@ impl EnhancedGameServer {
             history_capacity,
             &metrics_config.dashboard_cache_history_fields,
         ));
-        dashboard_metrics_cache.spawn(database.clone());
-
         // Set up process-local coordination behind the extension interfaces.
         let distributed_lock = Arc::new(InMemoryDistributedLock::new());
         let message_coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
@@ -482,6 +480,15 @@ impl EnhancedGameServer {
             active_socket_tasks: AtomicUsize::new(0),
             active_socket_tasks_notify: Notify::new(),
         });
+
+        // Start background work only after every fallible constructor step has
+        // succeeded. The refresh loop holds weak owners and stops when this
+        // cache/database pair is released.
+        drop(
+            server
+                .dashboard_metrics_cache
+                .spawn(Arc::clone(&server.database)),
+        );
 
         Ok(server)
     }
