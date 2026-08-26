@@ -2856,9 +2856,23 @@ mod tests {
         epoch: u32,
         seq: u64,
     ) -> OutboundData {
+        data_for(id, class, key, epoch, seq, 1, 2)
+    }
+
+    /// Generalizes [`data_with_epoch`] so negative-composition tests can vary
+    /// the stream owner and room independently of the queue under test.
+    fn data_for(
+        id: u64,
+        class: DeliveryClass,
+        key: Option<u32>,
+        epoch: u32,
+        seq: u64,
+        from_player: u128,
+        room_id: u128,
+    ) -> OutboundData {
         OutboundData::new(
             Arc::new(ServerMessage::GameData {
-                from_player: PlayerId::from_u128(1),
+                from_player: PlayerId::from_u128(from_player),
                 data: json!({ "id": id }),
                 seq: Some(seq),
                 epoch: Some(epoch),
@@ -2868,8 +2882,8 @@ mod tests {
             DataDeliveryMetadata {
                 class,
                 key,
-                from_player: PlayerId::from_u128(1),
-                room_id: RoomId::from_u128(2),
+                from_player: PlayerId::from_u128(from_player),
+                room_id: RoomId::from_u128(room_id),
                 epoch,
                 seq,
             },
@@ -2896,6 +2910,16 @@ mod tests {
             OutboundPayload::DeliveryReport(report) => report,
             other => panic!("expected report, got {other:?}"),
         }
+    }
+
+    /// Drains a closed queue to its terminal `None`, collecting every payload
+    /// (data, controls, barriers, and reports) in pop order.
+    async fn drain_to_end(rx: &mut OutboundReceiver) -> Vec<QueuedOutbound> {
+        let mut items = Vec::new();
+        while let Some(item) = rx.recv().await.unwrap() {
+            items.push(item);
+        }
+        items
     }
 
     #[tokio::test]
@@ -3519,6 +3543,129 @@ mod tests {
         // Remove-and-append preserves global sequence order across keys.
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 2);
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 3);
+    }
+
+    /// The coalescing scan matches the full `(from_player, room_id, key)`
+    /// composition: an equal application key from a different stream owner or
+    /// routed through a different room is an independent value. Dropping either
+    /// discriminant would silently merge unrelated gameplay streams and emit a
+    /// causal gap for data that was never superseded.
+    #[tokio::test]
+    async fn latest_supersede_requires_matching_stream_owner_and_room() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data_for(1, DeliveryClass::Latest, Some(10), 1, 1, 1, 2))
+            .unwrap();
+
+        assert_eq!(
+            tx.try_enqueue_data(data_for(2, DeliveryClass::Latest, Some(10), 1, 2, 3, 2))
+                .unwrap(),
+            EnqueueOutcome {
+                enqueued: true,
+                losses: 0
+            },
+            "a different player's equal key must not supersede"
+        );
+        assert_eq!(
+            tx.try_enqueue_data(data_for(3, DeliveryClass::Latest, Some(10), 1, 3, 1, 9))
+                .unwrap(),
+            EnqueueOutcome {
+                enqueued: true,
+                losses: 0
+            },
+            "an equal key from another room must not supersede"
+        );
+
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.data.len(), 3);
+            assert_eq!(state.counters.latest.superseded, 0);
+            drop(state);
+        }
+        drop(tx);
+        let drained = drain_to_end(&mut rx).await;
+        assert_eq!(
+            drained.iter().map(message_id).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "all three independent values must survive in enqueue order"
+        );
+        for item in &drained {
+            assert!(
+                !matches!(&item.payload, OutboundPayload::DeliveryReport(_)),
+                "an independent stream must never produce an omission gap"
+            );
+        }
+    }
+
+    /// After a room transition, both eviction scans see only current-generation
+    /// rows: a pre-transition `Latest` row can never be matched as a same-key
+    /// predecessor and no pre-transition `Volatile` row can be picked as an
+    /// eviction victim, so saturating the data lane reports `LatestDroppedFull`
+    /// instead of touching cross-generation rows. The dropped arrival is
+    /// reported causally and every retained row drains in fence order.
+    #[tokio::test]
+    async fn room_transition_shields_stale_generation_rows_from_latest_scans() {
+        let (tx, mut rx) = channel(3, 4);
+        tx.set_protocol_version(3);
+        // A stale same-key `Latest` predecessor and a stale `Volatile` victim
+        // candidate: a scan that ignores generations would touch either.
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .unwrap();
+        tx.try_enqueue_data(data(5, DeliveryClass::Volatile, None, 1))
+            .unwrap();
+        tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .unwrap();
+        // Saturate the data lane with a current-generation Reliable neighbor.
+        tx.try_enqueue_data(data(2, DeliveryClass::Reliable, None, 2))
+            .unwrap();
+        assert_eq!(rx.shared.state().data.len(), 3);
+
+        let outcome = tx
+            .try_enqueue_data(data(3, DeliveryClass::Latest, Some(10), 3))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            EnqueueOutcome {
+                enqueued: false,
+                losses: 1
+            },
+            "no current-generation same-key predecessor and no volatile \
+             victim means the arrival drops full"
+        );
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.data.len(), 3);
+            assert_eq!(state.counters.latest.dropped_full, 1);
+            assert_eq!(state.counters.latest.superseded, 0);
+            assert_eq!(state.counters.volatile.dropped, 0);
+            drop(state);
+        }
+        assert!(!tx.is_closed());
+
+        drop(tx);
+        let drained = drain_to_end(&mut rx).await;
+        assert_eq!(drained.len(), 5);
+        assert_eq!(message_id(&drained[0]), 1, "the stale Latest survived");
+        assert_eq!(
+            message_id(&drained[1]),
+            5,
+            "the stale Volatile survived as a potential victim"
+        );
+        assert!(
+            matches!(&drained[2].payload, OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::RoomLeft)),
+            "the transition barrier gates current-generation delivery"
+        );
+        let dropped_report = report(drained[3].clone());
+        assert_eq!(dropped_report.gaps.len(), 1);
+        assert_eq!(dropped_report.gaps[0].from_seq, 3);
+        assert_eq!(dropped_report.gaps[0].to_seq, 3);
+        assert_eq!(
+            dropped_report.gaps[0].reason,
+            DeliveryGapReason::LatestDroppedFull
+        );
+        assert_eq!(dropped_report.per_class.latest.dropped_full, 1);
+        assert_eq!(message_id(&drained[4]), 2, "the Reliable neighbor survived");
     }
 
     #[tokio::test]
