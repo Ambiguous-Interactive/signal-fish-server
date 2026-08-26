@@ -621,3 +621,164 @@ async fn zero_interval_disables_server_ping_frames() {
 
     running.shutdown().await;
 }
+
+/// Server probes effectively disabled (60 s interval) so the activity reaper
+/// (`server.ping_timeout`) is the only liveness mechanism under test.
+async fn start_server_with_reaper_window(
+    ping_timeout: std::time::Duration,
+) -> (
+    RunningTestServer,
+    std::sync::Arc<signal_fish_server::server::EnhancedGameServer>,
+) {
+    let config = ServerConfig {
+        app_id_allowlist_enabled: false,
+        ping_timeout,
+        room_cleanup_interval: std::time::Duration::from_secs(1),
+        websocket_config: WebSocketConfig {
+            server_ping_interval_secs: 1,
+            pong_timeout_secs: 30,
+            ..WebSocketConfig::default()
+        },
+        ..ServerConfig::default()
+    };
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    let running = RunningTestServer::spawn(server.clone(), router).await;
+    (running, server)
+}
+
+#[tokio::test]
+async fn client_protocol_pings_refresh_activity_reaper_liveness() {
+    let (running, server) =
+        start_server_with_reaper_window(std::time::Duration::from_millis(1_500)).await;
+    let mut ws = connect(running.addr()).await;
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::JoinRoom {
+            game_name: "keepalive".to_string(),
+            room_code: Some("KEEPAL".to_string()),
+            player_name: "Keepalive Client".to_string(),
+            max_players: Some(2),
+            supports_authority: Some(true),
+            relay_transport: None,
+        })
+        .expect("serialize JoinRoom")
+        .into(),
+    ))
+    .await
+    .expect("send JoinRoom");
+    let joined_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let frame = tokio::time::timeout_at(joined_deadline, ws.next())
+            .await
+            .expect("timed out waiting for join response")
+            .expect("connection closed while joining")
+            .expect("websocket failed while joining");
+        let Message::Text(ref text) = frame else {
+            continue;
+        };
+        let message: ServerMessage =
+            serde_json::from_str(text.as_str()).expect("decode server message while joining");
+        assert!(
+            matches!(message, ServerMessage::RoomJoined(_)),
+            "join did not succeed: {message:?}"
+        );
+        break;
+    }
+
+    // Production `main` runs the maintenance loop; spawn the same cleanup task
+    // so the activity reaper observes this connection.
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = std::sync::Arc::clone(&server);
+        let shutdown = std::sync::Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    // A compliant keepalive-only client: RFC 6455 Ping frames, no other
+    // traffic. Each inbound frame suppresses the server's own probe for that
+    // window, so survival must come from the frames themselves refreshing
+    // liveness — not from an auto-ponged server probe. The skipped-probe
+    // assertion below pins that suppression actually happened.
+    let mut keepalive = tokio::time::interval(tokio::time::Duration::from_millis(100));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let keepalive_until = tokio::time::Instant::now() + tokio::time::Duration::from_millis(2_600);
+    while tokio::time::Instant::now() < keepalive_until {
+        tokio::select! {
+            _ = keepalive.tick() => {
+                ws.send(Message::Ping(1_u64.to_be_bytes().to_vec().into()))
+                    .await
+                    .expect("send client protocol Ping");
+            }
+            frame = ws.next() => {
+                let frame = frame
+                    .expect("keepalive-only client's websocket stream ended")
+                    .expect("keepalive-only client's websocket read failed");
+                match frame {
+                    Message::Close(close_frame) => panic!(
+                        "keepalive-only client was closed by the server: {close_frame:?}"
+                    ),
+                    Message::Text(text)
+                        if text.contains("ActivityTimeout") || text.contains("activity_timeout") =>
+                    {
+                        panic!(
+                            "activity reaper evicted a keepalive-only client: {text}"
+                        );
+                    }
+                    // Benign asynchronous broadcasts (lobby state, etc.).
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    assert!(
+        server
+            .metrics()
+            .websocket_ping_probes_skipped_activity
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1,
+        "client protocol pings did not suppress scheduled server probes"
+    );
+    assert_eq!(
+        server
+            .metrics()
+            .websocket_ping_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "keepalive-only client was counted as a missed-Pong timeout"
+    );
+
+    // The connection must still process application traffic after the reaper
+    // window has long passed.
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::Ping)
+            .expect("serialize application Ping")
+            .into(),
+    ))
+    .await
+    .expect("keepalive-only connection was closed before application traffic");
+    let alive_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let frame = tokio::time::timeout_at(alive_deadline, ws.next())
+            .await
+            .expect("timed out proving keepalive-only connection stayed alive")
+            .expect("connection closed instead of answering application Ping")
+            .expect("websocket read failed while proving liveness");
+        if let Message::Text(text) = frame {
+            let message: ServerMessage =
+                serde_json::from_str(&text).expect("decode application Pong response");
+            if matches!(message, ServerMessage::Pong) {
+                break;
+            }
+        }
+    }
+
+    shutdown.notify_one();
+    tokio::time::timeout(tokio::time::Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
+    running.shutdown().await;
+}
