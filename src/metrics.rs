@@ -1082,6 +1082,10 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Account one maintenance-sweep execution. `runs` counts only sweeps that
+    /// completed with a removal count (the `Ok` arm of
+    /// `cleanup_expired_locks`); failed sweep attempts are logged but not
+    /// counted, so `removed` stays attributable to counted runs.
     pub fn record_distributed_lock_cleanup(&self, removed: usize) {
         self.distributed_lock_cleanup_runs
             .fetch_add(1, Ordering::Relaxed);

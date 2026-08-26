@@ -7597,7 +7597,7 @@ async fn join_flow_releases_do_not_count_as_release_failures() {
         .handle_join_room(
             &creator_id,
             "clean-release".to_string(),
-            None,
+            Some("CLEAN1".to_string()),
             "creator".to_string(),
             Some(4),
             Some(true),
@@ -7612,7 +7612,7 @@ async fn join_flow_releases_do_not_count_as_release_failures() {
     assert!(
         !server
             .distributed_lock
-            .is_locked("room_join:clean-release")
+            .is_locked("room_join:clean-release:CLEAN1")
             .await
             .expect("join lock check succeeds"),
         "the admission flow must release its room-join lock"

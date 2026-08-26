@@ -2328,7 +2328,10 @@ impl EnhancedGameServer {
         match self.distributed_lock.release(lock).await {
             Ok(true) => {}
             Ok(false) => {
-                tracing::warn!(key = %lock.key, "Released a stale distributed-lock handle");
+                tracing::warn!(
+                    key = %lock.key,
+                    "Attempted to release a stale distributed-lock handle (key absent or held by another token)"
+                );
                 self.metrics.increment_distributed_lock_release_failures();
             }
             Err(error) => {
