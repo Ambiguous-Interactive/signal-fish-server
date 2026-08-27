@@ -39,17 +39,28 @@ pub struct Cli {
     pub join_code: Option<String>,
 
     /// Expected total player count including this client; the client sends
-    /// PlayerReady once it has observed this many room members. Also sets the
-    /// room capacity (max_players) when this client creates the room.
+    /// PlayerReady once it has observed this many room members. Also the
+    /// default room capacity (max_players) when this client creates the room.
     #[arg(long, default_value_t = 2)]
     pub peers: usize,
+
+    /// Room capacity (`JoinRoom.max_players`) sent when this client CREATES a
+    /// room; defaults to `--peers`, which keeps every scenario where the flag
+    /// is absent byte-identical (rooms cap exactly at the expected party
+    /// size). Values above `--peers` leave open seats after the room
+    /// finalizes, which is the harness shape for live seat-fill scenarios: a
+    /// late joiner fills a seat of the running session without any prior
+    /// departure (issue #451). Joiners adopt the joined room's existing
+    /// capacity, so the flag conflicts with `--join-code`. Must not sit below
+    /// `--peers`: the room would fill before its members could ever reach the
+    /// ready barrier.
+    #[arg(long, conflicts_with = "join_code")]
+    pub max_players: Option<u8>,
 
     /// Total DISTINCT session members (including this client) that must have
     /// been observed before this client may exit successfully; defaults to
     /// --peers. Late-join scenarios set this above --peers on the incumbents
-    /// so they stay in the session until the late joiner has arrived (room
-    /// capacity stays --peers: the server only finalizes full rooms, so a
-    /// late join is always a seat fill after a departure).
+    /// so they stay in the session until the late joiner has arrived.
     #[arg(long)]
     pub expect_total_peers: Option<usize>,
 
@@ -329,6 +340,31 @@ impl Cli {
     pub fn effective_total_peers(&self) -> usize {
         self.expect_total_peers.unwrap_or(self.peers)
     }
+
+    /// The `max_players` value sent in `JoinRoom`: an explicit `--max-players`
+    /// (creator only), else `--peers`. The protocol carries capacity as u8, so
+    /// a `--peers`-derived value above 255 is a usage error, and a creator
+    /// capacity below `--peers` is rejected because the ready barrier could
+    /// never be reached.
+    pub fn join_max_players(&self) -> Result<u8, String> {
+        let max_players = self
+            .max_players
+            .or_else(|| u8::try_from(self.peers).ok())
+            .ok_or_else(|| {
+                format!(
+                    "--peers {} exceeds the u8 room-capacity type; pass --max-players or lower --peers",
+                    self.peers
+                )
+            })?;
+        if self.create_room && usize::from(max_players) < self.peers {
+            return Err(format!(
+                "--max-players {max_players} is below the --peers {} ready barrier: the room \
+                 would fill before its members could ever ready up",
+                self.peers
+            ));
+        }
+        Ok(max_players)
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +388,12 @@ mod tests {
         assert!(cli.create_room);
         assert_eq!(cli.join_code, None);
         assert_eq!(cli.peers, 2);
+        assert_eq!(cli.max_players, None);
+        assert_eq!(
+            cli.join_max_players(),
+            Ok(2),
+            "room capacity defaults to --peers"
+        );
         assert_eq!(cli.expect_total_peers, None);
         assert_eq!(
             cli.effective_total_peers(),
@@ -426,6 +468,112 @@ mod tests {
             "--expect-total-peers overrides the --peers default"
         );
         assert!(cli.leave_on_game_start);
+    }
+
+    #[test]
+    fn max_players_defaults_to_peers_and_overrides_when_given() {
+        let defaulted = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--peers",
+            "2",
+        ]);
+        assert_eq!(
+            defaulted.join_max_players(),
+            Ok(2),
+            "without --max-players the room caps exactly at the party size"
+        );
+
+        let open = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--peers",
+            "2",
+            "--max-players",
+            "3",
+        ]);
+        assert_eq!(
+            open.join_max_players(),
+            Ok(3),
+            "--max-players raises the capacity above the ready barrier (issue #451)"
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "signal-fish-reference-native",
+                "--server-url",
+                "ws://127.0.0.1:9000/v3/ws",
+                "--create-room",
+                "--max-players",
+                "256",
+            ])
+            .is_err(),
+            "capacity is a u8 on the wire; 256 must be rejected by the parser"
+        );
+
+        let joiner = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--join-code",
+            "ABC123",
+        ]);
+        assert_eq!(
+            joiner.join_max_players(),
+            Ok(2),
+            "a joiner still sends a u8 capacity (the server keeps the room's own)"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "signal-fish-reference-native",
+                "--server-url",
+                "ws://127.0.0.1:9000/v3/ws",
+                "--join-code",
+                "ABC123",
+                "--max-players",
+                "3",
+            ])
+            .is_err(),
+            "joiners adopt the joined room's capacity; --max-players must require --create-room"
+        );
+    }
+
+    #[test]
+    fn creator_capacity_below_the_ready_barrier_is_rejected() {
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--peers",
+            "3",
+            "--max-players",
+            "2",
+        ]);
+        let error = cli
+            .join_max_players()
+            .expect_err("a room that fills before its barrier must be a usage error");
+        assert!(
+            error.contains("--max-players 2"),
+            "the error names the capacity: {error}"
+        );
+
+        // A joiner's capacity is advisory (the server keeps the room's own),
+        // so the same numbers stay valid in join mode.
+        let joiner = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--join-code",
+            "ABC123",
+            "--peers",
+            "3",
+        ]);
+        assert_eq!(joiner.join_max_players(), Ok(3));
     }
 
     #[test]

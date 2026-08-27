@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Reference clients: add a creator-only `--max-players` flag (native and
+  browser, mirrored) that decouples room capacity from the `--peers` ready
+  barrier. Capacity above the barrier leaves open seats after the room
+  finalizes, so a late joiner can seat-fill the running session without any
+  prior departure; the flag is rejected in join mode and below `--peers`
+  (the ready barrier could never be reached). New interop scenarios exercise
+  the open-capacity seat fill end to end on the v2 relay floor — native
+  drivers, and the browser as the creating driver — pinning that the joiner
+  enters the `finalized` room, `GameStarting` is never re-broadcast, and no
+  `Error` frame surfaces (the live pin for the issue #449 stale-latch class:
+  a `StartGame` re-issue after finalization would draw `INVALID_ROOM_STATE`)
+  (issue #451).
 - Pin the host-election/readiness residuals of the issue #396 sweep with
   deterministic, mutation-verified tests: the coordinator's `StartGame`
   rejections (`NotReady`/`Forbidden`/`AlreadyStarted`) reach the wire with

@@ -48,6 +48,8 @@ Options:
   --create-room                 Create a new room (exclusive with --join-code)
   --join-code <CODE>            Join an existing room by code
   --peers <N>                   Expected member count incl. self [default: 2]
+  --max-players <N>             Room capacity when creating; creator-only,
+                                defaults to --peers [default: --peers]
   --expect-total-peers <N>      Distinct members observed before a successful
                                 exit [default: --peers]
   --leave-on-game-start         Exit 0 after GameStarting + plan, without pairing
@@ -81,6 +83,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     '--server-url',
     '--join-code',
     '--peers',
+    '--max-players',
     '--expect-total-peers',
     '--game-name',
     '--player-name',
@@ -189,11 +192,31 @@ export function parseArgs(argv: string[]): CliOptions | null {
     throw new UsageError(`--peers must be between 1 and 255, got ${peers}`);
   }
 
+  // Mirror the native `--max-players`: creator-only, u8 wire range, and never
+  // below the ready barrier (the room would fill before its members could
+  // ready up).
+  const maxPlayers = flags.has('--max-players') ? numberFlag('--max-players', 0) : null;
+  if (maxPlayers !== null) {
+    if (!createRoom) {
+      throw new UsageError('--max-players is only valid when creating a room (--create-room)');
+    }
+    if (maxPlayers < 1 || maxPlayers > 255) {
+      throw new UsageError(`--max-players must be between 1 and 255, got ${maxPlayers}`);
+    }
+    if (maxPlayers < peers) {
+      throw new UsageError(
+        `--max-players (${maxPlayers}) must not be below --peers (${peers}): the ready ` +
+          'barrier could never be reached',
+      );
+    }
+  }
+
   const config: RunConfig = {
     serverUrl,
     createRoom,
     joinCode: typeof joinCode === 'string' ? joinCode : null,
     peers,
+    maxPlayers,
     expectTotalPeers: flags.has('--expect-total-peers')
       ? numberFlag('--expect-total-peers', 0)
       : null,

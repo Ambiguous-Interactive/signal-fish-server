@@ -32,6 +32,12 @@ export interface RunConfig {
   createRoom: boolean;
   joinCode: string | null;
   peers: number;
+  /**
+   * Room capacity (`JoinRoom.max_players`) sent when this client CREATES a
+   * room; null keeps the native default of `--peers`. Parse-time validation
+   * (creator-only, range, not below `--peers`) mirrors the native flag.
+   */
+  maxPlayers: number | null;
   expectTotalPeers: number | null;
   leaveOnGameStart: boolean;
   gameName: string;

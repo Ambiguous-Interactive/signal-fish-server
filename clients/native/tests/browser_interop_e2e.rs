@@ -61,6 +61,12 @@
 //!    down itself and exits 143; a SIGKILL'd CLI (this harness's kill-on-drop
 //!    path, untrappable in-process) is covered by the detached reaper. Either
 //!    way zero Chromium descendants survive a bounded window.
+//! 9. `browser_creator_open_capacity_seat_fill_relay_floor` — the
+//!    `--max-players` capability with the BROWSER as the room creator
+//!    (issue #451): the browser opens a 3-seat room with a 2-member ready
+//!    barrier on the v2 relay floor, the room finalizes at 2/3 seats, and a
+//!    native joiner fills the open seat of the running session with no prior
+//!    departure. The seat-fill mirror of the native suite's scenario 9.
 //!
 //! Scenario assertions are copies of the native suite's
 //! (`tests/interop_e2e.rs`) — deliberately NOT shared, so this feature-gated
@@ -85,7 +91,7 @@ use uuid::Uuid;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the `#[tokio::test]` functions in this file).
-const SCENARIO_COUNT: u64 = 8;
+const SCENARIO_COUNT: u64 = 9;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -1025,6 +1031,195 @@ async fn mixed_v2_browser_v3_native_relay_floor() {
         // and the relay GameData matrix completes.
         single_event(full_log, "game_starting", who);
         assert_live_relay_floor(&run, index);
+    }
+}
+
+/// Scenario 9 (see the module docs): the BROWSER creator opens a 3-seat room
+/// with a 2-member ready barrier (`--max-players 3 --peers 2`) on the v2
+/// relay floor; the room finalizes at 2/3 seats and a native joiner fills the
+/// open seat of the running session (issue #451). Assertion shape mirrors the
+/// native suite's `seat_fill_join_into_open_capacity_finalized_room_v2_relay_floor`.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_creator_open_capacity_seat_fill_relay_floor() {
+    let _serial = acquire_serial().await;
+    let server = spawn_server("relay").await;
+    let v2_url = server.v2_ws_url();
+    let workdir = tempfile::tempdir().expect("create client workdir");
+    let success_release_file = workdir.path().join("release-seat-fill-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
+    assert!(
+        !success_release_file.exists(),
+        "success release path must start absent"
+    );
+
+    let incumbent_args = [
+        "--protocol-version",
+        "2",
+        "--expect-total-peers",
+        "3",
+        "--success-release-file",
+        success_release_path,
+    ];
+    let creator_relay = relay_payload_for("c0");
+    let mut creator = spawn_browser_client(
+        &ClientSpec {
+            name: "c0",
+            server_url: &v2_url,
+            game_name: "binterop-seatfill",
+            join_code: None,
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&creator_relay),
+            extra_args: &[
+                "--max-players",
+                "3",
+                "--protocol-version",
+                "2",
+                "--expect-total-peers",
+                "3",
+                "--success-release-file",
+                success_release_path,
+            ],
+        },
+        workdir.path(),
+    );
+    let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
+    let room_code = str_field(&created, "room_code").to_string();
+
+    let c1_relay = relay_payload_for("c1");
+    let mut c1 = spawn_client(
+        &ClientSpec {
+            name: "c1",
+            server_url: &v2_url,
+            game_name: "binterop-seatfill",
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&c1_relay),
+            extra_args: &incumbent_args,
+        },
+        workdir.path(),
+    );
+
+    // Deterministic pre-join gate: both incumbents processed GameStarting, so
+    // the room is Finalized server-side and every later join is a seat fill.
+    for incumbent in [&mut creator, &mut c1] {
+        incumbent.await_event("game_starting", EVENT_TIMEOUT).await;
+    }
+
+    let joiner_relay = relay_payload_for("c2");
+    let mut joiner = spawn_client(
+        &ClientSpec {
+            name: "c2",
+            server_url: &v2_url,
+            game_name: "binterop-seatfill",
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&joiner_relay),
+            extra_args: &[
+                "--protocol-version",
+                "2",
+                "--success-release-file",
+                success_release_path,
+            ],
+        },
+        workdir.path(),
+    );
+
+    for client in [&mut creator, &mut c1, &mut joiner] {
+        client
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+    }
+    std::fs::write(&success_release_file, b"release").expect("release seat-fill clients together");
+    for client in [&mut creator, &mut c1, &mut joiner] {
+        drain_expect_success(client).await;
+    }
+
+    let ids = [
+        player_id_of(&creator.events, "c0"),
+        player_id_of(&c1.events, "c1"),
+        player_id_of(&joiner.events, "c2"),
+    ];
+    let distinct: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(distinct.len(), 3, "player ids must be distinct: {ids:?}");
+
+    // Joiner: entry reports the running session's Finalized state and
+    // GameStarting is never re-broadcast.
+    let joined = single_event(&joiner.events, "room_joined", "c2");
+    assert_eq!(
+        str_field(joined, "lobby_state"),
+        "finalized",
+        "the seat-filling joiner must observe the room's Finalized state on entry"
+    );
+    assert!(
+        events_named(&joiner.events, "game_starting").is_empty(),
+        "joiner: GameStarting is never re-broadcast for a seat fill"
+    );
+    assert_eq!(
+        events_named(&joiner.events, "game_data_sent").len(),
+        1,
+        "joiner: the entry-armed relay probe sends exactly once"
+    );
+
+    // Incumbents: exactly one start; the join is the only post-start
+    // membership event; and zero error frames — a stale-latch StartGame
+    // re-issue after the join would draw INVALID_ROOM_STATE and surface here.
+    for (client, other) in [(&creator, 1usize), (&c1, 0usize)] {
+        let log = &client.events;
+        let start_index = log
+            .iter()
+            .position(|event| event.get("event").and_then(Value::as_str) == Some("game_starting"))
+            .expect("the incumbent started the session exactly once");
+        assert_eq!(
+            events_named(log, "game_starting").len(),
+            1,
+            "{}: the room starts exactly once;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+        // The incumbent's lobby-phase sibling join precedes the start; the
+        // seat fill is the only post-start join.
+        let post_start_joins: Vec<&Value> = log[start_index + 1..]
+            .iter()
+            .filter(|event| event.get("event").and_then(Value::as_str) == Some("peer_joined"))
+            .collect();
+        assert_eq!(
+            post_start_joins.len(),
+            1,
+            "{}: the seat fill is the only post-start join;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+        assert_eq!(
+            str_field(post_start_joins[0], "player_id"),
+            ids[2],
+            "{}: the joined member must be the joiner",
+            client.name
+        );
+        let window = scenario_window(log);
+        assert!(
+            events_named(window, "error").is_empty(),
+            "{}: a running seat-filled session must produce no error frames;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+        let received: BTreeSet<&str> = events_named(window, "game_data_received")
+            .into_iter()
+            .map(|event| str_field(event, "from"))
+            .collect();
+        let expected: BTreeSet<&str> = [ids[other].as_str(), ids[2].as_str()].into_iter().collect();
+        assert_eq!(
+            received,
+            expected,
+            "{}: the relay floor must deliver both siblings' payloads across the final \
+             membership;\n{}",
+            client.name,
+            client.diagnostics()
+        );
     }
 }
 

@@ -615,8 +615,7 @@ async fn join_room(
     ),
     FatalError,
 > {
-    let max_players = u8::try_from(cli.peers)
-        .map_err(|_overflow| FatalError::protocol(format!("--peers {} exceeds u8", cli.peers)))?;
+    let max_players = cli.join_max_players().map_err(FatalError::protocol)?;
     let message = ClientMessage::JoinRoom {
         game_name: cli.game_name.clone(),
         room_code: cli.join_code.clone(),
