@@ -237,7 +237,22 @@ mod handler_honesty {
             .get_client_room(&player)
             .await
             .expect("join routes the client into a room");
-        while rx.try_recv().is_ok() {}
+
+        // Join traffic is fully enqueued once `handle_join_room` returns, so
+        // draining what is present is deterministic; every popped frame must
+        // be an expected join/roster bookkeeping variant.
+        loop {
+            match rx.try_recv() {
+                Ok(message) => match message.as_ref() {
+                    ServerMessage::RoomJoined(_)
+                    | ServerMessage::PlayerJoined { .. }
+                    | ServerMessage::LobbyStateChanged { .. } => {}
+                    other => panic!("unexpected pre-scenario frame {other:?}"),
+                },
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(err) => panic!("channel closed while draining join traffic: {err}"),
+            }
+        }
 
         let vanished_row = server
             .database()
