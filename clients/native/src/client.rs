@@ -3639,12 +3639,8 @@ mod tests {
         async fn expect_silence(
             frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
         ) {
-            assert!(
-                tokio::time::timeout(Duration::from_millis(200), frames.recv())
-                    .await
-                    .is_err(),
-                "no client frame was expected on the wire"
-            );
+            let drained = tokio::time::timeout(Duration::from_millis(200), frames.recv()).await;
+            assert!(drained.is_err(), "no client frame was expected on the wire");
         }
 
         // (a) First all-ready broadcast: readiness fires, then exactly one
