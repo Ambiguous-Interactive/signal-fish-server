@@ -3358,7 +3358,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[should_panic(expected = "a Latest-classed row reached the legacy lane")]
     async fn latest_row_on_legacy_lane_trips_the_invariant_assert() {
-        let (tx, mut rx) = channel(4, 4);
+        let (_tx, mut rx) = channel(4, 4);
         {
             let mut state = rx.shared.state();
             let generation = state.receive_generation;
