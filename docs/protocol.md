@@ -139,7 +139,11 @@ envelope and are always reliable; delivery classes apply only to JSON
 
 Like every other command surface, game data sent from a connection that is
 not currently seated in any room is rejected with `NOT_IN_ROOM` (both the
-JSON and raw-binary lanes) and never relayed.
+JSON and raw-binary lanes) and never relayed. Other per-frame validation
+runs first: delivery-metadata violations answer `INVALID_DELIVERY_CLASS`,
+and oversized binary payloads answer `MESSAGE_TOO_LARGE`, regardless of
+seat state. This includes spectators, whose connections are never seated in
+the player roster.
 
 ### PlayerReady
 
@@ -1463,8 +1467,9 @@ By convention the payload is matchbox-compatible: one of `{"Offer": "..."}`, `{"
 rate limit, v3 target); it never inspects the SDP or ICE strings. A payload whose serialized JSON exceeds
 `security.max_signal_bytes` (default 16 KiB) is rejected with `SIGNAL_TOO_LARGE` and is not relayed. Dispatch to
 the validated target is best effort: a signal whose recipient's queue has closed or been superseded by a newer
-connection generation is dropped without notice to either side; validation failures are always reported to the
-sender with their coded error.
+connection generation is dropped without notice to either side; a recipient that stalls until its slow-consumer
+deadline abandons the signal along with the recipient's whole connection; validation failures are always reported
+to the sender with their coded error.
 
 Client → server (`to` names the target peer):
 

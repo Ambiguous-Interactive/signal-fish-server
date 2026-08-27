@@ -188,9 +188,9 @@ mod handler_honesty {
             "default registration negotiates below v3"
         );
 
-        // Latest without a key AND Reliable with a key are also invalid for
-        // v2 senders, but the v2-valid gate is total omission: drive both
-        // metadata-bearing shapes through the same pre-v3 rejection.
+        // The gate for pre-v3 senders is total metadata omission; drive both
+        // shapes through it. `(Some(Latest), Some(7))` is even the v3-legal
+        // pairing — below v3 it must still be rejected outright.
         server
             .handle_game_data(
                 &player,

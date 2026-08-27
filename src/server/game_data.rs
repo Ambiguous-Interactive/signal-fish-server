@@ -34,37 +34,34 @@ impl EnhancedGameServer {
             .update_player_connection_info(&room_id, player_id, connection_info)
             .await
         {
-            Ok(true) => {}
-            Ok(false) => {
-                // The durable membership row vanished between room resolution
-                // and the write (teardown raced us). Treating this as success
-                // would silently drop handoff metadata peers need at
-                // `GameStarting`; surface the same honest failure as any
-                // other persistence loss (#396 sweep).
-                tracing::warn!(
-                    %player_id,
-                    %room_id,
-                    "Legacy peer metadata write landed on a vanished membership row"
-                );
-                let _ = self
-                    .send_error_to_player(
-                        player_id,
-                        "Failed to store legacy peer metadata".to_string(),
-                        Some(ErrorCode::InternalError),
-                    )
-                    .await;
-            }
-            Err(e) => {
-                tracing::error!(%player_id, "Failed to store legacy peer metadata: {}", e);
-                let _ = self
-                    .send_error_to_player(
-                        player_id,
-                        "Failed to store legacy peer metadata".to_string(),
-                        Some(ErrorCode::InternalError),
-                    )
-                    .await;
-            }
+            // Confirmed write: the caller asked for no receipt, so silence is
+            // the success contract.
+            Ok(true) => return,
+            // A vanished membership row (`Ok(false)`; teardown raced us) and
+            // a storage failure both mean peers will never see this metadata
+            // at `GameStarting`. Treating either as success used to make the
+            // loss indistinguishable from stored (#396 sweep): both fall
+            // through to one honest client reply.
+            Ok(false) => tracing::warn!(
+                %player_id,
+                %room_id,
+                "Legacy peer metadata write landed on a vanished membership row"
+            ),
+            Err(e) => tracing::error!(
+                %player_id,
+                %room_id,
+                "Failed to store legacy peer metadata: {}",
+                e
+            ),
         }
+
+        let _ = self
+            .send_error_to_player(
+                player_id,
+                "Failed to store legacy peer metadata".to_string(),
+                Some(ErrorCode::InternalError),
+            )
+            .await;
     }
 
     /// Handle JSON game data fan-out with coordination.

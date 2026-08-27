@@ -77,12 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously started and then admitted relayed game data that could not be
   re-emitted, closing every recipient with `1009 outbound_message_too_large`
   — silent total rejection for exactly the traffic the deployment appeared to
-  accept. The pairing now fails startup with both knobs named (issue #396).
+  accept. The pairing now fails both top-level config validation and direct
+  library construction of `EnhancedGameServer`, naming both knobs
+  (issue #396).
 - Reject game data from unseated connections with `NOT_IN_ROOM` instead of
   dropping it silently: JSON `GameData` and raw binary game data sent before
-  joining (or after losing seat during teardown) now surface the same coded
-  error as every other command surface, so clients can distinguish "relayed"
-  from "dropped" and retry meaningfully.
+  joining, while spectating (spectator connections are never seated), or
+  after losing seat during teardown now surface the same coded error as
+  every other command surface, so clients can distinguish "relayed"
+  from "dropped" and retry meaningfully. Per-frame validation still runs
+  first (`INVALID_DELIVERY_CLASS` / `MESSAGE_TOO_LARGE`).
 - Accept-but-drop honesty for legacy peer metadata:
   `ProvideConnectionInfo` now returns `INTERNAL_ERROR` when its durable
   write lands on a membership row that vanished mid-flight instead of

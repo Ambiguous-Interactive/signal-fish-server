@@ -7803,3 +7803,106 @@ async fn test_distributed_lock_cleanup_counters_are_wired() {
         .expect("cleanup task should observe shutdown")
         .expect("cleanup task should not panic");
 }
+
+/// The creator rename must mirror into the freshly built room only when the
+/// durable store confirmed the row, and every observed surface must agree
+/// with storage (#396 honest-failure sweep). Mid-creation the row cannot
+/// realistically vanish (no interleave between room build and rename), so
+/// the failure half is pinned via injected storage errors: the published
+/// snapshot must never outlive the durable rename.
+#[tokio::test]
+async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database
+        .initialize()
+        .await
+        .expect("rename-integrity test database initializes");
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48310".parse().unwrap()).await;
+
+    // Failure half: a rejected rename keeps the creation placeholder in both
+    // surfaces instead of patching memory ahead of (or against) storage.
+    database.fail_update_player_name_for_test(true);
+    server
+        .handle_join_room(
+            &creator,
+            "rename-integrity".to_string(),
+            Some("RNM001".to_string()),
+            "Display-Name".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room_id = server
+        .get_client_room(&creator)
+        .await
+        .expect("join routes the creator");
+    let response = timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .expect("creator join must answer")
+        .expect("join response present");
+    let ServerMessage::RoomJoined(payload) = response.as_ref() else {
+        panic!("expected RoomJoined first for the creator, got {response:?}");
+    };
+    assert_eq!(payload.room_id, room_id);
+
+    let published_name = payload
+        .current_players
+        .iter()
+        .find(|player| player.id == creator)
+        .expect("the creator is part of its own join snapshot")
+        .name
+        .clone();
+    let stored_name = server
+        .database()
+        .get_room_players(&room_id)
+        .await
+        .expect("roster readable after creation")
+        .iter()
+        .find(|player| player.id == creator)
+        .expect("creator row exists in storage")
+        .name
+        .clone();
+    assert_eq!(
+        published_name, stored_name,
+        "published snapshot must never disagree with storage"
+    );
+    assert_eq!(
+        published_name, "Creator",
+        "a rejected rename keeps the creation placeholder in both surfaces"
+    );
+
+    // Success half: once storage confirms the row, the display name is the
+    // one truth; nothing may keep publishing a stale placeholder.
+    database.fail_update_player_name_for_test(false);
+    assert!(
+        server
+            .database()
+            .update_player_name(&room_id, &creator, "Display-Name")
+            .await
+            .expect("confirmed rename succeeds"),
+        "the seated creator's roster row must accept the rename"
+    );
+    let stored_after_rename = server
+        .database()
+        .get_room_players(&room_id)
+        .await
+        .expect("roster readable after rename")
+        .iter()
+        .find(|player| player.id == creator)
+        .expect("creator row still present")
+        .name
+        .clone();
+    assert_eq!(stored_after_rename, "Display-Name");
+}
