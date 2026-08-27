@@ -9,9 +9,11 @@
 // 3. Ready barrier: send `PlayerReady` only once the room is in the Lobby
 //    state AND `--peers N` members are present (counting members alone races
 //    the server's Waiting→Lobby transition). The lobby no longer auto-starts
-//    on a full ready set: when the server reports every current member ready
-//    (`LobbyStateChanged.all_ready`), the room creator sends an explicit
-//    `StartGame`; joiners just await the `GameStarting` it produces.
+//    on a full ready set: when every current member is ready — recomputed
+//    from the authoritative `ready_players` snapshots over current membership,
+//    since a join invalidates a cached all-ready (no corrective broadcast) and
+//    a departure can restore it without one — the room creator sends an
+//    explicit `StartGame`; joiners just await the `GameStarting` it produces.
 // 4. Finalize: `GameStarting`, then every v3 recipient's authoritative
 //    `SessionPlan` (including explicit relay/empty plans).
 // 5. P2P per `peers[].initiate` (with `NewPeer` retained for compatible
@@ -357,6 +359,11 @@ export function sessionPlanPeerIds(
     : [];
 }
 
+/** Defensively extract the player-id strings from an authoritative snapshot. */
+function parsePlayerIds(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+}
+
 /**
  * Run the full client lifecycle; emits every stdout event except the final
  * `exiting` (owned by the CLI) and resolves with the exit code. Never rejects.
@@ -450,6 +457,99 @@ export class ExchangeLedger {
   }
 }
 
+/**
+ * Readiness snapshot + explicit-`StartGame` latch for the room creator (the
+ * field-for-field mirror of the native `StartGameGate`).
+ *
+ * The creator's send is latched so repeated `LobbyStateChanged` broadcasts
+ * cannot duplicate it, but the latch must not survive an invalidation: a later
+ * join is always unready and emits only `PlayerJoined` (no corrective
+ * broadcast), so a cached `all_ready: true` goes stale and the server's
+ * authoritative gate rejects a stale-latch send with `GAME_START_NOT_READY`.
+ * Per the documented client contract
+ * (docs/guides/building-a-client.md "StartGame authorization and readiness"),
+ * the creator recomputes readiness from the authoritative `ready_players`
+ * snapshot over the CURRENT membership and re-issues `StartGame` once every
+ * current player is ready again — via the next `all_ready` toggle, or
+ * immediately when the unready member leaves (departures emit no readiness
+ * broadcast).
+ */
+export class StartGameGate {
+  private readonly readyPlayers = new Set<string>();
+  /** `StartGame` went out since the last invalidation (a join, a departure,
+   * or an authoritative `GAME_START_NOT_READY`). */
+  private sentSinceInvalidation = false;
+
+  constructor(readyPlayers: readonly string[]) {
+    this.readyPlayers = new Set(readyPlayers);
+  }
+
+  /** Replace the readiness set from an authoritative snapshot (`RoomJoined`
+   * baseline or `LobbyStateChanged`). Never re-arms the latch by itself: a
+   * snapshot without an invalidation must not duplicate a send. */
+  snapshot(readyPlayers: readonly string[]): void {
+    this.readyPlayers.clear();
+    for (const player of readyPlayers) {
+      this.readyPlayers.add(player);
+    }
+  }
+
+  /** A member joined. Joiners are always unready and their `PlayerJoined`
+   * arrives with no corrective broadcast, so the cached all-ready snapshot is
+   * stale and the latch re-arms. */
+  memberJoined(player: string): void {
+    this.readyPlayers.delete(player);
+    this.sentSinceInvalidation = false;
+  }
+
+  /** A member departed. Readiness belongs to the CURRENT membership, so a
+   * departure can restore all-ready with no readiness broadcast at all; the
+   * previous send's premise (that exact membership) is gone either way. */
+  memberLeft(player: string): void {
+    this.readyPlayers.delete(player);
+    this.sentSinceInvalidation = false;
+  }
+
+  /** The authoritative `StartGame` gate rejected our send
+   * (`GAME_START_NOT_READY`): the cached snapshot is stale and the latch
+   * re-arms. */
+  startRejected(): void {
+    this.sentSinceInvalidation = false;
+  }
+
+  /** Every current member is ready. Membership, not a raw count, decides —
+   * mirroring the server's gate, which also requires a non-empty room. */
+  allCurrentReady(present: ReadonlySet<string>): boolean {
+    if (present.size === 0) {
+      return false;
+    }
+    for (const player of present) {
+      if (!this.readyPlayers.has(player)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Whether the creator should send (or re-issue) the explicit `StartGame`. */
+  shouldSend(createRoom: boolean, gameStarted: boolean, present: ReadonlySet<string>): boolean {
+    return (
+      createRoom && !gameStarted && !this.sentSinceInvalidation && this.allCurrentReady(present)
+    );
+  }
+
+  /** Record that the `StartGame` went out on the wire. */
+  noteSent(): void {
+    this.sentSinceInvalidation = true;
+  }
+
+  /** Reset to an empty baseline (`RoomLeft`): the room's readiness is gone. */
+  reset(): void {
+    this.readyPlayers.clear();
+    this.sentSinceInvalidation = false;
+  }
+}
+
 /** Single-chain state machine driving the session (see module docs). */
 class Orchestrator {
   private readonly config: RunConfig;
@@ -481,10 +581,11 @@ class Orchestrator {
   private inLobby = false;
   private readySent = false;
   /**
-   * The explicit `StartGame` has been sent (room creator only, once). Guards
-   * against re-sending on subsequent `LobbyStateChanged` broadcasts.
+   * Readiness snapshot + explicit-`StartGame` latch for the room creator.
+   * Guards against duplicate sends on repeated `LobbyStateChanged` broadcasts
+   * while still re-issuing after a membership invalidation.
    */
-  private startGameSent = false;
+  private readonly startGameGate = new StartGameGate([]);
   private gameStarted = false;
   private lateJoined = false;
   private initialSessionPlanPending = false;
@@ -763,14 +864,19 @@ class Orchestrator {
       }
     }
     // Fold in deltas observed ahead of the baseline (set-idempotent).
+    this.startGameGate.snapshot(parsePlayerIds(payload['ready_players']));
     for (const player of earlyJoined) {
       const id = player['id'];
       if (typeof id === 'string') {
         this.present.add(id);
+        // A pre-baseline joiner is unready like any other joiner.
+        this.startGameGate.memberJoined(id);
       }
     }
     for (const event of earlyLeft) {
-      this.present.delete(String(event['player_id']));
+      const id = String(event['player_id']);
+      this.present.delete(id);
+      this.startGameGate.memberLeft(id);
     }
     this.present.add(this.myId);
     for (const id of this.present) {
@@ -1134,6 +1240,7 @@ class Orchestrator {
     switch (frame.type) {
       case 'RoomJoined':
         accountability.rebaselineSnapshot(data['current_players']);
+        this.startGameGate.snapshot(parsePlayerIds(data['ready_players']));
         break;
       case 'RoomLeft':
         accountability.resetRoom();
@@ -1142,6 +1249,7 @@ class Orchestrator {
         this.lobbyState = null;
         this.currentSessionGeneration = null;
         this.pendingSignals.clear();
+        this.startGameGate.reset();
         break;
       case 'PlayerJoined': {
         const player = data['player'] as Record<string, unknown>;
@@ -1149,6 +1257,12 @@ class Orchestrator {
         const id = String(player['id']);
         this.present.add(id);
         this.membersSeen.add(id);
+        // A joiner is always unready and no corrective broadcast fires, so a
+        // cached all-ready snapshot just went stale (and any in-flight latch
+        // with it). No re-issue is possible yet — the joiner is provably not
+        // ready — so this only re-arms the gate for the joiner's future
+        // toggle. (Mirrors the native client.)
+        this.startGameGate.memberJoined(id);
         if (
           requireFinalizedMembershipPlan(
             this.pendingMembershipPlans,
@@ -1169,6 +1283,11 @@ class Orchestrator {
         accountability.notePlayerLeft(rawId, data['epoch'], data['final_seq']);
         const id = String(rawId);
         this.present.delete(id);
+        // Readiness belongs to the current membership: the departure may
+        // restore all-ready with no readiness broadcast (an unready late
+        // joiner leaving), so re-arm and recompute. (Mirrors the native
+        // client.)
+        this.startGameGate.memberLeft(id);
         clearDepartedMembershipPlan(this.pendingMembershipPlans, id, data['epoch']);
         // A departed peer can no longer satisfy any pairing-derived
         // criterion (see the native client for the full rationale).
@@ -1185,6 +1304,11 @@ class Orchestrator {
           this.resolveTransportStatus();
         }
         emit({ event: 'player_left', player_id: id });
+        // The departure may have made the remaining membership all-ready
+        // again with no readiness broadcast; recompute and re-issue if so
+        // (post-finalize departures are blocked by the gate's `gameStarted`
+        // guard).
+        this.maybeSendStartGame();
         break;
       }
       case 'GameStarting': {
@@ -1342,6 +1466,11 @@ class Orchestrator {
         this.lobbyState = String(data['lobby_state']);
         this.inLobby = this.lobbyState === 'lobby';
         this.gameStarted = this.lobbyState === 'finalized';
+        // The reconnect snapshot's readiness is authoritative: lobby readiness
+        // can be pruned while we were away, so a cached pre-disconnect
+        // snapshot is exactly the stale `all_ready` class this gate exists to
+        // avoid. (Mirrors the native client.)
+        this.startGameGate.snapshot(parsePlayerIds(data['ready_players']));
         if ((this.negotiatedVersion ?? 2) >= 3 && this.lobbyState === 'finalized') {
           this.initialSessionPlanPending = true;
           this.lingerUntil = null;
@@ -1401,6 +1530,16 @@ class Orchestrator {
           });
           break;
         }
+        if (data['error_code'] === 'GAME_START_NOT_READY') {
+          // The authoritative StartGame gate rejected our send: the room's
+          // current membership is not all ready (e.g. a join slipped in
+          // between the all_ready broadcast and our StartGame). Re-arm the
+          // latch so the next recomputed all-ready moment re-issues — the
+          // documented client contract (docs/guides/building-a-client.md
+          // "StartGame authorization and readiness"). Mirrors the native
+          // client's dedicated arm.
+          this.startGameGate.startRejected();
+        }
         // Other server-reported errors are surfaced but non-fatal: the relay
         // floor (and the run window) decide the outcome.
         emit({
@@ -1411,13 +1550,14 @@ class Orchestrator {
       }
       case 'LobbyStateChanged': {
         this.lobbyState = String(data['lobby_state']);
+        this.startGameGate.snapshot(parsePlayerIds(data['ready_players']));
         if (this.lobbyState === 'lobby') {
           this.inLobby = true;
           this.maybeSendReady();
           // The lobby no longer auto-starts: the room creator issues the
-          // explicit StartGame that produces GameStarting once the server
-          // reports the full ready set.
-          this.maybeSendStartGame(Boolean(data['all_ready']));
+          // explicit StartGame that produces GameStarting once the recomputed
+          // readiness gate reports the full ready set.
+          this.maybeSendStartGame();
         }
         break;
       }
@@ -1708,9 +1848,9 @@ class Orchestrator {
   }
 
   /**
-   * Send the explicit `StartGame` that finalizes the lobby, exactly once, when
-   * this client created the room AND the server reports every current member
-   * ready (`LobbyStateChanged.all_ready`).
+   * Send the explicit `StartGame` that finalizes the lobby when this client
+   * created the room AND every current member is ready per the recomputed
+   * readiness gate.
    *
    * The protocol no longer auto-starts a full, all-ready room: finalization is
    * driven by an explicit `StartGame` from the authority — or, when no
@@ -1718,23 +1858,20 @@ class Orchestrator {
    * room creator is elected as that member here: it is always a v3 participant
    * that is present through finalization, so the choice is deterministic and
    * needs no cross-client coordination. Joiners send no `StartGame`; they
-   * simply await the `GameStarting` the creator's call produces. `all_ready`
-   * already implies a full, seated, ready room (every client gates
-   * `PlayerReady` on having seen all `--peers` members), and the server
-   * re-checks readiness under its room lock, so this never races a late joiner.
-   * The send is idempotent-guarded by `startGameSent`.
+   * simply await the `GameStarting` the creator's call produces.
    *
-   * Assumption: readiness is monotonic until finalize — no member leaves or
-   * un-readies between `all_ready` and the server processing this `StartGame`.
-   * That holds for every interop scenario (rooms cap at `--peers`; the only
-   * departures are AFTER `GameStarting`). A pre-finalize departure is a
-   * deliberate non-goal here (it could leave the latch set after a `NotReady`);
-   * a production game client would re-issue `StartGame` on the next ready set.
+   * The gate latches the send against duplicate all-ready broadcasts, but a
+   * join, a departure, or an authoritative `GAME_START_NOT_READY` invalidates
+   * that latch (see `StartGameGate`), and the next recomputed all-ready moment
+   * re-issues — the documented client contract
+   * (docs/guides/building-a-client.md "StartGame authorization and readiness").
+   * The server re-checks readiness under its room lock, so a premature
+   * re-issue is rejected non-fatally and simply re-arms the gate.
    */
-  private maybeSendStartGame(allReady: boolean): void {
-    if (this.config.createRoom && allReady && !this.startGameSent && !this.gameStarted) {
+  private maybeSendStartGame(): void {
+    if (this.startGameGate.shouldSend(this.config.createRoom, this.gameStarted, this.present)) {
       this.sendFrame(clientFrame('StartGame'));
-      this.startGameSent = true;
+      this.startGameGate.noteSent();
       console.error('all members ready; sent StartGame to finalize the lobby');
     }
   }

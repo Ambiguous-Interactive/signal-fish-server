@@ -472,6 +472,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   should omit it; removal is reserved for a future breaking protocol version.
   Also clarify that `relay_type` and `ConnectionInfo.relay` are informational,
   client-untrusted legacy metadata rather than routing authority (issue #393).
+- Re-issue `StartGame` in both maintained reference clients (native and
+  browser) after a readiness invalidation instead of latching after one send:
+  the room creator recomputes all-ready from the authoritative `ready_players`
+  snapshots over the current membership (mirroring the server's gate), latches
+  against duplicate all-ready broadcasts, and re-arms on a join (always
+  unready, no corrective broadcast), a departure (which can restore all-ready
+  with no readiness broadcast), or an authoritative `GAME_START_NOT_READY`
+  rejection; a `RoomJoined`/`LobbyStateChanged`/`Reconnected` snapshot
+  refreshes the readiness baseline without re-arming the latch (so a
+  reconnect can never duplicate an in-flight send), and a `RoomLeft` resets
+  it. A stale one-shot latch stalled lobbies exactly when the server's
+  readiness re-check mattered (issue #449).
+- Bump the yanked `chacha20` 0.10.1 lockfile pin to 0.10.2 across the server,
+  native-client, and fuzz workspaces (pulled in via `rand` 0.10; no API or
+  behavior change).
 
 ### Security
 

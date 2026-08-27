@@ -11,10 +11,12 @@
 //!    `--join-code` joins by code.
 //! 3. **Ready barrier** — once `--peers N` members are present, send
 //!    `PlayerReady`. The lobby no longer auto-starts on a full ready set:
-//!    finalization is driven by an explicit `StartGame`. When the server
-//!    reports every current member ready (`LobbyStateChanged.all_ready`), the
-//!    room creator sends that `StartGame`; joiners just await the broadcast it
-//!    produces.
+//!    finalization is driven by an explicit `StartGame`. When every current
+//!    member is ready — recomputed from the authoritative `ready_players`
+//!    snapshots over current membership, since a join invalidates a cached
+//!    all-ready (no corrective broadcast) and a departure can restore it
+//!    without one — the room creator sends that `StartGame`; joiners just
+//!    await the broadcast it produces.
 //! 4. **Finalize** — `GameStarting` (note our own `is_authority`), then every
 //!    v3 recipient's authoritative `SessionPlan` (including explicit
 //!    Relay/Relay plans with no peers).
@@ -460,7 +462,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     });
 
     let negotiated_version = authenticate(&mut ws, cli).await?;
-    let (my_id, mut present, lobby_state, accountability) =
+    let (my_id, mut present, lobby_state, ready_players, accountability) =
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
 
     present.insert(my_id);
@@ -485,7 +487,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         // late-join SessionPlan carries everything else we need).
         in_lobby: lobby_state == LobbyState::Lobby,
         ready_sent: false,
-        start_game_sent: false,
+        start_game_gate: StartGameGate::new(ready_players),
         game_started: lobby_state == LobbyState::Finalized,
         late_joined: lobby_state == LobbyState::Finalized,
         initial_session_plan_pending: negotiated_version >= 3
@@ -597,8 +599,8 @@ fn negotiated_version_from(
     }
 }
 
-/// Create or join the room; returns our player id, the seated member ids, and
-/// the room's lobby state at join time.
+/// Create or join the room; returns our player id, the seated member ids, the
+/// room's lobby state and readiness baseline at join time.
 async fn join_room(
     ws: &mut WsStream,
     cli: &Cli,
@@ -608,6 +610,7 @@ async fn join_room(
         PlayerId,
         BTreeSet<PlayerId>,
         LobbyState,
+        BTreeSet<PlayerId>,
         DeliveryAccountability,
     ),
     FatalError,
@@ -673,18 +676,24 @@ async fn join_room(
                     .iter()
                     .map(|player| player.id)
                     .collect();
+                let mut ready_players: BTreeSet<PlayerId> =
+                    payload.ready_players.iter().copied().collect();
                 // Apply the deltas observed ahead of the baseline (set
                 // semantics make this order-independent and idempotent).
                 for player in early_joined {
                     present.insert(player.id);
+                    // A pre-baseline joiner is unready like any other joiner.
+                    ready_players.remove(&player.id);
                 }
                 for (id, _, _) in early_left {
                     present.remove(&id);
+                    ready_players.remove(&id);
                 }
                 return Ok((
                     payload.player_id,
                     present,
                     payload.lobby_state,
+                    ready_players,
                     accountability,
                 ));
             }
@@ -921,6 +930,95 @@ fn validate_json_negotiated_server_message(message: &ServerMessage) -> Result<()
     Ok(())
 }
 
+/// Readiness snapshot + explicit-`StartGame` latch for the room creator.
+///
+/// The creator's send is latched so repeated `LobbyStateChanged` broadcasts
+/// cannot duplicate it, but the latch must not survive an invalidation: a
+/// later join is always unready and emits only `PlayerJoined` (no corrective
+/// broadcast), so a cached `all_ready: true` goes stale and the server's
+/// authoritative gate rejects a stale-latch send with `GAME_START_NOT_READY`
+/// (`ready_state_tests.rs::join_breaks_cached_all_ready_without_a_corrective_broadcast`).
+/// Per the documented client contract
+/// (docs/guides/building-a-client.md "StartGame authorization and readiness"),
+/// the creator recomputes readiness from the authoritative `ready_players`
+/// snapshot over the CURRENT membership and re-issues `StartGame` once every
+/// current player is ready again — via the next `all_ready` toggle, or
+/// immediately when the unready member leaves (departures emit no readiness
+/// broadcast).
+#[derive(Debug, Default)]
+struct StartGameGate {
+    ready_players: BTreeSet<PlayerId>,
+    /// `StartGame` went out since the last invalidation (a join, a departure,
+    /// or an authoritative `GAME_START_NOT_READY`).
+    sent_since_invalidation: bool,
+}
+
+impl StartGameGate {
+    fn new(ready_players: BTreeSet<PlayerId>) -> Self {
+        Self {
+            ready_players,
+            sent_since_invalidation: false,
+        }
+    }
+
+    /// Replace the readiness set from an authoritative snapshot (`RoomJoined`
+    /// baseline or `LobbyStateChanged`). Never re-arms the latch by itself: a
+    /// snapshot without an invalidation must not duplicate a send.
+    fn snapshot(&mut self, ready_players: impl IntoIterator<Item = PlayerId>) {
+        self.ready_players = ready_players.into_iter().collect();
+    }
+
+    /// A member joined. Joiners are always unready and their `PlayerJoined`
+    /// arrives with no corrective broadcast, so the cached all-ready snapshot
+    /// is stale and the latch re-arms.
+    fn member_joined(&mut self, player: PlayerId) {
+        self.ready_players.remove(&player);
+        self.sent_since_invalidation = false;
+    }
+
+    /// A member departed. Readiness belongs to the CURRENT membership, so a
+    /// departure can restore all-ready with no readiness broadcast at all; the
+    /// previous send's premise (that exact membership) is gone either way.
+    fn member_left(&mut self, player: PlayerId) {
+        self.ready_players.remove(&player);
+        self.sent_since_invalidation = false;
+    }
+
+    /// The authoritative `StartGame` gate rejected our send
+    /// (`GAME_START_NOT_READY`): the cached snapshot is stale and the latch
+    /// re-arms.
+    fn start_rejected(&mut self) {
+        self.sent_since_invalidation = false;
+    }
+
+    /// Every current member is ready. Membership, not a raw count, decides —
+    /// mirroring the server's gate, which also requires a non-empty room.
+    fn all_current_ready(&self, present: &BTreeSet<PlayerId>) -> bool {
+        !present.is_empty()
+            && present
+                .iter()
+                .all(|player| self.ready_players.contains(player))
+    }
+
+    /// Whether the creator should send (or re-issue) the explicit `StartGame`.
+    fn should_send(
+        &self,
+        create_room: bool,
+        game_started: bool,
+        present: &BTreeSet<PlayerId>,
+    ) -> bool {
+        create_room
+            && !game_started
+            && !self.sent_since_invalidation
+            && self.all_current_ready(present)
+    }
+
+    /// Record that the `StartGame` went out on the wire.
+    fn note_sent(&mut self) {
+        self.sent_since_invalidation = true;
+    }
+}
+
 /// Single-task state machine driving the session after the room is joined.
 struct Orchestrator<'a> {
     cli: &'a Cli,
@@ -947,9 +1045,10 @@ struct Orchestrator<'a> {
     /// so counting members alone would race the transition.
     in_lobby: bool,
     ready_sent: bool,
-    /// The explicit `StartGame` has been sent (room creator only, once). Guards
-    /// against re-sending on subsequent `LobbyStateChanged` broadcasts.
-    start_game_sent: bool,
+    /// Readiness snapshot + explicit-`StartGame` latch for the room creator.
+    /// Guards against duplicate sends on repeated `LobbyStateChanged`
+    /// broadcasts while still re-issuing after a membership invalidation.
+    start_game_gate: StartGameGate,
     game_started: bool,
     /// This client entered an already-Finalized room (a late join / seat
     /// fill). Late joiners waive the peer-status wait: siblings' reports may
@@ -1601,6 +1700,8 @@ impl Orchestrator<'_> {
                 self.accountability
                     .rebaseline_snapshot(&payload.current_players)
                     .map_err(FatalError::protocol)?;
+                self.start_game_gate
+                    .snapshot(payload.ready_players.iter().copied());
             }
             ServerMessage::RoomLeft => {
                 self.accountability.reset_room();
@@ -1609,6 +1710,7 @@ impl Orchestrator<'_> {
                 self.lobby_state = None;
                 self.current_session_generation = None;
                 self.pending_signals.clear();
+                self.start_game_gate = StartGameGate::default();
             }
             ServerMessage::PlayerJoined { player } => {
                 self.accountability
@@ -1616,6 +1718,12 @@ impl Orchestrator<'_> {
                     .map_err(FatalError::protocol)?;
                 self.present.insert(player.id);
                 self.members_seen.insert(player.id);
+                // A joiner is always unready and no corrective broadcast
+                // fires, so a cached all-ready snapshot just went stale (and
+                // any in-flight latch with it). No re-issue is possible yet —
+                // the joiner is provably not ready — so this only re-arms the
+                // gate for the joiner's future toggle.
+                self.start_game_gate.member_joined(player.id);
                 if require_finalized_membership_plan(
                     &mut self.pending_membership_plans,
                     self.negotiated_version,
@@ -1640,6 +1748,10 @@ impl Orchestrator<'_> {
                     .note_player_left(player_id, epoch, final_seq)
                     .map_err(FatalError::protocol)?;
                 self.present.remove(&player_id);
+                // Readiness belongs to the current membership: the departure
+                // may restore all-ready with no readiness broadcast (an
+                // unready late joiner leaving), so re-arm and recompute.
+                self.start_game_gate.member_left(player_id);
                 clear_departed_membership_plan(
                     &mut self.pending_membership_plans,
                     player_id,
@@ -1668,6 +1780,11 @@ impl Orchestrator<'_> {
                     epoch,
                     final_seq,
                 });
+                // The departure may have made the remaining membership
+                // all-ready again with no readiness broadcast; recompute and
+                // re-issue if so (post-finalize departures are blocked by the
+                // gate's `game_started` guard).
+                self.maybe_send_start_game().await?;
             }
             ServerMessage::GameStarting { peer_connections } => {
                 self.game_started = true;
@@ -1844,6 +1961,12 @@ impl Orchestrator<'_> {
                 self.lobby_state = Some(payload.lobby_state.clone());
                 self.in_lobby = payload.lobby_state == LobbyState::Lobby;
                 self.game_started = payload.lobby_state == LobbyState::Finalized;
+                // The reconnect snapshot's readiness is authoritative: lobby
+                // readiness can be pruned while we were away, so a cached
+                // pre-disconnect snapshot is exactly the stale `all_ready`
+                // class this gate exists to avoid.
+                self.start_game_gate
+                    .snapshot(payload.ready_players.iter().copied());
                 if self.negotiated_version >= 3 && payload.lobby_state == LobbyState::Finalized {
                     self.initial_session_plan_pending = true;
                     self.linger_until = None;
@@ -1902,6 +2025,24 @@ impl Orchestrator<'_> {
             }
             ServerMessage::Error {
                 message,
+                error_code: Some(ErrorCode::GameStartNotReady),
+            } => {
+                // The authoritative StartGame gate rejected our send: the room's
+                // current membership is not all ready (e.g. a join slipped in
+                // between the all_ready broadcast and our StartGame). Re-arm the
+                // latch so the next recomputed all-ready moment re-issues — the
+                // documented client contract (docs/guides/building-a-client.md
+                // "StartGame authorization and readiness").
+                self.start_game_gate.start_rejected();
+                emit(&Event::Error {
+                    message: format!(
+                        "server error: {message} ({:?})",
+                        ErrorCode::GameStartNotReady
+                    ),
+                });
+            }
+            ServerMessage::Error {
+                message,
                 error_code,
             } => {
                 // Server-reported errors are surfaced but non-fatal: the relay
@@ -1916,6 +2057,7 @@ impl Orchestrator<'_> {
                 all_ready,
             } => {
                 self.lobby_state = Some(lobby_state.clone());
+                self.start_game_gate.snapshot(ready_players.iter().copied());
                 // Info-level so the harness's stderr capture records the lobby
                 // progression (state, ready count, all_ready) for any later
                 // "GameStarting not received" diagnosis.
@@ -1929,9 +2071,9 @@ impl Orchestrator<'_> {
                     self.in_lobby = true;
                     self.maybe_send_ready().await?;
                     // The lobby no longer auto-starts: the room creator issues
-                    // the explicit StartGame that produces GameStarting once the
-                    // server reports the full ready set.
-                    self.maybe_send_start_game(all_ready).await?;
+                    // the explicit StartGame that produces GameStarting once
+                    // the recomputed readiness gate reports the full ready set.
+                    self.maybe_send_start_game().await?;
                 }
             }
             ServerMessage::Pong => {
@@ -2521,9 +2663,9 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
-    /// Send the explicit `StartGame` that finalizes the lobby, exactly once,
-    /// when this client created the room AND the server reports every current
-    /// member ready (`LobbyStateChanged.all_ready`).
+    /// Send the explicit `StartGame` that finalizes the lobby when this client
+    /// created the room AND every current member is ready per the recomputed
+    /// readiness gate.
     ///
     /// The protocol no longer auto-starts a full, all-ready room: finalization
     /// is driven by an explicit `StartGame` from the authority — or, when no
@@ -2532,22 +2674,22 @@ impl Orchestrator<'_> {
     /// participant that is present through finalization, so the choice is
     /// deterministic and needs no cross-client coordination. Joiners send no
     /// `StartGame`; they simply await the `GameStarting` the creator's call
-    /// produces. `all_ready` already implies a full, seated, ready room (every
-    /// client gates `PlayerReady` on having seen all `--peers` members), and the
-    /// server re-checks readiness under its room lock, so this never races a
-    /// late joiner. The send is idempotent-guarded by `start_game_sent`.
+    /// produces.
     ///
-    /// Assumption: readiness is monotonic until finalize — no member leaves or
-    /// un-readies between `all_ready` and the server processing this `StartGame`.
-    /// That holds for every interop scenario (rooms cap at `--peers`, so no late
-    /// joiner can un-ready the set, and the only departures are AFTER
-    /// `GameStarting`). A pre-finalize departure is a deliberate non-goal: it
-    /// could leave the latch set after a `NotReady`, and a production game client
-    /// (not this test driver) would re-issue `StartGame` on the next ready set.
-    async fn maybe_send_start_game(&mut self, all_ready: bool) -> Result<(), FatalError> {
-        if self.cli.create_room && all_ready && !self.start_game_sent && !self.game_started {
+    /// The gate latches the send against duplicate all-ready broadcasts, but a
+    /// join, a departure, or an authoritative `GAME_START_NOT_READY`
+    /// invalidates that latch (see [`StartGameGate`]), and the next recomputed
+    /// all-ready moment re-issues — the documented client contract
+    /// (docs/guides/building-a-client.md "StartGame authorization and
+    /// readiness"). The server re-checks readiness under its room lock, so a
+    /// premature re-issue is rejected non-fatally and simply re-arms the gate.
+    async fn maybe_send_start_game(&mut self) -> Result<(), FatalError> {
+        if self
+            .start_game_gate
+            .should_send(self.cli.create_room, self.game_started, &self.present)
+        {
             self.send_message(&ClientMessage::StartGame).await?;
-            self.start_game_sent = true;
+            self.start_game_gate.note_sent();
             tracing::info!("all members ready; sent StartGame to finalize the lobby");
         }
         Ok(())
@@ -2825,8 +2967,8 @@ mod tests {
 
     use serde_json::json;
     use signal_fish_server::protocol::{
-        DeliveryCountersByClass, DeliveryReportPayload, DirectEndpoint, GameDataEncoding,
-        LobbyState, PlayerId, ServerMessage,
+        ClientMessage, DeliveryCountersByClass, DeliveryReportPayload, DirectEndpoint, ErrorCode,
+        GameDataEncoding, LobbyState, PlayerId, ServerMessage,
     };
 
     use crate::accountability::DeliveryAccountability;
@@ -2836,21 +2978,22 @@ mod tests {
 
     use super::{
         apply_selected_pair_probes_before_run_deadline, arm_pair_window, authoritative_peer_delta,
-        automatic_p2p_retry_count, changed_transport_status, clear_departed_membership_plan,
-        connection_targets_for_generation, consume_join_accountability_preface,
-        direct_plan_rejection_message, harness_aware_base_wake, is_coordinated_p2p_rebuild_attempt,
-        is_current_session_generation, is_terminal_peer_connection_state,
-        needs_ice_gathering_marker, negotiated_version_from, next_handshake_message,
-        note_current_pair_connected, p2p_retry_delay, reject_unsupported_direct_plan_with,
-        require_finalized_membership_plan, requires_authoritative_finalization_plan,
-        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
-        selected_pair_evidence_deadline, session_plan_peer_ids,
-        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
-        should_report_retry_gap, should_resolve_connected_pair, take_ready_selected_pair_probes,
-        try_buffer_planned_signal, validate_json_negotiated_server_message,
-        validate_p2p_rebuild_retry_count, ExchangeLedger, PairGeneration, SelectedPairEvidence,
-        SelectedPairProbeDisposition, EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER,
-        MAX_PENDING_SIGNALS_TOTAL, SELECTED_PAIR_POLL,
+        automatic_p2p_retry_count, changed_transport_status, checked_deadline,
+        clear_departed_membership_plan, connection_targets_for_generation,
+        consume_join_accountability_preface, direct_plan_rejection_message,
+        harness_aware_base_wake, is_coordinated_p2p_rebuild_attempt, is_current_session_generation,
+        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
+        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
+        reject_unsupported_direct_plan_with, require_finalized_membership_plan,
+        requires_authoritative_finalization_plan, resolve_drop_ice_from,
+        restore_reconnected_member, retryable_missing_peers, selected_pair_evidence_deadline,
+        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
+        should_defer_success_at_run_deadline, should_report_retry_gap,
+        should_resolve_connected_pair, take_ready_selected_pair_probes, try_buffer_planned_signal,
+        validate_json_negotiated_server_message, validate_p2p_rebuild_retry_count, ExchangeLedger,
+        Orchestrator, PairGeneration, SelectedPairEvidence, SelectedPairProbeDisposition,
+        StartGameGate, EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER,
+        MAX_PENDING_SIGNALS_TOTAL, PING_INTERVAL, SELECTED_PAIR_POLL,
     };
     use crate::engine::{
         SelectedCandidatePair, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
@@ -3269,6 +3412,312 @@ mod tests {
         for _scenario in ["solo finalization", "incapable late join"] {
             assert_eq!(changed_transport_status(None, 0), Some(false));
         }
+    }
+
+    /// Pins the room creator's explicit-`StartGame` gate against the
+    /// documented `all_ready` semantics (issue #447 F1 / issue #449): the send
+    /// is latched against duplicate all-ready broadcasts, but a join (always
+    /// unready, no corrective broadcast), a departure (no readiness broadcast
+    /// at all), or an authoritative `GAME_START_NOT_READY` re-arms the latch so
+    /// the recomputed all-ready membership re-issues. A one-shot latch would
+    /// stall the lobby exactly when the server's readiness re-check matters.
+    #[test]
+    fn start_game_gate_reissues_after_membership_invalidation() {
+        let creator = PlayerId::from_u128(1);
+        let joiner = PlayerId::from_u128(2);
+        let present = |players: &[PlayerId]| players.iter().copied().collect::<BTreeSet<_>>();
+        let sends = |gate: &StartGameGate, members: &BTreeSet<PlayerId>, label: &str| {
+            assert!(
+                gate.should_send(true, false, members),
+                "{label}: the all-ready creator must (re-)issue StartGame"
+            );
+        };
+        let silent = |gate: &StartGameGate, members: &BTreeSet<PlayerId>, label: &str| {
+            assert!(
+                !gate.should_send(true, false, members),
+                "{label}: the gate must not send"
+            );
+        };
+
+        let mut gate = StartGameGate::new(BTreeSet::new());
+        silent(&gate, &present(&[creator]), "an empty readiness baseline");
+
+        // Happy path: the all-ready toggle drives exactly one send, and a
+        // repeated broadcast without an invalidation must not duplicate it.
+        gate.snapshot([creator]);
+        sends(&gate, &present(&[creator]), "first all-ready snapshot");
+        gate.note_sent();
+        silent(
+            &gate,
+            &present(&[creator]),
+            "a repeated all-ready broadcast",
+        );
+        assert!(
+            !gate.should_send(false, false, &present(&[creator])),
+            "non-creators never send"
+        );
+        assert!(
+            !gate.should_send(true, true, &present(&[creator])),
+            "a finalized room never sends"
+        );
+
+        // Join invalidation: the latecomer is unready with no corrective
+        // broadcast; the latch re-arms but the room is provably not all-ready.
+        gate.member_joined(joiner);
+        silent(&gate, &present(&[creator, joiner]), "right after the join");
+        // The joiner's toggle restores an authoritative all-ready snapshot and
+        // the creator re-issues.
+        gate.snapshot([creator, joiner]);
+        sends(
+            &gate,
+            &present(&[creator, joiner]),
+            "after the joiner's toggle",
+        );
+        gate.note_sent();
+
+        // Authoritative rejection re-arms: a NotReady between snapshot and
+        // send means the cached snapshot was stale. Production only queries
+        // the gate on the NEXT authoritative frame (toggle or membership
+        // change), which carries the refreshed snapshot.
+        gate.start_rejected();
+        gate.snapshot([creator, joiner]);
+        sends(
+            &gate,
+            &present(&[creator, joiner]),
+            "recovery after a rejection",
+        );
+        gate.note_sent();
+
+        // Departure restoration: the unready member leaves with NO readiness
+        // broadcast; membership recomputation alone must re-issue.
+        gate.member_left(joiner);
+        sends(
+            &gate,
+            &present(&[creator]),
+            "departure restores all-ready without a broadcast",
+        );
+    }
+
+    /// Pins the orchestrator WIRING behind the [`StartGameGate`] (issue #449):
+    /// the pure-gate test above cannot observe whether the server-message arms
+    /// still call `maybe_send_start_game`. Driving `handle_server_message`
+    /// through the exact #449 sequence against a loopback fake server must put
+    /// the matching `ClientMessage` frames on the wire — one `StartGame` on
+    /// the first all-ready broadcast, none on a duplicate broadcast, and
+    /// exactly one re-issue when the unready latecomer departs. The
+    /// `PlayerLeft` arm is the one recovery path with no readiness broadcast
+    /// to fall back on, so dropping that call site would silently reintroduce
+    /// the departure stall while every gate-level test stays green.
+    #[tokio::test]
+    async fn player_left_arm_reissues_start_game_on_the_wire_after_invalidation() {
+        // Loopback fake server: accepts the reference client and forwards
+        // every client frame to the test as its serialized wire value.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback fake-server listener");
+        let server_url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (client_frames_tx, mut client_frames) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("reference client connects");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("loopback websocket handshake");
+            while let Some(Ok(Message::Text(text))) = futures_util::StreamExt::next(&mut ws).await {
+                let frame: ClientMessage =
+                    serde_json::from_str(&text).expect("valid ClientMessage frame");
+                if client_frames_tx
+                    .send(serde_json::to_value(frame).expect("serialize ClientMessage"))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Creator with `--peers 1`: alone in the room, so the first all-ready
+        // broadcast also fires `maybe_send_ready`.
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            server_url.as_str(),
+            "--create-room",
+            "--peers",
+            "1",
+        ]);
+        let creator = PlayerId::from_u128(0x00C7_EA7E_00C1);
+        let latecomer = PlayerId::from_u128(0x00B0_B1A7_E0C1);
+
+        let (engine_tx, engine_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (selected_pair_tx, selected_pair_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = crate::engine::Engine::new(cli.engine_settings(), engine_tx)
+            .expect("the webrtc engine initializes in-process");
+        let (ws, _handshake) = tokio_tungstenite::connect_async(server_url.as_str())
+            .await
+            .expect("reference client connects to the loopback fake server");
+
+        // Mirrors the `run_inner` constructor for a v2 creator that just
+        // joined a Waiting room. v2 keeps the fixtures free of v3 epoch
+        // baselines; every exercised arm is version-independent. A new
+        // Orchestrator field breaks this literal at compile time, forcing the
+        // author to decide how it participates in this wiring.
+        let mut orchestrator = Orchestrator {
+            cli: &cli,
+            ws,
+            engine,
+            engine_rx,
+            selected_pair_tx,
+            selected_pair_rx,
+            my_id: creator,
+            negotiated_version: 2,
+            accountability: DeliveryAccountability::new(false),
+            present: BTreeSet::from([creator]),
+            members_seen: BTreeSet::from([creator]),
+            lobby_state: Some(LobbyState::Waiting),
+            in_lobby: false,
+            ready_sent: false,
+            start_game_gate: StartGameGate::new(BTreeSet::new()),
+            game_started: false,
+            late_joined: false,
+            initial_session_plan_pending: false,
+            pending_membership_plans: BTreeMap::new(),
+            webrtc_plan_seen: false,
+            current_session_generation: None,
+            expected_peers: BTreeSet::new(),
+            pair_roles: BTreeMap::new(),
+            pair_retry_attempts: BTreeMap::new(),
+            connected_pairs: BTreeSet::new(),
+            pair_connected_reported: BTreeSet::new(),
+            selected_pair_evidence: SelectedPairEvidence::default(),
+            retrying_pairs: BTreeSet::new(),
+            p2p_reconnected_pairs: BTreeSet::new(),
+            ice_gathering_complete: BTreeSet::new(),
+            last_ice_servers: Vec::new(),
+            transport_status: None,
+            p2p_deadline: None,
+            p2p_retry_at: None,
+            p2p_released: cli.p2p_release_file.is_none(),
+            p2p_release_poll_at: None,
+            p2p_rebuild_released: cli.p2p_rebuild_release_file.is_none(),
+            p2p_rebuild_release_poll_at: None,
+            pending_pair_directives: BTreeMap::new(),
+            relay_send_at: None,
+            relay_sent: false,
+            relay_received_from: BTreeSet::new(),
+            peer_status_from: BTreeSet::new(),
+            exchange_ledger: ExchangeLedger::default(),
+            exchange_released: cli.exchange_release_file.is_none(),
+            exchange_ready_reported: false,
+            exchange_release_poll_at: None,
+            unreliable_exchange_released: cli.unreliable_exchange_release_file.is_none(),
+            exchange_reliable_ready_reported: false,
+            unreliable_exchange_release_poll_at: None,
+            pending_signals: BTreeMap::new(),
+            drop_ice_from: None,
+            run_deadline: Deadline::after(
+                tokio::time::Instant::now(),
+                Duration::from_secs(cli.run_for_secs),
+            ),
+            linger_until: None,
+            success_criteria_reported: false,
+            success_release_poll_at: None,
+            next_ping_at: checked_deadline(tokio::time::Instant::now(), PING_INTERVAL),
+            pong_deadline: None,
+            pong_grace_applied: false,
+        };
+
+        // Every expectation is bounded by a real-clock wait far above loopback
+        // latency: expected frames resolve in microseconds, and an absent
+        // frame is a fast, clean failure rather than a hang.
+        async fn expect_frame(
+            frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        ) -> serde_json::Value {
+            tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .expect("expected a client frame on the wire")
+                .expect("the loopback fake server stays connected")
+        }
+        async fn expect_silence(
+            frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        ) {
+            let drained = tokio::time::timeout(Duration::from_millis(200), frames.recv()).await;
+            assert!(drained.is_err(), "no client frame was expected on the wire");
+        }
+
+        // (a) First all-ready broadcast: readiness fires, then exactly one
+        // StartGame.
+        orchestrator
+            .handle_server_message(ServerMessage::LobbyStateChanged {
+                lobby_state: LobbyState::Lobby,
+                ready_players: vec![creator],
+                all_ready: true,
+            })
+            .await
+            .expect("all-ready broadcast is protocol-clean");
+        assert_eq!(
+            expect_frame(&mut client_frames).await,
+            json!({ "type": "PlayerReady" })
+        );
+        assert_eq!(
+            expect_frame(&mut client_frames).await,
+            json!({ "type": "StartGame" }),
+            "the all-ready creator must send StartGame"
+        );
+        expect_silence(&mut client_frames).await;
+
+        // (b) A repeated all-ready broadcast must not duplicate the send.
+        orchestrator
+            .handle_server_message(ServerMessage::LobbyStateChanged {
+                lobby_state: LobbyState::Lobby,
+                ready_players: vec![creator],
+                all_ready: true,
+            })
+            .await
+            .expect("repeated all-ready broadcast is protocol-clean");
+        expect_silence(&mut client_frames).await;
+
+        // (c) The #449 invalidation: a latecomer joins (always unready, no
+        // corrective broadcast), the authoritative gate rejects a stale send,
+        // and the latecomer's departure restores all-ready with NO readiness
+        // broadcast — only the PlayerLeft arm can re-issue here.
+        orchestrator
+            .handle_server_message(ServerMessage::PlayerJoined {
+                player: serde_json::from_value(json!({
+                    "id": latecomer,
+                    "name": "latecomer",
+                    "is_authority": false,
+                    "is_ready": false,
+                    "connected_at": "2026-08-27T00:00:00Z",
+                    "connection_info": null,
+                }))
+                .expect("v2 PlayerJoined snapshot shape"),
+            })
+            .await
+            .expect("latecomer join is protocol-clean");
+        expect_silence(&mut client_frames).await;
+
+        orchestrator
+            .handle_server_message(ServerMessage::Error {
+                message: "room is not all ready".to_string(),
+                error_code: Some(ErrorCode::GameStartNotReady),
+            })
+            .await
+            .expect("authoritative rejection is protocol-clean");
+        expect_silence(&mut client_frames).await;
+
+        orchestrator
+            .handle_server_message(ServerMessage::PlayerLeft {
+                player_id: latecomer,
+                epoch: None,
+                final_seq: None,
+            })
+            .await
+            .expect("latecomer departure is protocol-clean");
+        assert_eq!(
+            expect_frame(&mut client_frames).await,
+            json!({ "type": "StartGame" }),
+            "the departure must restore all-ready and re-issue StartGame"
+        );
+        expect_silence(&mut client_frames).await;
     }
 
     #[test]
