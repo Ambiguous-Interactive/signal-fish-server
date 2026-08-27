@@ -99,10 +99,11 @@ use super::types::{
 //   |                      |                          |
 //   |-- JoinRoom --------->|                          |
 //   |<-- RoomJoined -------|                          |
+//   |<-- LobbyStateChanged-|   (state: lobby; the     |
+//   |                      |    one-time Waiting→Lobby|
+//   |                      |    promotion snapshot)   |
 //   |                      |<------- JoinRoom --------|
 //   |<-- PlayerJoined -----|--- RoomJoined ---------->|
-//   |<-- LobbyStateChanged-|--- LobbyStateChanged --->|
-//   |                      |      (state: lobby)      |
 //   |-- PlayerReady ------>|                          |
 //   |<-- LobbyStateChanged-|--- LobbyStateChanged --->|
 //   |                      |<------- PlayerReady -----|

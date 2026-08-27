@@ -881,7 +881,7 @@ Lobby state transitioned.
 {
   "type": "LobbyStateChanged",
   "data": {
-    "lobby_state": "finalized",
+    "lobby_state": "lobby",
     "ready_players": ["player-id-1", "player-id-2"],
     "all_ready": true
   }
@@ -889,9 +889,16 @@ Lobby state transitioned.
 
 ```
 
+The broadcast always carries `lobby`: the one-time `Waiting→Lobby` promotion
+snapshot (delivered to the first member inside its own `RoomJoined` flow) and
+every later readiness toggle. The move into `finalized` is signaled by
+[`GameStarting`](#gamestarting) itself — no `LobbyStateChanged` carries
+`finalized`.
+
 Possible states:
 
-- `waiting` - Waiting for the first player to join
+- `waiting` - Waiting for the first player to join (never broadcast; a room
+  promotes inside its first member's join)
 - `lobby` - Players are present and coordinating readiness (the room need not be
   full; `max_players` is a ceiling)
 - `finalized` - The game has started after an explicit `StartGame` (sent once
