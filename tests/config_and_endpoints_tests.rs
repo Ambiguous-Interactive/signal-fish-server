@@ -1434,6 +1434,8 @@ async fn test_health_endpoint_returns_ok() {
 #[tokio::test]
 async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
     let mut config = test_server_config();
+    config.max_message_size = 12_345;
+    config.max_signal_bytes = 12_345;
     config.max_outbound_message_size = 12_345;
     let server =
         test_helpers::create_test_server_with_config(config, ProtocolConfig::default()).await;

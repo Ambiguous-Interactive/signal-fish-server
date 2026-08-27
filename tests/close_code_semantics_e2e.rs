@@ -144,7 +144,12 @@ async fn authenticate_v3(ws: &mut WsStream) {
 #[tokio::test]
 async fn outbound_message_over_configured_limit_closes_with_1009() {
     let mut config = base_config();
-    config.max_outbound_message_size = 32;
+    // Pairing-legal small caps: the serialized `Authenticate` request (~60 B)
+    // fits, while the server's auth response exceeds the shared cap, so the
+    // oversize is discovered during the auth-response flush.
+    config.max_message_size = 100;
+    config.max_signal_bytes = 100;
+    config.max_outbound_message_size = 100;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let running_server = start_server(server).await;
     let mut ws = connect(running_server.addr()).await;
