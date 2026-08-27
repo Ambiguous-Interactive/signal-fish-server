@@ -2282,14 +2282,28 @@ impl EnhancedGameServer {
                             if let Some(app_id) = client_app_id {
                                 self.cache_room_application(&room.id, app_id);
                             }
-                            if let Err(error) = self
+                            match self
                                 .database
                                 .update_player_name(&room.id, player_id, player_name)
                                 .await
                             {
-                                tracing::warn!(%player_id, %error, "Failed to update creator name");
-                            } else if let Some(creator_info) = room.players.get_mut(player_id) {
-                                creator_info.name = player_name.to_string();
+                                // Mirror the durable rename into the freshly
+                                // built room only when the store confirmed
+                                // the row (`Ok` alone used to patch memory
+                                // even for a vanished row).
+                                Ok(true) => {
+                                    if let Some(creator_info) = room.players.get_mut(player_id) {
+                                        creator_info.name = player_name.to_string();
+                                    }
+                                }
+                                Ok(false) => tracing::warn!(
+                                    %player_id,
+                                    room_id = %room.id,
+                                    "Creator name update landed on a vanished roster row"
+                                ),
+                                Err(error) => {
+                                    tracing::warn!(%player_id, %error, "Failed to update creator name")
+                                }
                             }
                             let application_claim_rollback = client_app_id.map(|application_id| {
                                 PendingApplicationClaimRollback { application_id }
