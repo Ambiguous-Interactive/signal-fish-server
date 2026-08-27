@@ -186,8 +186,11 @@ Waiting; the remaining members stay in the lobby.
 The initial state. The room exists but is empty, awaiting its first player.
 
 - No players are present yet.
-- Readiness toggles are already honored in this state: a player who marks
-  ready before the lobby promotes carries that readiness with them.
+- The Waiting→Lobby promotion happens inside the first member's own
+  `JoinRoom`: that member's `RoomJoined` is immediately followed by the
+  one-time `LobbyStateChanged { state: lobby }` promotion snapshot. No
+  client can act while the room is `Waiting`, and later joins into the open
+  lobby fire no promotion snapshot.
 - The room stays here until a player joins or it expires from inactivity.
 
 ### Lobby
@@ -289,11 +292,11 @@ Alice (Client)             Server              Bob (Client)
      |-- JoinRoom (create) -->|                       |
      |<-- RoomJoined ---------|                       |
      |   (code: HK7T3W)      |                       |
+     |<-- LobbyStateChanged --|                       |
+     |   (state: lobby)      |                       |
      |                        |                       |
      |                        |<-- JoinRoom (join) ---|
      |<-- PlayerJoined -------|--- RoomJoined ------->|
-     |<-- LobbyStateChanged --|-- LobbyStateChanged ->|
-     |   (state: lobby)       |   (state: lobby)      |
      |                        |                       |
      |-- PlayerReady -------->|                       |
      |<-- LobbyStateChanged --|-- LobbyStateChanged ->|

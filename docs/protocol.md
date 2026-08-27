@@ -1251,6 +1251,7 @@ Client                              Server
   |                                    |
   |--- JoinRoom (no room_code) ------->|
   |<-- RoomJoined ---------------------|
+  |<-- LobbyStateChanged (lobby) ------|  (one-time Waiting→Lobby promotion)
   |                                    |
   |         (other client joins)       |
   |<-- PlayerJoined -------------------|
