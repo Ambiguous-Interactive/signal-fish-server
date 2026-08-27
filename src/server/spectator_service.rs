@@ -2084,4 +2084,54 @@ mod tests {
         assert!(!service.is_spectating(&spectator_id));
         assert!(coordinator.messages_for(&spectator_id).await.is_empty());
     }
+
+    /// A pending unpublished-detach row whose identity has since been
+    /// republished to the same room is void, not executable: the maintenance
+    /// sweep must clear the rollback record while leaving the live roster row
+    /// and the role mapping alone. Executing it instead would ghost a seated
+    /// broadcast out of a spectator that the room still lists.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn retry_disconnected_detaches_never_deletes_a_republished_identity() {
+        let (service, room, _creator_id, _coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_019).await;
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Republished Watcher".to_string(),
+            )
+            .await
+            .expect("spectator join succeeds");
+
+        // Simulate the stale rollback state: a disconnect-time storage failure
+        // left an unpublished detach row behind, then the same durable
+        // identity was re-admitted to the same room before maintenance ran.
+        service
+            .pending_unpublished_detaches
+            .insert((room.id, spectator_id), ());
+
+        assert_eq!(
+            service.retry_disconnected_detaches().await,
+            0,
+            "voiding a republished row is not a detach"
+        );
+        let stored = database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("fetch spectators");
+        assert!(
+            stored.iter().any(|info| info.id == spectator_id),
+            "maintenance must not delete the published roster entry"
+        );
+        assert_eq!(service.spectator_room(&spectator_id), Some(room.id));
+        assert!(
+            !service
+                .pending_unpublished_detaches
+                .contains_key(&(room.id, spectator_id)),
+            "the voided rollback record is cleared"
+        );
+    }
 }

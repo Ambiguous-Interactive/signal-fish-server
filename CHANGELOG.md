@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin four gameplay-seam guards surfaced by the issue #396 sweep with
+  deterministic, mutation-verified tests: reconnection expiry sweeps never
+  remove a record whose reconnection is claimed mid-flight; an interleaved
+  control frame never consumes an armed protocol v3 `Latest` acceleration
+  window; the documented spectator-cap boundary stays strict (`<`, a full room
+  refuses without mutating its roster, and a departure frees exactly one
+  seat); and spectator maintenance retries void stale rollback rows for
+  republished identities instead of deleting live roster entries. Clarify that
+  a future spectator cap would refuse before any room mutation through the
+  terminal `SpectatorJoinFailed` response carrying `TOO_MANY_SPECTATORS`
+  (verified behavior; no functional change) (issue #396).
 - Pin two eviction-scan guards of the v3 data lane with deterministic
   regression tests: coalescing matches the full
   `(from_player, room_id, key)` composition, so an equal application key from

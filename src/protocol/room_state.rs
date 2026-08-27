@@ -580,4 +580,40 @@ mod tests {
             "a spectator-only room is occupied and must use inactive_timeout"
         );
     }
+
+    fn watcher(id: Uuid) -> SpectatorInfo {
+        SpectatorInfo {
+            id,
+            name: "Watcher".to_string(),
+            connected_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The spectator-cap contract behind `TOO_MANY_SPECTATORS`: admissions are
+    /// allowed strictly below the configured maximum (`<`, never `<=`), a full
+    /// room refuses without mutating its roster, an uncapped room always
+    /// admits, and a departure frees exactly the seat it occupied.
+    #[test]
+    fn spectator_cap_admits_up_to_the_limit_and_frees_on_departure() {
+        let mut room = empty_room();
+        assert!(
+            room.can_spectate(),
+            "an uncapped room admits spectators unconditionally"
+        );
+
+        room.max_spectators = Some(2);
+        let departed = Uuid::new_v4();
+        assert!(room.add_spectator(watcher(Uuid::new_v4())));
+        assert!(room.add_spectator(watcher(departed)));
+        assert!(!room.can_spectate(), "a full room refuses new spectators");
+        assert!(
+            !room.add_spectator(watcher(Uuid::new_v4())),
+            "refusal must not mutate the roster"
+        );
+        assert_eq!(room.get_spectators().len(), 2);
+
+        room.remove_spectator(&departed);
+        assert!(room.can_spectate(), "departure frees exactly one seat");
+        assert!(room.add_spectator(watcher(departed)));
+    }
 }
