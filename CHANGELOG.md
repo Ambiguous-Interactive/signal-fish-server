@@ -478,9 +478,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshots over the current membership (mirroring the server's gate), latches
   against duplicate all-ready broadcasts, and re-arms on a join (always
   unready, no corrective broadcast), a departure (which can restore all-ready
-  with no readiness broadcast), an authoritative `GAME_START_NOT_READY`
-  rejection, or a `Reconnected` snapshot whose readiness was pruned while
-  away. A stale one-shot latch stalled lobbies exactly when the server's
+  with no readiness broadcast), or an authoritative `GAME_START_NOT_READY`
+  rejection; a `RoomJoined`/`LobbyStateChanged`/`Reconnected` snapshot
+  refreshes the readiness baseline without re-arming the latch (so a
+  reconnect can never duplicate an in-flight send), and a `RoomLeft` resets
+  it. A stale one-shot latch stalled lobbies exactly when the server's
   readiness re-check mattered (issue #449).
 - Bump the yanked `chacha20` 0.10.1 lockfile pin to 0.10.2 across the server,
   native-client, and fuzz workspaces (pulled in via `rand` 0.10; no API or

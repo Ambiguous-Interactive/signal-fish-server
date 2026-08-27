@@ -2967,8 +2967,8 @@ mod tests {
 
     use serde_json::json;
     use signal_fish_server::protocol::{
-        DeliveryCountersByClass, DeliveryReportPayload, DirectEndpoint, GameDataEncoding,
-        LobbyState, PlayerId, ServerMessage,
+        ClientMessage, DeliveryCountersByClass, DeliveryReportPayload, DirectEndpoint, ErrorCode,
+        GameDataEncoding, LobbyState, PlayerId, ServerMessage,
     };
 
     use crate::accountability::DeliveryAccountability;
@@ -2978,21 +2978,22 @@ mod tests {
 
     use super::{
         apply_selected_pair_probes_before_run_deadline, arm_pair_window, authoritative_peer_delta,
-        automatic_p2p_retry_count, changed_transport_status, clear_departed_membership_plan,
-        connection_targets_for_generation, consume_join_accountability_preface,
-        direct_plan_rejection_message, harness_aware_base_wake, is_coordinated_p2p_rebuild_attempt,
-        is_current_session_generation, is_terminal_peer_connection_state,
-        needs_ice_gathering_marker, negotiated_version_from, next_handshake_message,
-        note_current_pair_connected, p2p_retry_delay, reject_unsupported_direct_plan_with,
-        require_finalized_membership_plan, requires_authoritative_finalization_plan,
-        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
-        selected_pair_evidence_deadline, session_plan_peer_ids,
-        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
-        should_report_retry_gap, should_resolve_connected_pair, take_ready_selected_pair_probes,
-        try_buffer_planned_signal, validate_json_negotiated_server_message,
-        validate_p2p_rebuild_retry_count, ExchangeLedger, PairGeneration, SelectedPairEvidence,
-        SelectedPairProbeDisposition, StartGameGate, EXIT_PROTOCOL_ERROR,
-        MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL, SELECTED_PAIR_POLL,
+        automatic_p2p_retry_count, changed_transport_status, checked_deadline,
+        clear_departed_membership_plan, connection_targets_for_generation,
+        consume_join_accountability_preface, direct_plan_rejection_message,
+        harness_aware_base_wake, is_coordinated_p2p_rebuild_attempt, is_current_session_generation,
+        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
+        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
+        reject_unsupported_direct_plan_with, require_finalized_membership_plan,
+        requires_authoritative_finalization_plan, resolve_drop_ice_from,
+        restore_reconnected_member, retryable_missing_peers, selected_pair_evidence_deadline,
+        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
+        should_defer_success_at_run_deadline, should_report_retry_gap,
+        should_resolve_connected_pair, take_ready_selected_pair_probes, try_buffer_planned_signal,
+        validate_json_negotiated_server_message, validate_p2p_rebuild_retry_count, ExchangeLedger,
+        Orchestrator, PairGeneration, SelectedPairEvidence, SelectedPairProbeDisposition,
+        StartGameGate, EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER,
+        MAX_PENDING_SIGNALS_TOTAL, PING_INTERVAL, SELECTED_PAIR_POLL,
     };
     use crate::engine::{
         SelectedCandidatePair, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
@@ -3495,6 +3496,232 @@ mod tests {
             &present(&[creator]),
             "departure restores all-ready without a broadcast",
         );
+    }
+
+    /// Pins the orchestrator WIRING behind the [`StartGameGate`] (issue #449):
+    /// the pure-gate test above cannot observe whether the server-message arms
+    /// still call `maybe_send_start_game`. Driving `handle_server_message`
+    /// through the exact #449 sequence against a loopback fake server must put
+    /// the matching `ClientMessage` frames on the wire — one `StartGame` on
+    /// the first all-ready broadcast, none on a duplicate broadcast, and
+    /// exactly one re-issue when the unready latecomer departs. The
+    /// `PlayerLeft` arm is the one recovery path with no readiness broadcast
+    /// to fall back on, so dropping that call site would silently reintroduce
+    /// the departure stall while every gate-level test stays green.
+    #[tokio::test]
+    async fn player_left_arm_reissues_start_game_on_the_wire_after_invalidation() {
+        // Loopback fake server: accepts the reference client and forwards
+        // every client frame to the test as its serialized wire value.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback fake-server listener");
+        let server_url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (client_frames_tx, mut client_frames) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("reference client connects");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("loopback websocket handshake");
+            while let Some(Ok(Message::Text(text))) = futures_util::StreamExt::next(&mut ws).await {
+                let frame: ClientMessage =
+                    serde_json::from_str(&text).expect("valid ClientMessage frame");
+                if client_frames_tx
+                    .send(serde_json::to_value(frame).expect("serialize ClientMessage"))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Creator with `--peers 1`: alone in the room, so the first all-ready
+        // broadcast also fires `maybe_send_ready`.
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            server_url.as_str(),
+            "--create-room",
+            "--peers",
+            "1",
+        ]);
+        let creator = PlayerId::from_u128(0x00C7_EA7E_00C1);
+        let latecomer = PlayerId::from_u128(0x00B0_B1A7_E0C1);
+
+        let (engine_tx, engine_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (selected_pair_tx, selected_pair_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = crate::engine::Engine::new(cli.engine_settings(), engine_tx)
+            .expect("the webrtc engine initializes in-process");
+        let (ws, _handshake) = tokio_tungstenite::connect_async(server_url.as_str())
+            .await
+            .expect("reference client connects to the loopback fake server");
+
+        // Mirrors the `run_inner` constructor for a v2 creator that just
+        // joined a Waiting room. v2 keeps the fixtures free of v3 epoch
+        // baselines; every exercised arm is version-independent. A new
+        // Orchestrator field breaks this literal at compile time, forcing the
+        // author to decide how it participates in this wiring.
+        let mut orchestrator = Orchestrator {
+            cli: &cli,
+            ws,
+            engine,
+            engine_rx,
+            selected_pair_tx,
+            selected_pair_rx,
+            my_id: creator,
+            negotiated_version: 2,
+            accountability: DeliveryAccountability::new(false),
+            present: BTreeSet::from([creator]),
+            members_seen: BTreeSet::from([creator]),
+            lobby_state: Some(LobbyState::Waiting),
+            in_lobby: false,
+            ready_sent: false,
+            start_game_gate: StartGameGate::new(BTreeSet::new()),
+            game_started: false,
+            late_joined: false,
+            initial_session_plan_pending: false,
+            pending_membership_plans: BTreeMap::new(),
+            webrtc_plan_seen: false,
+            current_session_generation: None,
+            expected_peers: BTreeSet::new(),
+            pair_roles: BTreeMap::new(),
+            pair_retry_attempts: BTreeMap::new(),
+            connected_pairs: BTreeSet::new(),
+            pair_connected_reported: BTreeSet::new(),
+            selected_pair_evidence: SelectedPairEvidence::default(),
+            retrying_pairs: BTreeSet::new(),
+            p2p_reconnected_pairs: BTreeSet::new(),
+            ice_gathering_complete: BTreeSet::new(),
+            last_ice_servers: Vec::new(),
+            transport_status: None,
+            p2p_deadline: None,
+            p2p_retry_at: None,
+            p2p_released: cli.p2p_release_file.is_none(),
+            p2p_release_poll_at: None,
+            p2p_rebuild_released: cli.p2p_rebuild_release_file.is_none(),
+            p2p_rebuild_release_poll_at: None,
+            pending_pair_directives: BTreeMap::new(),
+            relay_send_at: None,
+            relay_sent: false,
+            relay_received_from: BTreeSet::new(),
+            peer_status_from: BTreeSet::new(),
+            exchange_ledger: ExchangeLedger::default(),
+            exchange_released: cli.exchange_release_file.is_none(),
+            exchange_ready_reported: false,
+            exchange_release_poll_at: None,
+            unreliable_exchange_released: cli.unreliable_exchange_release_file.is_none(),
+            exchange_reliable_ready_reported: false,
+            unreliable_exchange_release_poll_at: None,
+            pending_signals: BTreeMap::new(),
+            drop_ice_from: None,
+            run_deadline: Deadline::after(
+                tokio::time::Instant::now(),
+                Duration::from_secs(cli.run_for_secs),
+            ),
+            linger_until: None,
+            success_criteria_reported: false,
+            success_release_poll_at: None,
+            next_ping_at: checked_deadline(tokio::time::Instant::now(), PING_INTERVAL),
+            pong_deadline: None,
+            pong_grace_applied: false,
+        };
+
+        // Every expectation is bounded by a real-clock wait far above loopback
+        // latency: expected frames resolve in microseconds, and an absent
+        // frame is a fast, clean failure rather than a hang.
+        async fn expect_frame(
+            frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        ) -> serde_json::Value {
+            tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .expect("expected a client frame on the wire")
+                .expect("the loopback fake server stays connected")
+        }
+        async fn expect_silence(
+            frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        ) {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), frames.recv())
+                    .await
+                    .is_err(),
+                "no client frame was expected on the wire"
+            );
+        }
+
+        // (a) First all-ready broadcast: readiness fires, then exactly one
+        // StartGame.
+        orchestrator
+            .handle_server_message(ServerMessage::LobbyStateChanged {
+                lobby_state: LobbyState::Lobby,
+                ready_players: vec![creator],
+                all_ready: true,
+            })
+            .await
+            .expect("all-ready broadcast is protocol-clean");
+        assert_eq!(
+            expect_frame(&mut client_frames).await,
+            json!({ "type": "PlayerReady" })
+        );
+        assert_eq!(
+            expect_frame(&mut client_frames).await,
+            json!({ "type": "StartGame" }),
+            "the all-ready creator must send StartGame"
+        );
+        expect_silence(&mut client_frames).await;
+
+        // (b) A repeated all-ready broadcast must not duplicate the send.
+        orchestrator
+            .handle_server_message(ServerMessage::LobbyStateChanged {
+                lobby_state: LobbyState::Lobby,
+                ready_players: vec![creator],
+                all_ready: true,
+            })
+            .await
+            .expect("repeated all-ready broadcast is protocol-clean");
+        expect_silence(&mut client_frames).await;
+
+        // (c) The #449 invalidation: a latecomer joins (always unready, no
+        // corrective broadcast), the authoritative gate rejects a stale send,
+        // and the latecomer's departure restores all-ready with NO readiness
+        // broadcast — only the PlayerLeft arm can re-issue here.
+        orchestrator
+            .handle_server_message(ServerMessage::PlayerJoined {
+                player: serde_json::from_value(json!({
+                    "id": latecomer,
+                    "name": "latecomer",
+                    "is_authority": false,
+                    "is_ready": false,
+                    "connected_at": "2026-08-27T00:00:00Z",
+                    "connection_info": null,
+                }))
+                .expect("v2 PlayerJoined snapshot shape"),
+            })
+            .await
+            .expect("latecomer join is protocol-clean");
+        expect_silence(&mut client_frames).await;
+
+        orchestrator
+            .handle_server_message(ServerMessage::Error {
+                message: "room is not all ready".to_string(),
+                error_code: Some(ErrorCode::GameStartNotReady),
+            })
+            .await
+            .expect("authoritative rejection is protocol-clean");
+        expect_silence(&mut client_frames).await;
+
+        orchestrator
+            .handle_server_message(ServerMessage::PlayerLeft {
+                player_id: latecomer,
+                epoch: None,
+                final_seq: None,
+            })
+            .await
+            .expect("latecomer departure is protocol-clean");
+        assert_eq!(
+            expect_frame(&mut client_frames).await,
+            json!({ "type": "StartGame" }),
+            "the departure must restore all-ready and re-issue StartGame"
+        );
+        expect_silence(&mut client_frames).await;
     }
 
     #[test]
