@@ -504,7 +504,7 @@ pub struct InMemoryDatabase {
     release_get_room_by_id: tokio::sync::Notify,
     #[cfg(test)]
     fail_remove_player_from_room: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     fail_update_player_name: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
@@ -562,7 +562,7 @@ impl InMemoryDatabase {
             release_get_room_by_id: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_remove_player_from_room: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(all(test, signal_fish_repository_tests))]
             fail_update_player_name: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_remove_spectator_from_room: std::sync::atomic::AtomicBool::new(false),
@@ -696,7 +696,7 @@ impl InMemoryDatabase {
             .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn fail_update_player_name_for_test(&self, fail: bool) {
         self.fail_update_player_name
             .store(fail, std::sync::atomic::Ordering::Relaxed);
@@ -1229,7 +1229,7 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         name: &str,
     ) -> Result<bool> {
-        #[cfg(test)]
+        #[cfg(all(test, signal_fish_repository_tests))]
         if self
             .fail_update_player_name
             .load(std::sync::atomic::Ordering::Relaxed)
