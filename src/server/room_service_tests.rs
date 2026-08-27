@@ -7805,7 +7805,7 @@ async fn test_distributed_lock_cleanup_counters_are_wired() {
 }
 
 /// The creator rename must mirror into freshly built rooms only when the
-/// durable store confirmed the row, and every published surface is
+/// durable store confirmed the row. Standing published surfaces are
 /// storage-backed, so agreement with storage is the invariant (#396
 /// honest-failure sweep). Mid-creation the row cannot realistically vanish
 /// (no interleave between room build and rename), so the failure half is
