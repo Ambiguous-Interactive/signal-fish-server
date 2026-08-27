@@ -2031,12 +2031,15 @@ impl OutboundReceiver {
         let mut decrement_batch = false;
         let mut crossed_barrier = false;
         let (item, released_lane) = if let Some(front) = state.legacy.front() {
-            // The legacy lane has no `Latest` coalescing. Pre-v3 producers force
-            // `DeliveryClass::Reliable` (`try_enqueue_legacy_data`) and room
-            // transitions push class-less barriers, so `Some(Latest)` cannot
-            // occur here: every row releases immediately and none arms or spends
-            // a batch window. Coalescing waits are protocol-v3 behavior,
-            // deliberately not implemented for the compatibility lane (#444).
+            // The legacy lane has no `Latest` coalescing. Its rows come only
+            // from class-less control pushes (`push_message` always passes
+            // `None` there), pre-v3 data whose producer class was discarded in
+            // favor of `DeliveryClass::Reliable` (`try_enqueue_legacy_data`),
+            // and class-less transition barriers, so `Some(Latest)` cannot
+            // occur here (#444). Every row releases immediately without arming
+            // or spending a batch window; coalescing waits are protocol-v3
+            // behavior, deliberately not implemented for the compatibility
+            // lane.
             debug_assert_ne!(
                 front.class(),
                 Some(DeliveryClass::Latest),
@@ -3293,8 +3296,9 @@ mod tests {
 
     /// The compatibility lane releases every row immediately under the batched
     /// reader too: a class-less transition barrier crosses the generation fence
-    /// without arming or spending any coalescing window, so the next phase's
-    /// scoped row follows it out untouched (#444).
+    /// without ever arming a coalescing window (asserted via the receiver's
+    /// private counter), so the next phase's scoped row follows it out
+    /// untouched (#444).
     #[tokio::test(start_paused = true)]
     async fn pre_v3_batched_pop_crosses_transition_barrier_and_releases_rows_immediately() {
         let (tx, mut rx) = channel(4, 4);
@@ -3312,6 +3316,10 @@ mod tests {
         };
         drop(receive);
         assert_eq!(message_id(&first), 1);
+        assert_eq!(
+            rx.batch_remaining, 0,
+            "a pre-v3 pop must never arm a window"
+        );
 
         let barrier = rx
             .recv_batched(2, std::time::Duration::MAX)
@@ -3321,6 +3329,10 @@ mod tests {
         assert!(
             barrier.transition_barrier,
             "expected the transition barrier row"
+        );
+        assert_eq!(
+            rx.batch_remaining, 0,
+            "crossing the fence must not arm a window"
         );
         assert_eq!(
             message_id(
@@ -3337,6 +3349,29 @@ mod tests {
             .await
             .expect("queue reaches clean EOF")
             .is_none());
+    }
+
+    /// The legacy-lane classing rule is load-bearing now that its Latest arm is
+    /// gone (#444): this plants a corrupt `Some(Latest)` row directly in the
+    /// lane and expects the pop-path assertion to fail loudly instead of
+    /// releasing the row as if it were reliable FIFO.
+    #[tokio::test(start_paused = true)]
+    #[should_panic(expected = "a Latest-classed row reached the legacy lane")]
+    async fn latest_row_on_legacy_lane_trips_the_invariant_assert() {
+        let (tx, mut rx) = channel(4, 4);
+        {
+            let mut state = rx.shared.state();
+            let generation = state.receive_generation;
+            state.legacy.push_back(QueuedOutbound {
+                payload: OutboundPayload::Message(message(1)),
+                delivery_class: Some(DeliveryClass::Latest),
+                metadata: None,
+                enqueued_at: Instant::now(),
+                generation,
+                transition_barrier: false,
+            });
+        }
+        let _ = rx.recv_batched(2, std::time::Duration::MAX).await;
     }
 
     #[tokio::test(start_paused = true)]
