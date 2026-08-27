@@ -191,6 +191,23 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         );
     }
 
+    // Contradictory cap pairing (#396 sweep): an inbound cap above the
+    // outbound cap admits relayed game data that cannot be re-emitted. Every
+    // recipient would instead be fail-closed with `1009
+    // outbound_message_too_large`, turning the deployment into silent
+    // total-rejection for exactly the traffic it appears to accept. Like the
+    // signal-cap check below, this is rejected rather than warned about so
+    // the misconfiguration can never ship.
+    if config.security.max_message_size > config.security.max_outbound_message_size {
+        anyhow::bail!(
+            "security.max_message_size ({}) must not exceed security.max_outbound_message_size ({}): \
+             a frame admitted by the inbound cap could not be re-serialized under the outbound \
+             cap, closing every recipient with `1009 outbound_message_too_large`",
+            config.security.max_message_size,
+            config.security.max_outbound_message_size,
+        );
+    }
+
     // Signal payload cap validation. `max_signal_bytes` larger than
     // `max_message_size` is rejected (not just warned about) because it is
     // contradictory dead config: a frame that large is rejected by the
@@ -1215,6 +1232,63 @@ mod tests {
             validate_config_security(&config).is_ok(),
             "zero batch_interval_ms is harmless when batching is disabled"
         );
+    }
+
+    /// The inbound and outbound message caps must not invert (#396 sweep).
+    /// `max_message_size` above `max_outbound_message_size` is a
+    /// total-rejection configuration of exactly the class that previously
+    /// shipped silently (see the zero-cap cases): every relayed game-data
+    /// frame would be admitted at ingress and then fail-closed at the
+    /// recipient with `1009 outbound_message_too_large`. Data-driven over the
+    /// boundary; equality stays legal (same frame in and out).
+    #[test]
+    fn max_message_size_must_not_exceed_max_outbound_message_size() {
+        let (inbound_default, outbound_default) = {
+            let config = Config::default();
+            (
+                config.security.max_message_size,
+                config.security.max_outbound_message_size,
+            )
+        };
+        assert!(
+            inbound_default < outbound_default,
+            "defaults must stay a sane pairing"
+        );
+
+        // (inbound, outbound, expect_ok)
+        let cases = [
+            (inbound_default, outbound_default, true),
+            // Equal boundary stays legal: the same frame passes in and out.
+            (1_048_576, 1_048_576, true),
+            // Genuine inversion: ingress admits what egress cannot re-emit.
+            (2_097_152, 1_048_576, false),
+        ];
+
+        for (inbound, outbound, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.max_message_size = inbound;
+            config.security.max_outbound_message_size = outbound;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "max_message_size={inbound}, max_outbound_message_size={outbound}"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("security.max_message_size")
+                        && err.contains("security.max_outbound_message_size"),
+                    "rejection must name both offending fields: {err}"
+                );
+                assert!(
+                    err.contains("1009 outbound_message_too_large"),
+                    "rejection must state its consequence: {err}"
+                );
+            }
+        }
     }
 
     #[test]

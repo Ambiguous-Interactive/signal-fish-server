@@ -4015,6 +4015,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     async fn oversized_message_discovered_during_normal_close_flush_promotes_close_to_1009() {
         let server = test_server_with_config(ServerConfig {
+            max_message_size: 64,
+            max_signal_bytes: 64,
             max_outbound_message_size: 128,
             ..ServerConfig::default()
         })

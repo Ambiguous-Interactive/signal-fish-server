@@ -29,23 +29,39 @@ impl EnhancedGameServer {
 
         tracing::info!(%player_id, %room_id, "Player provided legacy peer connection metadata");
 
-        if let Err(e) = self
+        match self
             .database
             .update_player_connection_info(&room_id, player_id, connection_info)
             .await
         {
-            tracing::error!(%player_id, "Failed to store legacy peer metadata: {}", e);
-            let _ = self
-                .message_coordinator
-                .send_to_player(
-                    player_id,
-                    Arc::new(ServerMessage::Error {
-                        message: "Failed to store legacy peer metadata".to_string(),
-                        error_code: Some(ErrorCode::InternalError),
-                    }),
-                )
-                .await;
+            // Confirmed write: the caller asked for no receipt, so silence is
+            // the success contract.
+            Ok(true) => return,
+            // A vanished membership row (`Ok(false)`; teardown raced us) and
+            // a storage failure both mean peers will never see this metadata
+            // at `GameStarting`. Treating either as success used to make the
+            // loss indistinguishable from stored (#396 sweep): both fall
+            // through to one honest client reply.
+            Ok(false) => tracing::warn!(
+                %player_id,
+                %room_id,
+                "Legacy peer metadata write landed on a vanished membership row"
+            ),
+            Err(e) => tracing::error!(
+                %player_id,
+                %room_id,
+                "Failed to store legacy peer metadata: {}",
+                e
+            ),
         }
+
+        let _ = self
+            .send_error_to_player(
+                player_id,
+                "Failed to store legacy peer metadata".to_string(),
+                Some(ErrorCode::InternalError),
+            )
+            .await;
     }
 
     /// Handle JSON game data fan-out with coordination.
@@ -95,6 +111,18 @@ impl EnhancedGameServer {
                 })
             })
             .await;
+        } else {
+            // Every sibling surface (ProvideConnectionInfo, Signal,
+            // Authority) rejects unseated senders with NOT_IN_ROOM; leaving
+            // these lanes silent made "relayed" indistinguishable from
+            // "dropped" during teardown races (#396 sweep).
+            let _ = self
+                .send_error_to_player(
+                    player_id,
+                    "Not in a room".to_string(),
+                    Some(ErrorCode::NotInRoom),
+                )
+                .await;
         }
     }
 
@@ -148,6 +176,16 @@ impl EnhancedGameServer {
                 })
             })
             .await;
+        } else {
+            // See the text-lane rationale above: an unseated sender must be
+            // able to observe the rejection, not infer it from silence.
+            let _ = self
+                .send_error_to_player(
+                    player_id,
+                    "Not in a room".to_string(),
+                    Some(ErrorCode::NotInRoom),
+                )
+                .await;
         }
     }
 

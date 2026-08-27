@@ -186,7 +186,8 @@ Waiting; the remaining members stay in the lobby.
 The initial state. The room exists but is empty, awaiting its first player.
 
 - No players are present yet.
-- No ready-state tracking happens in this state.
+- Readiness toggles are already honored in this state: a player who marks
+  ready before the lobby promotes carries that readiness with them.
 - The room stays here until a player joins or it expires from inactivity.
 
 ### Lobby

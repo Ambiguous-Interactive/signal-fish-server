@@ -63,9 +63,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receive exactly matched terminal results without changing legacy v2/0.4/0.7
   wire shapes. Unexpected owned-task failures also return a correlated internal
   failure while the connection remains deliverable (issue #395).
+- Pin two previously unpinned game-data guards with deterministic tests: a
+  pre-v3 sender supplying delivery metadata (`class`/`key`) is rejected with
+  `INVALID_DELIVERY_CLASS`, and every game-data write from an unseated
+  connection is answered — nothing can regress to silent vanishing without
+  failing these (verified behavior plus the coded rejections above)
+  (issue #396).
 
 ### Changed
 
+- Reject contradictory message-cap pairings at startup: a
+  `security.max_message_size` above `security.max_outbound_message_size`
+  previously started and then admitted relayed game data that could not be
+  re-emitted, closing every recipient with `1009 outbound_message_too_large`
+  — silent total rejection for exactly the traffic the deployment appeared to
+  accept. The pairing now fails both top-level config validation and direct
+  library construction of `EnhancedGameServer` (which likewise enforces the
+  dead-config `max_signal_bytes ≤ max_message_size` pairing), naming the
+  contradictory knobs (issue #396).
+- Reject game data from unseated connections with `NOT_IN_ROOM` instead of
+  dropping it silently: JSON `GameData` and raw binary game data sent before
+  joining, while spectating (spectator connections are never seated), or
+  after losing seat during teardown now surface the same coded error as
+  every other command surface, so clients can distinguish "relayed"
+  from "dropped" and retry meaningfully. Per-frame validation still runs
+  first (`INVALID_DELIVERY_CLASS` / `MESSAGE_TOO_LARGE`).
+- Accept-but-drop honesty for legacy peer metadata:
+  `ProvideConnectionInfo` now returns `INTERNAL_ERROR` when its durable
+  write lands on a membership row that vanished mid-flight instead of
+  silently pretending success, matching the treatment of any other failed
+  persistence; the room-creator rename path likewise mirrors its database
+  result into in-memory state only on confirmed success.
 - **Breaking:** Remove never-wired metric exports that always reported a
   healthier-than-real server: `signal_fish_queries_total`, the
   `signal_fish_room_creation_latency`/`signal_fish_room_join_latency`/

@@ -97,6 +97,12 @@ correctness evidence appears.
 - #396 — continue the correctness and performance sweep through named,
   gameplay-facing seams; require a deterministic counterexample or current
   profile before changing production behavior.
+- #447 — resolve the all_ready-at-join product decision and land the
+  remaining host-election/readiness pins it unlocks (session-178 audit
+  residuals).
+- #446 — dormant multi-instance targeted bus path drops room context; fix
+  with a red-first test before any cross-instance/beyond-today scaffolding
+  is ever re-enabled.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted

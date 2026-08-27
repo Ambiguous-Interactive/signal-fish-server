@@ -34,7 +34,7 @@ use super::types::{
 // - **Characteristics**:
 //   - Room has fewer players than `max_players`
 //   - Players can join freely
-//   - No ready state tracking
+//   - Readiness toggles are honored and carried into the Lobby promotion
 //   - Room can expire if empty for too long
 //
 // ### 2. Lobby State
@@ -167,7 +167,7 @@ use super::types::{
 // - Message flow examples
 // - Code references and test coverage
 //
-// See: [`docs/architecture/room-lifecycle.md`](../../../docs/architecture/room-lifecycle.md)
+// See: [`docs/concepts/rooms-and-lobbies.md`](../../../docs/concepts/rooms-and-lobbies.md)
 //
 // ============================================================================
 

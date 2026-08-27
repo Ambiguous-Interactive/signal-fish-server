@@ -73,8 +73,9 @@ cargo run -- --print-config
   `max_rooms`, `max_players_per_room`) set where an app needs different limits.
 - [ ] `security.max_signal_bytes`, inbound `security.max_message_size`, and
   `security.max_outbound_message_size` left at sane nonzero caps
-  (`max_signal_bytes` must be `≤ max_message_size`; outbound must be no more
-  than 67108864 bytes).
+  (`max_signal_bytes` must be `≤ max_message_size`; inbound must be
+  `≤ max_outbound_message_size` — startup rejects inversions; outbound must
+  be no more than 67108864 bytes).
 
 ## TURN secret shared and rotated
 

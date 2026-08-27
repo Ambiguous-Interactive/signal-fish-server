@@ -351,6 +351,8 @@ mod tests {
     #[tokio::test]
     async fn every_handled_upgrade_response_advertises_the_configured_outbound_limit() {
         let config = crate::server::ServerConfig {
+            max_message_size: 12_345,
+            max_signal_bytes: 12_345,
             max_outbound_message_size: 12_345,
             ..crate::server::ServerConfig::default()
         };

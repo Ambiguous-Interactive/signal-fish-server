@@ -114,6 +114,8 @@ Spectators are strictly read-only. The following actions are **not
 available** to spectators:
 
 - **Send GameData** -- Spectators cannot inject game data into the room.
+  Attempted game data (JSON or raw binary) is answered with `NOT_IN_ROOM`,
+  since spectator connections are never seated in the player roster.
 - **Send PlayerReady** -- Spectators cannot affect the ready-up flow.
 - **Send AuthorityRequest** -- Spectators cannot claim or release
   authority.

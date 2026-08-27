@@ -133,6 +133,7 @@ mod tests {
             heartbeat_throttle: StdDuration::ZERO,
             max_connections_per_ip: 32,
             max_message_size: 4,
+            max_signal_bytes: 4,
             ..ServerConfig::default()
         })
         .await;

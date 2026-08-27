@@ -504,6 +504,8 @@ pub struct InMemoryDatabase {
     release_get_room_by_id: tokio::sync::Notify,
     #[cfg(test)]
     fail_remove_player_from_room: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    fail_update_player_name: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
     /// Join-race determinism gate: used only by repository-only test modules
@@ -560,6 +562,8 @@ impl InMemoryDatabase {
             release_get_room_by_id: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_remove_player_from_room: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            fail_update_player_name: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_remove_spectator_from_room: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -689,6 +693,12 @@ impl InMemoryDatabase {
     #[cfg(signal_fish_repository_tests)]
     pub(crate) fn fail_remove_player_from_room_for_test(&self, fail: bool) {
         self.fail_remove_player_from_room
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_update_player_name_for_test(&self, fail: bool) {
+        self.fail_update_player_name
             .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1219,6 +1229,13 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         name: &str,
     ) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .fail_update_player_name
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected update_player_name failure for test");
+        }
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if let Some(player) = room.players.get_mut(player_id) {
