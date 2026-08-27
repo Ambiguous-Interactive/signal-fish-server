@@ -401,6 +401,294 @@ async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
     );
 }
 
+/// The coordinator's `StartGameOutcome` rejections must reach the wire with
+/// their exact, distinct `ErrorCode`s through
+/// [`EnhancedGameServer::handle_start_game`] — `NotReady` =>
+/// `GAME_START_NOT_READY`, `Forbidden` => `GAME_START_FORBIDDEN`,
+/// `AlreadyStarted` => `INVALID_ROOM_STATE` — each with no state mutation and
+/// no traffic to any other member.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn start_game_rejections_map_to_exact_wire_error_codes() {
+    let server = create_test_server().await;
+
+    // NotReady: an open lobby with an unready member rejects the start.
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    server
+        .handle_join_room(
+            &player_a,
+            "start-not-ready".to_string(),
+            None,
+            "PlayerA".to_string(),
+            Some(4),
+            Some(false),
+            None,
+        )
+        .await;
+    let room_code = match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("player_a expected RoomJoined, got {other:?}"),
+    };
+    server
+        .handle_join_room(
+            &player_b,
+            "start-not-ready".to_string(),
+            Some(room_code),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("player_b expected RoomJoined, got {other:?}"),
+    }
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+    server.handle_player_ready(&player_a).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    server.handle_start_game(&player_a).await;
+    match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::Error { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::GameStartNotReady),
+                "a start with an unready member must be GAME_START_NOT_READY"
+            );
+        }
+        other => panic!("expected NotReady rejection, got {other:?}"),
+    }
+    assert_silent(&mut rx_b).await;
+    let not_ready_room_id = server.get_client_room(&player_a).await.expect("room");
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&not_ready_room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .lobby_state,
+        LobbyState::Lobby,
+        "a NotReady rejection must not mutate the room"
+    );
+
+    // Forbidden: an authority-designated, all-ready room rejects a
+    // non-authority sender.
+    let (owner, mut rx_owner) = register_client(&server).await;
+    let (member, mut rx_member) = register_client(&server).await;
+    server
+        .handle_join_room(
+            &owner,
+            "start-forbidden".to_string(),
+            None,
+            "Owner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let authority_code = match recv(&mut rx_owner).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_code.clone(),
+        other => panic!("owner expected RoomJoined, got {other:?}"),
+    };
+    server
+        .handle_join_room(
+            &member,
+            "start-forbidden".to_string(),
+            Some(authority_code),
+            "Member".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    match recv(&mut rx_member).await.as_ref() {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("member expected RoomJoined, got {other:?}"),
+    }
+    drain_pending(&mut rx_owner);
+    drain_pending(&mut rx_member);
+    server.handle_player_ready(&owner).await;
+    server.handle_player_ready(&member).await;
+    drain_pending(&mut rx_owner);
+    drain_pending(&mut rx_member);
+
+    server.handle_start_game(&member).await;
+    match recv(&mut rx_member).await.as_ref() {
+        ServerMessage::Error { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::GameStartForbidden),
+                "a non-authority start must be GAME_START_FORBIDDEN"
+            );
+        }
+        other => panic!("expected Forbidden rejection, got {other:?}"),
+    }
+    assert_silent(&mut rx_owner).await;
+
+    // AlreadyStarted: the authority's start succeeds; the next start is
+    // INVALID_ROOM_STATE.
+    server.handle_start_game(&owner).await;
+    for (rx, who) in [(&mut rx_owner, "owner"), (&mut rx_member, "member")] {
+        match recv(rx).await.as_ref() {
+            ServerMessage::GameStarting { .. } => {}
+            other => panic!("{who} expected GameStarting, got {other:?}"),
+        }
+    }
+    server.handle_start_game(&member).await;
+    match recv(&mut rx_member).await.as_ref() {
+        ServerMessage::Error { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::InvalidRoomState),
+                "a start on a finalized room must be INVALID_ROOM_STATE"
+            );
+        }
+        other => panic!("expected AlreadyStarted rejection, got {other:?}"),
+    }
+    assert_silent(&mut rx_owner).await;
+}
+
+/// Old-generation room operations must be silent no-ops after a reconnect
+/// reclaim: the reclaim renames the transient incarnation's lifecycle to the
+/// restored identity, so an in-flight `PlayerReady`/`StartGame` parked on that
+/// lifecycle belongs to a generation that no longer exists. The fence
+/// (`ready_state.rs`) must return without emitting anything — notably without
+/// the `NotInRoom` error an unfenced handler would send — and without mutating
+/// readiness or the room.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() {
+    let server = create_test_server().await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    server
+        .handle_join_room(
+            &player_a,
+            "stale-generation-fence".to_string(),
+            None,
+            "PlayerA".to_string(),
+            Some(4),
+            Some(false),
+            None,
+        )
+        .await;
+    let room_id = match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => payload.room_id,
+        other => panic!("player_a expected RoomJoined, got {other:?}"),
+    };
+    server
+        .handle_join_room(
+            &player_b,
+            "stale-generation-fence".to_string(),
+            Some(room_code_of(&room_id, &server).await),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    match recv(&mut rx_b).await.as_ref() {
+        ServerMessage::RoomJoined(_) => {}
+        other => panic!("player_b expected RoomJoined, got {other:?}"),
+    }
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+    server.handle_player_ready(&player_a).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+    assert!(server
+        .room_coordinator
+        .current_ready_players(&room_id)
+        .await
+        .contains(&player_a));
+    let ready_before = server
+        .room_coordinator
+        .current_ready_players(&room_id)
+        .await;
+
+    // Player A's connection drops; a transient incarnation connects and is
+    // about to be reclaimed as the restored identity.
+    server.connection_manager.remove_client(&player_a);
+    let (transient, mut rx_transient) = register_client(&server).await;
+
+    // Two stale in-flight operations for the transient incarnation park on its
+    // lifecycle gate (the handler fetches the lifecycle, then takes the gate).
+    let lifecycle = server
+        .connection_manager
+        .client_lifecycle(&transient)
+        .expect("transient incarnation has a lifecycle");
+    let _parked_gate = lifecycle.lock().await;
+    let ready_task = {
+        let server = Arc::clone(&server);
+        async move { server.handle_player_ready(&transient).await }
+    };
+    let start_task = {
+        let server = Arc::clone(&server);
+        async move { server.handle_start_game(&transient).await }
+    };
+    let (mut ready_task, mut start_task) = (tokio::spawn(ready_task), tokio::spawn(start_task));
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    // The reclaim renames the parked lifecycle to the restored identity.
+    server
+        .connection_manager
+        .reassign_connection(&transient, &player_a, room_id, 1)
+        .expect("reconnect reclaim succeeds");
+    drop(_parked_gate);
+    tokio::time::timeout(Duration::from_secs(1), &mut ready_task)
+        .await
+        .expect("stale ready handler completes")
+        .expect("stale ready handler does not panic");
+    tokio::time::timeout(Duration::from_secs(1), &mut start_task)
+        .await
+        .expect("stale start handler completes")
+        .expect("stale start handler does not panic");
+
+    // The fenced handlers stayed silent: no error frame to the restored
+    // connection, its incumbent, or anyone else.
+    assert_silent(&mut rx_transient).await;
+    assert_silent(&mut rx_b).await;
+
+    // A start attempt for the departed incarnation id finds no lifecycle at
+    // all and is equally silent.
+    server.handle_start_game(&transient).await;
+    assert_silent(&mut rx_transient).await;
+
+    // Nothing mutated: A's readiness is intact and its room assignment was
+    // restored by the reclaim.
+    assert_eq!(
+        server
+            .room_coordinator
+            .current_ready_players(&room_id)
+            .await,
+        ready_before,
+        "a stale-generation operation must not mutate readiness"
+    );
+    assert_eq!(
+        server.get_client_room(&player_a).await,
+        Some(room_id),
+        "the reclaim restores the room assignment"
+    );
+}
+
+/// The room code for `room_id`, fetched from storage (test helper).
+async fn room_code_of(room_id: &crate::protocol::RoomId, server: &EnhancedGameServer) -> String {
+    server
+        .database
+        .get_room_by_id(room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists")
+        .code
+}
+
 /// Readiness belongs to a membership, not to a player id. A member who leaves
 /// and joins again is a new, unready member: resurrecting the previous
 /// readiness would both invert their next toggle and let the remaining members
