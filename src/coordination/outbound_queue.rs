@@ -1970,6 +1970,17 @@ impl OutboundReceiver {
         if state.accountability_failed {
             return Err(PopState::Terminal);
         }
+        // Same legacy-lane classing invariant as `try_pop_batched` (#444): a
+        // `Some(Latest)` front cannot be produced, and if one ever appears the
+        // producer contract is already broken, so fail closed.
+        if state
+            .legacy
+            .front()
+            .is_some_and(|front| front.class() == Some(DeliveryClass::Latest))
+        {
+            state.accountability_failed = true;
+            return Err(PopState::Terminal);
+        }
         let (item, released_lane) = if let Some(item) = state.legacy.pop_front() {
             if item.transition_barrier {
                 state.receive_generation = item.generation;
@@ -2031,30 +2042,25 @@ impl OutboundReceiver {
         let mut decrement_batch = false;
         let mut crossed_barrier = false;
         let (item, released_lane) = if let Some(front) = state.legacy.front() {
-            // A `Latest` front waits up to `batch_interval` (unless the lane is
-            // already `batch_size` deep) so a superseding same-key value can
-            // still coalesce. Control, Reliable, and Volatile are
-            // latency-sensitive: released immediately, and they never start a
-            // batch, so a Latest queued behind them keeps its own coalesce wait
-            // (issue #198). `class() == None` is control.
-            let ready = front.class() != Some(DeliveryClass::Latest)
-                || self.batch_remaining > 0
-                || state.legacy.len() >= batch_size
-                || !state.receiver_open
-                || !state.producers_open()
-                || front
-                    .enqueued_at
-                    .checked_add(batch_interval)
-                    .is_some_and(|deadline| now >= deadline);
-            if !ready {
-                return Err(BatchedPopState::WaitUntil(
-                    front.enqueued_at.checked_add(batch_interval),
-                ));
+            // The legacy lane has no `Latest` coalescing. Its rows come only
+            // from class-less control pushes (`push_message` always passes
+            // `None` there), pre-v3 data whose producer class was discarded in
+            // favor of `DeliveryClass::Reliable` (`try_enqueue_legacy_data`),
+            // and class-less transition barriers (from both the direct and
+            // permit-fenced paths), so `Some(Latest)` cannot occur here
+            // (#444). Every row releases immediately without arming
+            // or spending a batch window; coalescing waits are protocol-v3
+            // behavior, deliberately not implemented for the compatibility
+            // lane.
+            if front.class() == Some(DeliveryClass::Latest) {
+                // A row carrying `Some(Latest)` here means a producer bypassed
+                // the pre-v3 classing rule above, so the lane's wire-ordering
+                // contract is already broken beyond exact description. Fail
+                // closed like every other accountability breach rather than
+                // guessing whether to release the row as reliable FIFO.
+                state.accountability_failed = true;
+                return Err(BatchedPopState::Terminal);
             }
-            if front.class() == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
-                self.batch_remaining = state.legacy.len().min(batch_size);
-            }
-            decrement_batch = self.batch_remaining > 0;
             let item = state.legacy.pop_front();
             if item.as_ref().is_some_and(|item| item.transition_barrier) {
                 crossed_barrier = true;
@@ -2083,9 +2089,10 @@ impl OutboundReceiver {
                 .iter()
                 .take_while(|item| item.generation == state.receive_generation)
                 .count();
-            // Same rule as the legacy lane: only a `Latest` front waits (and
-            // starts a batch); control/Reliable/Volatile release immediately and
-            // never arm one, so a trailing Latest keeps its coalesce wait (#198).
+            // Only a `Latest` front waits (and starts a batch);
+            // control/Reliable/Volatile release immediately and never arm one,
+            // so a trailing Latest keeps its coalesce wait (#198). The legacy
+            // lane deliberately has none of this logic (#444).
             let ready = front_class != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || phase_len >= batch_size
@@ -3300,6 +3307,123 @@ mod tests {
             .await
             .expect("pre-v3 queue reaches clean EOF")
             .is_none());
+    }
+
+    /// The compatibility lane releases every row immediately under the batched
+    /// reader too: a class-less transition barrier crosses the generation fence
+    /// without ever arming a coalescing window (asserted via the receiver's
+    /// private counter), so the next phase's scoped row follows it out
+    /// untouched (#444).
+    #[tokio::test(start_paused = true)]
+    async fn pre_v3_batched_pop_crosses_transition_barrier_and_releases_rows_immediately() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .expect("enqueue pre-v3 data");
+        tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .expect("enqueue pre-v3 transition");
+        tx.try_enqueue_control_scoped(message(2), None, 1)
+            .expect("enqueue post-transition control");
+
+        let mut receive = Box::pin(rx.recv_batched(2, std::time::Duration::MAX));
+        let first = match futures_util::poll!(receive.as_mut()) {
+            std::task::Poll::Ready(Ok(Some(item))) => item,
+            other => panic!("a pre-v3 front must release immediately: {other:?}"),
+        };
+        drop(receive);
+        assert_eq!(message_id(&first), 1);
+        assert_eq!(
+            rx.batch_remaining, 0,
+            "a pre-v3 pop must never arm a window"
+        );
+
+        let barrier = rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue remains healthy")
+            .expect("transition barrier crosses the fence");
+        assert!(
+            barrier.transition_barrier,
+            "expected the transition barrier row"
+        );
+        assert_eq!(
+            rx.batch_remaining, 0,
+            "crossing the fence must not arm a window"
+        );
+        assert_eq!(
+            message_id(
+                &rx.recv_batched(2, std::time::Duration::MAX)
+                    .await
+                    .expect("queue remains healthy")
+                    .expect("post-fence row releases immediately")
+            ),
+            2
+        );
+        drop(tx);
+        assert!(rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue reaches clean EOF")
+            .is_none());
+    }
+
+    /// The legacy-lane classing rule is load-bearing now that its Latest arm is
+    /// gone (#444): this plants a corrupt `Some(Latest)` row directly in the
+    /// lane behind one legitimate row and expects fail-closed behavior from
+    /// both consumers — the healthy row still releases, then the queue refuses
+    /// every further pop as a terminal accountability breach instead of
+    /// guessing FIFO semantics for the corrupted row.
+    #[tokio::test(start_paused = true)]
+    async fn latest_row_on_legacy_lane_fails_closed_as_accountability_breach() {
+        // `(label, unbatched)` drives each corruption scenario through both
+        // consumer seams; they map internal terminal states to the same public
+        // `TryReceiveError::AccountabilityFailed`.
+        let consumers: [(&str, bool); 2] = [("unbatched recv", true), ("batched recv", false)];
+        for (context, unbatched) in consumers {
+            let (tx, mut rx) = channel(4, 4);
+            tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+                .expect("enqueue healthy pre-v3 data (forced Reliable)");
+            {
+                let mut state = rx.shared.state();
+                let generation = state.receive_generation;
+                state.legacy.push_back(QueuedOutbound {
+                    payload: OutboundPayload::Message(message(2)),
+                    delivery_class: Some(DeliveryClass::Latest),
+                    metadata: None,
+                    enqueued_at: Instant::now(),
+                    generation,
+                    transition_barrier: false,
+                });
+            }
+
+            let healthy = if unbatched {
+                rx.recv().await
+            } else {
+                rx.recv_batched(2, std::time::Duration::MAX).await
+            };
+            let healthy = healthy
+                .expect("{context}: queue remains healthy before the corrupt front")
+                .expect("{context}: rows ahead of the corrupt row are unaffected");
+            assert_eq!(message_id(&healthy), 1, "{context}");
+
+            let terminal = if unbatched {
+                rx.recv().await
+            } else {
+                rx.recv_batched(2, std::time::Duration::MAX).await
+            };
+            assert!(
+                matches!(terminal, Err(TryReceiveError::AccountabilityFailed)),
+                "{context}: the corrupt Latest front must fail the queue closed: {terminal:?}"
+            );
+            let sticky = if unbatched {
+                rx.recv().await
+            } else {
+                rx.recv_batched(2, std::time::Duration::MAX).await
+            };
+            assert!(
+                matches!(sticky, Err(TryReceiveError::AccountabilityFailed)),
+                "{context}: terminal failure must be sticky: {sticky:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
