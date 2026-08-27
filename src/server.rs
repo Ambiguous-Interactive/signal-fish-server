@@ -3713,14 +3713,25 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         &self,
         message: crate::distributed::SequencedMessage,
     ) -> anyhow::Result<()> {
-        if let Some(player_id) = message.target_player {
-            self.send_to_player(&player_id, Arc::new(message.message))
+        match (message.target_player, message.room_id) {
+            // Targeted delivery with room context must go through that room's
+            // scope: server-stamped relay data classifies only with its room,
+            // so the unscoped path would fail closed and loud-close an
+            // innocent recipient (issue #446). Room-scoped delivery also
+            // no-ops when the target has left that room.
+            (Some(player_id), Some(room_id)) => self
+                .send_to_player_in_room(&player_id, &room_id, Arc::new(message.message))
                 .await
-        } else if let Some(room_id) = message.room_id {
-            self.broadcast_to_room(&room_id, Arc::new(message.message))
-                .await
-        } else {
-            Ok(())
+                .map(|_delivered| ()),
+            (Some(player_id), None) => {
+                self.send_to_player(&player_id, Arc::new(message.message))
+                    .await
+            }
+            (None, Some(room_id)) => {
+                self.broadcast_to_room(&room_id, Arc::new(message.message))
+                    .await
+            }
+            (None, None) => Ok(()),
         }
     }
 }

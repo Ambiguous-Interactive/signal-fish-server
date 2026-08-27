@@ -186,8 +186,11 @@ Waiting; the remaining members stay in the lobby.
 The initial state. The room exists but is empty, awaiting its first player.
 
 - No players are present yet.
-- Readiness toggles are already honored in this state: a player who marks
-  ready before the lobby promotes carries that readiness with them.
+- The Waiting→Lobby promotion happens inside the first member's own
+  `JoinRoom`: that member's `RoomJoined` is immediately followed by the
+  one-time `LobbyStateChanged { state: lobby }` promotion snapshot. No
+  client can act while the room is `Waiting`, and later joins into the open
+  lobby fire no promotion snapshot.
 - The room stays here until a player joins or it expires from inactivity.
 
 ### Lobby
@@ -203,6 +206,13 @@ more players and need not be full to start.
 - Readiness **does not** start the game on its own. Once every current
   player is ready, a member finalizes the lobby with an explicit
   [`StartGame`](../protocol.md#startgame).
+- `LobbyStateChanged` fires on readiness **toggles** only (plus the one-time
+  Waiting→Lobby promotion snapshot). A player who joins an open lobby later is
+  always unready and triggers no readiness broadcast, so a cached
+  `all_ready: true` is stale the moment a `PlayerJoined` shows a new member —
+  recompute readiness from the current membership instead, and treat
+  `StartGame` (which re-checks under the room lock) as the only authoritative
+  gate.
 - Readiness belongs to a **membership**: a player who leaves and joins the
   room again starts unready and must send `PlayerReady` again.
 - A member who **reconnects** resumes the same membership, so it is not forced
@@ -282,11 +292,11 @@ Alice (Client)             Server              Bob (Client)
      |-- JoinRoom (create) -->|                       |
      |<-- RoomJoined ---------|                       |
      |   (code: HK7T3W)      |                       |
+     |<-- LobbyStateChanged --|                       |
+     |   (state: lobby)      |                       |
      |                        |                       |
      |                        |<-- JoinRoom (join) ---|
      |<-- PlayerJoined -------|--- RoomJoined ------->|
-     |<-- LobbyStateChanged --|-- LobbyStateChanged ->|
-     |   (state: lobby)       |   (state: lobby)      |
      |                        |                       |
      |-- PlayerReady -------->|                       |
      |<-- LobbyStateChanged --|-- LobbyStateChanged ->|

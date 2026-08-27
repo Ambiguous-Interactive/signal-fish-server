@@ -62,7 +62,11 @@ server's `/v2/ws` (or `/v3/ws`) endpoint, then:
    `PlayerJoined` / `PlayerLeft` as others come and go.
 3. **PlayerReady** — toggle your readiness. The server broadcasts
    `LobbyStateChanged` after each toggle, with `all_ready: true` once every
-   _current_ player is ready. Readiness alone does **not** start the game.
+   _current_ player is ready. A player who joins later is always unready and
+   triggers **no** corrective broadcast, so a cached `all_ready: true` is
+   stale after a `PlayerJoined` — recompute it (every current player present
+   in `ready_players`) whenever membership changes. Readiness alone does
+   **not** start the game.
 4. **StartGame** — explicitly finalize and start. See
    [StartGame authorization](#startgame-authorization-and-readiness) below — this
    is the most common source of client bugs.
@@ -85,8 +89,9 @@ See the worked walkthrough in
 
 ### StartGame authorization and readiness
 
-`StartGame` is accepted only when **every current player is ready** (`all_ready`
-was `true` in the most recent `LobbyStateChanged`). `max_players` is a ceiling,
+`StartGame` is accepted only when **every current player is ready** —
+recomputed from the room's current membership, not from a cached flag
+(`all_ready` snapshots are advisory; see below). `max_players` is a ceiling,
 not a required count — a room with a single ready player may start (solo is
 allowed). The server rejects a premature start with the error code
 `GAME_START_NOT_READY`.
@@ -100,6 +105,14 @@ Authorization:
 So: track `all_ready` from `LobbyStateChanged`, track whether you are the
 authority (from `RoomJoined.is_authority` / `AuthorityChanged`), and only enable
 your "Start" affordance when both conditions allow it.
+
+Treat `all_ready` as advisory, never as a guarantee: the server re-checks
+readiness when `StartGame` arrives, and a member that joined after the last
+`LobbyStateChanged` (always unready, no corrective broadcast) makes the room
+not-all-ready. On `GAME_START_NOT_READY`, recompute readiness from the current
+membership and re-issue `StartGame` once every current player is ready again —
+via a `LobbyStateChanged { all_ready: true }` toggle or because the unready
+member left (no broadcast fires). A one-shot latch leaves the lobby stalled.
 
 ## Mandatory vs optional
 
@@ -289,6 +302,11 @@ A client is conformant when it passes these scenarios:
 - [ ] **StartGame rejection:** sending `StartGame` before `all_ready` returns
       `GAME_START_NOT_READY`; a non-authority sending it in an authority room
       returns `GAME_START_FORBIDDEN`.
+- [ ] **`all_ready` invalidation:** reach `all_ready: true`, have another player
+      join (a `PlayerJoined`, no corrective `LobbyStateChanged`), observe a
+      `StartGame` attempt return `GAME_START_NOT_READY`, then confirm the
+      client re-issues once the joiner readies and `all_ready` reports `true`
+      again.
 - [ ] **Error handling:** join a full room (`ROOM_FULL`), use a bad room code
       (`ROOM_NOT_FOUND`), and surface `error_code` values to the user. See
       [error handling](../scenarios/error-handling.md) and the

@@ -3819,3 +3819,99 @@ async fn full_recipient_queue_aborts_room_transaction_before_commit_hook() {
     let unexpected = stable_rx.try_recv();
     assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
 }
+
+#[tokio::test]
+async fn targeted_bus_delivery_scopes_stamped_data_to_the_recipient_room() {
+    // Issue #446: `handle_bus_message` routed targeted messages through the
+    // UNSCOPED `send_to_player`, so a server-stamped relay `GameData` (which
+    // needs its room context to classify) failed closed and loud-closed an
+    // innocent recipient. Room-scoped dispatch delivers it instead.
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    );
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0400);
+    let sender_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0401);
+    let recipient_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0402);
+    let (sender, mut receiver) = crate::coordination::outbound_queue::channel(2, 2);
+    sender.set_protocol_version(3);
+    let (close, close_listener) = ConnectionCloseSignal::channel();
+
+    // Establish the queue's room scope the way a real join baseline does, and
+    // advance the handle to the generation that scope was set under.
+    sender
+        .try_enqueue_transition(
+            Arc::new(ServerMessage::RoomJoined(Box::new(
+                crate::protocol::RoomJoinedPayload {
+                    room_id,
+                    room_code: "BUS404".to_string(),
+                    player_id: recipient_id,
+                    game_name: "bus-game".to_string(),
+                    max_players: 4,
+                    supports_authority: false,
+                    current_players: Vec::new(),
+                    is_authority: false,
+                    lobby_state: crate::protocol::LobbyState::Lobby,
+                    ready_players: Vec::new(),
+                    relay_type: "udp".to_string(),
+                    current_spectators: Vec::new(),
+                    ice_servers: Vec::new(),
+                    reconnection_token: None,
+                },
+            ))),
+            1,
+        )
+        .expect("the join baseline transition establishes the room scope");
+    let mut handle = ClientDeliveryHandle::classified(sender, close);
+    handle.sender = handle.sender.next_generation();
+
+    coordinator
+        .register_local_client(recipient_id, Some(room_id), handle)
+        .await
+        .expect("register targeted recipient in its room");
+
+    let sequenced = crate::distributed::SequencedMessage {
+        sequence_id: 1,
+        instance_id: uuid::Uuid::new_v4(),
+        timestamp: chrono::Utc::now(),
+        message: contended_game_data(sender_id),
+        room_id: Some(room_id),
+        target_player: Some(recipient_id),
+        excluded_players: Vec::new(),
+    };
+    coordinator
+        .handle_bus_message(sequenced)
+        .await
+        .expect("a targeted bus message delivers through the recipient's room scope");
+
+    let baseline = receiver
+        .try_recv()
+        .expect("the queued join baseline is still delivered");
+    assert!(matches!(
+        baseline.payload,
+        crate::coordination::outbound_queue::OutboundPayload::Message(_)
+    ));
+    let queued = receiver
+        .try_recv()
+        .expect("the stamped game data reaches the targeted recipient");
+    assert_eq!(
+        queued.metadata.as_ref().map(|metadata| metadata.room_id),
+        Some(room_id),
+        "the delivery must carry the recipient's room context"
+    );
+    match queued.payload {
+        crate::coordination::outbound_queue::OutboundPayload::Message(message) => {
+            assert!(
+                matches!(message.as_ref(), ServerMessage::GameData { .. }),
+                "the stamped game data itself reaches the recipient"
+            );
+        }
+        other => panic!("expected queued game data, got {other:?}"),
+    }
+    assert_eq!(
+        close_listener.requested_reason(),
+        None,
+        "the innocent recipient must not be fail-closed by a cross-instance delivery"
+    );
+}

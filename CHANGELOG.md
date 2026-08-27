@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin the host-election/readiness residuals of the issue #396 sweep with
+  deterministic, mutation-verified tests: the coordinator's `StartGame`
+  rejections (`NotReady`/`Forbidden`/`AlreadyStarted`) reach the wire with
+  their exact, distinct error codes and mutate nothing; in-flight
+  `PlayerReady`/`StartGame` handlers parked on a lifecycle renamed away by a
+  reconnect reclaim are silent no-ops; an aborted host re-plan publication
+  retains the sticky plan naming the departed host until one subsequent
+  departure heals it; and refreshed finalized-join plans after a mid-game
+  authority departure name no phantom authority (issue #447).
+- Document that `all_ready` in `LobbyStateChanged` is a toggle-driven advisory
+  snapshot: a player who joins later is always unready and triggers no
+  corrective broadcast, so a cached `all_ready: true` is stale after any
+  `PlayerJoined`; the authoritative readiness gate is the `StartGame` re-check
+  (its `GAME_START_NOT_READY` rejection is exact), and clients re-issue
+  `StartGame` when every current player is ready again. Pin the staleness,
+  rejection, and both recovery paths (latecomer readiness toggle, latecomer
+  departure) end to end (issue #447).
+
 - Pin four gameplay-seam guards surfaced by the issue #396 sweep with
   deterministic, mutation-verified tests: reconnection expiry sweeps never
   remove a record whose reconnection is claimed mid-flight; an interleaved
@@ -266,6 +284,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scope targeted cross-instance bus delivery to the recipient's room: the
+  dormant multi-instance bus path routed targeted messages through the
+  unscoped sender, so a server-stamped relay `GameData` (which classifies only
+  with its room context) would fail closed and loud-close an innocent
+  recipient. No production path reaches the dormant seam today; the fix
+  removes the landmine before any multi-instance re-enable and is pinned by a
+  red-first unit test (issue #446).
 - Fix dropped `EnhancedGameServer` instances retaining their dashboard cache,
   database, metrics, and refresh task until the Tokio runtime shut down. The
   cache refresh loop now releases its owners between samples, stops promptly

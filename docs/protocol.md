@@ -161,6 +161,16 @@ Behavior:
 Readiness **no longer** starts the game. When every current player is ready,
 the game starts only after an explicit [`StartGame`](#startgame) message.
 
+!!! note "`all_ready` is a readiness snapshot, not a start guarantee"
+    `LobbyStateChanged` is emitted on readiness **toggles** only. A player
+    who joins later is always unready, so a cached `all_ready: true` is
+    stale the moment a `PlayerJoined` shows a new lobby member — the server
+    does **not** send a corrective `LobbyStateChanged` for that. Treat
+    `all_ready` as an advisory snapshot: recompute it as "every current
+    player is in `ready_players`" whenever membership changes, and treat
+    [`StartGame`](#startgame) as the only authoritative readiness gate (its
+    `GAME_START_NOT_READY` rejection is exact).
+
 ```json
 
 {
@@ -214,6 +224,17 @@ an already `finalized` room returns an `Error` with `INVALID_ROOM_STATE`.
     authority **leaves** the room, the server clears the authority designation,
     after which any remaining member may start (the room is never locked into
     `GAME_START_FORBIDDEN` by an authority departure).
+
+!!! note "Readiness re-check and retry"
+    The server re-checks readiness under its room lock when `StartGame`
+    arrives, so a cached `all_ready: true` is never authoritative — a player
+    that joined after the last `LobbyStateChanged` (see the `PlayerReady`
+    note above) makes the room not-all-ready. On `GAME_START_NOT_READY`,
+    recompute readiness from the current membership and re-issue `StartGame`
+    once every current player is ready again — whether a
+    `LobbyStateChanged { all_ready: true }` announces it (a readiness
+    toggle) or the unready member simply leaves (no broadcast fires). A
+    client that latches after a single attempt can stall the lobby.
 
 ### AuthorityRequest
 
@@ -860,7 +881,7 @@ Lobby state transitioned.
 {
   "type": "LobbyStateChanged",
   "data": {
-    "lobby_state": "finalized",
+    "lobby_state": "lobby",
     "ready_players": ["player-id-1", "player-id-2"],
     "all_ready": true
   }
@@ -868,9 +889,16 @@ Lobby state transitioned.
 
 ```
 
+The broadcast always carries `lobby`: the one-time `Waiting→Lobby` promotion
+snapshot (delivered to the first member inside its own `RoomJoined` flow) and
+every later readiness toggle. The move into `finalized` is signaled by
+[`GameStarting`](#gamestarting) itself — no `LobbyStateChanged` carries
+`finalized`.
+
 Possible states:
 
-- `waiting` - Waiting for the first player to join
+- `waiting` - Waiting for the first player to join (never broadcast; a room
+  promotes inside its first member's join)
 - `lobby` - Players are present and coordinating readiness (the room need not be
   full; `max_players` is a ceiling)
 - `finalized` - The game has started after an explicit `StartGame` (sent once
@@ -1230,6 +1258,7 @@ Client                              Server
   |                                    |
   |--- JoinRoom (no room_code) ------->|
   |<-- RoomJoined ---------------------|
+  |<-- LobbyStateChanged (lobby) ------|  (one-time Waiting→Lobby promotion)
   |                                    |
   |         (other client joins)       |
   |<-- PlayerJoined -------------------|
