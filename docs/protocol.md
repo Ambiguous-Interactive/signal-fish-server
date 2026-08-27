@@ -104,7 +104,8 @@ Send arbitrary game data to other players in the room.
 ```
 
 The outer `data` is the serde content tag. The inner `data` is the variant
-field and can be any JSON-serializable object.
+field and can be any JSON value (object, array, scalar, or null) and is
+relayed verbatim.
 
 Omitting delivery metadata selects the reliable relay-floor behavior used by
 protocol v2. A negotiated-v3 client may instead classify JSON `GameData`:
@@ -135,6 +136,10 @@ with `INVALID_INPUT`. A connection below v3 may send only the legacy form with
 both fields omitted. Raw client WebSocket binary frames have no class/key
 envelope and are always reliable; delivery classes apply only to JSON
 `GameData`.
+
+Like every other command surface, game data sent from a connection that is
+not currently seated in any room is rejected with `NOT_IN_ROOM` (both the
+JSON and raw-binary lanes) and never relayed.
 
 ### PlayerReady
 
@@ -1456,7 +1461,10 @@ attempts are discarded.
 By convention the payload is matchbox-compatible: one of `{"Offer": "..."}`, `{"Answer": "..."}`, or
 `{"IceCandidate": "..."}`. The server validates only the envelope (payload size cap, same room, negotiated WebRTC,
 rate limit, v3 target); it never inspects the SDP or ICE strings. A payload whose serialized JSON exceeds
-`security.max_signal_bytes` (default 16 KiB) is rejected with `SIGNAL_TOO_LARGE` and is not relayed.
+`security.max_signal_bytes` (default 16 KiB) is rejected with `SIGNAL_TOO_LARGE` and is not relayed. Dispatch to
+the validated target is best effort: a signal whose recipient's queue has closed or been superseded by a newer
+connection generation is dropped without notice to either side; validation failures are always reported to the
+sender with their coded error.
 
 Client → server (`to` names the target peer):
 
@@ -1634,7 +1642,9 @@ unnegotiated transports are ignored and do not update stored state or metrics.
 ```
 
 An accepted report that records a real state change is additionally fanned out to the sender's current room
-as [`PeerTransportStatus`](#peertransportstatus) (below); ignored and duplicate reports fan out nothing.
+as [`PeerTransportStatus`](#peertransportstatus) (below), subject to the sender's pooled signaling budget:
+an exhausted budget accepts the state change but suppresses the fan-out. Ignored and duplicate reports fan
+out nothing.
 
 #### PeerTransportStatus
 
