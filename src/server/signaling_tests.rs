@@ -4630,7 +4630,10 @@ async fn refreshed_finalized_plans_carry_no_phantom_authority_after_departure() 
             .await
     );
 
-    for (rx, who) in [(&mut joiner_rx, "joiner"), (&mut incumbent_rx, "incumbent")] {
+    for (rx, who, expected_peer) in [
+        (&mut joiner_rx, "joiner", incumbent),
+        (&mut incumbent_rx, "incumbent", joiner),
+    ] {
         if who == "incumbent" {
             assert!(matches!(
                 recv(rx).await.as_ref(),
@@ -4641,6 +4644,16 @@ async fn refreshed_finalized_plans_carry_no_phantom_authority_after_departure() 
             ServerMessage::SessionPlan(plan) => {
                 assert_eq!(plan.topology, Topology::Mesh);
                 assert_eq!(plan.host, None, "no phantom elected host either");
+                assert_eq!(
+                    plan.peers.len(),
+                    1,
+                    "{who}'s refreshed plan still pairs the surviving member: {:?}",
+                    plan.peers
+                );
+                assert_eq!(
+                    plan.peers[0].player_id, expected_peer,
+                    "{who}'s refreshed plan names exactly the surviving member"
+                );
                 for peer in &plan.peers {
                     assert_ne!(
                         peer.player_id, authority,

@@ -5134,7 +5134,9 @@ async fn aborted_replan_transaction_retains_the_wedged_entry_for_the_next_event(
         .await;
 
     // The transaction aborted: the entry is retained UNCHANGED (still naming
-    // the departed host), nobody received a plan, and no re-plan was counted.
+    // the departed host), no plan was emitted by the publication transaction,
+    // and no re-plan was counted. (Peer traffic like `PlayerLeft` belongs to
+    // the caller's leave flow, which this direct drive bypasses.)
     assert_eq!(
         server.active_session_plan(&room_id),
         Some(ActiveSessionPlan {

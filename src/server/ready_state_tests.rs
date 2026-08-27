@@ -529,6 +529,18 @@ async fn start_game_rejections_map_to_exact_wire_error_codes() {
         other => panic!("expected Forbidden rejection, got {other:?}"),
     }
     assert_silent(&mut rx_owner).await;
+    let forbidden_room_id = server.get_client_room(&owner).await.expect("room");
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&forbidden_room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .lobby_state,
+        LobbyState::Lobby,
+        "a Forbidden rejection must not mutate the room"
+    );
 
     // AlreadyStarted: the authority's start succeeds; the next start is
     // INVALID_ROOM_STATE.
@@ -551,6 +563,17 @@ async fn start_game_rejections_map_to_exact_wire_error_codes() {
         other => panic!("expected AlreadyStarted rejection, got {other:?}"),
     }
     assert_silent(&mut rx_owner).await;
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&forbidden_room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .lobby_state,
+        LobbyState::Finalized,
+        "an AlreadyStarted rejection must not regress the finalized room"
+    );
 }
 
 /// Pin of the documented `all_ready` semantics (issue #447 F1, decision b):
@@ -671,7 +694,7 @@ async fn join_breaks_cached_all_ready_without_a_corrective_broadcast() {
     assert_silent(&mut rx_late).await;
 
     // The latecomer's toggle is a real readiness change: everyone — including
-    // the joiner — sees `all_ready: true` again, and a retried start succeeds.
+    // the joiner — sees `all_ready: true` again.
     server.handle_player_ready(&latecomer).await;
     for (rx, who) in [
         (&mut rx_a, "player_a"),
@@ -680,17 +703,50 @@ async fn join_breaks_cached_all_ready_without_a_corrective_broadcast() {
     ] {
         expect_lobby_state_changed(rx, true, who).await;
     }
-    server.handle_start_game(&player_a).await;
+    // ...but the latecomer un-readies immediately (a second real toggle):
+    // readiness is whole again only after it leaves, so a retried start is
+    // rejected once more.
+    server.handle_player_ready(&latecomer).await;
     for (rx, who) in [
         (&mut rx_a, "player_a"),
         (&mut rx_b, "player_b"),
         (&mut rx_late, "latecomer"),
     ] {
+        expect_lobby_state_changed(rx, false, who).await;
+    }
+    server.handle_start_game(&player_a).await;
+    match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::Error { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::GameStartNotReady));
+        }
+        other => panic!("expected GAME_START_NOT_READY after the un-ready, got {other:?}"),
+    }
+    assert_silent(&mut rx_b).await;
+    assert_silent(&mut rx_late).await;
+
+    // The unready latecomer leaves instead of readying: no readiness
+    // broadcast fires (departures are not toggles), yet the authoritative
+    // gate is whole again — a retried start finalizes the lobby.
+    server.leave_room(&latecomer).await;
+    match recv(&mut rx_late).await.as_ref() {
+        ServerMessage::RoomLeft => {}
+        other => panic!("latecomer expected RoomLeft, got {other:?}"),
+    }
+    for rx in [&mut rx_a, &mut rx_b] {
+        match recv(rx).await.as_ref() {
+            ServerMessage::PlayerLeft { .. } => {}
+            other => panic!("incumbent expected PlayerLeft, got {other:?}"),
+        }
+        assert_silent(rx).await;
+    }
+    server.handle_start_game(&player_a).await;
+    for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
         match recv(rx).await.as_ref() {
             ServerMessage::GameStarting { .. } => {}
             other => panic!("{who} expected GameStarting, got {other:?}"),
         }
     }
+    assert_silent(&mut rx_late).await;
 }
 
 /// Old-generation room operations must be silent no-ops after a reconnect
@@ -717,15 +773,15 @@ async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() 
             None,
         )
         .await;
-    let room_id = match recv(&mut rx_a).await.as_ref() {
-        ServerMessage::RoomJoined(payload) => payload.room_id,
+    let (room_id, room_code) = match recv(&mut rx_a).await.as_ref() {
+        ServerMessage::RoomJoined(payload) => (payload.room_id, payload.room_code.clone()),
         other => panic!("player_a expected RoomJoined, got {other:?}"),
     };
     server
         .handle_join_room(
             &player_b,
             "stale-generation-fence".to_string(),
-            Some(room_code_of(&room_id, &server).await),
+            Some(room_code),
             "PlayerB".to_string(),
             None,
             None,
@@ -776,7 +832,9 @@ async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() 
         tokio::task::yield_now().await;
     }
 
-    // The reclaim renames the parked lifecycle to the restored identity.
+    // The reclaim renames the parked lifecycle to the restored identity. The
+    // epoch mirrors production's `last_epoch + 1` from the surviving
+    // reconnection record (nothing here reads game-data stamps).
     server
         .connection_manager
         .reassign_connection(&transient, &player_a, room_id, 1)
@@ -816,17 +874,6 @@ async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() 
         Some(room_id),
         "the reclaim restores the room assignment"
     );
-}
-
-/// The room code for `room_id`, fetched from storage (test helper).
-async fn room_code_of(room_id: &crate::protocol::RoomId, server: &EnhancedGameServer) -> String {
-    server
-        .database
-        .get_room_by_id(room_id)
-        .await
-        .expect("room lookup")
-        .expect("room exists")
-        .code
 }
 
 /// Readiness belongs to a membership, not to a player id. A member who leaves

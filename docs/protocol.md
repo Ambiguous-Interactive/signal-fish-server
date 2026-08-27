@@ -230,9 +230,11 @@ an already `finalized` room returns an `Error` with `INVALID_ROOM_STATE`.
     arrives, so a cached `all_ready: true` is never authoritative — a player
     that joined after the last `LobbyStateChanged` (see the `PlayerReady`
     note above) makes the room not-all-ready. On `GAME_START_NOT_READY`,
-    wait for the next `LobbyStateChanged { all_ready: true }` and re-issue
-    `StartGame`; a client that latches after a single attempt can stall the
-    lobby.
+    recompute readiness from the current membership and re-issue `StartGame`
+    once every current player is ready again — whether a
+    `LobbyStateChanged { all_ready: true }` announces it (a readiness
+    toggle) or the unready member simply leaves (no broadcast fires). A
+    client that latches after a single attempt can stall the lobby.
 
 ### AuthorityRequest
 
