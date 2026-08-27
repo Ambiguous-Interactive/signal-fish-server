@@ -2035,8 +2035,9 @@ impl OutboundReceiver {
             // from class-less control pushes (`push_message` always passes
             // `None` there), pre-v3 data whose producer class was discarded in
             // favor of `DeliveryClass::Reliable` (`try_enqueue_legacy_data`),
-            // and class-less transition barriers, so `Some(Latest)` cannot
-            // occur here (#444). Every row releases immediately without arming
+            // and class-less transition barriers (from both the direct and
+            // permit-fenced paths), so `Some(Latest)` cannot occur here
+            // (#444). Every row releases immediately without arming
             // or spending a batch window; coalescing waits are protocol-v3
             // behavior, deliberately not implemented for the compatibility
             // lane.
@@ -3371,6 +3372,8 @@ mod tests {
                 transition_barrier: false,
             });
         }
+        // Discarding the result is the point: completing without panicking
+        // would mean the invariant assertion was removed or compiled out.
         let _ = rx.recv_batched(2, std::time::Duration::MAX).await;
     }
 
