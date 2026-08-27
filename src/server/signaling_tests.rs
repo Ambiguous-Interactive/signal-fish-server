@@ -4524,3 +4524,139 @@ async fn game_data_still_relays_after_transport_status_disconnected() {
         other => panic!("expected relayed GameData after fallback, got {other:?}"),
     }
 }
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn refreshed_finalized_plans_carry_no_phantom_authority_after_departure() {
+    // Issue #447: when a mid-game authority departs, storage clears the
+    // designation and every member's `is_authority` flag, and the session
+    // refresh for a later finalized join must reflect that: no refreshed plan
+    // may name the departed authority as a peer or mark any peer as authority.
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (authority, mut authority_rx) = register_client(&server).await;
+    let (incumbent, mut incumbent_rx) = register_client(&server).await;
+    let (joiner, mut joiner_rx) = register_client(&server).await;
+    for id in [&authority, &incumbent, &joiner] {
+        server.set_client_protocol(id, v3_webrtc());
+    }
+
+    let room_id = create_db_room_with_max(&server, authority, 3).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(incumbent, "incumbent"))
+        .await
+        .expect("add incumbent");
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(joiner, "joiner"))
+        .await
+        .expect("add finalized joiner");
+    for player_id in [&authority, &incumbent, &joiner] {
+        server
+            .connection_manager
+            .assign_client_to_room(player_id, room_id)
+            .await;
+    }
+    finalize_db_room(&server, &room_id, &[authority, incumbent, joiner]).await;
+    store_active_plan(&server, room_id, Topology::Mesh, Transport::WebRtc, None);
+
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("finalized room lookup")
+        .expect("finalized room remains present");
+    assert_eq!(
+        room.authority_player,
+        Some(authority),
+        "fixture premise: the room has a designated authority"
+    );
+    let stamp = server
+        .connection_manager
+        .current_relay_stamp_in_room(&joiner, &room_id)
+        .expect("joiner has a routed incarnation");
+    let mut joined_player = room
+        .players
+        .get(&joiner)
+        .cloned()
+        .expect("joiner remains in finalized snapshot");
+    joined_player.epoch = Some(stamp.epoch);
+    joined_player.seq = Some(stamp.seq);
+
+    // The authority departs mid-game: storage clears the designation and
+    // flags, and the departed member's route disappears.
+    server
+        .database
+        .remove_player_from_room(&room_id, &authority)
+        .await
+        .expect("remove departed authority")
+        .expect("authority was present");
+    let departed_delivery = server
+        .connection_manager
+        .clear_room_assignment(&authority)
+        .expect("departed authority remains connected");
+    server
+        .message_coordinator
+        .register_local_client(authority, None, departed_delivery)
+        .await
+        .expect("unroute departed authority");
+    let cleared_room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    assert_eq!(
+        cleared_room.authority_player, None,
+        "the departure clears the designation"
+    );
+    assert!(
+        cleared_room
+            .players
+            .values()
+            .all(|player| !player.is_authority),
+        "the departure clears every member's authority flag"
+    );
+
+    // The joiner's finalized publication refreshes the surviving members'
+    // plans over the post-clearance membership.
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&room_id)
+        .await;
+    assert!(
+        server
+            .publish_finalized_join_membership(&room, joiner, joined_player.clone(), guard,)
+            .await
+    );
+
+    for (rx, who) in [(&mut joiner_rx, "joiner"), (&mut incumbent_rx, "incumbent")] {
+        if who == "incumbent" {
+            assert!(matches!(
+                recv(rx).await.as_ref(),
+                ServerMessage::PlayerJoined { player } if player.id == joiner
+            ));
+        }
+        match recv(rx).await.as_ref() {
+            ServerMessage::SessionPlan(plan) => {
+                assert_eq!(plan.topology, Topology::Mesh);
+                assert_eq!(plan.host, None, "no phantom elected host either");
+                for peer in &plan.peers {
+                    assert_ne!(
+                        peer.player_id, authority,
+                        "{who}'s refreshed plan must not name the departed authority"
+                    );
+                    assert!(
+                        !peer.is_authority,
+                        "{who}'s refreshed plan carries a phantom authority: {:?}",
+                        plan.peers
+                    );
+                }
+            }
+            other => panic!("{who} expected a refreshed SessionPlan, got {other:?}"),
+        }
+    }
+    assert_silent(&mut authority_rx).await;
+    assert_silent(&mut joiner_rx).await;
+    assert_silent(&mut incumbent_rx).await;
+}

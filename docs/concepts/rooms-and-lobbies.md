@@ -203,6 +203,12 @@ more players and need not be full to start.
 - Readiness **does not** start the game on its own. Once every current
   player is ready, a member finalizes the lobby with an explicit
   [`StartGame`](../protocol.md#startgame).
+- `LobbyStateChanged` fires on readiness **toggles** only. A player who joins
+  later is always unready and triggers no corrective broadcast, so a cached
+  `all_ready: true` is stale the moment a `PlayerJoined` shows a new member —
+  recompute readiness from the current membership instead, and treat
+  `StartGame` (which re-checks under the room lock) as the only authoritative
+  gate.
 - Readiness belongs to a **membership**: a player who leaves and joins the
   room again starts unready and must send `PlayerReady` again.
 - A member who **reconnects** resumes the same membership, so it is not forced

@@ -161,6 +161,16 @@ Behavior:
 Readiness **no longer** starts the game. When every current player is ready,
 the game starts only after an explicit [`StartGame`](#startgame) message.
 
+!!! note "`all_ready` is a readiness snapshot, not a start guarantee"
+    `LobbyStateChanged` is emitted on readiness **toggles** only. A player
+    who joins later is always unready, so a cached `all_ready: true` is
+    stale the moment a `PlayerJoined` shows a new lobby member — the server
+    does **not** send a corrective `LobbyStateChanged` for that. Treat
+    `all_ready` as an advisory snapshot: recompute it as "every current
+    player is in `ready_players`" whenever membership changes, and treat
+    [`StartGame`](#startgame) as the only authoritative readiness gate (its
+    `GAME_START_NOT_READY` rejection is exact).
+
 ```json
 
 {
@@ -214,6 +224,15 @@ an already `finalized` room returns an `Error` with `INVALID_ROOM_STATE`.
     authority **leaves** the room, the server clears the authority designation,
     after which any remaining member may start (the room is never locked into
     `GAME_START_FORBIDDEN` by an authority departure).
+
+!!! note "Readiness re-check and retry"
+    The server re-checks readiness under its room lock when `StartGame`
+    arrives, so a cached `all_ready: true` is never authoritative — a player
+    that joined after the last `LobbyStateChanged` (see the `PlayerReady`
+    note above) makes the room not-all-ready. On `GAME_START_NOT_READY`,
+    wait for the next `LobbyStateChanged { all_ready: true }` and re-issue
+    `StartGame`; a client that latches after a single attempt can stall the
+    lobby.
 
 ### AuthorityRequest
 

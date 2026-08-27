@@ -5072,3 +5072,135 @@ async fn replan_prefers_electable_authority_over_earliest_joiner() {
          earliest joiner (the earliest joiner is {early})"
     );
 }
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn aborted_replan_transaction_retains_the_wedged_entry_for_the_next_event() {
+    // Issue #447: when a host-replan publication transaction resolves
+    // `RoutingChanged` (a member's route disappeared between the caller's
+    // snapshot and the commit), the sticky entry is neither rewritten nor
+    // dropped — it stays pointed at the DEPARTED host until a single
+    // subsequent departure event heals it. The entry must not be dropped (the
+    // relay floor would be the only remaining repair) and must not be half
+    // updated (no plans delivered, no re-plan counted).
+    let server = create_server_with_session(host_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (member_b, mut member_b_rx) = register_client(&server).await;
+    let (member_c, mut member_c_rx) = register_client(&server).await;
+    for id in [&host, &member_b, &member_c] {
+        server.set_client_protocol(id, v3_webrtc());
+    }
+
+    let room_id = finalized_db_room_with(&server, host, &[(member_b, "B"), (member_c, "C")]).await;
+    publish_room_members(&server, &room_id, &[host, member_b, member_c]).await;
+    let stored = ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::WebRtc,
+        host: Some(host),
+    };
+    server.active_session_plans.insert(room_id, stored);
+
+    // The host departs; the departure re-plan is about to run over the
+    // remaining members [B, C].
+    server
+        .database
+        .remove_player_from_room(&room_id, &host)
+        .await
+        .expect("remove host");
+    unpublish_room_member(&server, &host).await;
+    let members = {
+        let players = server
+            .database
+            .get_room_players(&room_id)
+            .await
+            .expect("room players");
+        assert_eq!(players.len(), 2, "fixture premise: B and C remain");
+        server.session_members_from(&players)
+    };
+    let replans_before = server
+        .metrics
+        .session_replans_emitted
+        .load(Ordering::Relaxed);
+
+    // B's route disappears inside the snapshot-to-commit window.
+    unpublish_room_member(&server, &member_b).await;
+
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&room_id)
+        .await;
+    server
+        .replan_host_session(&room_id, stored, None, members, guard)
+        .await;
+
+    // The transaction aborted: the entry is retained UNCHANGED (still naming
+    // the departed host), nobody received a plan, and no re-plan was counted.
+    assert_eq!(
+        server.active_session_plan(&room_id),
+        Some(ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(host),
+        }),
+        "an aborted replan must retain the wedged entry for the next event"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before,
+        "an aborted replan is not a re-plan event"
+    );
+    assert_silent(&mut member_b_rx).await;
+    assert_silent(&mut member_c_rx).await;
+    assert_silent(&mut host_rx).await;
+
+    // One subsequent departure event heals the wedged entry in place. B's
+    // route is restored first (a route loss can also heal), so the remaining
+    // membership at C's departure is routable again.
+    publish_room_members(&server, &room_id, &[member_b]).await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &member_c)
+        .await
+        .expect("remove member_c");
+    unpublish_room_member(&server, &member_c).await;
+    server
+        .handle_session_member_departure(&room_id, &member_c)
+        .await;
+
+    let healed = expect_plan(&mut member_b_rx, "member_b").await;
+    assert_eq!(healed.topology, Topology::Host, "topology is sticky");
+    assert_eq!(healed.transport, Transport::WebRtc, "transport is sticky");
+    assert_eq!(
+        healed.host,
+        Some(member_b),
+        "the heal re-elects the only remaining capable member"
+    );
+    assert!(
+        healed.peers.is_empty(),
+        "a one-member star has no peers: {:?}",
+        healed.peers
+    );
+    assert_eq!(
+        server.active_session_plan(&room_id),
+        Some(ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(member_b),
+        }),
+        "the single subsequent event rewrites the wedged entry"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        replans_before + 1,
+        "the heal is one re-plan event"
+    );
+    assert_silent(&mut member_b_rx).await;
+    assert_silent(&mut member_c_rx).await;
+    assert_silent(&mut host_rx).await;
+}
