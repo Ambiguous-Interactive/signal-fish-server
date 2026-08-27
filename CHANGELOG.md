@@ -78,8 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-emitted, closing every recipient with `1009 outbound_message_too_large`
   — silent total rejection for exactly the traffic the deployment appeared to
   accept. The pairing now fails both top-level config validation and direct
-  library construction of `EnhancedGameServer`, naming both knobs
-  (issue #396).
+  library construction of `EnhancedGameServer` (which likewise enforces the
+  dead-config `max_signal_bytes ≤ max_message_size` pairing), naming the
+  contradictory knobs (issue #396).
 - Reject game data from unseated connections with `NOT_IN_ROOM` instead of
   dropping it silently: JSON `GameData` and raw binary game data sent before
   joining, while spectating (spectator connections are never seated), or

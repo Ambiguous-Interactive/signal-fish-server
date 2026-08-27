@@ -7804,12 +7804,14 @@ async fn test_distributed_lock_cleanup_counters_are_wired() {
         .expect("cleanup task should not panic");
 }
 
-/// The creator rename must mirror into the freshly built room only when the
-/// durable store confirmed the row, and every observed surface must agree
-/// with storage (#396 honest-failure sweep). Mid-creation the row cannot
-/// realistically vanish (no interleave between room build and rename), so
-/// the failure half is pinned via injected storage errors: the published
-/// snapshot must never outlive the durable rename.
+/// The creator rename must mirror into freshly built rooms only when the
+/// durable store confirmed the row, and every published surface is
+/// storage-backed, so agreement with storage is the invariant (#396
+/// honest-failure sweep). Mid-creation the row cannot realistically vanish
+/// (no interleave between room build and rename), so the failure half is
+/// pinned via injected storage errors: the creator's own join snapshot and
+/// any later joiner's snapshot must both show the durable placeholder, and
+/// nothing may republish stale names afterwards.
 #[tokio::test]
 async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage() {
     let database = Arc::new(InMemoryDatabase::new());
@@ -7881,6 +7883,42 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
     assert_eq!(
         published_name, "Creator",
         "a rejected rename keeps the creation placeholder in both surfaces"
+    );
+
+    // Cross-surface half: a second joiner's snapshot is built from the same
+    // storage rows, so it must also report the durable placeholder — never a
+    // memory-mirrored name that outlived the rejected write.
+    database.fail_update_player_name_for_test(false);
+    let (joiner, mut joiner_rx) =
+        register_client(&server, "127.0.0.1:48311".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &joiner,
+            "rename-integrity".to_string(),
+            Some("RNM001".to_string()),
+            "Joiner".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let joiner_response = timeout(Duration::from_secs(1), joiner_rx.recv())
+        .await
+        .expect("joiner join must answer")
+        .expect("joiner response present");
+    let ServerMessage::RoomJoined(joiner_payload) = joiner_response.as_ref() else {
+        panic!("expected RoomJoined for the second joiner, got {joiner_response:?}");
+    };
+    let creator_seen_by_joiner = joiner_payload
+        .current_players
+        .iter()
+        .find(|player| player.id == creator)
+        .expect("the seated creator appears in a joiner's snapshot")
+        .name
+        .clone();
+    assert_eq!(
+        creator_seen_by_joiner, "Creator",
+        "later joiners must observe exactly what storage holds"
     );
 
     // Success half: once storage confirms the row, the display name is the

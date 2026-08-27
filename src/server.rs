@@ -343,16 +343,25 @@ impl EnhancedGameServer {
             crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
             config.max_outbound_message_size,
         );
-        // Same contradictory-cap pairing guard as `validate_config_security`:
-        // relayed frames admitted by the inbound cap could never be
-        // re-serialized under the outbound cap.
+        // Same contradictory-cap pairing guards as `validate_config_security`,
+        // so direct library construction cannot ship what config validation
+        // rejects.
         anyhow::ensure!(
             config.max_message_size <= config.max_outbound_message_size,
             "max_message_size ({}) must not exceed max_outbound_message_size ({}): \
              a frame admitted by the inbound cap could not be re-serialized under the \
-             outbound cap",
+             outbound cap, closing every recipient with `1009 \
+             outbound_message_too_large`",
             config.max_message_size,
             config.max_outbound_message_size,
+        );
+        anyhow::ensure!(
+            config.max_signal_bytes <= config.max_message_size,
+            "max_signal_bytes ({}) must not exceed max_message_size ({}): a Signal frame \
+             that large would be rejected by the message size cap first, so the \
+             configured signal cap could never take effect",
+            config.max_signal_bytes,
+            config.max_message_size,
         );
 
         let database: Arc<dyn GameDatabase> =
@@ -4359,6 +4368,38 @@ mod relay_projection_cache_tests {
                 .to_string()
                 .contains("max_message_size (2097152) must not exceed max_outbound_message_size"),
             "constructor must name the contradictory pairing: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn library_constructor_rejects_signal_cap_above_message_cap() {
+        let config = super::ServerConfig {
+            max_signal_bytes: 65_537,
+            ..super::ServerConfig::default()
+        };
+        let result = super::EnhancedGameServer::new(
+            config,
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("dead signal caps must fail before server construction"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("max_signal_bytes (65537) must not exceed max_message_size"),
+            "constructor must name the dead signal cap: {error}"
         );
     }
 }
