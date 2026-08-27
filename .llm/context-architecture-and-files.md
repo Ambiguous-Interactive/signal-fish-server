@@ -68,9 +68,15 @@ the pending record to prevent duplicate winners, but only successful reconnects
 remove it. Every post-claim failure path must release the claim and roll back
 room-side restoration so clients can retry with the same token until the
 reconnection window expires. Do not make active claims stealable or reusable
-while the original reconnect task can still continue. `handle_reconnect` uses
-a drop guard to release abandoned claims and completes the claim as soon as
-connection reassignment succeeds.
+while the original reconnect task can still continue. Each entry point owns a
+spawned transaction it awaits: `ReconnectionClaimGuard::drop` intentionally
+does NOT release (an async drop-release could hand a delivered token to
+another socket), it only logs; releases happen on explicit reject/rollback
+paths and phase-aware panic recovery, and the claim completes as soon as
+connection reassignment succeeds. All three expiry sweeps skip claimed
+records, so maintenance can never vanish a mid-flight restore; once the claim
+releases or completes, the record is ordinary expired residue again, removed
+by the next maintenance sweep.
 
 Session-plan topology/transport selection invariants are documented in
 [Protocol v3 Session-Plan Selection](skills/protocol-v3-session-plan/SKILL.md).

@@ -2121,6 +2121,9 @@ impl OutboundReceiver {
                     self.batch_remaining = self.batch_remaining.saturating_sub(1);
                 }
                 if crossed_barrier {
+                    // Crossing a generation boundary ends any open
+                    // acceleration window: slots were armed only for the
+                    // previous phase's rows.
                     self.batch_remaining = 0;
                     state.receive_generation = item.generation;
                 }
@@ -3486,6 +3489,62 @@ mod tests {
         let (gap, successor) = waiter.await.unwrap();
         assert_eq!(report(gap).gaps[0].from_seq, 2);
         assert_eq!(message_id(&successor), 3);
+    }
+
+    /// A control pop between pops of one fully-armed `Latest` acceleration
+    /// window must leave `batch_remaining` untouched. A four-row phase armed
+    /// off depth releases row-by-row with one slot per row; if an interleaved
+    /// control consumed a slot, the final row would miss its still-open
+    /// acceleration and block on the full batch interval (the re-arm below the
+    /// ready gate cannot rescue it until that interval expires, exposing both
+    /// latency and supersede-widening). Control latency is free by contract
+    /// (#198 class), so it must not be billed to Latest's window.
+    #[tokio::test(start_paused = true)]
+    async fn interleaved_control_pop_preserves_armed_latest_batch_budget() {
+        let (tx, mut rx) = channel(8, 8);
+        tx.set_protocol_version(3);
+        for seq in 1..=4_u64 {
+            let key = u32::try_from(seq * 10).expect("test keys fit in u32");
+            tx.try_enqueue_data(data(seq, DeliveryClass::Latest, Some(key), seq))
+                .unwrap();
+        }
+
+        // The first pop sees four same-generation Latest rows against
+        // batch_size 4, so depth alone releases it instantly while arming a
+        // four-slot window.
+        let started = Instant::now();
+        let first = rx
+            .recv_batched(4, std::time::Duration::from_secs(10))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message_id(&first), 1);
+
+        tx.try_enqueue_control(message(100)).unwrap();
+        let second = rx
+            .recv_batched(4, std::time::Duration::from_secs(10))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            message_id(&second),
+            100,
+            "same-generation control precedes queued data"
+        );
+
+        for expected in [2, 3, 4] {
+            let item = rx
+                .recv_batched(4, std::time::Duration::from_secs(10))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message_id(&item), expected);
+        }
+        assert_eq!(
+            started.elapsed(),
+            std::time::Duration::ZERO,
+            "every drain step must resolve without re-entering a wait window"
+        );
     }
 
     #[tokio::test(start_paused = true)]

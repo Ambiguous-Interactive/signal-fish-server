@@ -1595,6 +1595,71 @@ mod tests {
         );
     }
 
+    /// Issue #257 sweep-side corollary: every expiry surface must skip a
+    /// record whose reconnection is claimed, so an admitted attempt can never
+    /// be vanished mid-flight by maintenance (a vanished record would fail
+    /// completion silently and a late teardown would open a fresh window
+    /// around a still-running restore). The unclaimed sibling expires
+    /// normally, and once the winner releases its claim past the original
+    /// deadline, the abandoned record becomes ordinary sweepable residue.
+    #[tokio::test(start_paused = true)]
+    async fn expired_but_claimed_reconnection_survives_every_expiry_surface() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let claimed_player = Uuid::new_v4();
+        let expired_player = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(claimed_player, room_id, false, None, 0)
+            .await;
+        manager
+            .register_disconnection(expired_player, room_id, false, None, 0)
+            .await;
+        let claimant = Uuid::new_v4();
+        let claim = manager
+            .claim_reconnection(&claimant, &claimed_player, &room_id, &token)
+            .await
+            .expect("the still-valid reconnect is admitted and claimed");
+
+        tokio::time::advance(StdDuration::from_secs(301)).await;
+
+        assert_eq!(
+            manager.expired_cleanup_candidates().await,
+            vec![(expired_player, room_id)],
+            "only the unclaimed record may be nominated for durable cleanup"
+        );
+        assert_eq!(
+            manager.cleanup_expired().await,
+            1,
+            "the sweep must expire exactly the unclaimed record"
+        );
+        assert!(!manager.has_pending_reconnection(&expired_player).await);
+        assert!(
+            manager.has_pending_reconnection(&claimed_player).await,
+            "an admitted claim keeps its record alive mid-flight"
+        );
+        assert!(
+            !manager.remove_expired_reconnection(&claimed_player).await,
+            "the targeted removal must also refuse to drop a claimed record"
+        );
+        assert!(
+            matches!(
+                manager
+                    .claim_reconnection(&Uuid::new_v4(), &claimed_player, &room_id, &token)
+                    .await,
+                Err(ReconnectionError::AlreadyInProgress)
+            ),
+            "the in-flight reservation still excludes duplicate winners"
+        );
+
+        // Once the winner gives up past the expired deadline, the released
+        // record is ordinary expired residue: releasable-and-swept, never
+        // resurrected with a fresh window.
+        assert!(manager.release_reconnection_claim(&claim).await);
+        assert_eq!(manager.cleanup_expired().await, 1);
+        assert!(!manager.has_pending_reconnection(&claimed_player).await);
+    }
+
     #[tokio::test]
     async fn test_reconnection_claim_is_single_use_under_concurrency() {
         let metrics = Arc::new(ServerMetrics::new());

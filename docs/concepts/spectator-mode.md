@@ -227,8 +227,9 @@ exhausted shared admission budgets use `RATE_LIMIT_EXCEEDED`.
 Rooms accept an unlimited number of spectators -- there is currently no
 configuration option to cap spectator count per room. The protocol does
 reserve a `TOO_MANY_SPECTATORS` error code: if a per-room limit is ever
-introduced, a spectator exceeding it would receive an `Error` response
-carrying that code. Until then, the limit is never reached.
+introduced, an admission past it would be refused before any room mutation and
+surfaced through the terminal `SpectatorJoinFailed` response carrying that
+code. Until then, the limit is never reached.
 
 ## Next Steps
 
