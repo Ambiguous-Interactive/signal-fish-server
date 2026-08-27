@@ -226,14 +226,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 2.6 MiB by excluding eight standalone test-only modules while retaining
   every runtime source and package-verification check (issue #397).
 - Delete the unreachable protocol-v3 `Latest` coalescing arm from the legacy
-  (pre-v3 compatibility) pop path of the outbound queue and pin its classing
-  invariant with a fail-loud assertion plus regression tests (issue #444).
-  Legacy-lane rows can only be forced-`Reliable` data, class-less control
-  messages, or transition barriers, so the deleted deadline-wait/arm/spend
-  logic could never run; in the exotic mid-flight protocol-downgrade or stale
-  legacy-permit race those rows now release immediately without consuming
-  slots of an acceleration window armed before renegotiation, matching the
-  control-lane precedent.
+  (pre-v3 compatibility) pop path of the outbound queue and make its classing
+  invariant load-bearing. A legacy-lane row can only be forced-`Reliable`
+  data, class-less control messages, or transition barriers, so both the
+  unbatched and batched consumers now treat an impossible `Some(Latest)`
+  front as a terminal accountability breach and stop serving the queue rather
+  than guessing FIFO semantics for it (issue #444). In the exotic mid-flight
+  protocol-downgrade or stale legacy-permit race those rows release
+  immediately without consuming slots of an acceleration window armed before
+  renegotiation, matching the control-lane precedent.
 
 ### Fixed
 

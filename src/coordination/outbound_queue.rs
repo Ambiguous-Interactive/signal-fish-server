@@ -1970,6 +1970,17 @@ impl OutboundReceiver {
         if state.accountability_failed {
             return Err(PopState::Terminal);
         }
+        // Same legacy-lane classing invariant as `try_pop_batched` (#444): a
+        // `Some(Latest)` front cannot be produced, and if one ever appears the
+        // producer contract is already broken, so fail closed.
+        if state
+            .legacy
+            .front()
+            .is_some_and(|front| front.class() == Some(DeliveryClass::Latest))
+        {
+            state.accountability_failed = true;
+            return Err(PopState::Terminal);
+        }
         let (item, released_lane) = if let Some(item) = state.legacy.pop_front() {
             if item.transition_barrier {
                 state.receive_generation = item.generation;
@@ -2041,12 +2052,15 @@ impl OutboundReceiver {
             // or spending a batch window; coalescing waits are protocol-v3
             // behavior, deliberately not implemented for the compatibility
             // lane.
-            debug_assert_ne!(
-                front.class(),
-                Some(DeliveryClass::Latest),
-                "a Latest-classed row reached the legacy lane; \
-                 its producer bypassed the pre-v3 classing rule"
-            );
+            if front.class() == Some(DeliveryClass::Latest) {
+                // A row carrying `Some(Latest)` here means a producer bypassed
+                // the pre-v3 classing rule above, so the lane's wire-ordering
+                // contract is already broken beyond exact description. Fail
+                // closed like every other accountability breach rather than
+                // guessing whether to release the row as reliable FIFO.
+                state.accountability_failed = true;
+                return Err(BatchedPopState::Terminal);
+            }
             let item = state.legacy.pop_front();
             if item.as_ref().is_some_and(|item| item.transition_barrier) {
                 crossed_barrier = true;
@@ -3354,27 +3368,62 @@ mod tests {
 
     /// The legacy-lane classing rule is load-bearing now that its Latest arm is
     /// gone (#444): this plants a corrupt `Some(Latest)` row directly in the
-    /// lane and expects the pop-path assertion to fail loudly instead of
-    /// releasing the row as if it were reliable FIFO.
+    /// lane behind one legitimate row and expects fail-closed behavior from
+    /// both consumers — the healthy row still releases, then the queue refuses
+    /// every further pop as a terminal accountability breach instead of
+    /// guessing FIFO semantics for the corrupted row.
     #[tokio::test(start_paused = true)]
-    #[should_panic(expected = "a Latest-classed row reached the legacy lane")]
-    async fn latest_row_on_legacy_lane_trips_the_invariant_assert() {
-        let (_tx, mut rx) = channel(4, 4);
-        {
-            let mut state = rx.shared.state();
-            let generation = state.receive_generation;
-            state.legacy.push_back(QueuedOutbound {
-                payload: OutboundPayload::Message(message(1)),
-                delivery_class: Some(DeliveryClass::Latest),
-                metadata: None,
-                enqueued_at: Instant::now(),
-                generation,
-                transition_barrier: false,
-            });
+    async fn latest_row_on_legacy_lane_fails_closed_as_accountability_breach() {
+        // `(label, unbatched)` drives each corruption scenario through both
+        // consumer seams; they map internal terminal states to the same public
+        // `TryReceiveError::AccountabilityFailed`.
+        let consumers: [(&str, bool); 2] = [("unbatched recv", true), ("batched recv", false)];
+        for (context, unbatched) in consumers {
+            let (tx, mut rx) = channel(4, 4);
+            tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+                .expect("enqueue healthy pre-v3 data (forced Reliable)");
+            {
+                let mut state = rx.shared.state();
+                let generation = state.receive_generation;
+                state.legacy.push_back(QueuedOutbound {
+                    payload: OutboundPayload::Message(message(2)),
+                    delivery_class: Some(DeliveryClass::Latest),
+                    metadata: None,
+                    enqueued_at: Instant::now(),
+                    generation,
+                    transition_barrier: false,
+                });
+            }
+
+            let healthy = if unbatched {
+                rx.recv().await
+            } else {
+                rx.recv_batched(2, std::time::Duration::MAX).await
+            };
+            let healthy = healthy
+                .expect("{context}: queue remains healthy before the corrupt front")
+                .expect("{context}: rows ahead of the corrupt row are unaffected");
+            assert_eq!(message_id(&healthy), 1, "{context}");
+
+            let terminal = if unbatched {
+                rx.recv().await
+            } else {
+                rx.recv_batched(2, std::time::Duration::MAX).await
+            };
+            assert!(
+                matches!(terminal, Err(TryReceiveError::AccountabilityFailed)),
+                "{context}: the corrupt Latest front must fail the queue closed: {terminal:?}"
+            );
+            let sticky = if unbatched {
+                rx.recv().await
+            } else {
+                rx.recv_batched(2, std::time::Duration::MAX).await
+            };
+            assert!(
+                matches!(sticky, Err(TryReceiveError::AccountabilityFailed)),
+                "{context}: terminal failure must be sticky: {sticky:?}"
+            );
         }
-        // Discarding the result is the point: completing without panicking
-        // would mean the invariant assertion was removed or compiled out.
-        let _ = rx.recv_batched(2, std::time::Duration::MAX).await;
     }
 
     #[tokio::test(start_paused = true)]
