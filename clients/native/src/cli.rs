@@ -347,6 +347,9 @@ impl Cli {
     /// one reaches no one, and a creator capacity below `--peers` is rejected
     /// because the ready barrier could never be reached.
     pub fn join_max_players(&self) -> Result<u8, String> {
+        if self.peers < 1 {
+            return Err(format!("--peers must be at least 1, got {}", self.peers));
+        }
         let max_players = self
             .max_players
             .or_else(|| u8::try_from(self.peers).ok())
@@ -496,6 +499,40 @@ mod tests {
             "without --max-players the room caps exactly at the party size"
         );
 
+        let oversized_creator = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--peers",
+            "300",
+        ]);
+        assert_eq!(
+            oversized_creator.join_max_players(),
+            Err(
+                "--peers 300 exceeds the u8 room-capacity type; pass --max-players or lower \
+                 --peers"
+                    .to_string()
+            ),
+            "the creator branch names the creator-only remedy"
+        );
+        let oversized_joiner = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--join-code",
+            "ABC123",
+            "--peers",
+            "300",
+        ]);
+        let joiner_error = oversized_joiner
+            .join_max_players()
+            .expect_err("300 exceeds the u8 capacity type");
+        assert!(
+            !joiner_error.contains("--max-players"),
+            "the joiner branch must not suggest the creator-only flag: {joiner_error}"
+        );
+
         let open = Cli::parse_from([
             "signal-fish-reference-native",
             "--server-url",
@@ -549,8 +586,23 @@ mod tests {
         ]);
         assert_eq!(
             zero_peers.join_max_players(),
-            Err("room capacity must be at least 1, got 0".to_string()),
-            "a zero capacity reaches no one, even from a degenerate --peers 0"
+            Err("--peers must be at least 1, got 0".to_string()),
+            "a zero ready barrier reaches no one (browser parse-time parity)"
+        );
+        let zero_peers_creator = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--peers",
+            "0",
+            "--max-players",
+            "3",
+        ]);
+        assert_eq!(
+            zero_peers_creator.join_max_players(),
+            Err("--peers must be at least 1, got 0".to_string()),
+            "an explicit capacity does not rescue a degenerate --peers 0"
         );
         assert!(
             Cli::try_parse_from([

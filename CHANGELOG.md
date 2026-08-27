@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finalizes, so a late joiner can seat-fill the running session without any
   prior departure; the flag is rejected in join mode and below `--peers`
   (the ready barrier could never be reached). New interop scenarios exercise
-  the open-capacity seat fill end to end on the v2 relay   floor — native
+  the open-capacity seat fill end to end on the v2 relay floor — native
   drivers, and the browser as the creating driver — pinning that the joiner
   enters the `finalized` room, `GameStarting` is never re-broadcast, and no
   `Error` frame surfaces, guarding the issue #449 stale-latch class: any
