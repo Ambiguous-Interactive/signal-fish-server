@@ -80,9 +80,9 @@
 //!    lane (the relay floor) carries the whole proof: the joiner enters a
 //!    `finalized` room, `GameStarting` is never re-broadcast, the incumbents'
 //!    only post-start frames are the joiner's `PlayerJoined` (no corrective
-//!    broadcast) and its relay payload — and crucially NO `Error` frame, the
-//!    live pin for the issue #449 class: a creator that re-issued `StartGame`
-//!    from a stale latch would draw `INVALID_ROOM_STATE` here.
+//!    broadcast) and its relay payload — and crucially NO `Error` frame,
+//!    guarding the issue #449 stale-latch class: a post-finalize `StartGame`
+//!    re-issue would draw `INVALID_ROOM_STATE` and surface here.
 //!
 //! Scenarios are serialized behind a mutex (each spawns 3+ OS processes and
 //! up to three concurrent WebRTC stacks; running them in parallel on small CI
@@ -107,15 +107,16 @@ use uuid::Uuid;
 
 /// Serializes the multi-process scenarios (see module docs).
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-/// Fully degraded ceiling for scenario 4's TWO client waves:
+/// Fully degraded ceiling for a TWO-client-wave scenario (4 and 9): the
+/// joiner wave spawns only after the pre-join gates, i.e. while the first
+/// wave still lives.
 ///  - server spawn: up to 3 attempts x 15 s health deadline each (see
 ///    `spawn_server`) = 45 s;
-///  - first wave (incumbents + seat-holder): every process is hard-bounded
-///    by its `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
-///  - joiner wave (spawned only after the pre-join gates, i.e. while the
-///    first wave still lives): bounded by its own 90 s watchdog = 90 s.
+///  - first wave: every process is hard-bounded by its own
+///    `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
+///  - joiner wave: bounded by its own 90 s watchdog = 90 s.
 const LATE_JOIN_SCENARIO_CEILING_SECS: u64 = 45 + 90 + 90;
-/// Each of the seven ordinary one-wave scenarios is bounded by server startup
+/// Each of the six ordinary one-wave scenarios is bounded by server startup
 /// plus one 90 s client watchdog; the departure regression uses 30 s clients.
 const STANDARD_SCENARIO_CEILING_SECS: u64 = 45 + 90;
 const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
@@ -124,8 +125,8 @@ const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
 /// within the workflow's 30-minute job policy (unlike multiplying the unique
 /// two-wave ceiling by all nine scenarios).
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
-    LATE_JOIN_SCENARIO_CEILING_SECS
-        + 7 * STANDARD_SCENARIO_CEILING_SECS
+    2 * LATE_JOIN_SCENARIO_CEILING_SECS
+        + 6 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS,
 );
 
@@ -1677,12 +1678,23 @@ async fn seat_fill_join_into_open_capacity_finalized_room_v2_relay_floor() {
         workdir.path(),
     );
 
-    // Hold all three at their success barrier, then release together, so the
-    // incumbents cannot tear down before the joiner's payload has fanned out.
+    // Hold all three at their success barrier. The incumbents' criteria do
+    // NOT provide a happens-before for RECEIVING the joiner's payload (their
+    // relay-receive bar is `--peers - 1` senders, met by the sibling alone,
+    // and the joiner's criteria follow its send, not their receipts), so
+    // receiving the full final-membership traffic is made an explicit
+    // precondition of the release barrier below.
     for client in [&mut creator, &mut c1, &mut joiner] {
         client
             .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
             .await;
+    }
+    for client in [&mut creator, &mut c1] {
+        while events_named(&client.events, "game_data_received").len() < 2 {
+            client
+                .await_event("game_data_received", EVENT_TIMEOUT)
+                .await;
+        }
     }
     std::fs::write(&success_release_file, b"release").expect("release seat-fill clients together");
     for client in [&mut creator, &mut c1, &mut joiner] {
@@ -1717,10 +1729,10 @@ async fn seat_fill_join_into_open_capacity_finalized_room_v2_relay_floor() {
     );
 
     // Incumbents: exactly one start; the seat fill is the only post-start
-    // membership event; and there are NO error frames — the live pin for the
-    // issue #449 class: a creator that re-issued StartGame from a stale latch
-    // after the join would draw INVALID_ROOM_STATE (the room is already
-    // Finalized) and surface it here.
+    // membership event; and there are NO error frames — guarding the issue
+    // #449 stale-latch class: any post-finalize StartGame re-issue would
+    // draw INVALID_ROOM_STATE (the room is already Finalized) and surface
+    // here as a non-fatal `error` event.
     for (client, other) in [(&creator, 1usize), (&c1, 0usize)] {
         let log = &client.events;
         let start_index = log

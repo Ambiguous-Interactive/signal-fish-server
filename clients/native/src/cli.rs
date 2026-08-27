@@ -343,19 +343,29 @@ impl Cli {
 
     /// The `max_players` value sent in `JoinRoom`: an explicit `--max-players`
     /// (creator only), else `--peers`. The protocol carries capacity as u8, so
-    /// a `--peers`-derived value above 255 is a usage error, and a creator
-    /// capacity below `--peers` is rejected because the ready barrier could
-    /// never be reached.
+    /// a `--peers`-derived value above 255 is a usage error, a capacity below
+    /// one reaches no one, and a creator capacity below `--peers` is rejected
+    /// because the ready barrier could never be reached.
     pub fn join_max_players(&self) -> Result<u8, String> {
         let max_players = self
             .max_players
             .or_else(|| u8::try_from(self.peers).ok())
             .ok_or_else(|| {
-                format!(
-                    "--peers {} exceeds the u8 room-capacity type; pass --max-players or lower --peers",
-                    self.peers
-                )
+                if self.create_room {
+                    format!(
+                        "--peers {} exceeds the u8 room-capacity type; pass --max-players or \
+                         lower --peers",
+                        self.peers
+                    )
+                } else {
+                    format!("--peers {} exceeds the u8 room-capacity type", self.peers)
+                }
             })?;
+        if max_players < 1 {
+            return Err(format!(
+                "room capacity must be at least 1, got {max_players}"
+            ));
+        }
         if self.create_room && usize::from(max_players) < self.peers {
             return Err(format!(
                 "--max-players {max_players} is below the --peers {} ready barrier: the room \
@@ -526,6 +536,21 @@ mod tests {
             joiner.join_max_players(),
             Ok(2),
             "a joiner still sends a u8 capacity (the server keeps the room's own)"
+        );
+
+        let zero_peers = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--join-code",
+            "ABC123",
+            "--peers",
+            "0",
+        ]);
+        assert_eq!(
+            zero_peers.join_max_players(),
+            Err("room capacity must be at least 1, got 0".to_string()),
+            "a zero capacity reaches no one, even from a degenerate --peers 0"
         );
         assert!(
             Cli::try_parse_from([

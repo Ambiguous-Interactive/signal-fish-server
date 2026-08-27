@@ -66,7 +66,8 @@
 //!    (issue #451): the browser opens a 3-seat room with a 2-member ready
 //!    barrier on the v2 relay floor, the room finalizes at 2/3 seats, and a
 //!    native joiner fills the open seat of the running session with no prior
-//!    departure. The seat-fill mirror of the native suite's scenario 9.
+//!    departure. The seat-fill mirror of the native suite's scenario 9,
+//!    guarding the same #449 stale-latch class via zero error frames.
 //!
 //! Scenario assertions are copies of the native suite's
 //! (`tests/interop_e2e.rs`) — deliberately NOT shared, so this feature-gated
@@ -1129,10 +1130,23 @@ async fn browser_creator_open_capacity_seat_fill_relay_floor() {
         workdir.path(),
     );
 
+    // Hold all three at their success barrier. The incumbents' criteria do
+    // NOT provide a happens-before for RECEIVING the joiner's payload (their
+    // relay-receive bar is `--peers - 1` senders, met by the sibling alone,
+    // and the joiner's criteria follow its send, not their receipts), so
+    // receiving the full final-membership traffic is made an explicit
+    // precondition of the release barrier below.
     for client in [&mut creator, &mut c1, &mut joiner] {
         client
             .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
             .await;
+    }
+    for client in [&mut creator, &mut c1] {
+        while events_named(&client.events, "game_data_received").len() < 2 {
+            client
+                .await_event("game_data_received", EVENT_TIMEOUT)
+                .await;
+        }
     }
     std::fs::write(&success_release_file, b"release").expect("release seat-fill clients together");
     for client in [&mut creator, &mut c1, &mut joiner] {
@@ -1166,8 +1180,9 @@ async fn browser_creator_open_capacity_seat_fill_relay_floor() {
     );
 
     // Incumbents: exactly one start; the join is the only post-start
-    // membership event; and zero error frames — a stale-latch StartGame
-    // re-issue after the join would draw INVALID_ROOM_STATE and surface here.
+    // membership event; and zero error frames — guarding the #449 stale-latch
+    // class: any post-finalize StartGame re-issue would draw INVALID_ROOM_STATE
+    // and surface here as a non-fatal `error` event.
     for (client, other) in [(&creator, 1usize), (&c1, 0usize)] {
         let log = &client.events;
         let start_index = log
