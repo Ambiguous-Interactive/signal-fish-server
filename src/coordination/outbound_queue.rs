@@ -2031,30 +2031,18 @@ impl OutboundReceiver {
         let mut decrement_batch = false;
         let mut crossed_barrier = false;
         let (item, released_lane) = if let Some(front) = state.legacy.front() {
-            // A `Latest` front waits up to `batch_interval` (unless the lane is
-            // already `batch_size` deep) so a superseding same-key value can
-            // still coalesce. Control, Reliable, and Volatile are
-            // latency-sensitive: released immediately, and they never start a
-            // batch, so a Latest queued behind them keeps its own coalesce wait
-            // (issue #198). `class() == None` is control.
-            let ready = front.class() != Some(DeliveryClass::Latest)
-                || self.batch_remaining > 0
-                || state.legacy.len() >= batch_size
-                || !state.receiver_open
-                || !state.producers_open()
-                || front
-                    .enqueued_at
-                    .checked_add(batch_interval)
-                    .is_some_and(|deadline| now >= deadline);
-            if !ready {
-                return Err(BatchedPopState::WaitUntil(
-                    front.enqueued_at.checked_add(batch_interval),
-                ));
-            }
-            if front.class() == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
-                self.batch_remaining = state.legacy.len().min(batch_size);
-            }
-            decrement_batch = self.batch_remaining > 0;
+            // The legacy lane has no `Latest` coalescing. Pre-v3 producers force
+            // `DeliveryClass::Reliable` (`try_enqueue_legacy_data`) and room
+            // transitions push class-less barriers, so `Some(Latest)` cannot
+            // occur here: every row releases immediately and none arms or spends
+            // a batch window. Coalescing waits are protocol-v3 behavior,
+            // deliberately not implemented for the compatibility lane (#444).
+            debug_assert_ne!(
+                front.class(),
+                Some(DeliveryClass::Latest),
+                "a Latest-classed row reached the legacy lane; \
+                 its producer bypassed the pre-v3 classing rule"
+            );
             let item = state.legacy.pop_front();
             if item.as_ref().is_some_and(|item| item.transition_barrier) {
                 crossed_barrier = true;
@@ -2083,9 +2071,10 @@ impl OutboundReceiver {
                 .iter()
                 .take_while(|item| item.generation == state.receive_generation)
                 .count();
-            // Same rule as the legacy lane: only a `Latest` front waits (and
-            // starts a batch); control/Reliable/Volatile release immediately and
-            // never arm one, so a trailing Latest keeps its coalesce wait (#198).
+            // Only a `Latest` front waits (and starts a batch);
+            // control/Reliable/Volatile release immediately and never arm one,
+            // so a trailing Latest keeps its coalesce wait (#198). The legacy
+            // lane deliberately has none of this logic (#444).
             let ready = front_class != Some(DeliveryClass::Latest)
                 || self.batch_remaining > 0
                 || phase_len >= batch_size
@@ -3299,6 +3288,54 @@ mod tests {
             .recv_batched(2, std::time::Duration::MAX)
             .await
             .expect("pre-v3 queue reaches clean EOF")
+            .is_none());
+    }
+
+    /// The compatibility lane releases every row immediately under the batched
+    /// reader too: a class-less transition barrier crosses the generation fence
+    /// without arming or spending any coalescing window, so the next phase's
+    /// scoped row follows it out untouched (#444).
+    #[tokio::test(start_paused = true)]
+    async fn pre_v3_batched_pop_crosses_transition_barrier_and_releases_rows_immediately() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(10), 1))
+            .expect("enqueue pre-v3 data");
+        tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .expect("enqueue pre-v3 transition");
+        tx.try_enqueue_control_scoped(message(2), None, 1)
+            .expect("enqueue post-transition control");
+
+        let mut receive = Box::pin(rx.recv_batched(2, std::time::Duration::MAX));
+        let first = match futures_util::poll!(receive.as_mut()) {
+            std::task::Poll::Ready(Ok(Some(item))) => item,
+            other => panic!("a pre-v3 front must release immediately: {other:?}"),
+        };
+        drop(receive);
+        assert_eq!(message_id(&first), 1);
+
+        let barrier = rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue remains healthy")
+            .expect("transition barrier crosses the fence");
+        assert!(
+            barrier.transition_barrier,
+            "expected the transition barrier row"
+        );
+        assert_eq!(
+            message_id(
+                &rx.recv_batched(2, std::time::Duration::MAX)
+                    .await
+                    .expect("queue remains healthy")
+                    .expect("post-fence row releases immediately")
+            ),
+            2
+        );
+        drop(tx);
+        assert!(rx
+            .recv_batched(2, std::time::Duration::MAX)
+            .await
+            .expect("queue reaches clean EOF")
             .is_none());
     }
 
