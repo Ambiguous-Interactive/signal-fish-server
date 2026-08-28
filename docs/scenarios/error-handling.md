@@ -54,26 +54,48 @@ room returns `RoomJoinFailed`.)
 
 ## RATE_LIMIT_EXCEEDED — back off and retry
 
-Intent: a client sends messages faster than its app's configured rate limit (the `rate_limits` returned in
-`Authenticated`). The server rejects the offending message.
+Intent: a configured request budget is exhausted. Two budgets surface this code, and they recover
+differently.
 
-After too many requests in a short window, the server returns an `Error`:
+**Room admission budgets.** Join attempts (and spectator joins) are counted per player within the
+server's rate-limit window. An over-budget join is refused without mutating the room, and the
+refusal arrives on the same connection:
 
 ```json
 {
-  "type": "Error",
+  "type": "RoomJoinFailed",
   "data": {
-    "message": "Too many requests in a short time. Please slow down and try again later.",
+    "reason": "Join attempt rate limit exceeded. Try again in 42 seconds.",
     "error_code": "RATE_LIMIT_EXCEEDED"
   }
 }
 ```
 
-Next: the client must **back off** before retrying — stop sending, wait an increasing interval (exponential
-backoff with jitter is recommended), then resume. In the `Authenticated`
-message, `per_minute` is the enforced ceiling when the app configures one;
-`per_hour` and `per_day` are legacy advisory projections for client budgeting.
-The connection itself stays open; only the rate-limited message was dropped.
+A spectator join over budget answers with `SpectatorJoinFailed` carrying the same code. Next: the
+client must **back off** before retrying — wait an increasing interval (exponential backoff with
+jitter is recommended), then resume. The connection itself stays open; only the refused request was
+dropped.
+
+**The per-app handshake budget.** When the app configures `rate_limit_per_minute`, every
+`Authenticate` handshake counts against a budget shared across all connections using the same
+public ID (the `per_minute` value returned in `Authenticated`; `per_hour` and `per_day` are legacy
+advisory projections for client budgeting). An over-budget handshake is refused with an
+`AuthenticationError`, and the connection is then closed — the refusal is a farewell on a socket
+that is about to die:
+
+```json
+{
+  "type": "AuthenticationError",
+  "data": {
+    "error": "RateLimitExceeded",
+    "error_code": "RATE_LIMIT_EXCEEDED"
+  }
+}
+```
+
+Next: wait out the window before reconnecting. Each retry is itself a handshake and consumes the
+same app-wide budget, so a tight reconnect loop extends the lockout for every player of the app —
+back off and reconnect at a low, steady rate.
 
 ## SIGNAL_TOO_LARGE — split the payload
 

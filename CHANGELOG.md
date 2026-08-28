@@ -296,6 +296,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shutdown drain: `finish_background_shutdown` no longer aborts a drain that
+  has already begun. The drain task flips the process watch only after the
+  drain begins and the `GoingAway` fan-out completes, so a serve future that
+  returned inside that window used to abort the committed drain — dropping
+  every connected client with no `GoingAway` advisory and no coded `4000`
+  close frame. The join-or-abort decision now follows the server's drain
+  state. The grace wait before the shutdown closes is also skipped when no
+  socket handler is live: during a drain new registrations are refused, so
+  an empty grace was pure restart delay against the operator's termination
+  budget (issue #396).
+- Configuration: `security.max_outbound_message_size` must now exceed
+  `security.max_message_size` by at least 256 bytes of relay envelope
+  headroom (constructor-enforced for direct library builds too). The relayed
+  form of an admitted frame is strictly larger than the frame itself — the
+  relay projection attaches the sender id and delivery stamps — so an equal
+  or barely-larger outbound cap admitted frames it could not re-emit and
+  closed innocent recipients with `1009 outbound_message_too_large`; a
+  sender could sever the whole room. Tight pairings are now rejected at
+  startup, and the 1009-close end-to-end scenario pins the close contract
+  through a legal aggregate (`RoomJoined` roster growth) trigger (issue
+  #396).
+- Docs: the rate-limit scenario no longer claims the connection always
+  stays open. Room and spectator admission refusals arrive on
+  `RoomJoinFailed` / `SpectatorJoinFailed` and leave the connection open,
+  but an over-budget per-app handshake is refused with `AuthenticationError`
+  carrying `RATE_LIMIT_EXCEEDED` and the connection is closed — back-off
+  applies to the next connection attempt against the same shared app-wide
+  budget (issue #396).
 - Scope targeted cross-instance bus delivery to the recipient's room: the
   dormant multi-instance bus path routed targeted messages through the
   unscoped sender, so a server-stamped relay `GameData` (which classifies only

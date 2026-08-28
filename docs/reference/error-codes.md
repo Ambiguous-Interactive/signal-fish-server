@@ -267,6 +267,14 @@ retrying. The `Authenticated` response includes a `rate_limits` object
 whose per-minute value is enforced when configured. Its per-hour and per-day
 values are legacy advisory projections and are not enforced by the server.
 
+The two budgets that use this code recover differently: room and spectator
+admission refusals arrive on `RoomJoinFailed` / `SpectatorJoinFailed` and
+leave the connection open, while the per-minute value, when configured, is
+the per-app handshake budget — an over-budget `Authenticate` is refused
+with `AuthenticationError` and the connection is closed. Back off before
+reconnecting: every retry is itself a handshake against the same shared
+app-wide budget.
+
 ### Reconnection expired (`RECONNECTION_EXPIRED`)
 
 The reconnection window has closed since the client disconnected. The
