@@ -319,7 +319,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Spectator join panic-repair parity (issue #396): a panic between the
   durable spectator admission and the local role publication used to leave
   a ghost database row that consumed spectator capacity and was invisible
-  to both maintenance sweeps (`prune_missing_rooms`, 
+  to both maintenance sweeps (`prune_missing_rooms`,
   `retry_disconnected_detaches`). The owned join transaction now catches the
   unwind, rolls the unpublished admission back, and still delivers the
   client's terminal `SpectatorJoinFailed`. Also pinned: the broadcast-side
