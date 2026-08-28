@@ -604,6 +604,19 @@ mod tests {
             Err("--peers must be at least 1, got 0".to_string()),
             "an explicit capacity does not rescue a degenerate --peers 0"
         );
+        let zero_capacity = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            "ws://127.0.0.1:9000/v3/ws",
+            "--create-room",
+            "--max-players",
+            "0",
+        ]);
+        assert_eq!(
+            zero_capacity.join_max_players(),
+            Err("room capacity must be at least 1, got 0".to_string()),
+            "an explicit zero capacity reaches no one"
+        );
         assert!(
             Cli::try_parse_from([
                 "signal-fish-reference-native",
