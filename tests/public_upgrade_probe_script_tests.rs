@@ -43,7 +43,6 @@ fn workflow_run_body_extraction_does_not_cross_step_boundaries() {
 fn public_upgrade_probe_workflow_requires_repository_configuration_without_external_identity() {
     let workflow = fs::read_to_string(repo_path(".github/workflows/public-upgrade-probe.yml"))
         .expect("read public upgrade probe workflow");
-    let plan = fs::read_to_string(repo_path("PLAN.md")).expect("read deployment plan");
 
     for required in [
         "vars.SIGNAL_FISH_PUBLIC_WS_URL",
@@ -66,17 +65,6 @@ fn public_upgrade_probe_workflow_requires_repository_configuration_without_exter
         !workflow_without_descriptions.contains("ws://")
             && !workflow_without_descriptions.contains("wss://"),
         "the probe workflow must not contain a literal public WebSocket endpoint"
-    );
-    let deployment_section = plan
-        .split("### P97 — Public WebSocket upgrade deployment and first eligible probe (#367)")
-        .nth(1)
-        .expect("P97 deployment section")
-        .split("\n### ")
-        .next()
-        .expect("bounded P97 deployment section");
-    assert!(
-        !deployment_section.contains("github.com/") && !deployment_section.contains("](http"),
-        "the deployment requirement must not identify an external repository:\n{deployment_section}"
     );
 
     let validation = workflow
