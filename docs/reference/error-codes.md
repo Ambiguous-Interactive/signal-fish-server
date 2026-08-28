@@ -184,7 +184,7 @@ that may resolve on retry.
 |---|---|
 | `INTERNAL_ERROR` | An internal server error occurred. Try again or contact support. |
 | `STORAGE_ERROR` | A storage error occurred while processing the request. |
-| `SERVER_DRAINING` | The server is draining for shutdown. New room creation is rejected; existing sockets will close with `4000 server_shutdown` at the drain deadline. |
+| `SERVER_DRAINING` | The server is draining for shutdown. New room creation, reconnection admission, and spectator joins are rejected; existing sockets will close with `4000 server_shutdown` at the drain deadline. |
 
 The public Rust `ErrorCode` enum retains `INVALID_TOKEN`,
 `AUTHENTICATION_REQUIRED`, `APP_ID_EXPIRED`, `APP_ID_REVOKED`,
@@ -285,8 +285,10 @@ as a new player by sending a fresh `JoinRoom` message.
 
 ### Server draining (`SERVER_DRAINING`)
 
-The process is shutting down gracefully. New room creation is refused during the
-drain, and connected sockets close with WebSocket code `4000` and reason
+The process is shutting down gracefully. New room creation, reconnection
+attempts (`ReconnectionFailed` with `SERVER_DRAINING`), and spectator joins
+(`SpectatorJoinFailed` with `SERVER_DRAINING`) are refused during the drain,
+and connected sockets close with WebSocket code `4000` and reason
 `server_shutdown` at the drain deadline. Protocol v3 clients may first receive
 `GoingAway`; v2 clients see only the close frame. Retry on another healthy
 instance and create or join a fresh room.

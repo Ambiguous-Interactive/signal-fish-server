@@ -303,6 +303,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close the shutdown-drain admission gaps surfaced by the session-186 seam
+  sweep (issue #396):
+  - A reconnect attempt delivered inside the drain grace window (only possible
+    from a socket upgraded before the drain flipped) is now refused with
+    `ReconnectionFailed` carrying `SERVER_DRAINING` instead of being admitted,
+    force-closed with `4000`, and stripped of its restored membership — which
+    also consumed the one-time reconnection token. The refusal fires before
+    any claim, so the token stays spendable on a healthy instance.
+  - A spectator join delivered in the same window is now refused with
+    `SpectatorJoinFailed` carrying `SERVER_DRAINING` instead of publishing a
+    role the drain teardown detaches at unregister. The join path's existing
+    contract (new room creation refused; existing-room seat-fills allowed) is
+    unchanged.
+  - `discard_pending_reconnection` now skips records claimed by an in-flight
+    reconnect transaction, matching the invariant every expiry surface already
+    enforced; previously a drain-race discard could remove a claimed record and
+    strand the reconnect (its completion would silently fail while the player
+    observed success). Pinned red-first at the manager level.
+  - `SERVER_DRAINING` docs and client guidance now name reconnection and
+    spectator admission alongside new room creation.
+
 - Close the last actionable issue #454 residuals from the session-182/185
   seam audits (issues #454, #396):
   - A client that exhausts its rejection-detail budget (`max_signal_errors`)

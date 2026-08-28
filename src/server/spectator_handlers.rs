@@ -29,6 +29,27 @@ impl EnhancedGameServer {
         room_code: String,
         spectator_name: String,
     ) {
+        // Shutdown-drain parity with the join path: only a socket upgraded
+        // before the drain flipped can still deliver `JoinAsSpectator` inside
+        // the grace window. Admitting it would publish a role the drain
+        // teardown detaches at unregister, and the socket closes 4000 at the
+        // deadline anyway — refuse before any admission side effect.
+        if self.is_draining() {
+            let _ = self
+                .message_coordinator
+                .send_to_player(
+                    player_id,
+                    Arc::new(
+                        (ServerMessage::SpectatorJoinFailed {
+                            reason: "Server is draining for shutdown".to_string(),
+                            error_code: Some(crate::protocol::ErrorCode::ServerDraining),
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
+                )
+                .await;
+            return;
+        }
         if let Err(err) = self
             .spectator_service
             .join_operation(

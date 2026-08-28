@@ -301,7 +301,9 @@ seconds counted from the disconnect. That window is measured on a monotonic
 clock captured at the disconnect, so a host clock adjustment cannot close it
 early or keep it open late, and a reconnect attempt after it elapses is
 rejected with `RECONNECTION_EXPIRED` (a bad or mismatched token remains
-`RECONNECTION_TOKEN_INVALID`). For pure-v2 clients the token is still
+`RECONNECTION_TOKEN_INVALID`). A reconnect attempt delivered while the server
+is draining for shutdown is refused with `SERVER_DRAINING` and does not
+consume the token. For pure-v2 clients the token is still
 minted at disconnect time and never reaches the wire — reconnection is
 effectively a v3+ feature.
 
@@ -364,7 +366,8 @@ Required fields:
 Spectator admission consumes the same per-player room-admission attempt budget
 as seated joins and room creation. Invalid game names, invalid room codes, and
 exhausted admission budgets return `SpectatorJoinFailed` with `INVALID_GAME_NAME`,
-`INVALID_ROOM_CODE`, or `RATE_LIMIT_EXCEEDED`, respectively.
+`INVALID_ROOM_CODE`, or `RATE_LIMIT_EXCEEDED`, respectively. A join delivered
+while the server is draining for shutdown is refused with `SERVER_DRAINING`.
 
 ### LeaveSpectator
 
@@ -866,7 +869,9 @@ assignments that are never renumbered:
 | `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |
 
 During a shutdown drain the process stops accepting new WebSocket upgrades,
-rejects new room creation with `SERVER_DRAINING`, sends v3 clients a best-effort
+rejects new room creation with `SERVER_DRAINING`, refuses reconnection
+attempts (`ReconnectionFailed` with `SERVER_DRAINING`) and spectator joins
+(`SpectatorJoinFailed` with `SERVER_DRAINING`), sends v3 clients a best-effort
 [`GoingAway`](#goingaway) advisory, then closes remaining sockets with `4000
 server_shutdown` after `server.drain_grace_secs` (default 30). Shutdown-drain
 disconnects do not arm reconnection tokens; the instance is going away, so
@@ -1171,7 +1176,8 @@ Failed to join as spectator.
 
 Note: The `error_code` field is optional. Spectator admission validation and
 throttling use `INVALID_GAME_NAME`, `INVALID_ROOM_CODE`, and
-`RATE_LIMIT_EXCEEDED` on this role-specific response.
+`RATE_LIMIT_EXCEEDED` on this role-specific response; shutdown-drain refusal
+uses `SERVER_DRAINING`.
 
 ### SpectatorLeft
 
@@ -1589,7 +1595,8 @@ peer lists contain only peers that can run the session — that negotiated v3 pl
 transport. A joiner that cannot run the session is rejected at admission with
 `ROOM_SESSION_INCOMPATIBLE` (see below), so a live non-relay session's membership stays uniformly capable; what
 can remain is an incumbent that **reconnected** with downgraded capabilities (a reconnect owns its seat and is
-never rejected). Such a member still receives its plan, but with an **empty** `peers`
+never rejected for capability reasons; lifecycle refusals such as `SERVER_DRAINING` shutdown-drain admission
+still apply). Such a member still receives its plan, but with an **empty** `peers`
 list — it has no P2P peers and
 participates via the relay floor (`host` stays as elected, informational) — and never appears in other members'
 `peers`. Every publication observes this mixed-path shape (the `mixed_path_members_observed` counter plus a warn

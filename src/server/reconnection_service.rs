@@ -355,12 +355,22 @@ impl EnhancedGameServer {
                 let discarded = reconnection_manager
                     .discard_pending_reconnection(player_id)
                     .await;
-                tracing::warn!(
-                    %player_id,
-                    %room_id,
-                    %discarded,
-                    "Discarded reconnection registration after room cleanup won the race"
-                );
+                if discarded {
+                    tracing::warn!(
+                        %player_id,
+                        %room_id,
+                        "Discarded reconnection registration after room cleanup won the race"
+                    );
+                } else {
+                    // A claimed record must not be discarded (its in-flight
+                    // transaction owns it); the reconnect's own room
+                    // re-verification reports the deletion to the client.
+                    tracing::warn!(
+                        %player_id,
+                        %room_id,
+                        "Retained claimed reconnection registration after room cleanup won the race"
+                    );
+                }
                 return false;
             }
             Err(error) => {
@@ -746,6 +756,28 @@ impl EnhancedGameServer {
         let reconnect_player_id = &reconnect_player_id;
         let room_id = &room_id;
         let auth_token = auth_token.as_str();
+        // Shutdown-drain parity with the registration gate: only a socket
+        // upgraded before the drain flip can still deliver `Reconnect` inside
+        // the grace window. Admitting it would restore state the drain
+        // teardown immediately removes, consume the one-time token, and end
+        // in the forced 4000 close — refuse before any claim or restore side
+        // effect, so the token stays spendable on a healthy instance.
+        if self.is_draining() {
+            let _ = self
+                .message_coordinator
+                .send_to_player(
+                    current_player_id,
+                    Arc::new(
+                        (ServerMessage::ReconnectionFailed {
+                            reason: "Server is draining for shutdown".to_string(),
+                            error_code: ErrorCode::ServerDraining,
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
+                )
+                .await;
+            return false;
+        }
         // Check if reconnection is enabled
         let Some(reconnection_manager) = &self.reconnection_manager else {
             tracing::warn!("Reconnection attempt but reconnection is disabled");
