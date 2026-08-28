@@ -746,6 +746,27 @@ impl EnhancedGameServer {
         let reconnect_player_id = &reconnect_player_id;
         let room_id = &room_id;
         let auth_token = auth_token.as_str();
+        // Shutdown-drain parity with the join path: only a socket upgraded
+        // before the drain flipped can still deliver `Reconnect` inside the
+        // grace window. Admitting it would restore state the drain teardown
+        // immediately removes, and the socket closes 4000 at the deadline
+        // anyway — refuse before any claim or restore side effect.
+        if self.is_draining() {
+            let _ = self
+                .message_coordinator
+                .send_to_player(
+                    current_player_id,
+                    Arc::new(
+                        (ServerMessage::ReconnectionFailed {
+                            reason: "Server is draining for shutdown".to_string(),
+                            error_code: ErrorCode::ServerDraining,
+                        })
+                        .correlate_room_operation(operation_id),
+                    ),
+                )
+                .await;
+            return false;
+        }
         // Check if reconnection is enabled
         let Some(reconnection_manager) = &self.reconnection_manager else {
             tracing::warn!("Reconnection attempt but reconnection is disabled");

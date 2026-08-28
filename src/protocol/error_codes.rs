@@ -117,9 +117,9 @@ pub enum ErrorCode {
     /// socket-level `websocket.idle_timeout_secs` close. Sent best-effort as
     /// a final `Error` frame before the close.
     ActivityTimeout,
-    /// The server is draining for shutdown and is rejecting new room creation.
-    /// Existing connections will close with WebSocket close code 4000
-    /// (`server_shutdown`) at the drain deadline.
+    /// The server is draining for shutdown and is rejecting new room creation
+    /// and reconnection admission. Existing connections will close with
+    /// WebSocket close code 4000 (`server_shutdown`) at the drain deadline.
     ServerDraining,
 
     // Delivery-class validation (2xxx category). Appended at the END; see the
@@ -330,7 +330,7 @@ impl ErrorCode {
                 "The server received no messages from this connection within its activity window and evicted it. Send periodic Ping messages (or any traffic) to stay connected."
             }
             Self::ServerDraining => {
-                "The server is draining for shutdown and is not accepting new room creation. Retry on another instance or after the drain deadline."
+                "The server is draining for shutdown and is not accepting new rooms or reconnections. Retry on another instance or after the drain deadline."
             }
             Self::InvalidDeliveryClass => {
                 "The game-data delivery class is invalid: latest requires a key, while reliable and volatile must not include one."

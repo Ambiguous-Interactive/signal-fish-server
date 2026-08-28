@@ -2979,6 +2979,74 @@ async fn reconnect_room_full_failure_releases_claim_for_retry() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_during_shutdown_drain_is_rejected_with_server_draining() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    // The reconnecting socket upgraded before the drain flipped, so its
+    // Reconnect still arrives inside the grace window on a live route.
+    let drain = server.begin_shutdown_drain();
+    assert!(drain.started_by_this_call, "test owns the drain window");
+
+    let admitted = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        !admitted,
+        "reconnect admission must be refused while the server is draining"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::ServerDraining);
+        }
+        other => panic!("expected ReconnectionFailed(ServerDraining), got {other:?}"),
+    }
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("drain rejection must not consume the one-time token");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_during_teardown_preserves_token_for_retry() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;
