@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use futures_util::FutureExt;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -45,6 +48,20 @@ pub(crate) struct SpectatorService {
     connection_manager: Arc<ConnectionManager>,
     app_id_allowlist_enabled: bool,
     rate_limiter: Arc<RoomRateLimiter>,
+    /// Dev-only panic-injection slot for the owned spectator join transaction
+    /// (mirrors `EnhancedGameServer::owned_room_operation_panic`).
+    #[cfg(test)]
+    join_panic_point: Arc<AtomicU8>,
+}
+
+/// Where an injected owned-transaction panic fires (test-only).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpectatorJoinPanicPoint {
+    /// Fires inside the `Ok(true)` arm of the durable spectator admission:
+    /// the DB row exists but no local role is published yet, so the join is
+    /// in the ghost-row window that requires compensation.
+    JoinAfterDurableAdmission = 1,
 }
 
 #[derive(Debug)]
@@ -86,6 +103,30 @@ impl SpectatorService {
             connection_manager,
             app_id_allowlist_enabled,
             rate_limiter,
+            #[cfg(test)]
+            join_panic_point: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_spectator_join_for_test(&self, point: SpectatorJoinPanicPoint) {
+        self.join_panic_point
+            .store(point as u8, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn trigger_spectator_join_panic_for_test(&self, point: SpectatorJoinPanicPoint) {
+        if self
+            .join_panic_point
+            .compare_exchange(
+                point as u8,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            panic!("injected spectator join panic");
         }
     }
 
@@ -133,16 +174,46 @@ impl SpectatorService {
     ) -> Result<(), SpectatorError> {
         let service = self.clone();
         let player_id = *player_id;
+        // Compensation key for a panic between the durable admission and the
+        // local publication: while set, a panic must roll the row back, or a
+        // ghost row survives that no maintenance sweep can see (no local role,
+        // no pending-repair key) and it keeps consuming spectator capacity.
+        let pending_rollback = Arc::new(std::sync::Mutex::new(None::<RoomId>));
+        let pending_rollback_in_task = Arc::clone(&pending_rollback);
+        // `join_owned` consumes the service clone, so the compensation arm
+        // needs its own handle.
+        let rollback_service = service.clone();
         tokio::spawn(async move {
-            service
-                .join_owned(
-                    player_id,
-                    operation_id,
-                    game_name,
-                    room_code,
-                    spectator_name,
-                )
-                .await
+            let outcome = std::panic::AssertUnwindSafe(service.join_owned(
+                player_id,
+                operation_id,
+                game_name,
+                room_code,
+                spectator_name,
+                pending_rollback_in_task,
+            ))
+            .catch_unwind()
+            .await;
+            match outcome {
+                Ok(result) => result,
+                Err(_panic) => {
+                    tracing::error!(%player_id, "Owned spectator join transaction panicked");
+                    // The lock guard must drop before the async rollback.
+                    let room_id = pending_rollback
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
+                    if let Some(room_id) = room_id {
+                        rollback_service
+                            .rollback_unpublished_spectator_join(&player_id, &room_id)
+                            .await;
+                    }
+                    Err(SpectatorError::new(
+                        "Spectator join failed unexpectedly",
+                        Some(ErrorCode::SpectatorJoinFailed),
+                    ))
+                }
+            }
         })
         .await
         .map_err(|error| {
@@ -160,6 +231,7 @@ impl SpectatorService {
         game_name: String,
         room_code: String,
         spectator_name: String,
+        pending_rollback: Arc<std::sync::Mutex<Option<RoomId>>>,
     ) -> Result<(), SpectatorError> {
         let player_id = &player_id;
         let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
@@ -301,12 +373,23 @@ impl SpectatorService {
             connected_at: chrono::Utc::now(),
         };
 
+        // From here until the local role is published, a panic must be
+        // compensated: the durable row would otherwise survive as a ghost
+        // (no local role, no pending-repair key) that consumes capacity.
+        *pending_rollback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(room.id);
+
         match self
             .database
             .add_spectator_to_room(&room.id, spectator.clone())
             .await
         {
             Ok(true) => {
+                #[cfg(test)]
+                self.trigger_spectator_join_panic_for_test(
+                    SpectatorJoinPanicPoint::JoinAfterDurableAdmission,
+                );
                 self.connection_manager
                     .advance_delivery_generation(player_id)
                     .await;
@@ -429,6 +512,12 @@ impl SpectatorService {
                         "Spectator was already mapped to a different room; overwriting"
                     );
                 }
+                // Published: a panic past this point leaves a live, mapped
+                // spectator whose member notification is best-effort — no
+                // rollback may run, or it would delete a live admission.
+                *pending_rollback
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
                 let notification = Arc::new(ServerMessage::NewSpectatorJoined {
                     spectator: spectator.clone(),
@@ -790,6 +879,14 @@ impl SpectatorService {
         else {
             return false;
         };
+        // INVARIANT all role-mutating paths must preserve: the room mutation
+        // gate is held here and the (player → room) mapping is re-validated
+        // under it, which is what closes the prune/detach TOCTOU (issue #241).
+        // The lifecycle guard is mandatory only for LIVE connections (it
+        // serializes against a concurrent join/leave for the same socket);
+        // the maintenance backstops (`retry_disconnected_detaches`, the
+        // fallback unregister) legitimately run without one because no live
+        // connection exists to race.
         let room_event_guard = self
             .message_coordinator
             .lock_room_event_mutation(&room_id)
@@ -1467,6 +1564,46 @@ mod tests {
         assert_eq!(stored[0].id, spectator_id);
     }
 
+    /// A panic between the durable spectator admission and the local role
+    /// publication must be compensated. Uncompensated, the ghost row consumes
+    /// spectator capacity and is invisible to both maintenance sweeps: no
+    /// local role (`prune_missing_rooms`) and no pending-repair key
+    /// (`retry_disconnected_detaches`) ever exists for it.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn panicked_join_rolls_back_the_durable_admission() {
+        let (service, room, _creator_id, _coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_012).await;
+        service.panic_spectator_join_for_test(SpectatorJoinPanicPoint::JoinAfterDurableAdmission);
+
+        let outcome = service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Ghost".to_string(),
+            )
+            .await;
+        assert!(
+            outcome.is_err(),
+            "a panicked join must surface a terminal failure"
+        );
+
+        let stored = database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("fetch spectators after panicked join");
+        assert!(
+            !stored.iter().any(|info| info.id == spectator_id),
+            "a panicked join must not leave a durable ghost row, got: {stored:?}"
+        );
+        assert!(
+            !service.is_spectating(&spectator_id),
+            "no local role may be published for a panicked join"
+        );
+    }
+
     /// A v3 spectator needs the same sender `(epoch, seq)` baseline as a seated player.
     /// The snapshot is populated from live connection state; the socket send
     /// layer strips it again for v2 recipients.
@@ -2083,6 +2220,78 @@ mod tests {
         assert_eq!(service.prune_missing_rooms(drain).await, 1);
         assert!(!service.is_spectating(&spectator_id));
         assert!(coordinator.messages_for(&spectator_id).await.is_empty());
+    }
+
+    /// The drain gate must also suppress the BROADCAST side of a detach on a
+    /// live room: a routed member receives no `SpectatorDisconnected` when the
+    /// detach runs under an active drain (the room-gone prune branch above
+    /// never fans out at all, so it cannot cover this path).
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn detach_under_drain_suppresses_the_member_broadcast() {
+        let (service, room, creator_id, coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_020).await;
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Drained Watcher".to_string(),
+            )
+            .await
+            .expect("spectator join succeeds");
+
+        // Route a live room member so the fan-out has a real recipient.
+        let (member_tx, _member_rx) = tokio::sync::mpsc::channel(16);
+        service
+            .connection_manager
+            .connect_test_client(
+                creator_id,
+                member_tx,
+                "127.0.0.1:35021".parse().expect("test socket address"),
+            )
+            .await;
+        service
+            .connection_manager
+            .assign_client_to_room(&creator_id, room.id)
+            .await;
+
+        let (drain_tx, drain) = watch::channel(false);
+        drain_tx.send(true).expect("drain receiver remains live");
+        coordinator.sent.lock().await.clear();
+
+        // The disconnect-time detach path (`detach_if`) carries the live
+        // server drain receiver; persistence convergence is deliberately not
+        // drain-gated, only the notifications are.
+        let send_notifications = || true;
+        assert!(
+            service
+                .detach_if(
+                    &spectator_id,
+                    SpectatorStateChangeReason::Disconnected,
+                    &send_notifications,
+                    drain,
+                )
+                .await
+        );
+        assert!(!service.is_spectating(&spectator_id));
+        let stored = database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("fetch spectators after drained detach");
+        assert!(
+            !stored.iter().any(|info| info.id == spectator_id),
+            "persistence must converge even under drain"
+        );
+
+        // Neither the departed spectator nor the routed member may receive a
+        // drained-detach notification.
+        assert!(coordinator.messages_for(&spectator_id).await.is_empty());
+        assert!(
+            coordinator.messages_for(&creator_id).await.is_empty(),
+            "a routed member must not observe a SpectatorDisconnected suppressed by drain"
+        );
     }
 
     /// A pending unpublished-detach row whose identity has since been

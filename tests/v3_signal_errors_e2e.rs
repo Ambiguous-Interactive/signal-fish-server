@@ -16,9 +16,9 @@
 //! 6. target left the room after pairing → `SignalTargetNotFound`, no panic;
 //! 7. per-connection rate-limit exhaustion → `SignalRateLimited` on the
 //!    over-budget signal, within-budget signals still relay;
-//! 7b. rejection-*detail* budget exhaustion (#454) → rejections switch to the
-//!     truthful detail-suppression guidance, and VALID signals still relay
-//!     (the error budget never gates relaying).
+//! 8. rejection-*detail* budget exhaustion (#454) → rejections switch to the
+//!    truthful detail-suppression guidance, and VALID signals still relay
+//!    (the error budget never gates relaying).
 //!
 //! Every test asserts the EXACT `ErrorCode` the server returns to the sender AND
 //! that the would-be target receives NOTHING (the rejected signal is not

@@ -206,7 +206,13 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/metrics/prom", get(websocket::prometheus_metrics_handler));
 
-    // Spawn legacy full-mesh signaling on a separate port if enabled
+    // Spawn legacy full-mesh signaling on a separate port if enabled.
+    //
+    // Shutdown semantics (deliberate, #454): `matchbox_signaling` 0.14 offers
+    // no graceful-shutdown API, and the legacy protocol has no close-code
+    // contract, so the task is left unwired and stops with the process at
+    // runtime drop. Clients see an abrupt socket close either way; wiring an
+    // abort here would add code without changing any observable behavior.
     #[cfg(feature = "legacy-fullmesh")]
     {
         let legacy_port = port.saturating_add(1);
