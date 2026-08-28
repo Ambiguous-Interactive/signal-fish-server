@@ -311,12 +311,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headroom (constructor-enforced for direct library builds too). The relayed
   form of an admitted frame is strictly larger than the frame itself — the
   relay projection attaches the sender id and delivery stamps — so an equal
-  or barely-larger outbound cap admitted frames it could not re-emit and
-  closed innocent recipients with `1009 outbound_message_too_large`; a
-  sender could sever the whole room. Tight pairings are now rejected at
-  startup, and the 1009-close end-to-end scenario pins the close contract
-  through a legal aggregate (`RoomJoined` roster growth) trigger (issue
-  #396).
+  or barely-larger outbound cap admitted frames whose fixed envelope alone
+  overflowed the outbound cap, closing innocent recipients with `1009
+  outbound_message_too_large`; a sender could sever the whole room. Tight
+  pairings are now rejected at startup, and the 1009-close end-to-end
+  scenario pins the close contract through a legal aggregate (`RoomJoined`
+  roster growth) trigger. **Upgrade note:** deployments running equal or
+  near-equal caps must raise `max_outbound_message_size` (or lower
+  `max_message_size`) before upgrading; such pairings previously failed at
+  runtime instead. The headroom covers the fixed envelope; value-level
+  re-serialization growth (JSON number normalization, MessagePack→JSON
+  fallback escaping) can still exceed it and remains enforced fail-closed
+  at write (issue #396).
 - Docs: the rate-limit scenario no longer claims the connection always
   stays open. Room and spectator admission refusals arrive on
   `RoomJoinFailed` / `SpectatorJoinFailed` and leave the connection open,

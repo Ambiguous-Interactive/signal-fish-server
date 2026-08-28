@@ -131,14 +131,23 @@ async fn authenticate_v3(ws: &mut WsStream) {
 /// message-too-big code rather than silently truncating protocol state.
 ///
 /// The trigger must respect the relay-envelope headroom guard (`outbound ≥
-/// inbound + 256`): no single admitted frame can overflow its own relay, so
-/// the oversized frame here is the aggregate `RoomJoined` roster, which grows
-/// by roughly one `PlayerInfo` entry per member and eventually crosses the
-/// small outbound cap. Which joiner first overflows depends on wire details,
-/// so the test walks the member sequence and asserts the contract on the
-/// first close: code `1009`, reason `outbound_message_too_large`.
+/// inbound + 256`): the fixed relay envelope can no longer push any single
+/// admitted frame past a validated pairing, and value-level re-serialization
+/// growth (number normalization, fallback escaping) is not attacker-shaped
+/// here. The oversized frame is therefore the aggregate `RoomJoined` roster,
+/// which grows by roughly one `PlayerInfo` entry per member and eventually
+/// crosses the small outbound cap. Which joiner first overflows depends on
+/// wire details, so the test walks the member sequence and asserts the
+/// contract on the first close: code `1009`, reason
+/// `outbound_message_too_large`. (The old auth-response trigger is
+/// unreachable under any validated pairing: the ~155-byte response can never
+/// exceed the minimum legal outbound cap.)
 #[tokio::test]
 async fn outbound_message_over_configured_limit_closes_with_1009() {
+    /// Bounded per-frame wait for the join walk, so a stalled server fails
+    /// the walk in minutes rather than accumulating 30-second deadlines.
+    const JOIN_WALK_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+
     let mut config = base_config();
     // Pairing-legal small caps: the handshake and join frames fit the inbound
     // cap, while the aggregate roster snapshot grows past the outbound cap
@@ -177,7 +186,7 @@ async fn outbound_message_over_configured_limit_closes_with_1009() {
     let mut room_code = None;
     let mut seen_frames = Vec::new();
     for _ in 0..8 {
-        let frame = tokio::time::timeout(CLOSE_DEADLINE, creator.next())
+        let frame = tokio::time::timeout(JOIN_WALK_DEADLINE, creator.next())
             .await
             .expect("timed out waiting for the creator's RoomJoined")
             .expect("creator connection closed while joining")
@@ -213,7 +222,7 @@ async fn outbound_message_over_configured_limit_closes_with_1009() {
         .await
         .expect("send JoinRoom");
         for _ in 0..8 {
-            match tokio::time::timeout(CLOSE_DEADLINE, ws.next()).await {
+            match tokio::time::timeout(JOIN_WALK_DEADLINE, ws.next()).await {
                 Ok(Some(Ok(Message::Close(Some(frame))))) => {
                     assert_eq!(
                         u16::from(frame.code),

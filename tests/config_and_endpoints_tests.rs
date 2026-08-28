@@ -1433,13 +1433,14 @@ async fn test_health_endpoint_returns_ok() {
 
 #[tokio::test]
 async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
+    const INBOUND_CAP: usize = 12_345;
     let mut config = test_server_config();
     // Pairing-legal caps: the outbound cap keeps the relay envelope headroom
     // above the inbound cap (constructor guard).
-    config.max_message_size = 12_345;
-    config.max_signal_bytes = 12_345;
+    config.max_message_size = INBOUND_CAP;
+    config.max_signal_bytes = INBOUND_CAP;
     config.max_outbound_message_size =
-        12_345 + signal_fish_server::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES;
+        INBOUND_CAP + signal_fish_server::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES;
     let server =
         test_helpers::create_test_server_with_config(config, ProtocolConfig::default()).await;
     let enhanced_router = create_router("https://game.example").with_state(server.clone());
@@ -1471,7 +1472,8 @@ async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
             );
         assert_eq!(
             response.json::<serde_json::Value>(),
-            serde_json::json!({"max_outbound_message_size": 12_601}),
+            serde_json::json!({"max_outbound_message_size":
+                INBOUND_CAP + signal_fish_server::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES}),
             "{path} must expose the same version-neutral pre-connect limit"
         );
     }

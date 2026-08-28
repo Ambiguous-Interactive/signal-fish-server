@@ -1281,7 +1281,7 @@ mod tests {
             (inbound, inbound, false),
             // One byte below the required headroom still overflows.
             (inbound, inbound + headroom - 1, false),
-            // Exactly the headroom admits every relayed projection.
+            // Exactly the headroom covers the fixed relay envelope.
             (inbound, inbound + headroom, true),
             // Genuine inversion: ingress admits what egress cannot re-emit.
             (2_097_152, 1_048_576, false),

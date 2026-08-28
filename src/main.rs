@@ -11,6 +11,12 @@ use signal_fish_server::websocket;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
+/// Scheduling beat granted to upgraded-but-unpolled connection handlers to
+/// arm their shutdown lifetime guard before the idle drain decides the
+/// grace wait protects nothing. Far below any meaningful grace, so the idle
+/// restart fast path stays fast.
+const DRAIN_IDLE_HANDLER_SETTLE: Duration = Duration::from_millis(50);
+
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
 #[command(name = "signal-fish-server")]
@@ -345,9 +351,17 @@ async fn run_drain_choreography(server: &EnhancedGameServer, shutdown_tx: watch:
     // During a drain new registrations are refused, so with no live socket
     // handler no connection can ever receive the coded `4000` close. Waiting
     // out the grace anyway would be pure restart delay that eats into the
-    // operator's termination budget before the process can exit.
-    if wait_before_close > std::time::Duration::ZERO && server.has_active_socket_tasks() {
-        tokio::time::sleep(wait_before_close).await;
+    // operator's termination budget. An upgraded connection whose handler
+    // task has not been polled yet does not count as live, so the empty
+    // reading is confirmed after one scheduling beat before the wait is
+    // skipped; a handler surfacing during that beat still gets its grace.
+    if wait_before_close > std::time::Duration::ZERO {
+        if !server.has_active_socket_tasks() {
+            tokio::time::sleep(DRAIN_IDLE_HANDLER_SETTLE).await;
+        }
+        if server.has_active_socket_tasks() {
+            tokio::time::sleep(wait_before_close).await;
+        }
     }
 
     let close_requests = server.close_connections_for_shutdown();
@@ -394,6 +408,13 @@ async fn finish_background_shutdown(
     // the full choreography to completion, so it must be joined. With no
     // drain begun the task is parked in the signal wait and could never
     // complete, so aborting lets a spontaneous serve-loop failure exit.
+    //
+    // Residual window, accepted as unfixable without heavier coordination:
+    // a signal delivered after this decision but before exit — with the
+    // drain task not yet polled past its signal wait — is still lost. That
+    // requires a spontaneous serve failure to coincide with signal delivery
+    // inside one scheduling tick; the demonstrated failure this replaces
+    // spanned the whole GoingAway fan-out.
     let drain_begun = server.is_draining();
     let _ = shutdown_tx.send(true);
     if drain_begun {

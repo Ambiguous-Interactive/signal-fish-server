@@ -271,9 +271,11 @@ The two budgets that use this code recover differently: room and spectator
 admission refusals arrive on `RoomJoinFailed` / `SpectatorJoinFailed` and
 leave the connection open, while the per-minute value, when configured, is
 the per-app handshake budget — an over-budget `Authenticate` is refused
-with `AuthenticationError` and the connection is closed. Back off before
-reconnecting: every retry is itself a handshake against the same shared
-app-wide budget.
+with `AuthenticationError` and the connection is closed. Wait out the
+window before reconnecting: the lockout ends when earlier successful
+handshakes age out of the window, so retrying early neither helps nor
+hurts, and a low, steady reconnect rate is the polite choice for the
+app's other players.
 
 ### Reconnection expired (`RECONNECTION_EXPIRED`)
 

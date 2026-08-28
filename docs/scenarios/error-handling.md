@@ -93,9 +93,11 @@ that is about to die:
 }
 ```
 
-Next: wait out the window before reconnecting. Each retry is itself a handshake and consumes the
-same app-wide budget, so a tight reconnect loop extends the lockout for every player of the app —
-back off and reconnect at a low, steady rate.
+Next: wait out the window before reconnecting. The lockout ends once the
+earlier successful handshakes age out of the window; refused retries consume
+nothing but also reserve nothing, so hammering the reconnect only burns
+client resources without shortening the wait — back off and reconnect at a
+low, steady rate.
 
 ## SIGNAL_TOO_LARGE — split the payload
 
