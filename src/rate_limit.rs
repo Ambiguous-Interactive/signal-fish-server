@@ -5,27 +5,36 @@ use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Rate limiting configuration
+///
+/// All budgets use **fixed-window** accounting: each player's counters reset
+/// to zero together whenever `time_window` has elapsed since that player's
+/// window started. A player can therefore spend the entire budget at the end
+/// of one window and again immediately at the start of the next — up to twice
+/// the configured count across a window boundary. This differs from the
+/// handshake limiter (`crate::auth::rate_limiter`), which trims individual
+/// timestamps and so enforces a true sliding "per minute" rate.
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
-    /// Maximum number of room creation requests per time window
+    /// Maximum number of room creation requests per fixed time window
     pub max_room_creations: u32,
     /// Time window for rate limiting
     pub time_window: Duration,
     /// Shared maximum room-creation, seated-join, and spectator-join attempts
-    /// per time window.
+    /// per fixed time window.
     pub max_join_attempts: u32,
-    /// Maximum number of WebRTC signaling messages per time window
+    /// Maximum number of WebRTC signaling messages per fixed time window
     pub max_signals: u32,
-    /// Detailed rejected-signal responses before generic rate-limit errors.
+    /// Detailed rejected-signal responses per fixed time window before
+    /// generic rate-limit errors.
     pub max_signal_errors: u32,
 }
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            max_room_creations: 5, // 5 room creations per minute
+            max_room_creations: 5, // per fixed 60-second window
             time_window: Duration::from_secs(60),
-            max_join_attempts: 20, // 20 join attempts per minute
+            max_join_attempts: 20, // per fixed 60-second window
             max_signals: 600,      // generous for trickle-ICE (~10/sec over the 60s window)
             max_signal_errors: 60, // detailed rejection responses before generic errors
         }
@@ -64,7 +73,11 @@ impl RateLimitEntry {
         }
     }
 
-    /// Reset the rate limit window if enough time has passed
+    /// Reset the rate limit window if enough time has passed.
+    ///
+    /// Fixed-window semantics: every budget resets together, so a client can
+    /// burst up to twice the configured count across a window boundary
+    /// (documented trade-off, not a bug).
     fn maybe_reset_window(&mut self, config: &RateLimitConfig) {
         if self.window_start.elapsed() >= config.time_window {
             self.room_creations = 0;
@@ -137,7 +150,13 @@ impl RateLimitEntry {
     }
 }
 
-/// Rate limiter for room operations
+/// Rate limiter for room operations.
+///
+/// Fixed-window accounting per [`RateLimitConfig`]: all of a player's
+/// budgets reset together when the window elapses, so a boundary burst can
+/// spend up to twice the configured count across adjacent windows. The
+/// handshake limiter in `crate::auth::rate_limiter` is separately enforced
+/// as a sliding window.
 pub struct RoomRateLimiter {
     config: RateLimitConfig,
     /// Rate limit entries by player ID

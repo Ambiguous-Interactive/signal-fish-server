@@ -323,12 +323,14 @@ fn materialize_game_data_frame_uncached(
         } => {
             // Same fail-closed stamp contract as the binary carrier below: a
             // v3 recipient must never observe a partially-stamped relay frame,
-            // which would silently break gap accountability. Production
-            // construction sites stamp-or-suppress (`next_relay_stamp_in_room`),
-            // so reaching this arm means an internal contract breach.
+            // which would silently break gap accountability. Stamps must also
+            // be non-zero, mirroring the binary encoders' gate, so both
+            // carriers share one contract. Production construction sites
+            // stamp-or-suppress (`next_relay_stamp_in_room`), so reaching this
+            // arm means an internal contract breach.
             if recipient_supports_v3 {
                 match (*seq, *epoch) {
-                    (Some(_), Some(_)) => {}
+                    (Some(seq), Some(epoch)) if seq != 0 && epoch != 0 => {}
                     _ => return Err(GameDataMaterializationError::InvalidV3Stamp),
                 }
             }
@@ -360,8 +362,11 @@ fn materialize_game_data_frame_uncached(
             epoch,
         } => {
             let (seq, epoch) = if recipient_supports_v3 {
+                // Gate before the carrier split: the text fallback projection
+                // below must never carry the zero stamps the binary encoder
+                // rejects, so both sides of the split share one contract.
                 match (*seq, *epoch) {
-                    (Some(seq), Some(epoch)) => (Some(seq), Some(epoch)),
+                    (Some(seq), Some(epoch)) if seq != 0 && epoch != 0 => (Some(seq), Some(epoch)),
                     _ => return Err(GameDataMaterializationError::InvalidV3Stamp),
                 }
             } else {
@@ -554,7 +559,7 @@ pub(super) async fn send_single_message_ref(
                         %from_player,
                         seq = ?seq,
                         epoch = ?epoch,
-                        "Protocol-v3 binary game data lacked a complete delivery stamp; closing fail-closed"
+                        "Protocol-v3 binary game data lacked a complete, non-zero delivery stamp; closing fail-closed"
                     );
                     return Err(SendMessageError::Materialization);
                 }
@@ -608,7 +613,7 @@ pub(super) async fn send_single_message_ref(
                             %from_player,
                             seq = ?seq,
                             epoch = ?epoch,
-                            "Protocol-v3 text game data lacked a complete delivery stamp; closing fail-closed"
+                            "Protocol-v3 text game data lacked a complete, non-zero delivery stamp; closing fail-closed"
                         );
                     }
                     GameDataMaterializationError::Serialization(ref inner) => {
@@ -2242,14 +2247,23 @@ mod tests {
         ));
     }
 
-    /// A protocol-v3 recipient must never receive an incomplete `(seq, epoch)`
-    /// relay stamp on EITHER carrier. The binary path fails closed; the text
-    /// path must too — a silently unsequenced text frame would break the
-    /// recipient-side gap-accountability contract without any signal.
+    /// A protocol-v3 recipient must never receive an incomplete or zero
+    /// `(seq, epoch)` relay stamp on EITHER carrier. The binary path fails
+    /// closed; the text path must too — a silently unsequenced text frame
+    /// would break the recipient-side gap-accountability contract without any
+    /// signal, and a zero stamp would break the non-zero stamp contract the
+    /// binary carrier already enforces.
     #[test]
-    fn text_delivery_stamp_must_be_complete_for_v3_recipients() {
+    fn text_delivery_stamp_must_be_complete_and_nonzero_for_v3_recipients() {
         let data = serde_json::json!({ "tick": 7 });
-        for (seq, epoch) in [(Some(1u64), None), (None, Some(1u32)), (None, None)] {
+        for (seq, epoch) in [
+            (Some(1u64), None),
+            (None, Some(1u32)),
+            (None, None),
+            (Some(0u64), Some(1u32)),
+            (Some(1u64), Some(0u32)),
+            (Some(0u64), Some(0u32)),
+        ] {
             let message = ServerMessage::GameData {
                 from_player: player_a(),
                 data: data.clone(),
@@ -2269,7 +2283,7 @@ mod tests {
                     ),
                     Err(GameDataMaterializationError::InvalidV3Stamp)
                 ),
-                "incomplete stamp {seq:?}/{epoch:?} must fail closed for a v3 text recipient"
+                "invalid stamp {seq:?}/{epoch:?} must fail closed for a v3 text recipient"
             );
             // A pre-v3 recipient of the same frame is unaffected: the metadata
             // is stripped and delivery proceeds.
@@ -2281,6 +2295,41 @@ mod tests {
                 None,
             )
             .expect("v2 text projection strips the incomplete stamp");
+        }
+    }
+
+    /// The `GameDataBinary` stamp gate must fire before the carrier split: a
+    /// format-mismatched v3 recipient takes the text fallback projection,
+    /// which would otherwise carry the zero stamps the binary carrier
+    /// rejects. Both sides of the split share one fail-closed contract.
+    #[test]
+    fn binary_fallback_text_projection_rejects_zero_v3_stamps() {
+        let payload = Bytes::from_static(b"opaque");
+        for (seq, epoch) in [
+            (Some(0u64), Some(1u32)),
+            (Some(1u64), Some(0u32)),
+            (Some(0u64), Some(0u32)),
+        ] {
+            let message = ServerMessage::GameDataBinary {
+                from_player: player_a(),
+                encoding: GameDataEncoding::MessagePack,
+                payload: payload.clone(),
+                seq,
+                epoch,
+            };
+            assert!(
+                matches!(
+                    materialize_game_data_frame(
+                        &message,
+                        true,
+                        GameDataEncoding::Json,
+                        BinaryFallbackPreflight::NotNeeded,
+                        None,
+                    ),
+                    Err(GameDataMaterializationError::InvalidV3Stamp)
+                ),
+                "zero stamp {seq:?}/{epoch:?} must fail closed on the binary-fallback text projection"
+            );
         }
     }
 

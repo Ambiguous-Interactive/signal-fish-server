@@ -43,7 +43,11 @@ impl ShutdownDrain {
     ///
     /// The first drain owner waits out the grace time it has not already spent
     /// announcing. Later observers use the already-advertised deadline instead
-    /// of extending shutdown by another full grace window.
+    /// of extending shutdown by another full grace window. A deadline only
+    /// ever encodes "start + grace", so the observed wait is bounded by one
+    /// grace period; the bound also keeps an overflowed `u64::MAX` sentinel
+    /// deadline (or a backwards wall-clock step) from stretching the drain
+    /// into a near-infinite sleep.
     pub fn wait_before_close(self, elapsed_since_start: Duration) -> Duration {
         self.wait_before_close_since(elapsed_since_start, unix_epoch_ms_now())
     }
@@ -56,7 +60,7 @@ impl ShutdownDrain {
                 .unwrap_or(Duration::ZERO);
         }
 
-        Duration::from_millis(self.deadline_ms.saturating_sub(now_ms))
+        Duration::from_millis(self.deadline_ms.saturating_sub(now_ms)).min(self.grace)
     }
 }
 
@@ -379,6 +383,27 @@ mod tests {
         assert_eq!(
             drain.wait_before_close_since(Duration::ZERO, 1_200),
             Duration::ZERO
+        );
+    }
+
+    /// An observer of a drain whose stored deadline overflowed to the
+    /// `u64::MAX` sentinel must not sleep ~u64::MAX milliseconds before
+    /// forcing the coded closes: the observed wait is bounded by the grace
+    /// window the first drain owner announced, the same bound a normal
+    /// deadline always satisfies.
+    #[test]
+    fn observed_shutdown_drain_sentinel_deadline_is_bounded_by_grace() {
+        let drain = ShutdownDrain {
+            deadline_ms: u64::MAX,
+            grace: Duration::from_secs(30),
+            retry_after_secs: Some(30),
+            started_by_this_call: false,
+        };
+
+        assert_eq!(
+            drain.wait_before_close_since(Duration::ZERO, 0),
+            Duration::from_secs(30),
+            "a sentinel deadline must not extend the drain past one grace window"
         );
     }
 

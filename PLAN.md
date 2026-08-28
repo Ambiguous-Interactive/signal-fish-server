@@ -96,16 +96,17 @@ correctness evidence appears.
   acceptable signal and maintenance cost.
 - #396 — continue the correctness and performance sweep through named,
   gameplay-facing seams; require a deterministic counterexample or current
-  profile before changing production behavior. Session-179 closed the #447
-  host-election/readiness residuals and the #446 dormant bus-path landmine.
-  Session-182 swept the previously named seams: rate limiter internals
-  (arithmetic/eviction verified sound; the rate-limit scenario docs
-  corrected), the `websocket/sending.rs` v2-projection corridor (relay
-  envelope headroom now enforced between the inbound and outbound caps),
-  and shutdown/drain choreography (a committed drain is never aborted;
-  the idle grace wait is skipped). Next session must name new seams from
-  fresh evidence; residual low-priority findings from the session-182
-  audits are tracked in #454.
+  profile before changing production behavior. Session-182 swept the
+  previously named seams: rate limiter internals, the `websocket/sending.rs`
+  v2-projection corridor, and shutdown/drain choreography. Session-183
+  closed the actionable session-182 residuals from #454: text relay
+  carriers now enforce the binary lanes' complete, non-zero v3 stamp
+  contract, the observed-drain sentinel deadline is grace-bounded, and the
+  room limiter's fixed-window boundary-burst semantics are documented as the
+  deliberate trade-off. The remaining #454 items stay open, each gated on a
+  product decision (`signal_errors` retry advice, legacy-fullmesh drain
+  determinism) or sanitizer/oversubscription evidence (drain settle-budget
+  tail). Next session must name new seams from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted
