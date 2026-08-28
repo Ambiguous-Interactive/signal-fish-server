@@ -303,8 +303,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Close the shutdown-drain admission gaps surfaced by the session-186 issue
-  #396 seam sweep (issue #396):
+- Close the shutdown-drain admission gaps surfaced by the session-186 seam
+  sweep (issue #396):
   - A reconnect attempt delivered inside the drain grace window (only possible
     from a socket upgraded before the drain flipped) is now refused with
     `ReconnectionFailed` carrying `SERVER_DRAINING` instead of being admitted,
