@@ -92,7 +92,7 @@ mod spectator_service;
 use connection_manager::{ClientLifecycle, ConnectionManager};
 pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
-pub use shutdown::ShutdownDrain;
+pub use shutdown::{run_drain_choreography, ShutdownDrain};
 use spectator_service::SpectatorService;
 
 #[cfg(test)]

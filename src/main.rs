@@ -8,14 +8,8 @@ use signal_fish_server::logging;
 use signal_fish_server::security::OriginPolicy;
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::watch;
-
-/// Scheduling beat granted to upgraded-but-unpolled connection handlers to
-/// arm their shutdown lifetime guard before the idle drain decides the
-/// grace wait protects nothing. Far below any meaningful grace, so the idle
-/// restart fast path stays fast.
-const DRAIN_IDLE_HANDLER_SETTLE: Duration = Duration::from_millis(50);
 
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
@@ -322,64 +316,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch::Sender<bool>) {
     shutdown_signal().await;
-    run_drain_choreography(&server, shutdown_tx).await;
-}
-
-/// Everything the shutdown drain does after the shutdown signal arrives.
-///
-/// Separated from the signal wait so tests can drive the choreography
-/// directly without installing a real signal handler.
-async fn run_drain_choreography(server: &EnhancedGameServer, shutdown_tx: watch::Sender<bool>) {
-    let drain_started_at = tokio::time::Instant::now();
-    let drain = server.begin_shutdown_drain();
-    tracing::info!(
-        deadline_ms = drain.deadline_ms,
-        grace_ms = u64::try_from(drain.grace.as_millis()).unwrap_or(u64::MAX),
-        started_by_this_call = drain.started_by_this_call,
-        "Server shutdown drain started"
-    );
-    let going_away_sent = server.announce_shutdown_drain(drain).await;
-    tracing::info!(
-        going_away_sent,
-        started_by_this_call = drain.started_by_this_call,
-        "Shutdown GoingAway advisories enqueued"
-    );
-
-    let _ = shutdown_tx.send(true);
-
-    let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
-    // During a drain new registrations are refused, so with no live socket
-    // handler no connection can ever receive the coded `4000` close. Waiting
-    // out the grace anyway would be pure restart delay that eats into the
-    // operator's termination budget. An upgraded connection whose handler
-    // task has not been polled yet does not count as live, so the empty
-    // reading is confirmed after one scheduling beat before the wait is
-    // skipped; a handler surfacing during that beat still gets its grace.
-    if wait_before_close > std::time::Duration::ZERO {
-        if !server.has_active_socket_tasks() {
-            tokio::time::sleep(DRAIN_IDLE_HANDLER_SETTLE).await;
-        }
-        if server.has_active_socket_tasks() {
-            tokio::time::sleep(wait_before_close).await;
-        }
-    }
-
-    let close_requests = server.close_connections_for_shutdown();
-    tracing::info!(close_requests, "Shutdown close requests issued");
-
-    let settle_timeout = shutdown_connection_settle_timeout();
-    let remaining_connections = server.wait_for_shutdown_connections(settle_timeout).await;
-    if remaining_connections > 0 {
-        tracing::warn!(
-            remaining_connections,
-            settle_ms = u64::try_from(settle_timeout.as_millis()).unwrap_or(u64::MAX),
-            "Shutdown drain ended with connections still registered"
-        );
-    }
-}
-
-fn shutdown_connection_settle_timeout() -> Duration {
-    websocket::registered_connection_shutdown_settle_timeout()
+    signal_fish_server::server::run_drain_choreography(&server, shutdown_tx).await;
 }
 
 async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
@@ -462,7 +399,7 @@ async fn wait_for_ctrl_c_shutdown(ctrl_c: impl std::future::Future<Output = std:
 
 #[cfg(test)]
 mod cli_tests {
-    use super::{shutdown_connection_settle_timeout, wait_for_ctrl_c_shutdown, websocket, Cli};
+    use super::{wait_for_ctrl_c_shutdown, websocket, Cli};
     use clap::Parser;
     use std::io;
     use std::time::Duration;
@@ -526,7 +463,7 @@ mod cli_tests {
     #[test]
     fn shutdown_connection_settle_timeout_covers_registered_close_sequence() {
         assert_eq!(
-            shutdown_connection_settle_timeout(),
+            websocket::registered_connection_shutdown_settle_timeout(),
             websocket::CONNECTION_CLOSE_WRITE_TIMEOUT
                 .saturating_mul(websocket::REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS)
                 .saturating_add(websocket::REGISTERED_SHUTDOWN_SETTLE_MARGIN)
@@ -572,13 +509,13 @@ mod cli_tests {
 
 #[cfg(test)]
 mod shutdown_drain_tests {
-    use super::{finish_background_shutdown, run_drain_choreography};
+    use super::finish_background_shutdown;
     use signal_fish_server::config::{
         CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
         TransportSecurityConfig, TurnConfig,
     };
     use signal_fish_server::database::DatabaseConfig;
-    use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
+    use signal_fish_server::server::{run_drain_choreography, EnhancedGameServer, ServerConfig};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::sync::watch;
