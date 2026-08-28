@@ -826,6 +826,21 @@ impl ConnectionManager {
             .is_some_and(|client| Arc::ptr_eq(&client.lifecycle, lifecycle))
     }
 
+    /// Current and prior membership generation for the player, for tests that
+    /// pin advance/rollback symmetry of the delivery state.
+    #[cfg(test)]
+    pub(crate) fn delivery_generation_for_test(
+        &self,
+        player_id: &PlayerId,
+    ) -> Option<(Uuid, Option<Uuid>)> {
+        self.clients.get(player_id).map(|client| {
+            (
+                client.membership_generation,
+                client.prior_membership_generation,
+            )
+        })
+    }
+
     pub fn has_client(&self, player_id: &PlayerId) -> bool {
         self.clients.contains_key(player_id)
     }

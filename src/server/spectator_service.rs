@@ -58,10 +58,14 @@ pub(crate) struct SpectatorService {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpectatorJoinPanicPoint {
-    /// Fires inside the `Ok(true)` arm of the durable spectator admission:
-    /// the DB row exists but no local role is published yet, so the join is
-    /// in the ghost-row window that requires compensation.
+    /// Fires inside the `Ok(true)` arm of the durable spectator admission,
+    /// BEFORE the delivery generation advances: the DB row exists but no
+    /// local role is published yet and the generation state is untouched, so
+    /// the compensation must roll the row back WITHOUT rewinding generations.
     JoinAfterDurableAdmission = 1,
+    /// Fires after the advance: the compensation must roll both the row and
+    /// the delivery generation back.
+    JoinAfterGenerationAdvance = 2,
 }
 
 #[derive(Debug)]
@@ -130,11 +134,23 @@ impl SpectatorService {
         }
     }
 
-    async fn rollback_unpublished_spectator_join(&self, player_id: &PlayerId, room_id: &RoomId) {
+    /// Undo a durable spectator admission that never became externally
+    /// visible. `generation_advanced` must reflect whether this transaction's
+    /// `advance_delivery_generation` already ran: rolling back an advance that
+    /// never happened would resurrect a retired delivery generation from an
+    /// earlier join/leave cycle.
+    async fn rollback_unpublished_spectator_join(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        generation_advanced: bool,
+    ) {
         self.spectator_rooms.remove(player_id);
-        self.connection_manager
-            .rollback_delivery_generation(player_id)
-            .await;
+        if generation_advanced {
+            self.connection_manager
+                .rollback_delivery_generation(player_id)
+                .await;
+        }
         match self
             .database
             .remove_spectator_from_room(room_id, player_id)
@@ -178,12 +194,40 @@ impl SpectatorService {
         // local publication: while set, a panic must roll the row back, or a
         // ghost row survives that no maintenance sweep can see (no local role,
         // no pending-repair key) and it keeps consuming spectator capacity.
-        let pending_rollback = Arc::new(std::sync::Mutex::new(None::<RoomId>));
+        // The flag records whether this transaction already advanced the
+        // delivery generation, so the rollback never rewinds an advance that
+        // never happened.
+        let pending_rollback = Arc::new(std::sync::Mutex::new(None::<(RoomId, bool)>));
         let pending_rollback_in_task = Arc::clone(&pending_rollback);
         // `join_owned` consumes the service clone, so the compensation arm
         // needs its own handle.
         let rollback_service = service.clone();
         tokio::spawn(async move {
+            // The lifecycle guard is taken HERE, outside the panicking
+            // transaction, and held across the compensation: unwind drops the
+            // guards inside `join_owned`, and a compensation that ran without
+            // the lifecycle lock could race a concurrent admission for the
+            // same connection (deleting a newer row or rewinding a newer
+            // advance). Same discipline as the player join's panic repair.
+            let Some(lifecycle) = service.connection_manager.client_lifecycle(&player_id) else {
+                return Err(SpectatorError::new(
+                    "Connection is no longer active",
+                    Some(ErrorCode::SpectatorJoinFailed),
+                ));
+            };
+            // Held (not merely acquired) through the compensation below:
+            // dropping it early would reopen the concurrent-admission race.
+            let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            if lifecycle.player_id() != player_id
+                || !service
+                    .connection_manager
+                    .lifecycle_matches(&player_id, &lifecycle)
+            {
+                return Err(SpectatorError::new(
+                    "Connection identity changed",
+                    Some(ErrorCode::SpectatorJoinFailed),
+                ));
+            }
             let outcome = std::panic::AssertUnwindSafe(service.join_owned(
                 player_id,
                 operation_id,
@@ -198,15 +242,28 @@ impl SpectatorService {
                 Ok(result) => result,
                 Err(_panic) => {
                     tracing::error!(%player_id, "Owned spectator join transaction panicked");
-                    // The lock guard must drop before the async rollback.
-                    let room_id = pending_rollback
+                    // The marker lock guard must drop before the async rollback.
+                    let pending = pending_rollback
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .take();
-                    if let Some(room_id) = room_id {
-                        rollback_service
-                            .rollback_unpublished_spectator_join(&player_id, &room_id)
+                    if let Some((room_id, generation_advanced)) = pending {
+                        // Serialize the compensating delete with the room's
+                        // event lane (same discipline as the maintenance
+                        // retry sweep) so it cannot interleave with a
+                        // republished admission's add + publish.
+                        let room_event_guard = rollback_service
+                            .message_coordinator
+                            .lock_room_event_mutation(&room_id)
                             .await;
+                        rollback_service
+                            .rollback_unpublished_spectator_join(
+                                &player_id,
+                                &room_id,
+                                generation_advanced,
+                            )
+                            .await;
+                        drop(room_event_guard);
                     }
                     Err(SpectatorError::new(
                         "Spectator join failed unexpectedly",
@@ -214,6 +271,7 @@ impl SpectatorService {
                     ))
                 }
             }
+            // `lifecycle_guard` drops here — only after compensation finished.
         })
         .await
         .map_err(|error| {
@@ -231,26 +289,12 @@ impl SpectatorService {
         game_name: String,
         room_code: String,
         spectator_name: String,
-        pending_rollback: Arc<std::sync::Mutex<Option<RoomId>>>,
+        pending_rollback: Arc<std::sync::Mutex<Option<(RoomId, bool)>>>,
     ) -> Result<(), SpectatorError> {
         let player_id = &player_id;
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
-            return Err(SpectatorError::new(
-                "Connection is no longer active",
-                Some(ErrorCode::SpectatorJoinFailed),
-            ));
-        };
-        let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
-        if lifecycle.player_id() != *player_id
-            || !self
-                .connection_manager
-                .lifecycle_matches(player_id, &lifecycle)
-        {
-            return Err(SpectatorError::new(
-                "Connection identity changed",
-                Some(ErrorCode::SpectatorJoinFailed),
-            ));
-        }
+        // The lifecycle guard and identity validation live in `join_operation`
+        // so they outlive a panic; this body runs with the connection already
+        // serialized against concurrent joins and disconnect-time detaches.
         if let Err(error) = self.rate_limiter.check_join_attempt(player_id).await {
             return Err(SpectatorError::new(
                 error.to_string(),
@@ -375,10 +419,12 @@ impl SpectatorService {
 
         // From here until the local role is published, a panic must be
         // compensated: the durable row would otherwise survive as a ghost
-        // (no local role, no pending-repair key) that consumes capacity.
+        // (no local role, no pending-repair key) that consumes capacity. The
+        // flag records that the delivery generation has NOT been advanced
+        // yet, so the compensation must not rewind it.
         *pending_rollback
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(room.id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((room.id, false));
 
         match self
             .database
@@ -393,11 +439,20 @@ impl SpectatorService {
                 self.connection_manager
                     .advance_delivery_generation(player_id)
                     .await;
+                // Published generation state: the compensation must now roll
+                // the advance back alongside the row.
+                *pending_rollback
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((room.id, true));
+                #[cfg(test)]
+                self.trigger_spectator_join_panic_for_test(
+                    SpectatorJoinPanicPoint::JoinAfterGenerationAdvance,
+                );
                 let recipient_is_v3 = self.connection_manager.supports_v3(player_id);
                 let current_room = match self.database.get_room_by_id(&room.id).await {
                     Ok(Some(current_room)) => current_room,
                     Ok(None) => {
-                        self.rollback_unpublished_spectator_join(player_id, &room.id)
+                        self.rollback_unpublished_spectator_join(player_id, &room.id, true)
                             .await;
                         return Err(SpectatorError::new(
                             "Room not found",
@@ -406,7 +461,7 @@ impl SpectatorService {
                     }
                     Err(err) => {
                         warn!(room_id = %room.id, error = %err, "Failed to build fresh spectator baseline");
-                        self.rollback_unpublished_spectator_join(player_id, &room.id)
+                        self.rollback_unpublished_spectator_join(player_id, &room.id, true)
                             .await;
                         return Err(SpectatorError::new(
                             "Storage error",
@@ -422,7 +477,7 @@ impl SpectatorService {
                     Ok(routed) => routed.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
                     Err(err) => {
                         warn!(room_id = %room.id, error = %err, "Failed to resolve published players for spectator baseline");
-                        self.rollback_unpublished_spectator_join(player_id, &room.id)
+                        self.rollback_unpublished_spectator_join(player_id, &room.id, true)
                             .await;
                         return Err(SpectatorError::new(
                             "Storage error",
@@ -496,7 +551,7 @@ impl SpectatorService {
                     .await
                     .unwrap_or(false);
                 if !baseline_delivered {
-                    self.rollback_unpublished_spectator_join(player_id, &room.id)
+                    self.rollback_unpublished_spectator_join(player_id, &room.id, true)
                         .await;
                     return Err(SpectatorError::new(
                         "Spectator join response was not deliverable",
@@ -1569,12 +1624,39 @@ mod tests {
     /// spectator capacity and is invisible to both maintenance sweeps: no
     /// local role (`prune_missing_rooms`) and no pending-repair key
     /// (`retry_disconnected_detaches`) ever exists for it.
+    ///
+    /// The panic fires BEFORE the delivery generation advances, and the
+    /// connection already ran a prior join/leave cycle: the compensation must
+    /// roll the row back WITHOUT rewinding the delivery state — an
+    /// unconditional rollback would resurrect a retired generation (Bugbot
+    /// finding on PR #459).
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn panicked_join_rolls_back_the_durable_admission() {
         let (service, room, _creator_id, _coordinator, database) = setup_service().await;
         let spectator_id = PlayerId::new_v4();
         connect_spectator(&service, spectator_id, 35_012).await;
+
+        // A prior join/leave cycle gives the delivery state a retired
+        // generation that a naive unconditional rollback would resurrect.
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Cycled Watcher".to_string(),
+            )
+            .await
+            .expect("first spectator join succeeds");
+        service
+            .leave(&spectator_id)
+            .await
+            .expect("spectator leaves");
+        let generation_before = service
+            .connection_manager
+            .delivery_generation_for_test(&spectator_id)
+            .expect("connected client has delivery state");
+
         service.panic_spectator_join_for_test(SpectatorJoinPanicPoint::JoinAfterDurableAdmission);
 
         let outcome = service
@@ -1601,6 +1683,57 @@ mod tests {
         assert!(
             !service.is_spectating(&spectator_id),
             "no local role may be published for a panicked join"
+        );
+        assert_eq!(
+            service
+                .connection_manager
+                .delivery_generation_for_test(&spectator_id),
+            Some(generation_before),
+            "compensation must not rewind a delivery generation this transaction never advanced"
+        );
+    }
+
+    /// Same ghost-row window, but the panic fires AFTER the delivery
+    /// generation advanced: here the compensation must roll the generation
+    /// back too, restoring the exact pre-join delivery state.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn panicked_join_after_advance_rolls_back_row_and_generation() {
+        let (service, room, _creator_id, _coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_013).await;
+        let generation_before = service
+            .connection_manager
+            .delivery_generation_for_test(&spectator_id)
+            .expect("connected client has delivery state");
+
+        service.panic_spectator_join_for_test(SpectatorJoinPanicPoint::JoinAfterGenerationAdvance);
+
+        let outcome = service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Advanced Ghost".to_string(),
+            )
+            .await;
+        assert!(outcome.is_err(), "panicked join must report failure");
+
+        let stored = database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("fetch spectators after panicked post-advance join");
+        assert!(
+            !stored.iter().any(|info| info.id == spectator_id),
+            "a panicked join must not leave a durable ghost row, got: {stored:?}"
+        );
+        assert!(!service.is_spectating(&spectator_id));
+        assert_eq!(
+            service
+                .connection_manager
+                .delivery_generation_for_test(&spectator_id),
+            Some(generation_before),
+            "a post-advance panic must roll the delivery generation back to the pre-join state"
         );
     }
 
