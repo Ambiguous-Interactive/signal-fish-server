@@ -112,7 +112,7 @@ pub mod allocation_benchmark {
         )
         .map_err(|error| match error {
             GameDataMaterializationError::InvalidV3Stamp => {
-                "protocol-v3 binary game data lacked a complete stamp".to_string()
+                "protocol-v3 game data lacked a complete, non-zero stamp".to_string()
             }
             GameDataMaterializationError::Serialization(error)
             | GameDataMaterializationError::Undeliverable(error) => error,

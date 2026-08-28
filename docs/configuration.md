@@ -284,6 +284,14 @@ and the authenticated WebSocket relay floor remains available independently.
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 - `time_window` - Rate limit window in seconds
 
+These budgets use **fixed-window** accounting: a player's counters reset to
+zero together once `time_window` has elapsed since their window started, so a
+player can spend the full budget at the end of one window and again at the
+start of the next (up to twice the configured count across a boundary). This
+is distinct from the per-application handshake limiter
+(`security.allowed_apps[].rate_limit_per_minute`), which uses a sliding
+window.
+
 ## Protocol Settings
 
 ```json
