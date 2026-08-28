@@ -193,7 +193,6 @@ async fn main() -> anyhow::Result<()> {
     let cors = origin_policy.cors_layer();
     let enhanced_router = websocket::create_router_with_origin_policy(origin_policy.clone())
         .with_state(game_server.clone());
-
     use axum::routing::get;
 
     // Build base router with metrics endpoints
@@ -250,7 +249,9 @@ async fn main() -> anyhow::Result<()> {
         .fallback(|| async {
             "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v2/client-config (or /v3/client-config) for client limits, /v1/metrics for metrics, /metrics/prom for Prometheus."
         })
-        .with_state(game_server)
+        // Cloned, not moved: the original handle stays available for the
+        // post-serve shutdown join, which must observe the drain state.
+        .with_state(game_server.clone())
         .layer(cors);
 
     let make_service = combined_router.into_make_service_with_connect_info::<SocketAddr>();
@@ -288,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
             .serve(make_service)
             .await;
 
-        finish_background_shutdown(shutdown_tx, shutdown_rx, shutdown_task, cleanup_task).await;
+        finish_background_shutdown(&game_server, shutdown_tx, shutdown_task, cleanup_task).await;
         serve_result?;
 
         return Ok(());
@@ -307,7 +308,7 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
         .await;
 
-    finish_background_shutdown(shutdown_tx, shutdown_rx, shutdown_task, cleanup_task).await;
+    finish_background_shutdown(&game_server, shutdown_tx, shutdown_task, cleanup_task).await;
     serve_result?;
 
     Ok(())
@@ -315,7 +316,14 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch::Sender<bool>) {
     shutdown_signal().await;
+    run_drain_choreography(&server, shutdown_tx).await;
+}
 
+/// Everything the shutdown drain does after the shutdown signal arrives.
+///
+/// Separated from the signal wait so tests can drive the choreography
+/// directly without installing a real signal handler.
+async fn run_drain_choreography(server: &EnhancedGameServer, shutdown_tx: watch::Sender<bool>) {
     let drain_started_at = tokio::time::Instant::now();
     let drain = server.begin_shutdown_drain();
     tracing::info!(
@@ -334,7 +342,11 @@ async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch:
     let _ = shutdown_tx.send(true);
 
     let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
-    if wait_before_close > std::time::Duration::ZERO {
+    // During a drain new registrations are refused, so with no live socket
+    // handler no connection can ever receive the coded `4000` close. Waiting
+    // out the grace anyway would be pure restart delay that eats into the
+    // operator's termination budget before the process can exit.
+    if wait_before_close > std::time::Duration::ZERO && server.has_active_socket_tasks() {
         tokio::time::sleep(wait_before_close).await;
     }
 
@@ -368,14 +380,23 @@ async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
 }
 
 async fn finish_background_shutdown(
+    server: &EnhancedGameServer,
     shutdown_tx: watch::Sender<bool>,
-    shutdown_rx: watch::Receiver<bool>,
     shutdown_task: tokio::task::JoinHandle<()>,
     cleanup_task: tokio::task::JoinHandle<()>,
 ) {
-    let shutdown_started = *shutdown_rx.borrow();
+    // Decide on the server's drain state, not the process watch: the drain
+    // task flips the watch only after the drain begins and the GoingAway
+    // fan-out completes. If the serve future returns inside that window, a
+    // watch-based guard aborts a committed drain and every connected client
+    // is dropped with no close frame at all. Once `begin_shutdown_drain`
+    // has CAS'd the deadline the task is past its signal wait and will run
+    // the full choreography to completion, so it must be joined. With no
+    // drain begun the task is parked in the signal wait and could never
+    // complete, so aborting lets a spontaneous serve-loop failure exit.
+    let drain_begun = server.is_draining();
     let _ = shutdown_tx.send(true);
-    if shutdown_started {
+    if drain_begun {
         let _ = shutdown_task.await;
     } else {
         shutdown_task.abort();
@@ -524,6 +545,128 @@ mod cli_tests {
         assert!(
             result.is_err(),
             "Ctrl+C installation failure must not trigger shutdown"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_drain_tests {
+    use super::{finish_background_shutdown, run_drain_choreography};
+    use signal_fish_server::config::{
+        CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+        TransportSecurityConfig, TurnConfig,
+    };
+    use signal_fish_server::database::DatabaseConfig;
+    use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::watch;
+
+    async fn test_server_with_grace(grace: std::time::Duration) -> Arc<EnhancedGameServer> {
+        let server_config = ServerConfig {
+            drain_grace: grace,
+            ..ServerConfig::default()
+        };
+        EnhancedGameServer::new(
+            server_config,
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server")
+    }
+
+    /// Regression pin: once `begin_shutdown_drain` has committed the server to
+    /// draining, `finish_background_shutdown` must join the drain task even if
+    /// the process watch has not been flipped yet. The choreography only sends
+    /// the watch after the GoingAway fan-out; a watch-based guard aborts the
+    /// committed drain when the serve future returns inside that window, and
+    /// every connected client is dropped with no close frame at all.
+    #[tokio::test(start_paused = true)]
+    async fn finish_background_shutdown_joins_a_begun_drain_before_the_watch_flips() {
+        let server = test_server_with_grace(std::time::Duration::from_secs(10)).await;
+        server.begin_shutdown_drain();
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let choreography_ran = Arc::new(AtomicBool::new(false));
+        let drain_task = {
+            let server = Arc::clone(&server);
+            let choreography_ran = Arc::clone(&choreography_ran);
+            let shutdown_tx = shutdown_tx.clone();
+            tokio::spawn(async move {
+                run_drain_choreography(&server, shutdown_tx).await;
+                choreography_ran.store(true, Ordering::Release);
+            })
+        };
+        let cleanup_task = tokio::spawn(async {});
+
+        finish_background_shutdown(&server, shutdown_tx, drain_task, cleanup_task).await;
+
+        assert!(
+            choreography_ran.load(Ordering::Acquire),
+            "a begun drain must be joined to completion, not aborted: aborting drops \
+             every client's GoingAway advisory and coded 4000 close frame"
+        );
+        assert!(
+            *shutdown_rx.borrow(),
+            "the joined choreography must still flip the process watch for other watchers"
+        );
+    }
+
+    /// The inverse contract: with no drain begun, the drain task is parked in
+    /// the signal wait and could never complete, so it must be aborted to let
+    /// a spontaneous serve-loop failure exit instead of hanging the process.
+    /// A regression to joining unconditionally fails the timeout below, which
+    /// is the only alternative to aborting in `finish_background_shutdown`.
+    #[tokio::test(start_paused = true)]
+    async fn finish_background_shutdown_aborts_the_parked_task_when_no_drain_begun() {
+        let server = test_server_with_grace(std::time::Duration::from_secs(10)).await;
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let drain_task = tokio::spawn(async {
+            // Stands in for the real drain task parked in the signal wait.
+            std::future::pending::<()>().await;
+        });
+        let cleanup_task = tokio::spawn(async {});
+
+        let finished = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            finish_background_shutdown(&server, shutdown_tx, drain_task, cleanup_task),
+        )
+        .await;
+
+        assert!(
+            finished.is_ok(),
+            "shutdown finish must abort a drain task that never began draining instead \
+             of blocking process exit on the parked signal wait"
+        );
+    }
+
+    /// With no live socket handler nothing can ever receive the coded `4000`
+    /// close, so the idle drain must not wait out the grace window before
+    /// exiting: that delay is pure restart time against the operator's
+    /// termination budget.
+    #[tokio::test]
+    async fn idle_shutdown_drain_does_not_wait_out_the_grace() {
+        let grace = std::time::Duration::from_millis(300);
+        let server = test_server_with_grace(grace).await;
+        assert!(!server.has_active_socket_tasks());
+
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let started = std::time::Instant::now();
+        run_drain_choreography(&server, shutdown_tx).await;
+
+        assert!(
+            started.elapsed() < grace,
+            "an idle drain must skip the grace wait: no handler remains to receive \
+             the shutdown close frames"
         );
     }
 }

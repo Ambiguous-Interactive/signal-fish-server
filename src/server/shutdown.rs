@@ -74,6 +74,16 @@ impl EnhancedGameServer {
         self.shutdown_drain_deadline_ms.load(Ordering::Acquire) != 0
     }
 
+    /// Whether any WebSocket handler task is still live.
+    ///
+    /// Handlers are tracked for their whole lifetime, so this is true
+    /// whenever a socket could still observe a shutdown close frame. During
+    /// a drain new registrations are refused, so a false reading here means
+    /// no connection can ever receive the coded `4000` close.
+    pub fn has_active_socket_tasks(&self) -> bool {
+        self.active_socket_tasks.load(Ordering::Acquire) > 0
+    }
+
     /// Begin graceful shutdown drain, or return the already-advertised drain.
     ///
     /// The first caller fixes the deadline. Later callers observe the same
@@ -364,6 +374,39 @@ mod tests {
         assert!(
             matches!(duplicate_advisory, Err(TryRecvError::Empty)),
             "duplicate drain should not enqueue another GoingAway"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_socket_task_tracking_reflects_live_handlers() {
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+
+        assert!(
+            !server.has_active_socket_tasks(),
+            "a freshly constructed server has no live socket handlers"
+        );
+        let guard = server.track_socket_task();
+        assert!(
+            server.has_active_socket_tasks(),
+            "a tracked handler must be reported as live for the drain grace skip"
+        );
+        drop(guard);
+        assert!(
+            !server.has_active_socket_tasks(),
+            "a returned handler must stop counting toward the drain grace skip"
         );
     }
 
