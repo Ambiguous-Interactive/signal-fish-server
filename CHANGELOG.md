@@ -303,6 +303,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close the last actionable issue #454 residuals from the session-182/185
+  seam audits (issues #454, #396):
+  - A client that exhausts its rejection-detail budget (`max_signal_errors`)
+    now receives truthful guidance — "Too many rejected signaling messages;
+    further rejections are reported without detail until the window resets.
+    Valid signals are still relayed" — instead of "Signaling error rate limit
+    exceeded", which wrongly implied a healthy client's signaling was
+    throttled. The budget stays fail-closed; only the rejection detail is
+    suppressed, and valid signals always relay (pinned end to end).
+  - The feature-gated legacy full-mesh server's shutdown semantics are
+    documented as deliberate in `main.rs`: `matchbox_signaling` 0.14 exposes
+    no graceful-shutdown API and the legacy protocol has no close-code
+    contract, so it stops with the process.
+- Spectator join panic-repair parity (issue #396): a panic between the
+  durable spectator admission and the local role publication used to leave
+  a ghost database row that consumed spectator capacity and was invisible
+  to both maintenance sweeps (`prune_missing_rooms`,
+  `retry_disconnected_detaches`). The owned join transaction now catches the
+  unwind, rolls the unpublished admission back, and still delivers the
+  client's terminal `SpectatorJoinFailed`. Also pinned: the broadcast-side
+  drain gate for spectator detaches (a routed member observes no
+  `SpectatorDisconnected` under an active drain while persistence still
+  converges), and the issue-#241 TOCTOU invariant is documented at its
+  enforcement site.
 - Close the actionable issue #454 residuals from the session-182 seam audits
   (issues #454, #396):
   - The protocol-v3 text relay carriers (JSON `GameData` and the

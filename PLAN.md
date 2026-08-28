@@ -85,10 +85,16 @@ correctness evidence appears.
   carriers now enforce the binary lanes' complete, non-zero v3 stamp
   contract, the observed-drain sentinel deadline is grace-bounded, and the
   room limiter's fixed-window boundary-burst semantics are documented as the
-  deliberate trade-off. The remaining #454 items stay open, each gated on a
-  product decision (`signal_errors` retry advice, legacy-fullmesh drain
-  determinism) or sanitizer/oversubscription evidence (drain settle-budget
-  tail). Next session must name new seams from fresh evidence.
+  deliberate trade-off. Session-185 swept the spectator seam
+  (`spectator_service.rs` join/detach/prune/retry) with a four-way audit:
+  the concurrency invariants held, but panic-repair parity was missing —
+  a panic between the durable spectator admission and the local role
+  publication left a capacity-consuming ghost row; the join now compensates
+  (catch_unwind + rollback), a broadcast-side drain-suppression pin landed,
+  and the #241 TOCTOU invariant is documented at the re-validation site.
+  The remaining #454 item stays open, gated on sanitizer/oversubscription
+  evidence (drain settle-budget tail). Next session must name new seams
+  from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted
