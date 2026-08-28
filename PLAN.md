@@ -78,23 +78,24 @@ correctness evidence appears.
   acceptable signal and maintenance cost.
 - #396 — continue the correctness and performance sweep through named,
   gameplay-facing seams; require a deterministic counterexample or current
-  profile before changing production behavior. Session-182 swept the
-  previously named seams: rate limiter internals, the `websocket/sending.rs`
-  v2-projection corridor, and shutdown/drain choreography. Session-183
-  closed the actionable session-182 residuals from #454: text relay
-  carriers now enforce the binary lanes' complete, non-zero v3 stamp
-  contract, the observed-drain sentinel deadline is grace-bounded, and the
-  room limiter's fixed-window boundary-burst semantics are documented as the
-  deliberate trade-off. Session-185 swept the spectator seam
-  (`spectator_service.rs` join/detach/prune/retry) with a four-way audit:
-  the concurrency invariants held, but panic-repair parity was missing —
-  a panic between the durable spectator admission and the local role
-  publication left a capacity-consuming ghost row; the join now compensates
-  (catch_unwind + rollback), a broadcast-side drain-suppression pin landed,
-  and the #241 TOCTOU invariant is documented at the re-validation site.
-  The remaining #454 item stays open, gated on sanitizer/oversubscription
-  evidence (drain settle-budget tail). Next session must name new seams
-  from fresh evidence.
+  profile before changing production behavior. Prior sessions swept the
+  rate limiter internals, the `websocket/sending.rs` v2-projection corridor,
+  shutdown/drain choreography (#454, fully resolved), and the spectator seam
+  (join/detach/prune/retry panic-repair parity). Session-186 swept the
+  reconnect seam (`reconnection_service.rs` handle_reconnect corridor, all
+  four entry points): the concurrency skeleton held — atomic single-use
+  claims, panic-repair parity, capacity re-win, monotonic windows, bounded
+  waits, symmetric identity reassignment — and the drain-admission
+  asymmetry landed as fixes: reconnect and spectator-join attempts inside
+  the drain grace window are now refused with `SERVER_DRAINING` before any
+  claim or durable side effect, and `discard_pending_reconnection` enforces
+  the claimed-record invariant every expiry surface already had. The
+  audit's other candidates were evaluated and deliberately not taken:
+  reconnect capability asymmetry vs the join gate is the documented
+  relay-floor contract (`docs/protocol.md` mixed-path section), and a
+  reconnect rate-limit gate would be toothless (per-socket fresh UUIDs)
+  with floods already bounded by single-flight claims and the IP
+  connection cap. Next session must name new seams from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted
