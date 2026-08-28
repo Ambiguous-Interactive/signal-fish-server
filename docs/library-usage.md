@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the Axum router
     let router = websocket::create_standalone_router(&cfg.security.cors_origins)
-        .with_state(game_server);
+        .with_state(game_server.clone());
 
     // Start listening
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
@@ -95,11 +95,18 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Server listening on {}", addr);
 
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
+
+    // Once the serve future returns, run the shutdown drain so connected
+    // clients receive their `GoingAway` advisory and coded `4000` close
+    // instead of an abrupt drop when the process exits.
+    signal_fish_server::server::run_drain_choreography(&game_server, shutdown_tx).await;
 
     Ok(())
 }

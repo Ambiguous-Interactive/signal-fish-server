@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Public Rust API: expose `server::run_drain_choreography`, the full
+  post-signal drain sequence (begin, `GoingAway` fan-out, grace wait with an
+  idle fast path, coded `4000` closes, handler settle), so embedded servers
+  running their own accept loop reuse the exact shutdown choreography of the
+  shipped binary instead of dropping clients abruptly. Also public in
+  support: `EnhancedGameServer::has_active_socket_tasks` and
+  `config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES` (issue #396).
 - Reference clients: add a creator-only `--max-players` flag (native and
   browser, mirrored) that decouples room capacity from the `--peers` ready
   barrier. Capacity above the barrier leaves open seats after the room
