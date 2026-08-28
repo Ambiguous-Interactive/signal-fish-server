@@ -48,9 +48,10 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--server-url <URL>` | (required) | Full WebSocket URL of the signaling endpoint (e.g. `ws://127.0.0.1:3536/v3/ws`; use `/v2/ws` for a faithful v2 run) |
 | `--create-room` | — | Create a new room (the `room_created` event carries the code for sibling processes) |
 | `--join-code <CODE>` | — | Join an existing room by code |
-| `--peers <N>` | `2` | Expected member count incl. self; `PlayerReady` is sent once N members are seated AND the room is in the Lobby state. Also sets the room capacity (`max_players`) when creating |
-| `--expect-total-peers <N>` | `--peers` | Distinct members (incl. self, cumulative across departures) that must have been OBSERVED before a successful exit. Late-join incumbents set this above `--peers` so they outlive the session until the joiner arrives; room capacity stays `--peers` |
-| `--leave-on-game-start` | off | Exit 0 after `GameStarting` and its authoritative `SessionPlan` WITHOUT pairing (the plan is logged, not acted on). Used to vacate a seat in a finalized room — the server only finalizes full rooms, so late joins are seat fills |
+| `--peers <N>` | `2` | Expected member count incl. self; `PlayerReady` is sent once N members are seated AND the room is in the Lobby state. Also the default room capacity (`max_players`) when creating |
+| `--max-players <N>` | `--peers` | Creator-only room capacity; conflicts with `--join-code`. Values above `--peers` leave open seats after the room finalizes, so a late joiner can seat-fill the running session without any prior departure. Must not sit below `--peers` (the ready barrier could never be reached) |
+| `--expect-total-peers <N>` | `--peers` | Distinct members (incl. self, cumulative across departures) that must have been OBSERVED before a successful exit. Late-join incumbents set this above `--peers` so they outlive the session until the joiner arrives; room capacity is `--peers` unless `--max-players` raises it |
+| `--leave-on-game-start` | off | Exit 0 after `GameStarting` and its authoritative `SessionPlan` WITHOUT pairing (the plan is logged, not acted on). Used to vacate a seat in a finalized room so a late joiner can seat-fill the running session |
 | `--game-name <NAME>` | `reference-native` | Game name for room create/join |
 | `--player-name <NAME>` | `RefNative` | Display name |
 | `--app-id <ID>` | `reference-native-app` | Public `Authenticate.app_id` (interop servers use an open app-ID policy) |

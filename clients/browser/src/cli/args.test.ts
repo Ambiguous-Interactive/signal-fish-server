@@ -85,4 +85,42 @@ for (const [flag] of durationFlags) {
   }
 }
 
+// --max-players: creator-only capacity above the ready barrier (issue #451).
+// Default (absent) stays null so the page falls back to --peers.
+const withoutFlag = parseArgs(['--server-url', 'ws://127.0.0.1/v3/ws', '--create-room']);
+assert(withoutFlag?.config.maxPlayers === null, 'maxPlayers must default to null');
+const raised = parseArgs([
+  '--server-url',
+  'ws://127.0.0.1/v3/ws',
+  '--create-room',
+  '--peers',
+  '2',
+  '--max-players',
+  '3',
+]);
+assert(raised?.config.maxPlayers === 3, '--max-players must remain exact');
+for (const [args, description] of [
+  [
+    ['--join-code', 'ABC123', '--max-players', '3'],
+    'joiners adopt the joined room capacity; --max-players requires --create-room',
+  ],
+  [['--create-room', '--max-players', '0'], 'capacity is u8 on the wire; zero is out of range'],
+  [
+    ['--create-room', '--max-players', '256'],
+    'capacity is u8 on the wire; 256 is out of range',
+  ],
+  [
+    ['--create-room', '--peers', '3', '--max-players', '2'],
+    'capacity below the ready barrier deadlocks the run',
+  ],
+] as const) {
+  let rejected = false;
+  try {
+    parseArgs(['--server-url', 'ws://127.0.0.1/v3/ws', ...args]);
+  } catch (error) {
+    rejected = error instanceof UsageError;
+  }
+  assert(rejected, `--max-players must reject: ${description}`);
+}
+
 console.error('ok - browser CLI arguments preserve exact numeric values');

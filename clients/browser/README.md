@@ -88,7 +88,7 @@ accounting lifetime from `sender_watermarks`. Thus the shared
 ## CLI reference
 
 The shared flag surface mirrors the native client's ([canonical reference](../native/README.md#cli-reference)):
-`--server-url`, `--create-room`/`--join-code`, `--peers`, `--expect-total-peers`, `--leave-on-game-start`,
+`--server-url`, `--create-room`/`--join-code`, `--peers`, `--max-players`, `--expect-total-peers`, `--leave-on-game-start`,
 `--game-name`, `--player-name`, `--app-id`, `--platform`, `--exchange`, `--relay-payload`, `--cripple-ice`,
 `--p2p-timeout-secs`, `--run-for-secs`, `--max-runtime-secs`, `--success-release-file`, `--protocol-version`,
 `--supported-topologies`, `--supported-transports` — matching semantics and defaults except for the numeric

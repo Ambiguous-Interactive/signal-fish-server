@@ -33,8 +33,9 @@
 //!    observed by everyone, and the relay floor carries every member's
 //!    payload (the crippled one is fully served by the floor).
 //! 4. `late_join_authoritative_replan_real_webrtc_n3` — a seat-holder departs
-//!    a finalized 3-seat mesh room (the server only finalizes FULL rooms, so a
-//!    late join is always a seat fill); a new client then joins the running session:
+//!    a finalized 3-seat mesh room, vacating a seat; a new client then joins
+//!    the running session (a late join into a finalized room with a free seat
+//!    is a seat fill):
 //!    `RoomJoined` reports `finalized`, then every v3 member receives a fresh
 //!    authoritative `SessionPlan` with antisymmetric pairing roles, and all 3
 //!    live pairs connect with the full
@@ -70,6 +71,18 @@
 //!    Signaling still runs over the harness server's IPv4 loopback listener,
 //!    so the IPv6 claim is about the WebRTC data path (ICE, DTLS, SCTP). A
 //!    runner without IPv6 loopback fails the cell; it is never skipped.
+//! 9. `seat_fill_join_into_open_capacity_finalized_room_v2_relay_floor` — the
+//!    `--max-players` capability (issue #451): the creator opens a 3-seat
+//!    room with a 2-member ready barrier (`--peers 2 --max-players 3`), the
+//!    room finalizes at 2/3 seats when the all-ready toggle lands, and a
+//!    late joiner then fills the open seat of the RUNNING session with no
+//!    prior departure. Every member is pure v2 on `/v2/ws`, so the cheapest
+//!    lane (the relay floor) carries the whole proof: the joiner enters a
+//!    `finalized` room, `GameStarting` is never re-broadcast, the incumbents'
+//!    only post-start frames are the joiner's `PlayerJoined` (no corrective
+//!    broadcast) and its relay payload — and crucially NO `Error` frame,
+//!    guarding the issue #449 stale-latch class: a post-finalize `StartGame`
+//!    re-issue would draw `INVALID_ROOM_STATE` and surface here.
 //!
 //! Scenarios are serialized behind a mutex (each spawns 3+ OS processes and
 //! up to three concurrent WebRTC stacks; running them in parallel on small CI
@@ -94,13 +107,14 @@ use uuid::Uuid;
 
 /// Serializes the multi-process scenarios (see module docs).
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-/// Fully degraded ceiling for scenario 4's TWO client waves:
+/// Fully degraded ceiling for a TWO-client-wave scenario (4 and 9): the
+/// joiner wave spawns only after the pre-join gates, i.e. while the first
+/// wave still lives.
 ///  - server spawn: up to 3 attempts x 15 s health deadline each (see
 ///    `spawn_server`) = 45 s;
-///  - first wave (incumbents + seat-holder): every process is hard-bounded
-///    by its `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
-///  - joiner wave (spawned only after the pre-join gates, i.e. while the
-///    first wave still lives): bounded by its own 90 s watchdog = 90 s.
+///  - first wave: every process is hard-bounded by its own
+///    `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
+///  - joiner wave: bounded by its own 90 s watchdog = 90 s.
 const LATE_JOIN_SCENARIO_CEILING_SECS: u64 = 45 + 90 + 90;
 /// Each of the six ordinary one-wave scenarios is bounded by server startup
 /// plus one 90 s client watchdog; the departure regression uses 30 s clients.
@@ -109,9 +123,9 @@ const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
 /// A test may queue behind every other test. Bounding that wait by the entire
 /// suite's real composition remains conservative while keeping a degraded run
 /// within the workflow's 30-minute job policy (unlike multiplying the unique
-/// two-wave ceiling by all eight scenarios).
+/// two-wave ceiling by all nine scenarios).
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
-    LATE_JOIN_SCENARIO_CEILING_SECS
+    2 * LATE_JOIN_SCENARIO_CEILING_SECS
         + 6 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS,
 );
@@ -1098,8 +1112,8 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
         "success release path must start absent"
     );
 
-    // The server only finalizes FULL rooms, so a late join is always a seat
-    // fill: a 3-seat room finalizes with the two incumbents plus a
+    // A late join into a finalized room with a free seat is a seat fill: a
+    // 3-seat room finalizes with the two incumbents plus a
     // seat-holder that departs right after GameStarting (without ever
     // pairing), and the late joiner then fills the freed seat. The incumbents
     // gate their exit on having seen 4 distinct members (themselves, each
@@ -1549,6 +1563,235 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
         total_received, 12,
         "3 members x 2 pairs x 2 channels = 12 channel_message receive events"
     );
+}
+
+/// Scenario 9 (see the module docs): `--max-players` above the ready barrier
+/// leaves an open seat in the finalized room, and a late joiner seat-fills the
+/// running session over the v2 relay floor (issue #451).
+///
+/// RED-GREEN: without `--max-players 3` the room caps exactly at `--peers`,
+/// the joiner is rejected `ROOM_FULL`, and the run fails (verified: FAIL in
+/// 45 s — the joiner never seats); with the flag the scenario passes in ~1 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn seat_fill_join_into_open_capacity_finalized_room_v2_relay_floor() {
+    let _serial = acquire_serial().await;
+    let server = spawn_server("relay").await;
+    // Pure v2 on the legacy endpoint is the cheapest lane that proves the
+    // seat fill: the relay floor stores no sticky session plan, so the
+    // running session stays admissible to every joiner (the capability gate
+    // for non-relay plans cannot reject).
+    let server_url = server.v2_ws_url();
+    let workdir = tempfile::tempdir().expect("create client workdir");
+    let success_release_file = workdir.path().join("release-seat-fill-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
+    assert!(
+        !success_release_file.exists(),
+        "success release path must start absent"
+    );
+
+    // Creator: a 3-seat room with a 2-member ready barrier. The room
+    // finalizes at 2/3 seats when the all-ready toggle fires, so the third
+    // seat stays open WITHOUT any prior departure — the shape that requires
+    // `--max-players`: with the default capacity (exactly `--peers`) the
+    // joiner would be rejected `ROOM_FULL`. The incumbents stay seated until
+    // the joiner has arrived (`--expect-total-peers 3`), so every member is
+    // live when the joiner's entry-armed relay payload fans out.
+    let incumbent_args = [
+        "--protocol-version",
+        "2",
+        "--expect-total-peers",
+        "3",
+        "--success-release-file",
+        success_release_path,
+    ];
+    let creator_relay = relay_payload_for("c0");
+    let mut creator = spawn_client(
+        &ClientSpec {
+            name: "c0",
+            server_url: &server_url,
+            game_name: "interop-seatfill",
+            join_code: None,
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&creator_relay),
+            extra_args: &[
+                "--max-players",
+                "3",
+                "--protocol-version",
+                "2",
+                "--expect-total-peers",
+                "3",
+                "--success-release-file",
+                success_release_path,
+            ],
+        },
+        workdir.path(),
+    );
+    let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
+    let room_code = str_field(&created, "room_code").to_string();
+
+    let c1_relay = relay_payload_for("c1");
+    let mut c1 = spawn_client(
+        &ClientSpec {
+            name: "c1",
+            server_url: &server_url,
+            game_name: "interop-seatfill",
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&c1_relay),
+            extra_args: &incumbent_args,
+        },
+        workdir.path(),
+    );
+
+    // Deterministic pre-join gate: both incumbents processed GameStarting, so
+    // the room is Finalized server-side (the broadcast is enqueued after the
+    // state transition commits) and every later join is a seat fill.
+    for incumbent in [&mut creator, &mut c1] {
+        incumbent.await_event("game_starting", EVENT_TIMEOUT).await;
+    }
+
+    // The joiner fills the open seat of the running session. GameStarting
+    // pre-dates the join and is never re-fired, so its relay probe is armed
+    // on ENTRY; as a late joiner it waives pre-join relay receptions, so its
+    // own send completes its criteria.
+    let joiner_relay = relay_payload_for("c2");
+    let mut joiner = spawn_client(
+        &ClientSpec {
+            name: "c2",
+            server_url: &server_url,
+            game_name: "interop-seatfill",
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&joiner_relay),
+            extra_args: &[
+                "--protocol-version",
+                "2",
+                "--success-release-file",
+                success_release_path,
+            ],
+        },
+        workdir.path(),
+    );
+
+    // Hold all three at their success barrier. The incumbents' criteria do
+    // NOT provide a happens-before for RECEIVING the joiner's payload (their
+    // relay-receive bar is `--peers - 1` senders, met by the sibling alone,
+    // and the joiner's criteria follow its send, not their receipts), so
+    // receiving the full final-membership traffic is made an explicit
+    // precondition of the release barrier below.
+    for client in [&mut creator, &mut c1, &mut joiner] {
+        client
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+    }
+    for client in [&mut creator, &mut c1] {
+        while events_named(&client.events, "game_data_received").len() < 2 {
+            client
+                .await_event("game_data_received", EVENT_TIMEOUT)
+                .await;
+        }
+    }
+    std::fs::write(&success_release_file, b"release").expect("release seat-fill clients together");
+    for client in [&mut creator, &mut c1, &mut joiner] {
+        drain_expect_success(client).await;
+    }
+
+    let ids = [
+        player_id_of(&creator.events, "c0"),
+        player_id_of(&c1.events, "c1"),
+        player_id_of(&joiner.events, "c2"),
+    ];
+    let distinct: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(distinct.len(), 3, "player ids must be distinct: {ids:?}");
+
+    // Joiner: entry reports the running session's Finalized state; the
+    // GameStarting broadcast pre-dated the join and is never re-sent; the
+    // entry-armed probe sends exactly once.
+    let joined = single_event(&joiner.events, "room_joined", "c2");
+    assert_eq!(
+        str_field(joined, "lobby_state"),
+        "finalized",
+        "the seat-filling joiner must observe the room's Finalized state on entry"
+    );
+    assert!(
+        events_named(&joiner.events, "game_starting").is_empty(),
+        "joiner: GameStarting is never re-broadcast for a seat fill"
+    );
+    assert_eq!(
+        events_named(&joiner.events, "game_data_sent").len(),
+        1,
+        "joiner: the entry-armed relay probe sends exactly once"
+    );
+
+    // Incumbents: exactly one start; the seat fill is the only post-start
+    // membership event; and there are NO error frames — guarding the issue
+    // #449 stale-latch class: any post-finalize StartGame re-issue would
+    // draw INVALID_ROOM_STATE (the room is already Finalized) and surface
+    // here as a non-fatal `error` event.
+    for (client, other) in [(&creator, 1usize), (&c1, 0usize)] {
+        let log = &client.events;
+        let start_index = log
+            .iter()
+            .position(|event| event.get("event").and_then(Value::as_str) == Some("game_starting"))
+            .expect("the incumbent started the session exactly once");
+        assert_eq!(
+            events_named(log, "game_starting").len(),
+            1,
+            "{}: the room starts exactly once;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+        // The incumbent's lobby-phase sibling join precedes the start; the
+        // seat fill is the only post-start join.
+        let post_start_joins: Vec<&Value> = log[start_index + 1..]
+            .iter()
+            .filter(|event| event.get("event").and_then(Value::as_str) == Some("peer_joined"))
+            .collect();
+        assert_eq!(
+            post_start_joins.len(),
+            1,
+            "{}: the seat fill is the only post-start join;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+        assert_eq!(
+            str_field(post_start_joins[0], "player_id"),
+            ids[2],
+            "{}: the joined member must be the joiner",
+            client.name
+        );
+        let window = scenario_window(log);
+        assert!(
+            events_named(window, "error").is_empty(),
+            "{}: a running seat-filled session must produce no error frames;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+        // The relay floor carries both siblings' payloads across the FINAL
+        // membership: the other incumbent's post-start payload and the
+        // joiner's entry payload (sent while the incumbents were held live).
+        let received: BTreeSet<&str> = events_named(window, "game_data_received")
+            .into_iter()
+            .map(|event| str_field(event, "from"))
+            .collect();
+        let expected: BTreeSet<&str> = [ids[other].as_str(), ids[2].as_str()].into_iter().collect();
+        assert_eq!(
+            received,
+            expected,
+            "{}: the relay floor must deliver both siblings' payloads across the final \
+             membership;\n{}",
+            client.name,
+            client.diagnostics()
+        );
+    }
+    // The joiner waived pre-join receptions (nothing is replayed); whether
+    // the incumbents' payloads landed before or after its entry is a spawn
+    // race, so no reception assertion is made for it (mirroring scenario 4).
 }
 
 #[tokio::test(flavor = "multi_thread")]

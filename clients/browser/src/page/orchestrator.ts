@@ -799,7 +799,7 @@ class Orchestrator {
         game_name: this.config.gameName,
         room_code: this.config.joinCode,
         player_name: this.config.playerName,
-        max_players: this.config.peers,
+        max_players: this.config.maxPlayers ?? this.config.peers,
         supports_authority: false,
       }),
     );

@@ -435,6 +435,10 @@ pub async fn run(cli: &Cli) -> i32 {
 async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     validate_p2p_rebuild_retry_count(cli.p2p_rebuild_release_file.is_some(), cli.p2p_retry_count)
         .map_err(FatalError::protocol)?;
+    // Room-capacity usage errors reject before any network touch (the
+    // browser CLI rejects at parse time for the same reason): a doomed run
+    // must not cost a server-side room or a connection.
+    cli.join_max_players().map_err(FatalError::protocol)?;
 
     // Resolve an explicitly requested `--ip-family` BEFORE touching the
     // network, so a host that cannot serve it fails the process instead of
@@ -615,8 +619,9 @@ async fn join_room(
     ),
     FatalError,
 > {
-    let max_players = u8::try_from(cli.peers)
-        .map_err(|_overflow| FatalError::protocol(format!("--peers {} exceeds u8", cli.peers)))?;
+    // Validated in `run_inner`'s preflight (before any network touch); this
+    // recomputation is infallible for any `Cli` that got this far.
+    let max_players = cli.join_max_players().map_err(FatalError::protocol)?;
     let message = ClientMessage::JoinRoom {
         game_name: cli.game_name.clone(),
         room_code: cli.join_code.clone(),
