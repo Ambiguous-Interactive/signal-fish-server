@@ -44,24 +44,6 @@ unavailability after owner reconfiguration, with no failed required check.
 Repository-owned green checks alone do not satisfy this administrative
 requirement.
 
-### P97 — Public WebSocket upgrade deployment and first eligible probe (#367)
-
-- Configure the repository variable `SIGNAL_FISH_PUBLIC_WS_URL` with the
-  operator-owned public WebSocket endpoint.
-- Deploy the correlated image and record its platform-authoritative immutable
-  image digest, source revision, and rollout-complete UTC in the operator-owned
-  deployment record.
-- Classify the first schedule-triggered public probe with
-  `github.run_attempt == 1` whose start time follows that rollout boundary,
-  regardless of outcome or which headers survive the proxy.
-- Use its application and proxy correlation IDs to close #367 or narrow the
-  failing boundary with retained evidence.
-
-Acceptance: the first eligible post-rollout scheduled probe passes, admitting
-every simultaneous upgrade with distinct application correlation IDs and
-conserved outcomes. A failure must refine #367 with correlated evidence but
-does not satisfy this acceptance criterion.
-
 ### P7 — Mobile and Steam interoperability
 
 - Run the documented v3 interoperability matrix with maintained out-of-repo
