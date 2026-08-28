@@ -303,19 +303,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Close the actionable issue #454 residuals from the session-182 seam audits:
-  the protocol-v3 text relay carriers (JSON `GameData` and the
-  `GameDataBinary` text fallback projection) now reject zero delivery stamps
-  exactly like the binary encoders, so both carriers share one complete,
-  non-zero stamp contract — a zero stamp can no longer ride the
-  format-mismatch fallback projection that previously bypassed the binary
-  gate; an observer of a shutdown drain whose stored deadline overflowed to
-  the `u64::MAX` sentinel is now bounded by one grace window instead of
-  sleeping ~`u64::MAX` milliseconds before forcing the coded closes; and the
-  room rate limiter's fixed-window semantics (all budgets reset together, so
-  a boundary burst can spend up to twice the configured count) are documented
-  in the code and configuration reference, distinguished from the handshake
-  limiter's sliding window (issues #454, #396).
+- Close the actionable issue #454 residuals from the session-182 seam audits
+  (issues #454, #396):
+  - The protocol-v3 text relay carriers (JSON `GameData` and the
+    `GameDataBinary` text fallback projection) now reject zero delivery
+    stamps exactly like the binary encoders, so both carriers share one
+    complete, non-zero stamp contract — a zero stamp can no longer ride the
+    format-mismatch fallback projection that previously bypassed the binary
+    gate. Binary-direct zero stamps keep their fail-closed outcome but are
+    now classified as an invalid v3 stamp instead of a serialization failure.
+  - An observer of a shutdown drain whose stored deadline overflowed to the
+    `u64::MAX` sentinel is now bounded by one grace window instead of
+    sleeping ~`u64::MAX` milliseconds before forcing the coded closes; the
+    same bound absorbs backwards wall-clock steps.
+  - The room rate limiter's fixed-window semantics (all budgets reset
+    together, so a boundary burst can spend up to twice the configured
+    count) are documented in the code and configuration reference,
+    distinguished from the handshake limiter's sliding window.
 - Shutdown drain: `finish_background_shutdown` no longer aborts a drain that
   has already begun. The drain task flips the process watch only after the
   drain begins and the `GoingAway` fan-out completes, so a serve future that

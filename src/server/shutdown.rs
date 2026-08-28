@@ -43,10 +43,11 @@ impl ShutdownDrain {
     ///
     /// The first drain owner waits out the grace time it has not already spent
     /// announcing. Later observers use the already-advertised deadline instead
-    /// of extending shutdown by another full grace window, bounded by one
-    /// grace period: a deadline only ever encodes "start + grace", so the
-    /// bounded wait also keeps an overflowed `u64::MAX` sentinel deadline
-    /// from stretching the drain into a near-infinite sleep.
+    /// of extending shutdown by another full grace window. A deadline only
+    /// ever encodes "start + grace", so the observed wait is bounded by one
+    /// grace period; the bound also keeps an overflowed `u64::MAX` sentinel
+    /// deadline (or a backwards wall-clock step) from stretching the drain
+    /// into a near-infinite sleep.
     pub fn wait_before_close(self, elapsed_since_start: Duration) -> Duration {
         self.wait_before_close_since(elapsed_since_start, unix_epoch_ms_now())
     }
