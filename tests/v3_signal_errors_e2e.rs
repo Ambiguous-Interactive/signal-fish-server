@@ -15,7 +15,10 @@
 //!    must NOT be able to relay `Signal`s);
 //! 6. target left the room after pairing → `SignalTargetNotFound`, no panic;
 //! 7. per-connection rate-limit exhaustion → `SignalRateLimited` on the
-//!    over-budget signal, within-budget signals still relay.
+//!    over-budget signal, within-budget signals still relay;
+//! 7b. rejection-*detail* budget exhaustion (#454) → rejections switch to the
+//!     truthful detail-suppression guidance, and VALID signals still relay
+//!     (the error budget never gates relaying).
 //!
 //! Every test asserts the EXACT `ErrorCode` the server returns to the sender AND
 //! that the would-be target receives NOTHING (the rejected signal is not
@@ -245,6 +248,54 @@ async fn expect_signal_error(ws: &mut WsStream, who: &str, expected: ErrorCode) 
                     Some(expected.clone()),
                     "{who} expected {expected:?}"
                 );
+                Some(())
+            }
+            ServerMessage::Signal { .. } => {
+                panic!("{who}: a rejected signal must not be relayed back to the sender")
+            }
+            _ => None,
+        },
+    )
+    .await;
+}
+
+/// Assert the next *relevant* message the sender receives is an `Error` carrying
+/// exactly `expected` AND a `message` that satisfies every `expected_clauses`
+/// phrase (and none of the `forbidden_clauses` phrases). Housekeeping messages
+/// (e.g. `PlayerJoined`/`PlayerLeft`) are skipped.
+async fn expect_signal_error_with_message(
+    ws: &mut WsStream,
+    who: &str,
+    expected: ErrorCode,
+    expected_clauses: &[&str],
+    forbidden_clauses: &[&str],
+) {
+    next_matching_server_message_within(
+        ws,
+        SERVER_MESSAGE_TIMEOUT,
+        "signal rejection error",
+        |message| match message {
+            ServerMessage::Error {
+                message,
+                error_code,
+            } => {
+                assert_eq!(
+                    error_code,
+                    Some(expected.clone()),
+                    "{who} expected {expected:?}"
+                );
+                for clause in expected_clauses {
+                    assert!(
+                        message.contains(clause),
+                        "{who}: guidance must contain {clause:?}, got: {message}"
+                    );
+                }
+                for clause in forbidden_clauses {
+                    assert!(
+                        !message.contains(clause),
+                        "{who}: guidance must not contain {clause:?}, got: {message}"
+                    );
+                }
                 Some(())
             }
             ServerMessage::Signal { .. } => {
@@ -594,6 +645,67 @@ async fn signal_rate_limit_exhaustion_rejects_over_budget() {
     )
     .await;
     expect_no_relayed_signal(&mut peer2, "over-budget target").await;
+    running_server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// 7b. Rejection-detail budget exhaustion (#454): over-budget rejections switch
+//     to the truthful detail-suppression guidance, and VALID signals still
+//     relay — the error budget must never gate relaying.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn error_budget_exhaustion_suppresses_only_rejection_detail_and_relays_valid_signals() {
+    // One detailed rejection, then every further rejection is reported
+    // without detail. The valid-signal budget stays at its default.
+    let mut server_config = test_server_config();
+    server_config.rate_limit_config.max_signal_errors = 1;
+    let (running_server, _server) = start_server_with_config(server_config).await;
+    let addr = running_server.addr();
+
+    let (mut peer1, peer1_id, mut peer2, peer2_id) = webrtc_pair(addr).await;
+
+    // Peer-flap churn: the first stale-target signal gets the DETAILED
+    // rejection and consumes the one detailed-error slot.
+    send_signal(
+        &mut peer1,
+        PlayerId::new_v4(),
+        json!({ "IceCandidate": "stale-1" }),
+    )
+    .await;
+    expect_signal_error(
+        &mut peer1,
+        "first stale-target sender",
+        ErrorCode::SignalTargetNotFound,
+    )
+    .await;
+
+    // The next rejection is still reported (never silently dropped) but
+    // without detail, and the guidance must not tell a healthy client its
+    // signaling is throttled.
+    send_signal(
+        &mut peer1,
+        PlayerId::new_v4(),
+        json!({ "IceCandidate": "stale-2" }),
+    )
+    .await;
+    expect_signal_error_with_message(
+        &mut peer1,
+        "detail-suppressed sender",
+        ErrorCode::SignalRateLimited,
+        &[
+            "rejected signaling messages",
+            "Valid signals are still relayed",
+        ],
+        &["Signaling rate limit exceeded"],
+    )
+    .await;
+
+    // The gameplay-critical property: a VALID signal still relays —
+    // exhausting the rejection-detail budget never gates relaying.
+    let valid = json!({ "IceCandidate": "still-works" });
+    send_signal(&mut peer1, peer2_id, valid.clone()).await;
+    expect_relayed_signal(&mut peer2, "peer2 (post-exhaustion)", peer1_id, &valid).await;
     running_server.shutdown().await;
 }
 

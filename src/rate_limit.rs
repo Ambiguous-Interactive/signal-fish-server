@@ -412,7 +412,9 @@ impl std::fmt::Display for RateLimitError {
             Self::SignalErrorLimitExceeded { retry_after } => {
                 write!(
                     f,
-                    "Signaling error rate limit exceeded. Try again in {} seconds.",
+                    "Too many rejected signaling messages; further rejections are reported \
+                     without detail until the window resets. Valid signals are still relayed. \
+                     Try again in {} seconds.",
                     retry_after_secs(retry_after)
                 )
             }
@@ -873,6 +875,36 @@ mod tests {
         assert!(
             limiter.check_room_creation(&player_id).await.is_err(),
             "the accepted request, not the earlier stats read, must anchor the new window"
+        );
+    }
+
+    #[test]
+    fn signal_error_budget_guidance_is_truthful_about_detail_suppression() {
+        // #454: the error budget suppresses only the *detail* of rejection
+        // responses. A player whose peers flap burns this budget on routine
+        // validation failures, so the guidance must not borrow the
+        // valid-signal-budget wording ("Signaling rate limit exceeded") that
+        // would tell a healthy client to back off its trickle-ICE.
+        let error = RateLimitError::SignalErrorLimitExceeded {
+            retry_after: Duration::from_secs(30),
+        };
+        let text = error.to_string();
+
+        assert!(
+            text.contains("rejected signaling messages"),
+            "guidance must describe suppression of rejected-signal details, got: {text}"
+        );
+        assert!(
+            text.contains("Valid signals are still relayed"),
+            "guidance must state that valid signaling is unaffected, got: {text}"
+        );
+        assert!(
+            text.contains("Try again in 30 seconds"),
+            "guidance must keep the retry-after advice, got: {text}"
+        );
+        assert!(
+            !text.contains("Signaling rate limit exceeded"),
+            "guidance must not borrow the valid-signal-budget wording, got: {text}"
         );
     }
 
