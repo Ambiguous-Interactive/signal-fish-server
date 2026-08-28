@@ -353,7 +353,10 @@ mod tests {
         let config = crate::server::ServerConfig {
             max_message_size: 12_345,
             max_signal_bytes: 12_345,
-            max_outbound_message_size: 12_345,
+            // Pairing-legal: the relay envelope headroom above the inbound
+            // cap (constructor guard).
+            max_outbound_message_size: 12_345
+                + crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
             ..crate::server::ServerConfig::default()
         };
         let server = EnhancedGameServer::new(
@@ -384,7 +387,8 @@ mod tests {
                 .headers()
                 .get(WEBSOCKET_MAX_OUTBOUND_MESSAGE_SIZE_HEADER)
                 .and_then(|value| value.to_str().ok()),
-            Some("12345")
+            Some("12601"),
+            "the header must advertise the configured outbound cap"
         );
     }
 
