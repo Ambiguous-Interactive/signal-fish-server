@@ -564,6 +564,17 @@ impl ReconnectionManager {
 
     pub async fn discard_pending_reconnection(&self, player_id: &PlayerId) -> bool {
         let mut state = self.replay_state.write().await;
+        // Same claim invariant as every expiry surface: a claimed record is
+        // owned by its in-flight reconnect transaction, and removing it here
+        // would strand that transaction (its completion would silently fail
+        // while the player observed a successful reconnect).
+        if state
+            .disconnected_players
+            .get(player_id)
+            .is_some_and(|record| record.claim.is_some())
+        {
+            return false;
+        }
         let removed = state.disconnected_players.remove(player_id);
         if let Some(record) = &removed {
             let room_id = record.disconnected.room_id;
@@ -1712,6 +1723,38 @@ mod tests {
             .claim_reconnection(&Uuid::new_v4(), &player_id, &room_id, &token)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn discard_pending_reconnection_never_removes_a_claimed_record() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+        let claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player_id, &room_id, &token)
+            .await
+            .expect("claim succeeds");
+
+        assert!(
+            !manager.discard_pending_reconnection(&player_id).await,
+            "a discard must not remove a record claimed by an in-flight reconnect"
+        );
+        assert!(
+            manager.has_pending_reconnection(&player_id).await,
+            "the claimed record must survive the discard attempt"
+        );
+        assert!(
+            manager.complete_claimed_reconnection(&claim).await,
+            "the in-flight transaction still owns and can complete the record"
+        );
+        assert!(
+            !manager.has_pending_reconnection(&player_id).await,
+            "completion removes the record the discard could not"
+        );
     }
 
     #[tokio::test]
