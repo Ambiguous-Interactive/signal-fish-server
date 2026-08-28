@@ -83,18 +83,6 @@ async fn read_close_frame(ws: &mut WsStream, context: &str) -> (u16, String) {
     }
 }
 
-async fn read_exact_next_close_frame(ws: &mut WsStream, context: &str) -> (u16, String) {
-    match tokio::time::timeout(CLOSE_DEADLINE, ws.next()).await {
-        Ok(Some(Ok(Message::Close(Some(frame))))) => (frame.code.into(), frame.reason.to_string()),
-        Ok(Some(Ok(other))) => {
-            panic!("{context}: application/control frame leaked before close: {other:?}")
-        }
-        Ok(Some(Err(error))) => panic!("{context}: transport error before close: {error}"),
-        Ok(None) => panic!("{context}: stream ended before close frame"),
-        Err(_elapsed) => panic!("{context}: timed out waiting for immediate close frame"),
-    }
-}
-
 fn base_config() -> ServerConfig {
     ServerConfig {
         // Long reaper window by default so individual tests opt IN to the
@@ -141,27 +129,138 @@ async fn authenticate_v3(ws: &mut WsStream) {
 /// An oversized server application message is rejected before the WebSocket
 /// sink sees any prefix, and the connection closes with RFC 6455's standard
 /// message-too-big code rather than silently truncating protocol state.
+///
+/// The trigger must respect the relay-envelope headroom guard (`outbound ≥
+/// inbound + 256`): the fixed relay envelope can no longer push any single
+/// admitted frame past a validated pairing, and value-level re-serialization
+/// growth (number normalization, fallback escaping) is not attacker-shaped
+/// here. The oversized frame is therefore the aggregate `RoomJoined` roster,
+/// which grows by roughly one `PlayerInfo` entry per member and eventually
+/// crosses the small outbound cap. Which joiner first overflows depends on
+/// wire details, so the test walks the member sequence and asserts the
+/// contract on the first close: code `1009`, reason
+/// `outbound_message_too_large`. (The old auth-response trigger is
+/// unreachable under any validated pairing: the ~155-byte response can never
+/// exceed the minimum legal outbound cap.)
 #[tokio::test]
 async fn outbound_message_over_configured_limit_closes_with_1009() {
+    /// Bounded per-frame wait for the join walk, so a stalled server fails
+    /// the walk in minutes rather than accumulating 30-second deadlines.
+    const JOIN_WALK_DEADLINE: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+
     let mut config = base_config();
-    // Pairing-legal small caps: the serialized `Authenticate` request (~60 B)
-    // fits, while the server's auth response exceeds the shared cap, so the
-    // oversize is discovered during the auth-response flush.
-    config.max_message_size = 100;
-    config.max_signal_bytes = 100;
-    config.max_outbound_message_size = 100;
+    // Pairing-legal small caps: the handshake and join frames fit the inbound
+    // cap, while the aggregate roster snapshot grows past the outbound cap
+    // after a few members join.
+    config.max_message_size = 200;
+    config.max_signal_bytes = 200;
+    config.max_outbound_message_size = config.max_message_size
+        + 4 * signal_fish_server::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let running_server = start_server(server).await;
-    let mut ws = connect(running_server.addr()).await;
+    let addr = running_server.addr();
 
-    authenticate(&mut ws).await;
-    let (code, reason) =
-        read_exact_next_close_frame(&mut ws, "oversized outbound auth response").await;
-    assert_eq!(
-        code, 1009,
-        "oversized outbound message must close with 1009"
+    fn join_frame(room_code: Option<String>, player_name: String) -> Message {
+        let join = ClientMessage::JoinRoom {
+            game_name: "overflow-close".to_string(),
+            room_code,
+            player_name,
+            max_players: Some(24),
+            supports_authority: None,
+            relay_transport: None,
+        };
+        Message::Text(
+            serde_json::to_string(&join)
+                .expect("serialize JoinRoom")
+                .into(),
+        )
+    }
+
+    // The creator mints the room; later joiners reuse its room code.
+    let mut creator = connect(addr).await;
+    authenticate(&mut creator).await;
+    creator
+        .send(join_frame(None, "player-00000".to_string()))
+        .await
+        .expect("send JoinRoom");
+    let mut room_code = None;
+    let mut seen_frames = Vec::new();
+    for _ in 0..8 {
+        let frame = tokio::time::timeout(JOIN_WALK_DEADLINE, creator.next())
+            .await
+            .expect("timed out waiting for the creator's RoomJoined")
+            .expect("creator connection closed while joining")
+            .expect("websocket error while joining");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text) {
+            Ok(ServerMessage::RoomJoined(payload)) => {
+                room_code = Some(payload.room_code);
+                break;
+            }
+            other => seen_frames.push(format!("{other:?}")),
+        }
+    }
+    let room_code = room_code.unwrap_or_else(|| {
+        panic!("creator must receive RoomJoined with the room code; saw {seen_frames:?}")
+    });
+
+    // Walk the member sequence until a roster snapshot crosses the outbound
+    // cap. Joiners whose own RoomJoined arrives stay open (their sockets are
+    // held so the roster keeps growing); the first joiner whose snapshot
+    // fails its flush must close with exactly 1009.
+    let mut held_sockets = Vec::new();
+    let mut first_close = None;
+    for index in 1..16 {
+        let mut ws = connect(addr).await;
+        authenticate(&mut ws).await;
+        ws.send(join_frame(
+            Some(room_code.clone()),
+            format!("player-{index:05}"),
+        ))
+        .await
+        .expect("send JoinRoom");
+        for _ in 0..8 {
+            match tokio::time::timeout(JOIN_WALK_DEADLINE, ws.next()).await {
+                Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                    assert_eq!(
+                        u16::from(frame.code),
+                        1009,
+                        "oversized outbound message must close with 1009"
+                    );
+                    assert_eq!(
+                        frame.reason.as_str(),
+                        "outbound_message_too_large",
+                        "the oversize close must carry its documented reason"
+                    );
+                    first_close = Some(());
+                    break;
+                }
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    if text.contains("\"RoomJoined\"") {
+                        // The join landed; hold the socket so this member
+                        // stays in the roster for the next joiner.
+                        held_sockets.push(ws);
+                        break;
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(error))) => panic!("joiner {index}: transport error: {error}"),
+                Ok(None) => panic!("joiner {index}: stream ended with no close frame"),
+                Err(_elapsed) => panic!("joiner {index}: timed out waiting for join response"),
+            }
+        }
+        if first_close.is_some() {
+            break;
+        }
+    }
+
+    assert!(
+        first_close.is_some(),
+        "the growing roster snapshot must eventually exceed the outbound cap and close \
+         its joiner with 1009"
     );
-    assert_eq!(reason, "outbound_message_too_large");
 
     running_server.shutdown().await;
 }

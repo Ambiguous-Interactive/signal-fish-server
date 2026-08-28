@@ -191,20 +191,31 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         );
     }
 
-    // Contradictory cap pairing (#396 sweep): an inbound cap above the
-    // outbound cap admits relayed game data that cannot be re-emitted. Every
-    // recipient would instead be fail-closed with `1009
+    // Contradictory cap pairing (#396 sweep): an inbound cap at or above the
+    // outbound cap admits relayed game data that cannot be re-emitted. The
+    // relay projection attaches the sender id and delivery stamps, so the
+    // relayed frame is strictly larger than the admitted inbound frame —
+    // equality alone already overflows the outbound cap for near-max frames.
+    // Every recipient would instead be fail-closed with `1009
     // outbound_message_too_large`, turning the deployment into silent
     // total-rejection for exactly the traffic it appears to accept. Like the
     // signal-cap check below, this is rejected rather than warned about so
     // the misconfiguration can never ship.
-    if config.security.max_message_size > config.security.max_outbound_message_size {
+    if config.security.max_outbound_message_size
+        < config
+            .security
+            .max_message_size
+            .saturating_add(crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES)
+    {
         anyhow::bail!(
-            "security.max_message_size ({}) must not exceed security.max_outbound_message_size ({}): \
-             a frame admitted by the inbound cap could not be re-serialized under the outbound \
-             cap, closing every recipient with `1009 outbound_message_too_large`",
+            "security.max_message_size ({}) leaves security.max_outbound_message_size ({}) \
+             without the required {}-byte relay projection headroom: the server re-emits \
+             an admitted frame with the relay envelope (sender id, delivery stamps), \
+             which grows it past the outbound cap and would close every recipient with \
+             `1009 outbound_message_too_large`",
             config.security.max_message_size,
             config.security.max_outbound_message_size,
+            crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
         );
     }
 
@@ -1234,13 +1245,15 @@ mod tests {
         );
     }
 
-    /// The inbound and outbound message caps must not invert (#396 sweep).
-    /// `max_message_size` above `max_outbound_message_size` is a
-    /// total-rejection configuration of exactly the class that previously
-    /// shipped silently (see the zero-cap cases): every relayed game-data
-    /// frame would be admitted at ingress and then fail-closed at the
-    /// recipient with `1009 outbound_message_too_large`. Data-driven over the
-    /// boundary; equality stays legal (same frame in and out).
+    /// The inbound and outbound message caps must keep the relay envelope
+    /// headroom (#396 sweep). `max_message_size` above `max_outbound_message_size`
+    /// is a total-rejection configuration of exactly the class that previously
+    /// shipped silently (see the zero-cap cases): every relayed game-data frame
+    /// would be admitted at ingress and then fail-closed at the recipient with
+    /// `1009 outbound_message_too_large`. Equality is part of the same failure
+    /// class, not an exception: the relayed frame grows by the relay envelope
+    /// (sender id, delivery stamps), so an admitted near-max frame overflows the
+    /// matching outbound cap. Data-driven over the boundary.
     #[test]
     fn max_message_size_must_not_exceed_max_outbound_message_size() {
         let (inbound_default, outbound_default) = {
@@ -1251,15 +1264,25 @@ mod tests {
             )
         };
         assert!(
-            inbound_default < outbound_default,
+            outbound_default - inbound_default
+                > crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
             "defaults must stay a sane pairing"
         );
+
+        let headroom = crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES;
+        let inbound = 1_048_576;
 
         // (inbound, outbound, expect_ok)
         let cases = [
             (inbound_default, outbound_default, true),
-            // Equal boundary stays legal: the same frame passes in and out.
-            (1_048_576, 1_048_576, true),
+            // The old "equality stays legal" pin was wrong: the relayed frame
+            // is strictly larger than the admitted frame, so a matching
+            // outbound cap closes the recipient with `1009`.
+            (inbound, inbound, false),
+            // One byte below the required headroom still overflows.
+            (inbound, inbound + headroom - 1, false),
+            // Exactly the headroom covers the fixed relay envelope.
+            (inbound, inbound + headroom, true),
             // Genuine inversion: ingress admits what egress cannot re-emit.
             (2_097_152, 1_048_576, false),
         ];

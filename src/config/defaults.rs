@@ -242,6 +242,31 @@ pub const fn default_max_outbound_message_size() -> usize {
 /// server's fallible materialization buffer.
 pub const MAX_OUTBOUND_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
+/// Minimum headroom the outbound cap must keep above the inbound frame cap.
+///
+/// An admitted inbound frame is re-emitted to roommates with the relay
+/// envelope attached, so its relayed form is strictly larger than what the
+/// inbound cap admitted, by at least the fixed envelope. Bounded per carrier:
+///
+/// - JSON `GameData`: `"from_player":"<hyphenated-uuid>"` (~54 bytes) plus
+///   v3 delivery stamps (`"seq":<u64>,"epoch":<u32>`, ~40 bytes max) and
+///   envelope punctuation.
+/// - Binary `GameData`: the fixed MessagePack envelope (16-byte sender id,
+///   encoding, delivery stamps, framing header, ~50 bytes).
+/// - Relayed `Signal`: the sender id field, ~70 bytes with envelope.
+///
+/// Worst fixed-envelope case is ~150 bytes; 256 keeps roughly 1.7x margin.
+///
+/// This headroom covers only the fixed envelope. Value-level
+/// re-serialization can still grow a frame beyond it — JSON number
+/// normalization (`9e9` becomes `9000000000.0`) and the MessagePack→JSON
+/// fallback's escaping being the known cases — and such a frame remains
+/// enforced fail-closed at write time (`1009 outbound_message_too_large`).
+/// The headroom exists so that ordinary, envelope-only growth can never
+/// close a recipient; deployments that relay adversarial payloads should
+/// keep a proportionally larger gap.
+pub const RELAY_ENVELOPE_HEADROOM_BYTES: usize = 256;
+
 /// Default cap on the serialized size of a v3 `Signal` payload (16 KiB):
 /// generously above any real SDP/ICE payload, well under the 64 KiB
 /// `max_message_size` frame cap.

@@ -74,6 +74,16 @@ impl EnhancedGameServer {
         self.shutdown_drain_deadline_ms.load(Ordering::Acquire) != 0
     }
 
+    /// Whether any WebSocket handler task is still live.
+    ///
+    /// Handlers are tracked for their whole lifetime, so this is true
+    /// whenever a socket could still observe a shutdown close frame. During
+    /// a drain new registrations are refused, so a false reading here means
+    /// no connection can ever receive the coded `4000` close.
+    pub fn has_active_socket_tasks(&self) -> bool {
+        self.active_socket_tasks.load(Ordering::Acquire) > 0
+    }
+
     /// Begin graceful shutdown drain, or return the already-advertised drain.
     ///
     /// The first caller fixes the deadline. Later callers observe the same
@@ -213,6 +223,71 @@ impl EnhancedGameServer {
                 }
             }
         }
+    }
+}
+
+/// Scheduling beat granted to upgraded-but-unpolled connection handlers to
+/// arm their shutdown lifetime guard before the idle drain decides the
+/// grace wait protects nothing. Far below any meaningful grace, so the idle
+/// restart fast path stays fast.
+pub(crate) const DRAIN_IDLE_HANDLER_SETTLE: Duration = Duration::from_millis(50);
+
+/// Everything the shutdown drain does after the shutdown signal arrives:
+/// begin the drain, fan out the v3 `GoingAway` advisories, wait out the
+/// grace (skipped when no socket handler can observe the close), force the
+/// coded `4000` closes, and settle the handlers before process exit.
+///
+/// Embedded servers that run their own accept loop call this after their
+/// serve future returns, instead of reimplementing the choreography.
+pub async fn run_drain_choreography(
+    server: &EnhancedGameServer,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+) {
+    let drain_started_at = tokio::time::Instant::now();
+    let drain = server.begin_shutdown_drain();
+    tracing::info!(
+        deadline_ms = drain.deadline_ms,
+        grace_ms = u64::try_from(drain.grace.as_millis()).unwrap_or(u64::MAX),
+        started_by_this_call = drain.started_by_this_call,
+        "Server shutdown drain started"
+    );
+    let going_away_sent = server.announce_shutdown_drain(drain).await;
+    tracing::info!(
+        going_away_sent,
+        started_by_this_call = drain.started_by_this_call,
+        "Shutdown GoingAway advisories enqueued"
+    );
+
+    let _ = shutdown_tx.send(true);
+
+    let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
+    // During a drain new registrations are refused, so with no live socket
+    // handler no connection can ever receive the coded `4000` close. Waiting
+    // out the grace anyway would be pure restart delay that eats into the
+    // operator's termination budget. An upgraded connection whose handler
+    // task has not been polled yet does not count as live, so the empty
+    // reading is confirmed after one scheduling beat before the wait is
+    // skipped; a handler surfacing during that beat still gets its grace.
+    if wait_before_close > Duration::ZERO {
+        if !server.has_active_socket_tasks() {
+            tokio::time::sleep(DRAIN_IDLE_HANDLER_SETTLE).await;
+        }
+        if server.has_active_socket_tasks() {
+            tokio::time::sleep(wait_before_close).await;
+        }
+    }
+
+    let close_requests = server.close_connections_for_shutdown();
+    tracing::info!(close_requests, "Shutdown close requests issued");
+
+    let settle_timeout = crate::websocket::registered_connection_shutdown_settle_timeout();
+    let remaining_connections = server.wait_for_shutdown_connections(settle_timeout).await;
+    if remaining_connections > 0 {
+        tracing::warn!(
+            remaining_connections,
+            settle_ms = u64::try_from(settle_timeout.as_millis()).unwrap_or(u64::MAX),
+            "Shutdown drain ended with connections still registered"
+        );
     }
 }
 
@@ -364,6 +439,102 @@ mod tests {
         assert!(
             matches!(duplicate_advisory, Err(TryRecvError::Empty)),
             "duplicate drain should not enqueue another GoingAway"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_socket_task_tracking_reflects_live_handlers() {
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+
+        assert!(
+            !server.has_active_socket_tasks(),
+            "a freshly constructed server has no live socket handlers"
+        );
+        let guard = server.track_socket_task();
+        assert!(
+            server.has_active_socket_tasks(),
+            "a tracked handler must be reported as live for the drain grace skip"
+        );
+        drop(guard);
+        assert!(
+            !server.has_active_socket_tasks(),
+            "a returned handler must stop counting toward the drain grace skip"
+        );
+    }
+
+    /// A connection whose handler task arms during the idle settle beat must
+    /// still get the grace wait: the empty active-task reading that would
+    /// skip the wait is confirmed only after the beat, so a handler
+    /// surfacing inside it flips the choreography back onto the full wait
+    /// and receives its coded `4000` close. Red condition: an immediate
+    /// skip (no settle beat) completes the choreography long before the
+    /// grace elapses.
+    #[tokio::test]
+    async fn handler_armed_during_idle_settle_still_gets_the_grace() {
+        let grace = Duration::from_millis(300);
+        let server = EnhancedGameServer::new(
+            ServerConfig {
+                drain_grace: grace,
+                ..ServerConfig::default()
+            },
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let started = std::time::Instant::now();
+        let choreography = {
+            let server = std::sync::Arc::clone(&server);
+            tokio::spawn(async move {
+                run_drain_choreography(&server, shutdown_tx).await;
+            })
+        };
+
+        // Arm a handler inside the 50 ms settle beat. Timer deadlines are
+        // ordered on one runtime, so this 20 ms sleep fires before the
+        // beat's 50 ms recheck, deterministically.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let guard = server.track_socket_task();
+
+        // Release the guard well after the recheck but before the grace
+        // expires, so the trailing settle wait observes zero active tasks.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(guard);
+
+        choreography
+            .await
+            .expect("choreography task must not panic");
+
+        // The choreography began ~0 ms into this test; completing it must
+        // have waited out at least the grace (settle beat + grace), not
+        // skipped the wait while the handler was arming.
+        assert!(
+            started.elapsed() >= grace,
+            "a handler that armed during the settle beat must still get the grace wait \
+             (elapsed {:?}, grace {grace:?})",
+            started.elapsed()
         );
     }
 

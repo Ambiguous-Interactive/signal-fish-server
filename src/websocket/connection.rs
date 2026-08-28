@@ -4017,7 +4017,9 @@ mod tests {
         let server = test_server_with_config(ServerConfig {
             max_message_size: 64,
             max_signal_bytes: 64,
-            max_outbound_message_size: 128,
+            // Pairing-legal: the relay envelope headroom above the inbound
+            // cap; the 512-byte blob overflows it either way.
+            max_outbound_message_size: 64 + crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
             ..ServerConfig::default()
         })
         .await;

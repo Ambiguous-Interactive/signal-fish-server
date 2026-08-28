@@ -92,7 +92,7 @@ mod spectator_service;
 use connection_manager::{ClientLifecycle, ConnectionManager};
 pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
-pub use shutdown::ShutdownDrain;
+pub use shutdown::{run_drain_choreography, ShutdownDrain};
 use spectator_service::SpectatorService;
 
 #[cfg(test)]
@@ -345,15 +345,21 @@ impl EnhancedGameServer {
         );
         // Same contradictory-cap pairing guards as `validate_config_security`,
         // so direct library construction cannot ship what config validation
-        // rejects.
+        // rejects. The relay projection attaches the sender id and delivery
+        // stamps to every re-emitted frame, so the outbound cap must keep the
+        // envelope headroom above the inbound cap, not merely match it.
         anyhow::ensure!(
-            config.max_message_size <= config.max_outbound_message_size,
-            "max_message_size ({}) must not exceed max_outbound_message_size ({}): \
-             a frame admitted by the inbound cap could not be re-serialized under the \
-             outbound cap, closing every recipient with `1009 \
-             outbound_message_too_large`",
+            config.max_outbound_message_size
+                >= config
+                    .max_message_size
+                    .saturating_add(crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES),
+            "max_message_size ({}) leaves max_outbound_message_size ({}) without the \
+             required {}-byte relay projection headroom: a frame admitted by the \
+             inbound cap grows when re-emitted with the relay envelope, closing every \
+             recipient with `1009 outbound_message_too_large`",
             config.max_message_size,
             config.max_outbound_message_size,
+            crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
         );
         anyhow::ensure!(
             config.max_signal_bytes <= config.max_message_size,
@@ -4375,10 +4381,50 @@ mod relay_projection_cache_tests {
             Err(error) => error,
         };
         assert!(
-            error
-                .to_string()
-                .contains("max_message_size (2097152) must not exceed max_outbound_message_size"),
+            error.to_string().contains("max_message_size (2097152)")
+                && error
+                    .to_string()
+                    .contains("max_outbound_message_size (1048576)"),
             "constructor must name the contradictory pairing: {error}"
+        );
+        assert!(
+            error.to_string().contains("relay projection headroom"),
+            "constructor must state the envelope-headroom requirement: {error}"
+        );
+    }
+
+    /// Equality is part of the same failure class as inversion: the relayed
+    /// frame grows by the relay envelope, so a matching outbound cap admits
+    /// frames it cannot re-emit.
+    #[tokio::test]
+    async fn library_constructor_rejects_message_caps_without_relay_headroom() {
+        let inbound = 1_048_576;
+        let config = super::ServerConfig {
+            max_message_size: inbound,
+            max_outbound_message_size: inbound,
+            ..super::ServerConfig::default()
+        };
+        let result = super::EnhancedGameServer::new(
+            config,
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("caps without relay headroom must fail before server construction"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("relay projection headroom"),
+            "constructor must state the envelope-headroom requirement: {error}"
         );
     }
 
