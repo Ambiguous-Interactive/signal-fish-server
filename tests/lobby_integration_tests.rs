@@ -743,6 +743,55 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
 }
 
 #[tokio::test]
+async fn spectator_join_during_shutdown_drain_is_rejected_with_server_draining() {
+    let server = create_test_server().await;
+
+    let host_id = Uuid::new_v4();
+    let spectator_id = Uuid::new_v4();
+    let (host_tx, mut host_rx) = mpsc::channel(64);
+    let (spectator_tx, mut spectator_rx) = mpsc::channel(64);
+    server.connect_client(host_id, host_tx).await;
+    server.connect_client(spectator_id, spectator_tx).await;
+
+    server
+        .handle_join_room(
+            &host_id,
+            "drain_spectator".to_string(),
+            Some("DRN101".to_string()),
+            "Host".to_string(),
+            Some(2),
+            Some(true),
+            None,
+        )
+        .await;
+    let _room = expect_room_joined(&mut host_rx, "host join before drain");
+
+    // The spectator socket upgraded before the drain flipped, so its join
+    // still arrives inside the grace window on a live route.
+    let drain = server.begin_shutdown_drain();
+    assert!(drain.started_by_this_call, "test owns the drain window");
+
+    server
+        .handle_join_as_spectator(
+            &spectator_id,
+            "drain_spectator".to_string(),
+            "DRN101".to_string(),
+            "Viewer".to_string(),
+        )
+        .await;
+    match recv_now(&mut spectator_rx, "spectator drain outcome").as_ref() {
+        ServerMessage::SpectatorJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::ServerDraining));
+        }
+        other => panic!("expected SpectatorJoinFailed(ServerDraining), got {other:?}"),
+    }
+    assert_no_pending_message(
+        &mut spectator_rx,
+        "drain rejection produces exactly one terminal response",
+    );
+}
+
+#[tokio::test]
 async fn spectator_admission_uses_configured_name_and_room_code_boundaries() {
     let protocol = signal_fish_server::config::ProtocolConfig {
         max_game_name_length: 4,
