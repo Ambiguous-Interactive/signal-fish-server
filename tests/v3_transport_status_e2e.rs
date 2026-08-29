@@ -100,12 +100,12 @@ fn mesh_session_config() -> SessionConfig {
 async fn start_server_with_session(
     session: SessionConfig,
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
-    start_server_with_websocket_config(session, |_| {}).await
+    start_server_with_config(session, |_| {}).await
 }
 
 /// [`start_server_with_session`] with direct access to the server config
 /// for tests that need to size queue capacity or slow-consumer deadlines.
-async fn start_server_with_websocket_config(
+async fn start_server_with_config(
     session: SessionConfig,
     mutate_config: impl FnOnce(&mut ServerConfig),
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
@@ -1372,7 +1372,7 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
     const STALLED_RECV_BUFFER_BYTES: u32 = 4096;
 
     let session = mesh_session_config();
-    let (running_server, game_server) = start_server_with_websocket_config(session, |config| {
+    let (running_server, game_server) = start_server_with_config(session, |config| {
         // The activity reaper is a second, independent clock on the stalled
         // member (10 s in `test_server_config`); the wedged phases below take
         // a few seconds even before CI variance, so raise the deadline well
