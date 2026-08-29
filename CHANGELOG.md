@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `ROOM_SESSION_INCOMPATIBLE` wire code: seat-fill joins into finalized rooms from clients that
   did not negotiate the room's protocol, topology, and transport are refused instead of being
   seated on a silently split data path; new `seat_fills_rejected_incompatible` and
-  `mixed_path_members_observed` metrics observe residual mixed-path rooms (issue #421).
+  `mixed_path_members_observed` metrics count rejected incompatible seat fills and observed
+  mixed-path members (issue #421).
 - Startup warnings: token binding over plaintext `ws://` only provides replay ordering, not
   authentication, and disabling every liveness mechanism at once leaves dead clients un-reaped
   (issues #462, #465).
@@ -85,8 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforced only when `rate_limit_per_minute` is configured, and
   `signal_fish_game_data_messages_total` counts admission-time acceptance (no values changed).
 - Dependencies: refreshed compatible Rust dependencies (including `webrtc`/`rtc` 0.20.3 and
-  `uuid` 1.24.1) and GitHub Actions; the crates.io source archive shrinks by excluding test-only
-  modules (issue #397).
+  `uuid` 1.24.1, and the yanked `chacha20` 0.10.1 lockfile pin bumped to 0.10.2) and GitHub
+  Actions; the crates.io source archive shrinks by excluding test-only modules (issue #397).
 
 ### Fixed
 
