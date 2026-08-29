@@ -109,6 +109,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Truthful rate-limit documentation (issue #396 session-187 audit): the
+  `Authenticated.rate_limits` projection and its rustdoc now state that
+  `per_minute` handshake limiting is enforced only for allowlist entries that
+  configure an explicit `rate_limit_per_minute` — omitting the field is the
+  "unlimited" configuration, the advertised 1000/60000/1440000 numbers are
+  projections only, and unknown-ID rejections consume no budget. Public docs
+  were already qualified ("enforced when configured"); the internal rustdoc
+  overclaimed and is corrected. A paired data-driven test pins both halves of
+  the contract (advertised projection AND no enforcement) so a future change
+  to either side must consciously update it.
 - Reject contradictory message-cap pairings at startup: a
   `security.max_message_size` above `security.max_outbound_message_size`
   previously started and then admitted relayed game data that could not be

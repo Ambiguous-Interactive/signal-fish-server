@@ -100,7 +100,10 @@ does not turn the public label into a credential.
   all game names.
 - `max_players_per_room` — maximum requested capacity for newly created rooms.
 - `rate_limit_per_minute` — handshake requests per minute, counted across every
-  connection using the same public ID.
+  connection using the same public ID. Enforced only when an entry configures
+  an explicit value; omitting it is the "unlimited" configuration — the
+  `Authenticated.rate_limits` numbers are then projections only, and unknown-ID
+  rejections never consume any budget.
 
 ## Legacy configuration
 

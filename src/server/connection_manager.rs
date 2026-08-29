@@ -233,17 +233,23 @@ pub(crate) enum ReassignmentOutcome {
 }
 
 /// Per-socket close reasons that must not cross a reconnect identity swap.
+/// Exhaustive on purpose: a future `CloseReason` variant must be classified
+/// here explicitly instead of silently inheriting either default.
 fn is_transient_socket_close_reason(reason: crate::coordination::CloseReason) -> bool {
     use crate::coordination::CloseReason;
-    matches!(
-        reason,
+    match reason {
+        // Per-socket lifecycle closes: pinned for the transient socket's own
+        // quietness, congestion, or teardown.
         CloseReason::AuthTimeout
-            | CloseReason::ActivityTimeout
-            | CloseReason::IdleTimeout
-            | CloseReason::SlowConsumer
-            | CloseReason::OutboundMessageTooLarge
-            | CloseReason::Unregistered
-    )
+        | CloseReason::ActivityTimeout
+        | CloseReason::IdleTimeout
+        | CloseReason::SlowConsumer
+        | CloseReason::OutboundMessageTooLarge
+        | CloseReason::Unregistered => true,
+        // Identity/room-scoped: a drain must close restored connections, and
+        // a room pin reflects the room the claim just verified.
+        CloseReason::Shutdown | CloseReason::RoomInactive => false,
+    }
 }
 
 pub(crate) struct ConnectionManager {
