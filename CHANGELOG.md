@@ -16,13 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verbatim, so the client chooses the application UUID; nothing consumes
   open-mode application identity as an authority today, and a future consumer
   must not treat it as unspoofable (issue #464).
-- Pin the documented `TransportStatus` fan-out sharp edge with a
-  deterministic e2e counterexample: with one room member stalled on a full
-  control queue, an accepted report parks the fan-out for a full
-  slow-consumer window while holding the room event mutation gate, delaying a
-  concurrent `LeaveRoom` past the stalled member's eviction. Pins the current
-  snapshot-consistency tradeoff as the evidence base for the issue #463
-  treatment decision (issue #463).
 - Public Rust API: expose `server::run_drain_choreography`, the full
   post-signal drain sequence (begin, `GoingAway` fan-out, grace wait with an
   idle fast path, coded `4000` closes, handler settle), so embedded servers
@@ -123,6 +116,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PeerTransportStatus` fan-out delivery no longer holds the room event
+  mutation gate or the reporting connection's lifecycle gate: recipients are
+  resolved under the gates, then delivery is dispatched outside them, so one
+  slow room member's backpressured fan-out leg no longer delays concurrent
+  room mutations (`JoinRoom`, `LeaveRoom`, `PlayerReady`, `StartGame`) for up
+  to a slow-consumer window (issue #463). Dispatch truth is carried by
+  per-recipient revalidation — membership via the routing-checked delivery
+  path, negotiated protocol v3 capability per leg. Defense in depth: the
+  socket writer now fail-closed-suppresses (accounted drop, no queue fence)
+  every server-to-client message variant documented v3-only (`Signal`,
+  `NewPeer`, `SessionPlan`, `PeerTransportStatus`, `RelayStats`, `GoingAway`,
+  `DeliveryReport`, `RoomOperationResult`) if one ever reaches a pre-v3
+  connection's queue — for example through a reconnect identity swap racing a
+  fan-out's recipient snapshot — so a client that cannot parse the variant
+  can never observe it. The rewritten deterministic e2e pins the improved
+  contract: a concurrent `LeaveRoom` is admitted while the stalled member's
+  fan-out leg is still parked, and the parked leg still evicts that member.
 - Protocol: a second `Authenticate` on a connection that already completed the
   handshake — under either app-ID policy, including a re-`Authenticate` after a
   reconnect identity swap on the same socket — and a first `Authenticate` sent

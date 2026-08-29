@@ -92,12 +92,17 @@ correctness evidence appears.
   UUID divergence is documented (#464, closed as documented), the
   ChannelClosed reservation metric gap was refuted (#470, counted once at
   reservation), the token-binding plaintext warning was already landed
-  (#462, closed with evidence), and the TransportStatus fan-out gate-hold
-  now has its deterministic counterexample pinned as a test (#463 — the
-  production decision/fix remains open: snapshot-then-deliver vs
-  documenting the exception). Next session: decide and implement the #463
-  treatment from the pinned counterexample, then name new seams from fresh
-  evidence.
+  (#462, closed with evidence), and #463's TransportStatus fan-out gate-hold
+  was pinned as a deterministic counterexample (#472). Session-190 decided
+  and implemented the #463 treatment (#473): the fan-out releases the room
+  mutation gate and the sender lifecycle gate before delivery (snapshot-only
+  gate hold), and the socket writer fail-closed-suppresses every documented
+  v3-only server-to-client variant on a pre-v3 queue, eliminating the
+  reconnect-identity-swap race class; the pinned counterexample was rewritten
+  to the improved contract with a deterministic eviction-ordering regression
+  oracle. Deliberate gate-holds documented in #463 (signaling plan-before-
+  signal, session-policy departure snapshot stability) remain by design.
+  Next session: name new seams from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted

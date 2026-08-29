@@ -35,11 +35,11 @@
 //! 10. `finalization_race_single_plan_per_member` — both members of a 2-seat
 //!     room send `PlayerReady` concurrently; finalization happens exactly once
 //!     and both receive identical (mirrored) `SessionPlan`s.
-//! 11. `transport_status_fanout_gate_delays_mutation_behind_stalled_member` —
-//!     the deterministic counterexample for the documented fan-out sharp edge:
-//!     dispatch holds the room event mutation gate across backpressured
-//!     delivery, so a stalled member delays a concurrent room mutation by up
-//!     to one slow-consumer window.
+//! 11. `transport_status_fanout_backpressure_does_not_block_room_mutation` —
+//!     the improved #463 contract the deterministic counterexample pinned:
+//!     dispatch releases the room event mutation gate before backpressured
+//!     delivery, so a stalled member's parked fan-out leg delays no room
+//!     mutation (and the stalled member is still evicted by that leg).
 
 mod test_helpers;
 mod v3_conformance_helpers;
@@ -1328,37 +1328,31 @@ async fn connect_v3_with_small_recv_buffer(
     ws_stream
 }
 
-/// Deterministic counterexample for the documented `TransportStatus` fan-out
-/// sharp edge: dispatch holds the room event mutation gate across backpressured
-/// delivery (`message_router.rs`), while every other room-event publisher
-/// releases the gate before delivery ("delivery backpressure never holds the
-/// room mutation gate"). With one member stalled on a full control queue, an
-/// accepted report parks inside the fan-out for a whole slow-consumer window,
-/// and a concurrent room mutation (`LeaveRoom`) that needs the same gate is
-/// admitted only once the stalled member is evicted.
+/// Deterministic counterexample (issue #463) turned contract pin: dispatch of
+/// the `PeerTransportStatus` fan-out releases the room event mutation gate
+/// before backpressured delivery, so no gate holder parks on delivery on this
+/// path (sequenced publishers instead transfer the guard into their FIFO
+/// job). With one member stalled on a full control queue, the accepted
+/// report's stalled leg parks for a whole slow-consumer window, and a
+/// concurrent room mutation (`LeaveRoom`) is admitted WITHOUT waiting behind
+/// that leg's eviction. The stalled member is still evicted by the parked leg.
 ///
-/// This pins the CURRENT deliberate tradeoff (membership-snapshot consistency
-/// over mutation admission latency) as the evidence a #463 treatment requires
-/// before touching production behavior. A treatment that delivers outside the
-/// gate must rewrite the latency bound here to the improved contract; the
-/// stall itself is deterministic because the stalled member never reads, so
-/// its eviction is not a timing race (same zero-flaky shape as
-/// `slow_consumer_no_cascade_e2e`).
+/// The stall itself is deterministic because the stalled member never reads,
+/// so its eviction is not a timing race (same zero-flaky shape as
+/// `slow_consumer_no_cascade_e2e`); the mutation-admission bound has the full
+/// stall window of slack against co-tenant loopback variance (issue #467).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
+async fn transport_status_fanout_backpressure_does_not_block_room_mutation() {
     /// Control-queue capacity for every member. The stalled member is filled
     /// to exactly this count with `LobbyStateChanged` broadcasts.
     const CONTROL_CAPACITY: usize = 8;
-    /// One full slow-consumer window is the demonstrated gate-hold duration.
-    /// Sized so the latency floor below keeps ~1 s of slack under the
-    /// co-tenant runner variance documented in issue #467 (a 3-5x excursion
-    /// on the in-window loopback hops must not erode the floor).
+    /// One full slow-consumer window is the parked-leg duration the mutation
+    /// must NOT wait behind. The regression oracle is the deterministic
+    /// eviction-ordering assertion below; this window is only the wall-clock
+    /// backstop, sized with the whole window of slack against the co-tenant
+    /// runner variance documented in issue #467.
     const STALL_WINDOW_MS: u64 = 4000;
     const STALL_WINDOW: tokio::time::Duration = tokio::time::Duration::from_millis(STALL_WINDOW_MS);
-    /// Lower bound for the mutation delay: the gate-hold window minus the
-    /// in-window loopback round trips (fan-out enqueue hop, LeaveRoom send)
-    /// that the window also covers.
-    const MIN_MUTATION_DELAY: std::time::Duration = std::time::Duration::from_millis(3000);
     /// 16 KiB per flood frame so the backlog cannot hide inside the stalled
     /// member's clamped kernel receive buffer (same rationale as
     /// `slow_consumer_no_cascade_e2e`).
@@ -1482,12 +1476,12 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
         .await;
     }
 
-    // The accepted first report fans out under the room event mutation gate.
-    // The backpressure counter must tick exactly once for it: the stalled
-    // leg's reserve is the only `Full` in the whole scenario, so this pins
-    // that the control queue was filled to exactly capacity — a future
-    // control-lane message type that shifts the exact-fill accounting fails
-    // here, naming the precondition, instead of as a confusing latency miss.
+    // The accepted first report fans out. Its backpressure counter must tick
+    // exactly once for the stalled leg: that leg's reserve is the only `Full`
+    // in the whole scenario, so this pins that the control queue was filled to
+    // exactly capacity — a future control-lane message type that shifts the
+    // exact-fill accounting fails here, naming the precondition, instead of as
+    // a confusing latency miss.
     let backpressure_before = game_server
         .metrics()
         .websocket_backpressure_events
@@ -1495,8 +1489,9 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
     report_transport_status(&mut reporter, Transport::WebRtc, true).await;
 
     // The mutator's leg of the fan-out arrives while the stalled member's leg
-    // is still parked: PeerTransportStatus on the mutator's socket proves the
-    // fan-out dispatch is active and therefore still holds the gate.
+    // is still parked. Its arrival proves dispatch is active; with the room
+    // event mutation gate released before delivery, it no longer proves a
+    // gate hold.
     expect_peer_transport_status(
         &mut mutator,
         "mutator",
@@ -1515,32 +1510,61 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
          exact-fill precondition broke"
     );
 
-    // A room mutation that needs the same gate is now admitted only after the
-    // stalled member's eviction resolves the parked fan-out leg.
+    // A room mutation that needs the same gate must be admitted WITHOUT
+    // waiting behind the parked stalled leg: backpressured delivery no longer
+    // holds the room event mutation gate. The oracle is deterministic
+    // ordering, not a clock: the stalled member's eviction is the ONLY
+    // slow-consumer source in this scenario, and a regression that re-holds
+    // the gate admits the mutation only after that eviction — so observing
+    // zero evictions at RoomLeft time fails the regression deterministically,
+    // while the wall-clock bound below is a co-tenant-variance backstop (a
+    // gate-hold regression waits out the full stall window here).
     let leave_started = std::time::Instant::now();
     send(&mut mutator, &ClientMessage::LeaveRoom).await;
     next_matching_server_message_within(&mut mutator, SERVER_MESSAGE_TIMEOUT, "RoomLeft", {
         |message| matches!(message, ServerMessage::RoomLeft).then_some(())
     })
     .await;
-    let leave_elapsed = leave_started.elapsed();
-    assert!(
-        leave_elapsed >= MIN_MUTATION_DELAY,
-        "the room mutation must wait behind the stalled member's eviction (the fan-out \
-         holds the room event mutation gate across backpressured delivery), took \
-         {leave_elapsed:?} against a {STALL_WINDOW:?} stall window"
-    );
-
-    // Exactly one slow-consumer eviction — the stalled member — resolved the
-    // parked leg; the mutation delay was not produced by any other eviction.
     assert_eq!(
         game_server
             .metrics()
             .websocket_slow_consumer_disconnects
             .load(Ordering::Relaxed),
-        1,
-        "exactly the stalled member may be evicted to resolve the fan-out"
+        0,
+        "the mutation must be admitted while the stalled member's parked leg is \
+         still pending; an eviction observed before it means the fan-out held \
+         the room event mutation gate across backpressured delivery again"
     );
+    let leave_elapsed = leave_started.elapsed();
+    assert!(
+        leave_elapsed < STALL_WINDOW,
+        "the room mutation must not wait behind the stalled member's eviction \
+         (backpressured delivery must not hold the room event mutation gate), \
+         took {leave_elapsed:?} against a {STALL_WINDOW:?} stall window"
+    );
+
+    // The parked leg still resolves the way it always did: the stalled member
+    // is evicted as a slow consumer once its window expires — after, not
+    // before, the mutation that used to wait for it.
+    let eviction_deadline = tokio::time::Instant::now() + STALL_WINDOW + SERVER_MESSAGE_TIMEOUT;
+    loop {
+        let observed = game_server
+            .metrics()
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed);
+        assert!(
+            observed <= 1,
+            "only the stalled member may be evicted to resolve the fan-out"
+        );
+        if observed == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < eviction_deadline,
+            "the stalled member's parked leg must still evict it as a slow consumer"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     running_server.shutdown().await;
 }

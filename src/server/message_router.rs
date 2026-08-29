@@ -33,6 +33,43 @@ pub(super) fn disarm_transport_status_lifecycle_probe(player_id: &crate::protoco
     TRANSPORT_STATUS_LIFECYCLE_PROBES.remove(player_id);
 }
 
+/// The prepared room fan-out of an accepted transport-state change: the exact
+/// recipient snapshot and the shared event, ready to dispatch once the caller
+/// has released its serialization gates.
+struct TransportStatusFanOut {
+    room_id: crate::protocol::RoomId,
+    recipients: Vec<PlayerId>,
+    message: Arc<ServerMessage>,
+}
+
+impl TransportStatusFanOut {
+    /// Deliver outside every serialization gate. Per-recipient membership is
+    /// revalidated by `send_to_player_in_room` at delivery, and each leg
+    /// re-checks the recipient's negotiated v3 capability, so a membership
+    /// change or a reconnect identity swap that lands after the snapshot
+    /// cannot direct this v3-only frame at a v2 connection.
+    async fn deliver(&self, server: &EnhancedGameServer) {
+        // Deliver to all peers concurrently: one slow room member costs this
+        // event one slow-consumer window, never `(N - 1)` windows. Recipient
+        // filtering is v3-only but deliberately transport-agnostic: a
+        // relay-only client still needs to know that a peer fell back.
+        futures_util::future::join_all(self.recipients.iter().map(|recipient| async move {
+            if !server.client_supports_v3(recipient) {
+                return;
+            }
+            let _ = server
+                .message_coordinator
+                .send_to_player_in_room(recipient, &self.room_id, Arc::clone(&self.message))
+                .await;
+        }))
+        .await;
+
+        // One fan-out EVENT per accepted in-room state change — not per
+        // recipient (see `ServerMetrics::record_transport_status_fanout`).
+        server.metrics.record_transport_status_fanout();
+    }
+}
+
 impl EnhancedGameServer {
     /// Handle incoming client message with enhanced coordination.
     pub async fn handle_client_message(
@@ -268,7 +305,7 @@ impl EnhancedGameServer {
         if let Some(probe) = TRANSPORT_STATUS_LIFECYCLE_PROBES.get(player_id) {
             probe.store(true, Ordering::Release);
         }
-        let _lifecycle_guard = lifecycle.lock().await;
+        let lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
@@ -277,18 +314,31 @@ impl EnhancedGameServer {
             return;
         }
 
-        self.handle_transport_status_under_lifecycle(player_id, transport, connected)
-            .await;
+        let Some(fan_out) = self
+            .handle_transport_status_under_lifecycle(player_id, transport, connected)
+            .await
+        else {
+            return;
+        };
+        // Release the sender's lifecycle gate before delivery: the fan-out's
+        // backpressured legs park up to one slow-consumer window, and this
+        // connection's own concurrent transitions (a reconnect claiming this
+        // identity, teardown) must not queue behind them. Recipient truth no
+        // longer depends on either gate — see the fan-out below.
+        drop(lifecycle_guard);
+        fan_out.deliver(self).await;
     }
 
     /// Process a transport report after the caller has fixed the connection
-    /// identity and membership with its lifecycle guard.
+    /// identity and membership with its lifecycle guard. Returns the prepared
+    /// room fan-out to dispatch after the caller releases its serialization
+    /// gates, or `None` when the report fans nothing out.
     async fn handle_transport_status_under_lifecycle(
         &self,
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
-    ) {
+    ) -> Option<TransportStatusFanOut> {
         use crate::protocol::Transport;
 
         match self.set_client_transport_status(player_id, transport, connected) {
@@ -300,7 +350,7 @@ impl EnhancedGameServer {
                     connected,
                     "Ignoring duplicate TransportStatus report"
                 );
-                return;
+                return None;
             }
             TransportStatusUpdate::MissingConnection => {
                 tracing::debug!(
@@ -309,7 +359,7 @@ impl EnhancedGameServer {
                     connected,
                     "Ignoring TransportStatus for connection that no longer exists"
                 );
-                return;
+                return None;
             }
             TransportStatusUpdate::UnsupportedProtocolVersion => {
                 tracing::debug!(
@@ -318,7 +368,7 @@ impl EnhancedGameServer {
                     connected,
                     "Ignoring TransportStatus from a non-v3 connection (v3-only message)"
                 );
-                return;
+                return None;
             }
             TransportStatusUpdate::UnsupportedTransport => {
                 let protocol = self.client_protocol(player_id);
@@ -329,7 +379,7 @@ impl EnhancedGameServer {
                     negotiated_transports = ?protocol.transports,
                     "Ignoring TransportStatus for transport not negotiated by connection"
                 );
-                return;
+                return None;
             }
         }
 
@@ -349,15 +399,26 @@ impl EnhancedGameServer {
         // once per real state change in the current membership generation
         // (including its first report). No room ⇒ nothing to fan out — the
         // generation-scoped state was still recorded above.
-        let Some(room_id) = self.get_client_room(player_id).await else {
-            return;
-        };
+        let room_id = self.get_client_room(player_id).await?;
 
-        // Keep membership and connection generations fixed while resolving and
-        // dispatching this room-wide status event. The sender lifecycle lock is
-        // already held, so this follows the same lifecycle -> room ordering as
-        // join/leave/reconnect and prevents a stale database member or
-        // replacement v2 connection from receiving a v3-only frame.
+        // Keep membership and connection generations fixed while resolving
+        // this room-wide status event's recipient snapshot. The sender
+        // lifecycle lock is already held, so this follows the same
+        // lifecycle -> room ordering as join/leave/reconnect. The gate is
+        // released BEFORE delivery (see the caller): the snapshot below never
+        // parks, while delivery does. Sequenced publishers keep their
+        // CALLER's task from parking under the gate by transferring the guard
+        // into the FIFO job that publishes (the job itself may still park on
+        // backpressured delivery while retaining the guard — the documented
+        // sequenced-publication design); this path is stricter: NOTHING holds
+        // the gate at any point during delivery. Truth at dispatch is carried
+        // by per-recipient revalidation instead of the gate:
+        // `send_to_player_in_room` re-checks membership under the room
+        // routing gate, the fan-out re-checks the negotiated v3 capability
+        // per leg, and the socket writer fail-closed-drops any v3-only frame
+        // that still reaches a pre-v3 queue — so neither a departed member
+        // nor a replacement v2 connection (reconnect identity swap) can
+        // observe this v3-only frame.
         let _room_event_guard = self
             .message_coordinator
             .lock_room_event_mutation(&room_id)
@@ -380,7 +441,7 @@ impl EnhancedGameServer {
                 connected,
                 "Dropping TransportStatus fan-out: per-connection signal rate limit exceeded"
             );
-            return;
+            return None;
         }
 
         // Resolve the exact live v3 recipients before charging the sender's
@@ -395,7 +456,7 @@ impl EnhancedGameServer {
             Ok(Some(routed)) => {
                 if !routed.contains(player_id) {
                     tracing::debug!(%player_id, %room_id, "Skipping TransportStatus from an unrouted sender");
-                    return;
+                    return None;
                 }
                 routed
                     .into_iter()
@@ -417,7 +478,7 @@ impl EnhancedGameServer {
                         error = %err,
                         "Failed to load room members for PeerTransportStatus fan-out"
                     );
-                    return;
+                    return None;
                 }
             },
             Err(err) => {
@@ -427,7 +488,7 @@ impl EnhancedGameServer {
                     error = %err,
                     "Failed to resolve routed members for PeerTransportStatus fan-out"
                 );
-                return;
+                return None;
             }
         };
 
@@ -439,7 +500,7 @@ impl EnhancedGameServer {
                 connected,
                 "Skipping TransportStatus fan-out: no eligible v3 room peers"
             );
-            return;
+            return None;
         }
 
         // The room fan-out below is the only 1→N amplifier on this path (the
@@ -468,7 +529,7 @@ impl EnhancedGameServer {
                 connected,
                 "Dropping TransportStatus fan-out: per-connection signal rate limit exceeded"
             );
-            return;
+            return None;
         }
 
         let message = Arc::new(ServerMessage::PeerTransportStatus {
@@ -476,21 +537,10 @@ impl EnhancedGameServer {
             transport,
             connected,
         });
-        // Deliver to all peers concurrently: one slow room member costs this
-        // event one slow-consumer window, never `(N - 1)` windows. Recipient
-        // filtering above is v3-only but deliberately transport-agnostic: a
-        // relay-only client still needs to know that a peer fell back.
-        futures_util::future::join_all(recipients.iter().map(|recipient| {
-            self.message_coordinator.send_to_player_in_room(
-                recipient,
-                &room_id,
-                Arc::clone(&message),
-            )
-        }))
-        .await;
-
-        // One fan-out EVENT per accepted in-room state change — not per
-        // recipient (see `ServerMetrics::record_transport_status_fanout`).
-        self.metrics.record_transport_status_fanout();
+        Some(TransportStatusFanOut {
+            room_id,
+            recipients,
+            message,
+        })
     }
 }
