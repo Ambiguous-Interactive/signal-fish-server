@@ -21150,15 +21150,26 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
 #[test]
 fn test_ci_safety_workflow_uploads_artifacts() {
     // Validates that both safety jobs upload their output as artifacts.
-    // Artifacts are critical for diagnosing gating safety findings.
+    // Artifacts are critical for diagnosing gating safety findings. The two
+    // Miri lanes must keep DISTINCT names: within one workflow run, a
+    // duplicate artifact name across matrix jobs fails the upload at
+    // runtime, and a substring guard would not catch a regression to one
+    // shared static name.
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_live_file(&workflow_path);
 
     let expected_artifacts = [
-        ("miri-output", "Miri analysis output"),
-        ("asan-output", "AddressSanitizer analysis output"),
+        // The Miri artifact name must stay templated on the matrix lane:
+        // embedding `matrix.lane.name` is what keeps the two lanes'
+        // artifacts distinct within one run (a static shared name fails
+        // the Actions upload at runtime).
+        (
+            "name: miri-output-${{ matrix.lane.name }}",
+            "per-lane Miri analysis output",
+        ),
+        ("name: asan-output", "AddressSanitizer analysis output"),
     ];
 
     let mut missing = Vec::new();
@@ -21239,7 +21250,7 @@ fn test_ci_safety_workflow_artifact_uploads_always_run() {
     assert!(
         upload_count >= 2,
         "Expected at least 2 upload-artifact steps in ci-safety.yml \
-         (miri-output and asan-output), found {upload_count}."
+         (per-lane miri-output-* and asan-output), found {upload_count}."
     );
 
     if !missing_always.is_empty() {
