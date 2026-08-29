@@ -1427,6 +1427,17 @@ impl EnhancedGameServer {
         {
             Ok(Some(tail)) => tail,
             Ok(None) => {
+                // Deliberate fail-closed answer to a guarded-semantics
+                // divergence (#469): no relay watermark was captured, and the
+                // honest alternatives are all worse. A watermark-less
+                // `PlayerLeft` is rejected by both maintained clients'
+                // accountability layers (a v3 `PlayerLeft` without
+                // `epoch`/`final_seq` fails closed), a borrowed or zeroed
+                // watermark would corrupt the room's delivery accounting, and
+                // suppressing only the publication keeps local routing swept
+                // while the `error!` log and the coded refusal surface the
+                // state. Peers reconcile the ghosted membership from their
+                // next baseline.
                 tracing::error!(%player_id, %room_id, "Terminal unroute found no relay watermark; suppressing incomplete PlayerLeft");
                 if let Some(operation_id) = operation_id {
                     let _ = self
