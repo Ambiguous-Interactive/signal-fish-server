@@ -7,7 +7,12 @@
 //! collapsing by outcome alone would merge distinct attackers into one line.
 //! Warnings are therefore throttled per `(peer, outcome)` window: the first
 //! occurrence is emitted verbatim, in-window repeats are counted silently,
-//! and the next emission after the quiet period summarizes them.
+//! and the next emission after the quiet period summarizes them. This
+//! conservation holds only modulo eviction: when the bounded map evicts a
+//! still-live window (only reachable under a source-churn flood), its
+//! silently counted repeats are discarded and the source restarts with a
+//! fresh first emission. That is the intended trade — log volume stays
+//! bounded ahead of forensic completeness.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

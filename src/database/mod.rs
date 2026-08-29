@@ -254,7 +254,17 @@ pub trait GameDatabase: Send + Sync {
         player_id: &PlayerId,
     ) -> Result<Option<PlayerInfo>>;
 
-    /// Update room authority
+    /// Update room authority.
+    ///
+    /// A `Some(id)` grant is a raw write: it is the caller's contract to pass
+    /// only a current room member. Granting a non-member leaves
+    /// `authority_player` pointing outside the roster with no `is_authority`
+    /// flag set, which wedges `request_room_authority` (`AlreadyHeld`) and is
+    /// never cleared by a departure (removal clears the role only for the
+    /// departing member). Production must go through
+    /// [`Self::request_room_authority`] (membership-checked) for grants; the
+    /// only production caller of this method passes `None` to clear the role
+    /// during reconnect rollback.
     #[allow(dead_code)]
     async fn update_room_authority(
         &self,
@@ -352,6 +362,13 @@ pub trait GameDatabase: Send + Sync {
 
     /// Toggle player ready state and return lobby information if successful
     /// Returns (lobby_state, ready_players, all_ready) if in lobby state
+    ///
+    /// Test-only parity surface today: the live ready path is the coordinator's
+    /// own ready map under the room mutation gate (which accepts any
+    /// non-finalized room), while this storage gate accepts exactly
+    /// [`crate::protocol::LobbyState::Lobby`]. Do not wire this into
+    /// production without
+    /// reconciling that state-gate divergence.
     async fn toggle_player_ready(
         &self,
         room_id: &RoomId,

@@ -102,13 +102,23 @@ correctness evidence appears.
   to the improved contract with a deterministic eviction-ordering regression
   oracle. Deliberate gate-holds documented in #463 (signaling plan-before-
   signal, session-policy departure snapshot stability) remain by design.
-  Session-191 swept the delivery-ledger/DeliveryReport, room-join baseline,
-  and room/maintenance-cleanup seams: the first fixed the tail-parked causal
-  DeliveryReport eviction class (queue-age deadline measured the server's own
-  parking, not recipient progress) and fail-closed the two pending-omission
-  write paths that bypassed the v3-only writer arm; the join-baseline and
-  cleanup seams audited sound (records only). Next session: name new seams
-  from fresh evidence.
+   Session-191 swept the delivery-ledger/DeliveryReport, room-join baseline,
+   and room/maintenance-cleanup seams: the first fixed the tail-parked causal
+   DeliveryReport eviction class (queue-age deadline measured the server's own
+   parking, not recipient progress) and fail-closed the two pending-omission
+   write paths that bypassed the v3-only writer arm; the join-baseline and
+   cleanup seams audited sound (records only). Session-192 swept the
+   authority/relay-policy seam (no dangling authority on any mutation path,
+   deterministic total repair, topology/signal-relay predicate agreement),
+   the room-identity/state-machine seam (bounded collision retry with
+   dual-lock atomicity, exactly two validated atomic LobbyState writers, no
+   half-applied observations), and the upgrade-admission seam (no
+   panic/hang/unbounded-memory, bounded kernel-keyed rejection throttle,
+   fail-closed ordering) — all sound under adversarial re-verification; the
+   recorded foot-guns (`update_room_authority` `Some(non-member)` grant
+   contract, `toggle_player_ready` coordinator-parity divergence,
+   rejection-log eviction discarding suppressed counts) are now documented at
+   their sites. Next session: name new seams from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted
