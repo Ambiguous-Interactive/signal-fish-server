@@ -2084,6 +2084,14 @@ pub(super) async fn handle_socket(
                                 && app_handshake_complete
                             {
                                 tracing::warn!(%active_player_id, "App-ID handshake already completed");
+                                let _ = server_clone
+                                    .send_error_to_player(
+                                        &active_player_id,
+                                        "Authenticate already completed on this connection"
+                                            .to_string(),
+                                        Some(ErrorCode::InvalidInput),
+                                    )
+                                    .await;
                                 continue;
                             }
                             if !server_clone.config().app_id_allowlist_enabled
@@ -2093,6 +2101,21 @@ pub(super) async fn handle_socket(
                                     %active_player_id,
                                     "Authenticate must be the first client message"
                                 );
+                                // `authenticate_processed` survives a reconnect
+                                // identity swap, so this refusal also covers a
+                                // re-Authenticate on an already-swapped socket.
+                                let refusal = if authenticate_processed {
+                                    "Authenticate already completed on this connection"
+                                } else {
+                                    "Authenticate must be the first application message"
+                                };
+                                let _ = server_clone
+                                    .send_error_to_player(
+                                        &active_player_id,
+                                        refusal.to_string(),
+                                        Some(ErrorCode::InvalidInput),
+                                    )
+                                    .await;
                                 continue;
                             }
 

@@ -388,6 +388,14 @@ candidate codes or changing the behavior of explicit room-code requests.
   delivery guarantee.
   Set the interval to `0` to disable server probes. The Pong timeout must remain
   greater than `0`; both fields are capped at 3600 seconds.
+
+  > **Warning:** the three liveness mechanisms are independent, and each may be
+  > disabled alone, but `server.ping_timeout=0` together with
+  > `idle_timeout_secs=0` and `server_ping_interval_secs=0` leaves a
+  > silently-dead client (power loss, NAT drop without RST) holding its
+  > connection, per-IP slot, and room seat indefinitely: nothing writes to an
+  > idle peer, so nothing ever fails. The server logs a startup warning for
+  > this combination; keep at least one mechanism enabled in production.
 - `socket_send_buffer_bytes` - Requested TCP send buffer inherited by accepted
   sockets (default: 65536; `0` keeps the operating-system default; maximum 16
   MiB). This bounds bytes application data can hand to TCP ahead of a later

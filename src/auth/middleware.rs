@@ -232,6 +232,14 @@ impl AppIdAllowlist {
     }
 
     /// Build a default context for use when allowlist enforcement is disabled.
+    ///
+    /// Unlike enforced mode, which always derives the UUID deterministically
+    /// from the app ID string, an open-policy client that sends a well-formed
+    /// UUID as its `app_id` chooses the application UUID verbatim. Nothing
+    /// consumes open-mode application identity as an authority today (the
+    /// cross-app join gate is allowlist-only); a future consumer of that
+    /// identity — per-app caps, quotas, room stamping — must not treat this
+    /// client-chosen ID as unspoofable.
     fn default_app_context(&self, app_id: &str) -> AppContext {
         let id = app_id
             .parse::<Uuid>()
@@ -482,6 +490,11 @@ mod tests {
         assert_eq!(info.rate_limits.per_minute, DEFAULT_RATE_LIMIT_PER_MINUTE);
     }
 
+    /// Pins the documented open-policy divergence: a valid UUID sent as
+    /// `app_id` is used verbatim, so the client chooses the application UUID.
+    /// Enforced mode never does this (the UUID is always derived from the app
+    /// ID string). Acceptable only because nothing consumes open-mode
+    /// application identity as an authority; a future consumer must revisit.
     #[tokio::test]
     async fn disabled_app_id_parsed_as_uuid_when_valid() {
         let mw = AppIdAllowlist::disabled();
