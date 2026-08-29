@@ -35,6 +35,11 @@
 //! 10. `finalization_race_single_plan_per_member` — both members of a 2-seat
 //!     room send `PlayerReady` concurrently; finalization happens exactly once
 //!     and both receive identical (mirrored) `SessionPlan`s.
+//! 11. `transport_status_fanout_gate_delays_mutation_behind_stalled_member` —
+//!     the deterministic counterexample for the documented fan-out sharp edge:
+//!     dispatch holds the room event mutation gate across backpressured
+//!     delivery, so a stalled member delays a concurrent room mutation by up
+//!     to one slow-consumer window.
 
 mod test_helpers;
 mod v3_conformance_helpers;
@@ -95,8 +100,18 @@ fn mesh_session_config() -> SessionConfig {
 async fn start_server_with_session(
     session: SessionConfig,
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
+    start_server_with_config(session, |_| {}).await
+}
+
+/// [`start_server_with_session`] with direct access to the server config
+/// for tests that need to size queue capacity or slow-consumer deadlines.
+async fn start_server_with_config(
+    session: SessionConfig,
+    mutate_config: impl FnOnce(&mut ServerConfig),
+) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     let mut server_config: ServerConfig = test_server_config();
     server_config.app_id_allowlist_enabled = true;
+    mutate_config(&mut server_config);
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
@@ -1283,5 +1298,249 @@ async fn finalization_race_single_plan_per_member() {
         plan_a.peers[0].initiate, plan_b.peers[0].initiate,
         "exactly one side of the pair offers (antisymmetric glare)"
     );
+    running_server.shutdown().await;
+}
+
+/// Connect to `/v3/ws` over a TCP socket whose kernel receive buffer is
+/// clamped before the connect, so the server-side writer to this peer blocks
+/// once the buffer fills (mirrors
+/// `websocket_test_helpers::connect_with_small_recv_buffer` with the v3 path).
+async fn connect_v3_with_small_recv_buffer(
+    addr: std::net::SocketAddr,
+    recv_buffer_bytes: u32,
+) -> WsStream {
+    let socket = tokio::net::TcpSocket::new_v4().expect("create IPv4 TCP socket");
+    socket
+        .set_recv_buffer_size(recv_buffer_bytes)
+        .expect("clamp SO_RCVBUF before connect");
+    let stream = tokio::time::timeout(std::time::Duration::from_secs(10), socket.connect(addr))
+        .await
+        .expect("small-rcvbuf TCP connect timed out")
+        .expect("small-rcvbuf TCP connect failed");
+    let url = format!("ws://{addr}/v3/ws");
+    let (ws_stream, _response) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio_tungstenite::client_async(url, tokio_tungstenite::MaybeTlsStream::Plain(stream)),
+    )
+    .await
+    .expect("small-rcvbuf websocket handshake timed out")
+    .expect("small-rcvbuf websocket handshake failed");
+    ws_stream
+}
+
+/// Deterministic counterexample for the documented `TransportStatus` fan-out
+/// sharp edge: dispatch holds the room event mutation gate across backpressured
+/// delivery (`message_router.rs`), while every other room-event publisher
+/// releases the gate before delivery ("delivery backpressure never holds the
+/// room mutation gate"). With one member stalled on a full control queue, an
+/// accepted report parks inside the fan-out for a whole slow-consumer window,
+/// and a concurrent room mutation (`LeaveRoom`) that needs the same gate is
+/// admitted only once the stalled member is evicted.
+///
+/// This pins the CURRENT deliberate tradeoff (membership-snapshot consistency
+/// over mutation admission latency) as the evidence a #463 treatment requires
+/// before touching production behavior. A treatment that delivers outside the
+/// gate must rewrite the latency bound here to the improved contract; the
+/// stall itself is deterministic because the stalled member never reads, so
+/// its eviction is not a timing race (same zero-flaky shape as
+/// `slow_consumer_no_cascade_e2e`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
+    /// Control-queue capacity for every member. The stalled member is filled
+    /// to exactly this count with `LobbyStateChanged` broadcasts.
+    const CONTROL_CAPACITY: usize = 8;
+    /// One full slow-consumer window is the demonstrated gate-hold duration.
+    /// Sized so the latency floor below keeps ~1 s of slack under the
+    /// co-tenant runner variance documented in issue #467 (a 3-5x excursion
+    /// on the in-window loopback hops must not erode the floor).
+    const STALL_WINDOW_MS: u64 = 4000;
+    const STALL_WINDOW: tokio::time::Duration = tokio::time::Duration::from_millis(STALL_WINDOW_MS);
+    /// Lower bound for the mutation delay: the gate-hold window minus the
+    /// in-window loopback round trips (fan-out enqueue hop, LeaveRoom send)
+    /// that the window also covers.
+    const MIN_MUTATION_DELAY: std::time::Duration = std::time::Duration::from_millis(3000);
+    /// 16 KiB per flood frame so the backlog cannot hide inside the stalled
+    /// member's clamped kernel receive buffer (same rationale as
+    /// `slow_consumer_no_cascade_e2e`).
+    const STALL_PADDING_BYTES: usize = 16 * 1024;
+    /// 64 x 16 KiB = 1 MiB against an ~8 KiB (clamped, kernel-doubled) receive
+    /// buffer: physically impossible to drain, so the stalled member's writer
+    /// blocks for the rest of the test and its queues stop emptying. Far below
+    /// the default data-queue capacity, so the flood itself never overflows a
+    /// queue into an eviction.
+    const FLOOD_FRAMES: u64 = 64;
+    const STALLED_RECV_BUFFER_BYTES: u32 = 4096;
+
+    let session = mesh_session_config();
+    let (running_server, game_server) = start_server_with_config(session, |config| {
+        // The activity reaper is a second, independent clock on the stalled
+        // member (10 s in `test_server_config`); the wedged phases below take
+        // a few seconds even before CI variance, so raise the deadline well
+        // clear of the whole test.
+        config.ping_timeout = tokio::time::Duration::from_secs(120);
+        config.websocket_config.control_queue_capacity = CONTROL_CAPACITY;
+        config.websocket_config.slow_consumer_timeout_ms = STALL_WINDOW_MS;
+        config.websocket_config.delivery_stats_interval_secs = 0;
+    })
+    .await;
+    let addr = running_server.addr();
+
+    // Join order matters for exact queue accounting: reporter and mutator join
+    // first, the stalled member last — its join produces no PlayerJoined
+    // broadcasts to itself, and it reads its own RoomJoined before wedging, so
+    // its control queue starts the fill phase at exactly zero.
+    let mut reporter = connect(addr).await;
+    authenticate_v3_full(&mut reporter).await;
+    let reporter_join = join_room(&mut reporter, "gate_stall_game", None, "Reporter", 8).await;
+    let reporter_id = reporter_join.player_id;
+    let room_code = reporter_join.room_code;
+
+    let mut mutator = connect(addr).await;
+    authenticate_v3_full(&mut mutator).await;
+    let _mutator_id = join_room(
+        &mut mutator,
+        "gate_stall_game",
+        Some(room_code.clone()),
+        "Mutator",
+        8,
+    )
+    .await
+    .player_id;
+
+    let mut stalled = connect_v3_with_small_recv_buffer(addr, STALLED_RECV_BUFFER_BYTES).await;
+    authenticate_v3_full(&mut stalled).await;
+    let stalled_id = join_room(
+        &mut stalled,
+        "gate_stall_game",
+        Some(room_code.clone()),
+        "Stalled",
+        8,
+    )
+    .await
+    .player_id;
+    // Wedge part 1: the stalled member stops reading right after its own join
+    // response. `stalled` stays in scope so the socket never closes.
+    let _stalled_socket = stalled;
+
+    // The mutator observes the stalled member's join broadcast, which leaves
+    // its stream exactly at the post-fill baseline.
+    drain_until_player_joined(&mut mutator, stalled_id, "mutator").await;
+
+    // Wedge part 2: saturate the stalled member's receive path so its
+    // server-side writer blocks and its queues stop emptying. The relay flood
+    // is DATA-lane traffic, so it never touches the control queue staged
+    // below, and it stays far below the data-queue capacity, so the flood
+    // itself never overflows a queue into an eviction. The healthy mutator
+    // drains its own copies meanwhile.
+    for seq in 0..FLOOD_FRAMES {
+        let flood = ClientMessage::GameData {
+            class: None,
+            key: None,
+            data: serde_json::json!({ "seq": seq, "padding": "x".repeat(STALL_PADDING_BYTES) }),
+        };
+        send(&mut reporter, &flood).await;
+    }
+    let mut relayed_frames = 0u64;
+    while relayed_frames < FLOOD_FRAMES {
+        next_matching_server_message_within(
+            &mut mutator,
+            SERVER_MESSAGE_TIMEOUT,
+            "flood-phase GameData",
+            |message| match message {
+                ServerMessage::GameData { .. } => {
+                    relayed_frames += 1;
+                    Some(())
+                }
+                _ => None,
+            },
+        )
+        .await;
+    }
+
+    // Wedge part 3: fill the stalled member's blocked control queue to exactly
+    // toggle broadcasts one `LobbyStateChanged` control message per member, so
+    // CONTROL_CAPACITY toggles land one-for-one into the stalled queue. Every
+    // slot taken here succeeds via try-reserve — none parks, so nothing evicts.
+    // The count is even so the mutator ends not-ready (no all-ready finalize).
+    for _ in 0..CONTROL_CAPACITY {
+        ready(&mut mutator).await;
+    }
+    let mut observed_lobby_updates = 0usize;
+    while observed_lobby_updates < CONTROL_CAPACITY {
+        next_matching_server_message_within(
+            &mut mutator,
+            SERVER_MESSAGE_TIMEOUT,
+            "fill-phase LobbyStateChanged",
+            |message| match message {
+                ServerMessage::LobbyStateChanged { .. } => {
+                    observed_lobby_updates += 1;
+                    Some(())
+                }
+                _ => None,
+            },
+        )
+        .await;
+    }
+
+    // The accepted first report fans out under the room event mutation gate.
+    // The backpressure counter must tick exactly once for it: the stalled
+    // leg's reserve is the only `Full` in the whole scenario, so this pins
+    // that the control queue was filled to exactly capacity — a future
+    // control-lane message type that shifts the exact-fill accounting fails
+    // here, naming the precondition, instead of as a confusing latency miss.
+    let backpressure_before = game_server
+        .metrics()
+        .websocket_backpressure_events
+        .load(Ordering::Relaxed);
+    report_transport_status(&mut reporter, Transport::WebRtc, true).await;
+
+    // The mutator's leg of the fan-out arrives while the stalled member's leg
+    // is still parked: PeerTransportStatus on the mutator's socket proves the
+    // fan-out dispatch is active and therefore still holds the gate.
+    expect_peer_transport_status(
+        &mut mutator,
+        "mutator",
+        reporter_id,
+        Transport::WebRtc,
+        true,
+    )
+    .await;
+    assert_eq!(
+        game_server
+            .metrics()
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed),
+        backpressure_before + 1,
+        "exactly the stalled fan-out leg may observe a full control queue; the \
+         exact-fill precondition broke"
+    );
+
+    // A room mutation that needs the same gate is now admitted only after the
+    // stalled member's eviction resolves the parked fan-out leg.
+    let leave_started = std::time::Instant::now();
+    send(&mut mutator, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(&mut mutator, SERVER_MESSAGE_TIMEOUT, "RoomLeft", {
+        |message| matches!(message, ServerMessage::RoomLeft).then_some(())
+    })
+    .await;
+    let leave_elapsed = leave_started.elapsed();
+    assert!(
+        leave_elapsed >= MIN_MUTATION_DELAY,
+        "the room mutation must wait behind the stalled member's eviction (the fan-out \
+         holds the room event mutation gate across backpressured delivery), took \
+         {leave_elapsed:?} against a {STALL_WINDOW:?} stall window"
+    );
+
+    // Exactly one slow-consumer eviction — the stalled member — resolved the
+    // parked leg; the mutation delay was not produced by any other eviction.
+    assert_eq!(
+        game_server
+            .metrics()
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        1,
+        "exactly the stalled member may be evicted to resolve the fan-out"
+    );
+
     running_server.shutdown().await;
 }

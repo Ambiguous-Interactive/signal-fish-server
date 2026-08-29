@@ -547,6 +547,24 @@ fn built_in_tls_active(config: &Config, tls_feature_compiled: bool) -> bool {
     config.security.transport.tls.enabled && tls_feature_compiled
 }
 
+/// Whether every independent liveness mechanism is disabled at once.
+///
+/// Three knobs each legitimately disable one dead-peer reaping mechanism:
+/// `server.ping_timeout = 0` disables the activity reaper,
+/// `websocket.idle_timeout_secs = 0` disables the socket idle deadline, and
+/// `websocket.server_ping_interval_secs = 0` disables the transport Ping
+/// probes. Each is supportable alone (short-lived test deployments, trusted
+/// networks), but the combination leaves a silently-dead peer — power loss,
+/// NAT drop without RST — holding its connection entry, per-IP slot, and room
+/// seat until a write fails, with no liveness signal at all. Advisory only:
+/// nothing in the combination is invalid configuration.
+#[must_use]
+pub fn should_warn_all_liveness_disabled(config: &Config) -> bool {
+    config.server.ping_timeout == 0
+        && config.websocket.idle_timeout_secs == 0
+        && config.websocket.server_ping_interval_secs == 0
+}
+
 /// Detect if we're running in production mode.
 ///
 /// Checks for `SIGNAL_FISH_PRODUCTION` or generic `PRODUCTION` / `PROD` environment variables.
@@ -624,6 +642,37 @@ mod tests {
                 expected,
                 "binding.enabled={binding_enabled}, binding.required={binding_required}, \
                  tls.enabled={tls_enabled}, tls_feature_compiled={tls_feature_compiled}"
+            );
+        }
+    }
+
+    /// Truth table for the all-liveness-disabled startup warning: it fires
+    /// exactly when all three independent dead-peer reaping mechanisms are
+    /// disabled together; each knob alone must stay warning-free.
+    #[test]
+    fn all_liveness_disabled_warning_fires_only_for_the_full_combination() {
+        // (ping_timeout, idle_timeout_secs, server_ping_interval_secs, expected)
+        let cases = [
+            (30, 300, 10, false),
+            (0, 300, 10, false),
+            (30, 0, 10, false),
+            (30, 300, 0, false),
+            (0, 0, 10, false),
+            (0, 300, 0, false),
+            (30, 0, 0, false),
+            (0, 0, 0, true),
+        ];
+        for (ping_timeout, idle_timeout_secs, server_ping_interval_secs, expected) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.server.ping_timeout = ping_timeout;
+            config.websocket.idle_timeout_secs = idle_timeout_secs;
+            config.websocket.server_ping_interval_secs = server_ping_interval_secs;
+            assert_eq!(
+                should_warn_all_liveness_disabled(&config),
+                expected,
+                "ping_timeout={ping_timeout}, idle_timeout_secs={idle_timeout_secs}, \
+                 server_ping_interval_secs={server_ping_interval_secs}"
             );
         }
     }

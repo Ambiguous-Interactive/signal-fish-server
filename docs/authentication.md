@@ -92,6 +92,17 @@ Room ownership remains non-enumerating: a different label receives the same
 `ROOM_NOT_FOUND` result for seated, spectator, and reconnect admission. That
 does not turn the public label into a credential.
 
+### What the application UUID means
+
+The connection-bound application context carries an internal UUID, and its
+provenance differs by policy. Under the enforced allowlist it is always a
+deterministic SHA-256 derivative of the public app ID string, so nothing about
+it is client-chosen. Under the open policy, a well-formed UUID sent as
+`app_id` is used verbatim, so the client chooses the application UUID. No
+current open-mode feature consumes that identity as an authority (per-app
+quotas and the cross-app join gate are allowlist-only); a future feature that
+does must not treat an open-mode application UUID as unspoofable.
+
 ## Per-app settings
 
 - `app_id` — public identifier sent by clients.

@@ -2703,6 +2703,9 @@ impl InMemoryMessageCoordinator {
                             }
                         }
                     }
+                    // Arrived-`ChannelClosed` reservations were already counted
+                    // by `reserve_one_if` at reservation time; counting here as
+                    // well would double-count the same closed-channel event.
                     ConditionalDeliveryReservation::ChannelClosed { .. } => {}
                     ConditionalDeliveryReservation::SlowConsumer { .. }
                     | ConditionalDeliveryReservation::Canceled => {

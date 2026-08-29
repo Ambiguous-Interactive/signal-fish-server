@@ -72,7 +72,7 @@ pub use turn::TurnConfig;
 pub use types::{Config, REDACTED_SECRET};
 
 pub use validation::{
-    is_production_mode, should_warn_missing_signaling_tls,
+    is_production_mode, should_warn_all_liveness_disabled, should_warn_missing_signaling_tls,
     should_warn_unauthenticated_token_binding, validate_config_security,
 };
 

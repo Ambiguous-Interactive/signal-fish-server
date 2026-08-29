@@ -44,6 +44,13 @@ Optional fields:
 - `requested_capabilities` - v3 additive extensions the client wants to use; unknown tokens are ignored and the
   client must wait for the same token in `ProtocolInfo.capabilities`
 
+`Authenticate` MUST be the first application message on a connection (and the
+only one): a second `Authenticate` after the handshake completed — including a
+re-`Authenticate` after a reconnect identity swap on the same socket, or a
+first `Authenticate` sent after any other application message under the open
+app-ID policy — is refused with an `Error` frame carrying `INVALID_INPUT`. The
+connection stays open; the handshake itself is not retried.
+
 ### JoinRoom
 
 Join or create a room for a specific game. There is no separate room-creation

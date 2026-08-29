@@ -111,6 +111,18 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Each liveness knob is legitimate to disable alone, but all three at once
+    // means nothing ever reaps a silently-dead peer. Once-at-startup warning so
+    // operators get the diagnostic before a stale seat explains it.
+    if config::should_warn_all_liveness_disabled(&cfg) {
+        tracing::warn!(
+            "All liveness mechanisms are disabled (server.ping_timeout=0, \
+             websocket.idle_timeout_secs=0, websocket.server_ping_interval_secs=0): a \
+             silently-dead client keeps its connection, per-IP slot, and room seat \
+             indefinitely with no reaping signal."
+        );
+    }
+
     let port: u16 = cfg.port;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 

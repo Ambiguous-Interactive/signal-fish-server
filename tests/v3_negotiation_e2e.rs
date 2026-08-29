@@ -829,3 +829,126 @@ async fn malformed_room_operation_error_is_explicitly_uncorrelated() {
     ));
     running_server.shutdown().await;
 }
+
+/// A duplicate Authenticate violates the documented must-be-first handshake
+/// contract, so it must answer with a machine-readable refusal instead of
+/// silence: a client whose duplicate-authenticate race waits on a second
+/// `Authenticated` would otherwise hang until the socket idle deadline.
+/// The connection itself stays alive; only the handshake attempt is refused.
+#[tokio::test]
+async fn duplicate_authenticate_answers_invalid_input_and_stays_connected() {
+    let running_server = start_allowlist_server().await;
+    let mut ws = connect(running_server.addr(), "/v2/ws").await;
+
+    let info = authenticate(&mut ws, version_only_auth(Some(3))).await;
+    assert!(matches!(info, ServerMessage::ProtocolInfo(_)));
+
+    ws.send(Message::Text(
+        serde_json::to_string(&version_only_auth(Some(3)))
+            .expect("serialize duplicate Authenticate")
+            .into(),
+    ))
+    .await
+    .expect("send duplicate Authenticate");
+    match next_server_message(&mut ws).await {
+        ServerMessage::Error {
+            message,
+            error_code,
+        } => {
+            assert_eq!(error_code, Some(ErrorCode::InvalidInput));
+            assert!(
+                message.contains("already completed"),
+                "refusal must name the completed handshake, got {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+    ))
+    .await
+    .expect("send Ping");
+    assert!(
+        matches!(next_server_message(&mut ws).await, ServerMessage::Pong),
+        "the refusal must not close the connection"
+    );
+    running_server.shutdown().await;
+}
+
+/// The open policy's optional Authenticate has the same must-be-first
+/// contract once any application message (or an earlier Authenticate) was
+/// accepted, including a re-Authenticate after a reconnect identity swap on
+/// the same socket: the handshake is already complete, so the retry gets the
+/// same coded refusal.
+#[tokio::test]
+async fn open_policy_duplicate_authenticate_answers_invalid_input() {
+    let running_server = start_open_policy_server().await;
+    let mut ws = connect(running_server.addr(), "/v2/ws").await;
+
+    let info = authenticate(&mut ws, version_only_auth(Some(3))).await;
+    assert!(matches!(info, ServerMessage::ProtocolInfo(_)));
+
+    ws.send(Message::Text(
+        serde_json::to_string(&version_only_auth(Some(3)))
+            .expect("serialize duplicate Authenticate")
+            .into(),
+    ))
+    .await
+    .expect("send duplicate Authenticate");
+    match next_server_message(&mut ws).await {
+        ServerMessage::Error {
+            message,
+            error_code,
+        } => {
+            assert_eq!(error_code, Some(ErrorCode::InvalidInput));
+            assert!(
+                message.contains("already completed"),
+                "refusal must name the completed handshake, got {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    running_server.shutdown().await;
+}
+
+/// A late Authenticate after an application message cannot retroactively
+/// establish the handshake: the answer names the ordering violation instead
+/// of silently ignoring the frame.
+#[tokio::test]
+async fn open_policy_late_authenticate_after_application_message_answers_invalid_input() {
+    let running_server = start_open_policy_server().await;
+    let mut ws = connect(running_server.addr(), "/v2/ws").await;
+
+    ws.send(Message::Text(
+        serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+    ))
+    .await
+    .expect("send Ping");
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::Pong
+    ));
+
+    ws.send(Message::Text(
+        serde_json::to_string(&version_only_auth(Some(3)))
+            .expect("serialize late Authenticate")
+            .into(),
+    ))
+    .await
+    .expect("send late Authenticate");
+    match next_server_message(&mut ws).await {
+        ServerMessage::Error {
+            message,
+            error_code,
+        } => {
+            assert_eq!(error_code, Some(ErrorCode::InvalidInput));
+            assert!(
+                message.contains("first"),
+                "refusal must name the ordering violation, got {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    running_server.shutdown().await;
+}
