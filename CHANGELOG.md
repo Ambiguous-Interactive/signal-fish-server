@@ -147,7 +147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protocol contract correction: `JoinRoom.relay_transport` is a compatibility-only hint the server
   ignores; new clients should omit it (issue #393).
 - Reference clients re-issue `StartGame` after readiness invalidations instead of latching after
-  one send, unstalling lobbies exactly when the server's readiness re-check mattered (issue #449).
+  one send, unblocking lobbies exactly when the server's readiness re-check mattered (issue #449).
 
 ### Security
 
