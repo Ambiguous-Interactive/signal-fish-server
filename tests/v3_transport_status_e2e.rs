@@ -103,15 +103,15 @@ async fn start_server_with_session(
     start_server_with_websocket_config(session, |_| {}).await
 }
 
-/// [`start_server_with_session`] with direct access to the WebSocket config
+/// [`start_server_with_session`] with direct access to the server config
 /// for tests that need to size queue capacity or slow-consumer deadlines.
 async fn start_server_with_websocket_config(
     session: SessionConfig,
-    mutate_websocket: impl FnOnce(&mut signal_fish_server::config::WebSocketConfig),
+    mutate_config: impl FnOnce(&mut ServerConfig),
 ) -> (RunningTestServer, Arc<EnhancedGameServer>) {
     let mut server_config: ServerConfig = test_server_config();
     server_config.app_id_allowlist_enabled = true;
-    mutate_websocket(&mut server_config.websocket_config);
+    mutate_config(&mut server_config);
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
@@ -1350,11 +1350,15 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
     /// to exactly this count with `LobbyStateChanged` broadcasts.
     const CONTROL_CAPACITY: usize = 8;
     /// One full slow-consumer window is the demonstrated gate-hold duration.
-    const STALL_WINDOW_MS: u64 = 1000;
+    /// Sized so the latency floor below keeps ~1 s of slack under the
+    /// co-tenant runner variance documented in issue #467 (a 3-5x excursion
+    /// on the in-window loopback hops must not erode the floor).
+    const STALL_WINDOW_MS: u64 = 4000;
     const STALL_WINDOW: tokio::time::Duration = tokio::time::Duration::from_millis(STALL_WINDOW_MS);
-    /// Lower bound for the mutation delay: the gate-hold window minus generous
-    /// scheduling slack for the loopback round trips that happen inside it.
-    const MIN_MUTATION_DELAY: std::time::Duration = std::time::Duration::from_millis(700);
+    /// Lower bound for the mutation delay: the gate-hold window minus the
+    /// in-window loopback round trips (fan-out enqueue hop, LeaveRoom send)
+    /// that the window also covers.
+    const MIN_MUTATION_DELAY: std::time::Duration = std::time::Duration::from_millis(3000);
     /// 16 KiB per flood frame so the backlog cannot hide inside the stalled
     /// member's clamped kernel receive buffer (same rationale as
     /// `slow_consumer_no_cascade_e2e`).
@@ -1368,10 +1372,15 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
     const STALLED_RECV_BUFFER_BYTES: u32 = 4096;
 
     let session = mesh_session_config();
-    let (running_server, game_server) = start_server_with_websocket_config(session, |ws| {
-        ws.control_queue_capacity = CONTROL_CAPACITY;
-        ws.slow_consumer_timeout_ms = STALL_WINDOW_MS;
-        ws.delivery_stats_interval_secs = 0;
+    let (running_server, game_server) = start_server_with_websocket_config(session, |config| {
+        // The activity reaper is a second, independent clock on the stalled
+        // member (10 s in `test_server_config`); the wedged phases below take
+        // a few seconds even before CI variance, so raise the deadline well
+        // clear of the whole test.
+        config.ping_timeout = tokio::time::Duration::from_secs(120);
+        config.websocket_config.control_queue_capacity = CONTROL_CAPACITY;
+        config.websocket_config.slow_consumer_timeout_ms = STALL_WINDOW_MS;
+        config.websocket_config.delivery_stats_interval_secs = 0;
     })
     .await;
     let addr = running_server.addr();
@@ -1474,6 +1483,15 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
     }
 
     // The accepted first report fans out under the room event mutation gate.
+    // The backpressure counter must tick exactly once for it: the stalled
+    // leg's reserve is the only `Full` in the whole scenario, so this pins
+    // that the control queue was filled to exactly capacity — a future
+    // control-lane message type that shifts the exact-fill accounting fails
+    // here, naming the precondition, instead of as a confusing latency miss.
+    let backpressure_before = game_server
+        .metrics()
+        .websocket_backpressure_events
+        .load(Ordering::Relaxed);
     report_transport_status(&mut reporter, Transport::WebRtc, true).await;
 
     // The mutator's leg of the fan-out arrives while the stalled member's leg
@@ -1487,6 +1505,15 @@ async fn transport_status_fanout_gate_delays_mutation_behind_stalled_member() {
         true,
     )
     .await;
+    assert_eq!(
+        game_server
+            .metrics()
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed),
+        backpressure_before + 1,
+        "exactly the stalled fan-out leg may observe a full control queue; the \
+         exact-fill precondition broke"
+    );
 
     // A room mutation that needs the same gate is now admitted only after the
     // stalled member's eviction resolves the parked fan-out leg.
