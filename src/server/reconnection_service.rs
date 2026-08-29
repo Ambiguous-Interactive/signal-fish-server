@@ -1160,22 +1160,54 @@ impl EnhancedGameServer {
                 "Reconnect epoch saturated at u32::MAX; the resumed stream reuses it"
             );
         }
-        let Some(reassigned_delivery) = self.connection_manager.reassign_connection(
+        let reassigned_delivery = match self.connection_manager.reassign_connection(
             current_player_id,
             reconnect_player_id,
             *room_id,
             resumed_epoch,
-        ) else {
-            return self
-                .reject_claimed_reconnect(
-                    current_player_id,
-                    claim_guard,
-                    &restore,
-                    "Current connection no longer exists",
-                    ErrorCode::ReconnectionFailed,
-                    operation_id,
-                )
-                .await;
+        ) {
+            crate::server::connection_manager::ReassignmentOutcome::Reassigned(delivery) => {
+                delivery
+            }
+            crate::server::connection_manager::ReassignmentOutcome::TransientConnectionMissing => {
+                return self
+                    .reject_claimed_reconnect(
+                        current_player_id,
+                        claim_guard,
+                        &restore,
+                        "Current connection no longer exists",
+                        ErrorCode::ReconnectionFailed,
+                        operation_id,
+                    )
+                    .await;
+            }
+            crate::server::connection_manager::ReassignmentOutcome::RefusedTransientClose(
+                reason,
+            ) => {
+                // The claiming socket was already scheduled to close for a
+                // per-socket reason (reaper timeout, slow consumer, ...)
+                // before the swap. Refusing keeps the stale close from
+                // killing the restored identity; the record below is
+                // released unspent, so a retry from a fresh socket
+                // reconnects normally. The precise cause rides on the
+                // close frame that follows (code + close_frame_reason).
+                tracing::warn!(
+                    %current_player_id,
+                    %reconnect_player_id,
+                    close_reason = reason.close_frame_reason(),
+                    "Reconnect refused: claiming socket already carries a per-socket close"
+                );
+                return self
+                    .reject_claimed_reconnect(
+                        current_player_id,
+                        claim_guard,
+                        &restore,
+                        "Connection scheduled to close; reconnect from a fresh connection",
+                        ErrorCode::ReconnectionFailed,
+                        operation_id,
+                    )
+                    .await;
+            }
         };
         if let Some(effective_player_id) = &effective_player_id {
             *effective_player_id.write().await = *reconnect_player_id;

@@ -303,6 +303,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close the reaper-vs-reconnect identity-swap race surfaced by the session-187
+  seam sweep (issue #396): a reconnect claim that reached the identity swap
+  while its claiming socket already carried a per-socket close pin (activity
+  reaper eviction, idle/slow-consumer close, oversized-outbound or teardown
+  close) used to adopt the pinned signal into the restored identity — killing
+  the freshly reconnected player with a stale close code (for example
+  `4003 activity_timeout`) right after peers saw `PlayerReconnected`, and
+  tearing its restored membership back out. The identity swap now refuses
+  atomically when the transient entry carries such a pin: the pending close
+  tears down only the transient socket, the one-time token is not consumed,
+  and a retry from a fresh connection reconnects normally while the window is
+  open (`ReconnectionFailed` with `RECONNECTION_FAILED`; the precise cause
+  rides on the close frame that follows). `Shutdown` and `RoomInactive`
+  closes still cross the swap — a drain must close restored connections, and
+  a room-inactive pin reflects the room the claim just verified. Pinned
+  red-first end to end and at the manager level.
+
 - Close the shutdown-drain admission gaps surfaced by the session-186 seam
   sweep (issue #396):
   - A reconnect attempt delivered inside the drain grace window (only possible

@@ -303,7 +303,13 @@ early or keep it open late, and a reconnect attempt after it elapses is
 rejected with `RECONNECTION_EXPIRED` (a bad or mismatched token remains
 `RECONNECTION_TOKEN_INVALID`). A reconnect attempt delivered while the server
 is draining for shutdown is refused with `SERVER_DRAINING` and does not
-consume the token. For pure-v2 clients the token is still
+consume the token. The same holds when the reconnecting socket was already
+scheduled to close for a per-socket reason — the activity-timeout reaper, an
+idle/slow-consumer close, or teardown caught up with it just before the
+attempt: the refusal (`ReconnectionFailed` with `RECONNECTION_FAILED`) does
+not consume the token, and the precise cause arrives on the close frame that
+immediately follows. Retrying from a fresh connection reconnects normally
+while the token window is open. For pure-v2 clients the token is still
 minted at disconnect time and never reaches the wire — reconnection is
 effectively a v3+ feature.
 
@@ -1595,8 +1601,8 @@ peer lists contain only peers that can run the session — that negotiated v3 pl
 transport. A joiner that cannot run the session is rejected at admission with
 `ROOM_SESSION_INCOMPATIBLE` (see below), so a live non-relay session's membership stays uniformly capable; what
 can remain is an incumbent that **reconnected** with downgraded capabilities (a reconnect owns its seat and is
-never rejected for capability reasons; lifecycle refusals such as `SERVER_DRAINING` shutdown-drain admission
-still apply). Such a member still receives its plan, but with an **empty** `peers`
+never rejected for capability reasons; lifecycle refusals such as `SERVER_DRAINING` shutdown-drain admission,
+or a refusal because the reconnecting socket was already scheduled to close, still apply). Such a member still receives its plan, but with an **empty** `peers`
 list — it has no P2P peers and
 participates via the relay floor (`host` stays as elected, informational) — and never appears in other members'
 `peers`. Every publication observes this mixed-path shape (the `mixed_path_members_observed` counter plus a warn

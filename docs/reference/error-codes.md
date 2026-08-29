@@ -145,7 +145,7 @@ disconnection using a stored reconnection token.
 
 | Error Code | Description |
 |---|---|
-| `RECONNECTION_FAILED` | Failed to reconnect. The session may have expired or the room closed. |
+| `RECONNECTION_FAILED` | Failed to reconnect. The session may have expired or the room closed. A reconnect attempt delivered on a socket already scheduled to close (activity timeout, slow consumer, teardown) is also refused with this code and does not consume the token. |
 | `RECONNECTION_TOKEN_INVALID` | The reconnection token is invalid or malformed. |
 | `RECONNECTION_EXPIRED` | The reconnection window has expired. Join as a new player. |
 | `PLAYER_ALREADY_CONNECTED` | This player is already connected from another session. |
@@ -282,6 +282,16 @@ app's other players.
 The reconnection window has closed since the client disconnected. The
 stored `auth_token` is no longer valid. The client must rejoin the room
 as a new player by sending a fresh `JoinRoom` message.
+
+### Reconnect on a closing socket (`RECONNECTION_FAILED`)
+
+A `Reconnect` delivered on a socket the server has already scheduled to
+close — the activity-timeout reaper fired, an idle/slow-consumer close
+landed, or teardown caught up with the attempt — is refused with
+`ReconnectionFailed` and `RECONNECTION_FAILED` without consuming the
+token. The close frame that immediately follows carries the precise cause
+(for example `4003 activity_timeout`). Retry from a fresh connection:
+while the token window is open, the same token reconnects normally there.
 
 ### Server draining (`SERVER_DRAINING`)
 
