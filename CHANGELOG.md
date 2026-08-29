@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Documentation: record the issue #396 session-192 seam sweeps —
+  authority/relay-policy, room identity/LobbyState state machine, and
+  WebSocket upgrade admission audited sound under adversarial
+  re-verification — and document the three recorded foot-guns at their
+  sites: `DatabaseStorage::update_room_authority` `Some(id)` grants require
+  a current room member (production grants must go through
+  `request_room_authority`); `DatabaseStorage::toggle_player_ready` is a
+  test-only parity surface whose storage gate diverges from the coordinator
+  contract; and upgrade-rejection warning suppression is conserved only
+  modulo window eviction.
 - Documentation: `docs/authentication.md` now states what the
   connection-bound application UUID means in each mode — under the enforced
   allowlist it is always derived deterministically from the public app ID,

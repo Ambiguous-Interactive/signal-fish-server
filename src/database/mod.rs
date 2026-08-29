@@ -366,7 +366,8 @@ pub trait GameDatabase: Send + Sync {
     /// Test-only parity surface today: the live ready path is the coordinator's
     /// own ready map under the room mutation gate (which accepts any
     /// non-finalized room), while this storage gate accepts exactly
-    /// [`LobbyState::Lobby`]. Do not wire this into production without
+    /// [`crate::protocol::LobbyState::Lobby`]. Do not wire this into
+    /// production without
     /// reconciling that state-gate divergence.
     async fn toggle_player_ready(
         &self,
