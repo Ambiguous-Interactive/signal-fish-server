@@ -1486,6 +1486,8 @@ that cannot produce its operation-specific success result. A malformed top-level
 uncorrelated top-level `Error`, because the server cannot safely trust an operation ID from undecodable input.
 
 Generate a UUID that is unique among live and recently completed operations on the current physical WebSocket.
+The `operation_id` text must use lowercase hyphenated canonical UUID form; any other encoding is rejected as a
+malformed frame.
 The scope continues across a successful `Reconnect` on that socket, while a new physical connection starts a new
 scope. The server echoes IDs but does not deduplicate requests or make them idempotent. Autonomous lifecycle events
 (for example, disconnect-driven `SpectatorLeft`) remain top-level and never impersonate an operation result.

@@ -109,6 +109,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Truthful capability-gate error code (issue #396 session-188 audit): a
+  negotiated-v3 connection that sends `RoomOperation` without the negotiated
+  `room_operation_ids` capability now receives `INVALID_INPUT` naming the
+  capability, instead of `UNSUPPORTED_PROTOCOL_VERSION` — that code's
+  documented meaning is "version below the deployment minimum; upgrade the
+  client", which is wrong retry guidance for a client whose session version
+  is valid and whose remedy is requesting the capability in a fresh
+  handshake. A pre-v3 connection (which has no `RoomOperation` surface at
+  all) still receives `UNSUPPORTED_PROTOCOL_VERSION`, and that code's
+  documentation now covers this frame-class case explicitly. Pinned by a new
+  red-first e2e alongside the existing v2-downgrade pin.
+- Truthful activity-reaper documentation (issue #396 session-188 audit): the
+  `ACTIVITY_TIMEOUT` row stated the reaper fires when the connection
+  "observed no inbound traffic", but frames rejected for size or content and
+  reconnect attempts answered on the direct dispatch arm deliberately do not
+  refresh the activity window — exactly so a flood of invalid frames cannot
+  keep an otherwise dead socket alive (mirroring the oversized-frame policy
+  in the game-data path). The row now states the enforced semantics: no
+  successfully processed inbound application or transport-liveness traffic.
+- Document the canonical `operation_id` encoding in `docs/protocol.md`: the
+  lowercase-hyphenated UUID requirement is enforced and golden-pinned but was
+  never stated in the protocol document (issue #396 session-188 audit).
 - Truthful rate-limit documentation (issue #396 session-187 audit): the
   `Authenticated.rate_limits` projection and its rustdoc now state that
   `per_minute` handshake limiting is enforced only for allowlist entries that
