@@ -709,12 +709,47 @@ pub(super) async fn send_single_message_ref(
             )
             .await?;
         }
+        // Fail-closed protocol gate: these variants exist only on the v3 wire
+        // (`docs/protocol.md`), and every emission site checks the recipient's
+        // negotiated version before enqueueing. Routing can still race that
+        // check (a reconnect identity swap landing between a fan-out's
+        // recipient snapshot and this write), so the writer — the last
+        // serialization point that owns the recipient's version — suppresses
+        // them here, beside the per-recipient GameData stamp projection. The
+        // suppressed frame is accounted like any other pre-write rejection:
+        // counted, never fenced (the sink never saw bytes), and never written.
+        ServerMessage::PeerTransportStatus { .. }
+        | ServerMessage::RelayStats { .. }
+        | ServerMessage::GoingAway { .. }
+        | ServerMessage::DeliveryReport { .. }
+            if !recipient_supports_v3 =>
+        {
+            accounting.complete_rejected_before_write();
+            tracing::debug!(
+                %player_id,
+                variant = v3_only_message_name(message),
+                "Suppressed a protocol-v3-only server message on a pre-v3 connection"
+            );
+            disposition = SendDisposition::AccountedDrop;
+        }
         other => {
             send_text_message(sender, other, player_id, max_outbound_message_size).await?;
         }
     }
 
     Ok(disposition)
+}
+
+/// The wire name of a protocol-v3-only [`ServerMessage`] variant, for
+/// diagnostics; empty for variants that exist below v3.
+fn v3_only_message_name(message: &ServerMessage) -> &'static str {
+    match message {
+        ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
+        ServerMessage::RelayStats { .. } => "RelayStats",
+        ServerMessage::GoingAway { .. } => "GoingAway",
+        ServerMessage::DeliveryReport { .. } => "DeliveryReport",
+        _ => "",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

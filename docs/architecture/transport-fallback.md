@@ -182,11 +182,15 @@ out nothing. Spectators are roomless in connection routing: spectator entry and
 leave reset deduplication, so the next accepted report is counted again, but
 reports made while spectating do not produce `PeerTransportStatus`. A later seated join starts another fresh
 generation, so prior roomless or spectator state never suppresses the first
-in-room report. Delivery is per-recipient v3-gated (a v2 member never observes it,
-the per-recipient v3 capability gate) but deliberately **not** gated on the recipient's own transport
+in-room report. Delivery is per-recipient v3-gated (a v2 member never observes
+it: recipients are filtered when the fan-out is resolved, re-checked per
+delivery leg, and the socket writer fail-closed-drops any v3-only frame that
+still reaches a pre-v3 queue) but deliberately **not** gated on the recipient's own transport
 capabilities — it is informational status about a _peer_, useful to any v3
 client, not an instruction to use that transport. Like the report it relays, it
-never changes how the server relays `GameData`. Delivery is best-effort (like
+never changes how the server relays `GameData`. The fan-out releases the room
+event mutation gate before delivering, so backpressured (slow-consumer) legs
+never delay other members' room mutations. Delivery is best-effort (like
 `Signal`): a backpressured peer may miss a notice and re-syncs on
 the next state change.
 

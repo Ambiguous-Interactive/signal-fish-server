@@ -3793,6 +3793,134 @@ mod tests {
         }
     }
 
+    /// The v3-only server messages must fail closed on a pre-v3 wire.
+    ///
+    /// `PeerTransportStatus`, `RelayStats`, `GoingAway`, and `DeliveryReport`
+    /// exist only on the protocol-v3 wire. Every emission site checks the
+    /// recipient's negotiated version before enqueueing, but routing and a
+    /// reconnect identity swap can race that check (issue #463): the writer is
+    /// the last serialization point that owns the recipient's version, so it
+    /// suppresses these variants exactly where the per-recipient GameData
+    /// stamp projection already lives — accounted, never fenced, never on the
+    /// wire of a connection that cannot parse them.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn v3_only_messages_fail_closed_on_a_pre_v3_wire() {
+        use crate::protocol::Transport;
+
+        let v3_only_messages: Vec<(&'static str, ServerMessage)> = vec![
+            (
+                "PeerTransportStatus",
+                ServerMessage::PeerTransportStatus {
+                    peer_id: PlayerId::from_u128(4),
+                    transport: Transport::WebRtc,
+                    connected: true,
+                },
+            ),
+            (
+                "RelayStats",
+                ServerMessage::RelayStats {
+                    interval_ms: 1_000,
+                    sent_to_you: 1,
+                    dropped_for_you: 0,
+                    backpressure_events: 0,
+                },
+            ),
+            (
+                "GoingAway",
+                ServerMessage::GoingAway {
+                    deadline_ms: 1,
+                    retry_after_secs: None,
+                },
+            ),
+            (
+                "DeliveryReport",
+                ServerMessage::DeliveryReport(Box::default()),
+            ),
+        ];
+
+        for (name, message) in v3_only_messages {
+            for (recipient_is_v3, context) in [
+                (false, "{name}: pre-v3 queue must suppress the frame"),
+                (true, "{name}: v3 queue must still deliver the frame"),
+            ] {
+                let context = context.replace("{name}", name);
+                let server = test_server().await;
+                let player_id = PlayerId::from_u128(9);
+                let (tx, rx) = crate::coordination::outbound_queue::channel(4, 4);
+                if recipient_is_v3 {
+                    tx.set_protocol_version(3);
+                }
+
+                let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+                let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+                let mut pair = UpgradedSocketPair::connect().await;
+
+                let queued = Arc::new(message.clone());
+                send_queued(
+                    &mut pair.server_sink,
+                    crate::coordination::outbound_queue::QueuedOutbound::test_control(Arc::clone(
+                        &queued,
+                    )),
+                    None,
+                    &rx,
+                    &player_id,
+                    &server,
+                    &close_signal,
+                    &probe_state,
+                    Duration::ZERO,
+                    WritePhase::Live,
+                )
+                .await
+                .expect("{context}: the suppression must never fail the writer");
+
+                if recipient_is_v3 {
+                    let frame = tokio::time::timeout(Duration::from_secs(10), pair.client.next())
+                        .await
+                        .expect("{context}: frame write completed before this read")
+                        .expect("client frame");
+                    match frame.expect("client frame") {
+                        TungsteniteMessage::Text(text) => {
+                            let decoded: ServerMessage = serde_json::from_str(&text)
+                                .unwrap_or_else(|error| {
+                                    panic!("{context}: decode {text}: {error}")
+                                });
+                            assert_eq!(
+                                std::mem::discriminant(&decoded),
+                                std::mem::discriminant(queued.as_ref()),
+                                "{context}: the delivered variant must be the queued one"
+                            );
+                        }
+                        other => panic!("{context}: expected a text frame, got {other:?}"),
+                    }
+                } else {
+                    let leaked =
+                        tokio::time::timeout(Duration::from_millis(500), pair.client.next()).await;
+                    match leaked {
+                        Err(_elapsed) => {}
+                        Ok(Some(Ok(TungsteniteMessage::Close(_)))) => {}
+                        Ok(other) => {
+                            panic!("{context}: v3-only frame reached the pre-v3 wire: {other:?}")
+                        }
+                    }
+                    assert!(
+                        !rx.abandoned_in_flight_write(),
+                        "{context}: a known-rejected-before-write frame must never fence the queue"
+                    );
+                    assert_eq!(
+                        server
+                            .metrics()
+                            .websocket_messages_dropped
+                            .load(Ordering::Relaxed),
+                        1,
+                        "{context}: the suppressed frame must be accounted, not lost silently"
+                    );
+                }
+                pair.shutdown().await;
+            }
+        }
+    }
+
     /// A 1009 teardown must flush coalesced unsupported-format omission
     /// reports like every other finalize branch.
     ///
