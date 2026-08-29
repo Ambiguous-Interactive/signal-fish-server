@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejected whole with close code `1009` instead of truncated (issue #399).
 - New `ROOM_SESSION_INCOMPATIBLE` wire code: seat-fill joins into finalized rooms from clients that
   did not negotiate the room's protocol, topology, and transport are refused instead of being
-  seated on a silently split data path (issue #421).
+  seated on a silently split data path; new `seat_fills_rejected_incompatible` and
+  `mixed_path_members_observed` metrics observe residual mixed-path rooms (issue #421).
 - Startup warnings: token binding over plaintext `ws://` only provides replay ordering, not
   authentication, and disabling every liveness mechanism at once leaves dead clients un-reaped
   (issues #462, #465).
@@ -51,7 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   objects, and their dead helper APIs.
 - **Breaking:** Removed more unwired or impossible metric series (distributed-lock extend
   failures, relay client-id reuse/exhaustion, JSON `relay_health`, cross-instance membership
-  cache) and wired the distributed-lock cleanup and release-failure counters to real events;
+  cache) and their public Rust types, fields, and increment methods, and wired the
+  distributed-lock cleanup and release-failure counters to real events;
   `DistributedLock::release` returns `true` only for an owned-lease removal.
 - **Breaking:** Startup validation rejects zero-valued caps that silently disabled features:
   `max_connections_per_ip`, `max_rooms_per_game`, room-creation/join/signal budgets, name-length
@@ -68,7 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `admin_user_exists` was removed; retry-success metrics report `null` before the first attempt
   instead of a fabricated `100%`; `EncryptedSecret` metadata is now authenticated, so bundles
   encrypted by a previous version no longer decrypt and must be re-encrypted when upgrading;
-  `MetricsQuery.timeRange` was removed from `/metrics`.
+  `MetricsQuery.timeRange` was removed from `/metrics`; `dashboard_cache.refresh_count` is wired
+  to the real refresh counter and the hardcoded-zero `refresh_errors` stub field was removed.
+- Dispatching a `Reconnect` frame through `EnhancedGameServer::handle_client_message` is now
+  refused fail-closed with `RECONNECTION_FAILED` instead of half-reconnecting: the message router
+  cannot update the socket's identity, so reconnection stays exclusive to the connection task
+  (issue #396).
 - Unauthorized-metrics and rejected-upgrade warnings are throttled per source (60-second window
   with a suppressed-repeat count) so anonymous request loops can no longer amplify operator log
   volume (issue #411).
@@ -85,6 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A control-lane busy period no longer closes healthy connections with `4002 slow_consumer`:
   parked `DeliveryReport` carriers are bounded by write progress instead of queue age.
+- A serve future returning mid-drain no longer aborts the committed shutdown drain (which used to
+  drop every connected client with no `GoingAway` advisory and no coded `4000` closes), and the
+  grace wait is skipped when no socket handler is live.
 - Closed the reaper-versus-reconnect identity-swap race that could kill a freshly reconnected
   player with a stale close code; the pin now tears down only the transient socket and the
   one-time token stays spendable (issue #396).

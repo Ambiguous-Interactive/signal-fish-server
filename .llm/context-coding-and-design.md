@@ -8,7 +8,8 @@ See [Rust Idioms and Patterns](skills/rust-idioms-and-patterns/SKILL.md) and
   clearer name over the shortened one. A comment is a last resort for exceptional
   circumstances only: a non-obvious "why" (invariant, safety proof, external-contract
   constraint) that a better name cannot carry. Never comment "what", and never keep
-  history in comments -- git and `progress/` notes own history.
+  history in comments -- git and `progress/` notes own history. Rustdoc (`///`, `//!`)
+  is documentation, not a comment; it keeps its own standards.
 - When a comment is genuinely required, keep it minimal. A multi-line, non-doc
   comment uses the block form (not stacked `//` lines):
 
