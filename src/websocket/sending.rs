@@ -709,16 +709,21 @@ pub(super) async fn send_single_message_ref(
             )
             .await?;
         }
-        // Fail-closed protocol gate: these variants exist only on the v3 wire
-        // (`docs/protocol.md`), and every emission site checks the recipient's
-        // negotiated version before enqueueing. Routing can still race that
-        // check (a reconnect identity swap landing between a fan-out's
-        // recipient snapshot and this write), so the writer — the last
-        // serialization point that owns the recipient's version — suppresses
-        // them here, beside the per-recipient GameData stamp projection. The
-        // suppressed frame is accounted like any other pre-write rejection:
-        // counted, never fenced (the sink never saw bytes), and never written.
-        ServerMessage::PeerTransportStatus { .. }
+        // Fail-closed protocol gate: these are ALL the variants documented as
+        // protocol-v3-only (`docs/protocol.md`, `src/protocol/messages.rs`),
+        // so a pre-v3 connection can never parse them. Every emission site
+        // checks the recipient's negotiated version before enqueueing, but
+        // routing can still race that check (a reconnect identity swap landing
+        // between a fan-out's recipient snapshot and this write), so the
+        // writer — the last serialization point that owns the recipient's
+        // version — suppresses them here, beside the per-recipient GameData
+        // stamp projection. The suppressed frame is accounted like any other
+        // pre-write rejection: counted, never fenced (the sink never saw
+        // bytes), and never written. (Writer-generated report flushes are
+        // covered separately: see `write_pending_unsupported_report`.)
+        ServerMessage::NewPeer { .. }
+        | ServerMessage::SessionPlan { .. }
+        | ServerMessage::PeerTransportStatus { .. }
         | ServerMessage::RelayStats { .. }
         | ServerMessage::GoingAway { .. }
         | ServerMessage::DeliveryReport { .. }
@@ -744,6 +749,8 @@ pub(super) async fn send_single_message_ref(
 /// diagnostics; empty for variants that exist below v3.
 fn v3_only_message_name(message: &ServerMessage) -> &'static str {
     match message {
+        ServerMessage::NewPeer { .. } => "NewPeer",
+        ServerMessage::SessionPlan { .. } => "SessionPlan",
         ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
         ServerMessage::RelayStats { .. } => "RelayStats",
         ServerMessage::GoingAway { .. } => "GoingAway",
@@ -1068,6 +1075,12 @@ pub(super) async fn write_pending_unsupported_report(
     player_id: &PlayerId,
     max_outbound_message_size: usize,
 ) -> Result<bool, SendMessageError> {
+    // This write path bypasses the fail-closed v3-only arm of
+    // `send_single_message_ref` deliberately: a pre-v3 queue can never HAVE a
+    // pending unsupported report, because the queue refuses to accumulate
+    // pending ranges for a recipient that never negotiated v3
+    // (`OutboundQueueState::record_unsupported_format` /
+    // `hold_unsupported_format`).
     let Some(report) = receiver.pending_unsupported_report() else {
         return Ok(false);
     };

@@ -406,15 +406,18 @@ impl EnhancedGameServer {
         // lifecycle lock is already held, so this follows the same
         // lifecycle -> room ordering as join/leave/reconnect. The gate is
         // released BEFORE delivery (see the caller): the snapshot below never
-        // parks, while delivery does, and "delivery backpressure never holds
-        // the room mutation gate" is the codebase invariant every publisher
-        // shares. Truth at dispatch is carried by per-recipient revalidation
-        // instead of the gate: `send_to_player_in_room` re-checks membership
-        // under the room routing gate, the fan-out re-checks the negotiated
-        // v3 capability per leg, and the socket writer fail-closed-drops any
-        // v3-only frame that still reaches a pre-v3 queue — so neither a
-        // departed member nor a replacement v2 connection (reconnect identity
-        // swap) can observe this v3-only frame.
+        // parks, while delivery does. Sequenced publishers satisfy the shared
+        // caller-side rule — no task parks on backpressured delivery while
+        // directly holding the gate — by transferring their guard into the
+        // FIFO job that publishes; this path is strictly stronger: NOTHING
+        // holds the gate during delivery. Truth at dispatch is carried by
+        // per-recipient revalidation instead of the gate:
+        // `send_to_player_in_room` re-checks membership under the room
+        // routing gate, the fan-out re-checks the negotiated v3 capability
+        // per leg, and the socket writer fail-closed-drops any v3-only frame
+        // that still reaches a pre-v3 queue — so neither a departed member
+        // nor a replacement v2 connection (reconnect identity swap) can
+        // observe this v3-only frame.
         let _room_event_guard = self
             .message_coordinator
             .lock_room_event_mutation(&room_id)

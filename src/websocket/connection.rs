@@ -3795,20 +3795,41 @@ mod tests {
 
     /// The v3-only server messages must fail closed on a pre-v3 wire.
     ///
-    /// `PeerTransportStatus`, `RelayStats`, `GoingAway`, and `DeliveryReport`
-    /// exist only on the protocol-v3 wire. Every emission site checks the
-    /// recipient's negotiated version before enqueueing, but routing and a
-    /// reconnect identity swap can race that check (issue #463): the writer is
-    /// the last serialization point that owns the recipient's version, so it
+    /// The variants documented as protocol-v3-only (`NewPeer`, `SessionPlan`,
+    /// `PeerTransportStatus`, `RelayStats`, `GoingAway`, `DeliveryReport`)
+    /// exist only on the v3 wire. Every emission site checks the recipient's
+    /// negotiated version before enqueueing, but routing and a reconnect
+    /// identity swap can race that check (issue #463): the writer is the last
+    /// serialization point that owns the recipient's version, so it
     /// suppresses these variants exactly where the per-recipient GameData
     /// stamp projection already lives — accounted, never fenced, never on the
     /// wire of a connection that cannot parse them.
     #[tokio::test(flavor = "multi_thread")]
     #[cfg_attr(miri, ignore)]
     async fn v3_only_messages_fail_closed_on_a_pre_v3_wire() {
-        use crate::protocol::Transport;
+        use crate::protocol::{SessionGeneration, SessionPlanPayload, Topology, Transport};
 
         let v3_only_messages: Vec<(&'static str, ServerMessage)> = vec![
+            (
+                "NewPeer",
+                ServerMessage::NewPeer {
+                    peer_id: PlayerId::from_u128(4),
+                    you_initiate: true,
+                },
+            ),
+            (
+                "SessionPlan",
+                ServerMessage::SessionPlan(Box::new(SessionPlanPayload {
+                    generation: SessionGeneration::from_u128(1),
+                    topology: Topology::Relay,
+                    transport: Transport::Relay,
+                    host: None,
+                    direct_endpoint: None,
+                    peers: Vec::new(),
+                    ice_servers: Vec::new(),
+                    fallback: Transport::Relay,
+                })),
+            ),
             (
                 "PeerTransportStatus",
                 ServerMessage::PeerTransportStatus {
@@ -3872,12 +3893,16 @@ mod tests {
                     WritePhase::Live,
                 )
                 .await
-                .expect("{context}: the suppression must never fail the writer");
+                .unwrap_or_else(|error| {
+                    panic!("{context}: the suppression must never fail the writer: {error:?}")
+                });
 
                 if recipient_is_v3 {
                     let frame = tokio::time::timeout(Duration::from_secs(10), pair.client.next())
                         .await
-                        .expect("{context}: frame write completed before this read")
+                        .unwrap_or_else(|_elapsed| {
+                            panic!("{context}: frame write completed before this read")
+                        })
                         .expect("client frame");
                     match frame.expect("client frame") {
                         TungsteniteMessage::Text(text) => {

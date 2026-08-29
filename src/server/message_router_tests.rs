@@ -571,9 +571,11 @@ async fn transport_status_is_ordered_before_concurrent_leave() {
     ));
 
     // Poll both production handlers to their lifecycle wait point in a known
-    // order while the gate is held. Tokio's FIFO mutex then makes the oracle
-    // independent of executor scheduling: status must publish before leave can
-    // clear membership.
+    // order. The lifecycle gate spans only handler processing (transport
+    // status releases it before fan-out dispatch), so this oracle rests on
+    // `join!`'s in-order poll discipline: after the guard drops, the status
+    // future completes its (uncontended, healthy-queue) publication within
+    // its poll, before leave is first polled to clear membership.
     let lifecycle = server
         .connection_manager
         .client_lifecycle(&reporter)

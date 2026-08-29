@@ -1347,10 +1347,10 @@ async fn transport_status_fanout_backpressure_does_not_block_room_mutation() {
     /// to exactly this count with `LobbyStateChanged` broadcasts.
     const CONTROL_CAPACITY: usize = 8;
     /// One full slow-consumer window is the parked-leg duration the mutation
-    /// must NOT wait behind. Sized so the upper bound below keeps the whole
-    /// window of slack under the co-tenant runner variance documented in
-    /// issue #467 (a regression that re-introduces gate-holding waits out the
-    /// full window and fails here, while ordinary loopback hops do not).
+    /// must NOT wait behind. The regression oracle is the deterministic
+    /// eviction-ordering assertion below; this window is only the wall-clock
+    /// backstop, sized with the whole window of slack against the co-tenant
+    /// runner variance documented in issue #467.
     const STALL_WINDOW_MS: u64 = 4000;
     const STALL_WINDOW: tokio::time::Duration = tokio::time::Duration::from_millis(STALL_WINDOW_MS);
     /// 16 KiB per flood frame so the backlog cannot hide inside the stalled
@@ -1512,14 +1512,29 @@ async fn transport_status_fanout_backpressure_does_not_block_room_mutation() {
 
     // A room mutation that needs the same gate must be admitted WITHOUT
     // waiting behind the parked stalled leg: backpressured delivery no longer
-    // holds the room event mutation gate. A regression that re-introduces the
-    // gate hold waits out the full stall window here and fails this bound.
+    // holds the room event mutation gate. The oracle is deterministic
+    // ordering, not a clock: the stalled member's eviction is the ONLY
+    // slow-consumer source in this scenario, and a regression that re-holds
+    // the gate admits the mutation only after that eviction — so observing
+    // zero evictions at RoomLeft time fails the regression deterministically,
+    // while the wall-clock bound below is a co-tenant-variance backstop (a
+    // gate-hold regression waits out the full stall window here).
     let leave_started = std::time::Instant::now();
     send(&mut mutator, &ClientMessage::LeaveRoom).await;
     next_matching_server_message_within(&mut mutator, SERVER_MESSAGE_TIMEOUT, "RoomLeft", {
         |message| matches!(message, ServerMessage::RoomLeft).then_some(())
     })
     .await;
+    assert_eq!(
+        game_server
+            .metrics()
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0,
+        "the mutation must be admitted while the stalled member's parked leg is \
+         still pending; an eviction observed before it means the fan-out held \
+         the room event mutation gate across backpressured delivery again"
+    );
     let leave_elapsed = leave_started.elapsed();
     assert!(
         leave_elapsed < STALL_WINDOW,
