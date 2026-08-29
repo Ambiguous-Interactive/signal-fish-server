@@ -3,7 +3,22 @@
 See [Rust Idioms and Patterns](skills/rust-idioms-and-patterns/SKILL.md) and
 [SOLID Principles Enforcement](skills/solid-principles-enforcement/SKILL.md) for full details.
 
-- Code should be self-documenting -- only comment "why", never "what"
+- Strive for zero comments. Code must be self-documenting through descriptive,
+  unabbreviated names for classes, functions, and variables -- prefer the longer,
+  clearer name over the shortened one. A comment is a last resort for exceptional
+  circumstances only: a non-obvious "why" (invariant, safety proof, external-contract
+  constraint) that a better name cannot carry. Never comment "what", and never keep
+  history in comments -- git and `progress/` notes own history.
+- When a comment is genuinely required, keep it minimal. A multi-line, non-doc
+  comment uses the block form (not stacked `//` lines):
+
+  ```rust
+  /*
+      The re-serialization envelope can exceed the frame cap even when the
+      admitted frame did not; the write-side check is the binding limit.
+  */
+  ```
+
 - Apply SOLID, DRY, and Clean Architecture consistently
 - Build lightweight, zero-cost abstractions (value types -> borrows -> generics -> `Arc`/`Box`)
 - Extract repeated patterns into shared modules; use domain types to encapsulate validation

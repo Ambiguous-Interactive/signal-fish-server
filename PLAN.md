@@ -132,7 +132,9 @@ correctness evidence appears.
    with red-first pins (PR #476), and the `target_not_routed` pre-gate,
    StartGame ghost-row error shape, retried-`LeaveRoom` `NOT_IN_ROOM`, and
    acceptance-time `game_data_messages_total` semantics are recorded at
-   their sites. Next session: name new seams from fresh evidence.
+   their sites. Session-194 was an issue-hygiene session (public-site copy
+   #478, changelog concision #477, minimal-comments knowledge #479): no new
+   production seam swept; next session: name new seams from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted
