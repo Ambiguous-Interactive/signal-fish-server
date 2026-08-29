@@ -373,6 +373,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop evicting healthy recipients for the server's own report parking
+  (issue #396): a causal `DeliveryReport` parked at the control-lane tail (the
+  queue deliberately lets fresh control overtake it, and in-place gap appends
+  and advisory refreshes keep its original timestamp) expired by queue age, so
+  a control-lane busy period longer than `websocket.max_sojourn_ms` closed a
+  fully healthy connection with the `4002 slow_consumer` code exactly when the
+  room was busiest — killing the report and every gap it carried with it. The
+  carrier's write deadline is now write progress (like the lossy delivery
+  classes), so a genuinely stalled write still evicts through the same budget
+  while non-report control items keep their queue-age deadlines. Pinned
+  red-first at the writer deadline policy.
+
+- Fail closed the two write paths that bypassed the v3-only writer arm when
+  flushing coalesced unsupported-format omission reports (issue #396): the
+  live flush and the teardown final flush could emit the v3-only
+  `DeliveryReport` frame on a pre-v3 wire if a queue's protocol version ever
+  regressed after accumulation. Versions are monotone in production (set once
+  at negotiation; re-negotiation is refused), so the gates are unreachable
+  defense: a violation now leaves the unwritten ranges pending (they retire
+  only after the wire) instead of leaking the frame. Pinned red-first on a
+  real upgraded socket.
+
 - Close the reaper-vs-reconnect identity-swap race surfaced by the session-187
   seam sweep (issue #396): a reconnect claim that reached the identity swap
   while its claiming socket already carried a per-socket close pin (activity
