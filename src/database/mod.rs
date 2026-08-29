@@ -525,8 +525,7 @@ pub struct InMemoryDatabase {
     /// target room, reproducing inactive-room GC winning the race against a
     /// reconnect's membership restore — the exact storage state whose wire
     /// classification must not read as a storage fault.
-    #[cfg(test)]
-    #[cfg(signal_fish_repository_tests)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     delete_room_during_add_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     fail_update_player_name: std::sync::atomic::AtomicBool,
@@ -724,8 +723,7 @@ impl InMemoryDatabase {
 
     /// Arms the one-shot "delete the room at the next membership write"
     /// injection (see the `delete_room_during_add_once` field doc).
-    #[cfg(test)]
-    #[cfg(signal_fish_repository_tests)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn delete_room_during_next_add_for_test(&self) {
         self.delete_room_during_add_once
             .store(true, std::sync::atomic::Ordering::Relaxed);

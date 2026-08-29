@@ -752,12 +752,21 @@ Miri runs on server library unit tests (`--lib`). Integration tests are
 excluded because they use networking, async runtimes, and OS-level I/O
 that Miri cannot interpret.
 
+Since the #424 lane split, the library suite runs as two parallel lanes —
+`Miri (core)` (`websocket`, `coordination`, `server`, `protocol`) and
+`Miri (remaining)` (every other module). The lane filters are libtest name
+filters whose union is pinned by
+`test_ci_safety_miri_lane_filters_cover_every_library_module`, so a new
+library module that is named by no lane fails CI instead of silently
+skipping Miri.
+
 ### Viewing Results
 
 Output artifacts are uploaded even when either gating analyzer reports a
 finding:
 
-- `miri-output` — Miri analysis output
+- `miri-output-core` / `miri-output-remaining` — Miri analysis output, one
+  artifact per lane (issue #424 lane split)
 - `asan-output` — AddressSanitizer analysis output
 
 Download these from the workflow run's Artifacts section in GitHub Actions.
