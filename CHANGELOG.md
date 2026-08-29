@@ -7,23 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- Protocol: a second `Authenticate` on a connection that already completed the
-  handshake — under either app-ID policy, including a re-`Authenticate` after a
-  reconnect identity swap on the same socket — and a first `Authenticate` sent
-  after any other application message under the open policy are now refused
-  with an `Error` frame carrying `INVALID_INPUT` naming the violation.
-  Previously these frames were silently ignored, so a client waiting on a
-  second `Authenticated` hung until the socket idle deadline; the connection
-  now stays open and receives the coded refusal (issue #468).
-- Configuration: the server logs a startup warning when every liveness
-  mechanism is disabled together (`server.ping_timeout=0`,
-  `websocket.idle_timeout_secs=0`, `websocket.server_ping_interval_secs=0`) —
-  a combination that leaves silently-dead clients holding their connection,
-  per-IP slot, and room seat with no reaping signal. Each knob may still be
-  disabled alone (issue #465).
-
 ### Added
 
 - Documentation: `docs/authentication.md` now states what the
@@ -40,7 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concurrent `LeaveRoom` past the stalled member's eviction. Pins the current
   snapshot-consistency tradeoff as the evidence base for the issue #463
   treatment decision (issue #463).
-
 - Public Rust API: expose `server::run_drain_choreography`, the full
   post-signal drain sequence (begin, `GoingAway` fan-out, grace wait with an
   idle fast path, coded `4000` closes, handler settle), so embedded servers
@@ -141,6 +123,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Protocol: a second `Authenticate` on a connection that already completed the
+  handshake — under either app-ID policy, including a re-`Authenticate` after a
+  reconnect identity swap on the same socket — and a first `Authenticate` sent
+  after any other application message under the open policy are now refused
+  with an `Error` frame carrying `INVALID_INPUT` naming the violation.
+  Previously these frames were silently ignored, so a client waiting on a
+  second `Authenticated` hung until the socket idle deadline; the connection
+  now stays open and receives the coded refusal (issue #468).
+- Configuration: the server logs a startup warning when every liveness
+  mechanism is disabled together (`server.ping_timeout=0`,
+  `websocket.idle_timeout_secs=0`, `websocket.server_ping_interval_secs=0`) —
+  a combination that leaves silently-dead clients holding their connection,
+  per-IP slot, and room seat with no reaping signal. Each knob may still be
+  disabled alone (issue #465).
 - Truthful capability-gate error code (issue #396 session-188 audit): a
   negotiated-v3 connection that sends `RoomOperation` without the negotiated
   `room_operation_ids` capability now receives `INVALID_INPUT` naming the
