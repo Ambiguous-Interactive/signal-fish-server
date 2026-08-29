@@ -265,6 +265,19 @@ fn queued_write_deadline(
         ),
         // Control traffic owns its queue-age deadline. In particular, a fresh
         // DeliveryReport must not inherit the age of stale lossy data.
+        // A causal DeliveryReport carrier is the one exception to that
+        // queue-age rule: the queue deliberately parks it at the control-lane
+        // tail (fresh control is inserted ahead of it; gap appends and
+        // advisory refreshes mutate it in place without re-stamping), so its
+        // queue age measures the server's own parking decision rather than
+        // recipient progress. Expiring it by write progress — like the lossy
+        // classes — keeps a healthy recipient alive for the whole parked
+        // window, while a genuinely stalled write still evicts through this
+        // same budget and non-report control items keep their queue-age
+        // deadlines.
+        None if matches!(&queued.payload, OutboundPayload::DeliveryReport(_)) => {
+            deadline_after(write_started_at, max_sojourn)
+        }
         None => deadline_after(queued.enqueued_at, max_sojourn),
         // Latest/volatile queue age is resolved by their explicit loss policy.
         // Once selected, retain a bounded write-progress budget so a peer that
@@ -1015,6 +1028,66 @@ mod tests {
             ),
             Some(report_write_started_at + Duration::from_secs(15)),
             "a deterministic unsupported outcome must use report write progress, not reliable queue age"
+        );
+    }
+
+    /// A causal `DeliveryReport` parked at the control-lane tail must not be
+    /// evicted by its own queue age.
+    ///
+    /// The queue deliberately parks the trailing same-generation report (fresh
+    /// control is inserted ahead of it; gap appends and advisory refreshes
+    /// mutate it in place, keeping its original timestamp), so its queue age
+    /// measures the server's own parking decision — sustained same-generation
+    /// control progress — not recipient progress. Expiring the carrier by that
+    /// age closes a fully healthy connection as a slow consumer exactly when a
+    /// room is busiest, and the eviction kills the report together with every
+    /// gap it carries. Its write deadline is therefore write progress, like the
+    /// lossy classes: a genuinely stalled write still evicts through the same
+    /// budget, and non-report control items keep their queue-age deadlines.
+    #[tokio::test(start_paused = true)]
+    async fn parked_delivery_report_expires_by_write_progress_not_queue_age() {
+        let (tx, mut rx) = channel(1, 2);
+        tx.set_protocol_version(3);
+        // Fill the data lane, then drop a volatile arrival: its lossy drop is
+        // exactly how a causal gap report is born on the control lane.
+        tx.try_enqueue_data(data(DeliveryClass::Reliable, 1))
+            .expect("enqueue reliable data");
+        let dropped = tx
+            .try_enqueue_data(data(DeliveryClass::Volatile, 2))
+            .expect("enqueue volatile arrival that must be dropped to create the gap report");
+        assert_eq!(
+            dropped.losses, 1,
+            "precondition: the volatile arrival must be dropped to create the gap report"
+        );
+
+        let report = rx.recv().await.expect("queue open").expect("gap report");
+        assert!(
+            matches!(report.payload, OutboundPayload::DeliveryReport(_)),
+            "precondition: the popped carrier must be the causal DeliveryReport"
+        );
+
+        // Simulate the parked window: same-generation control keeps overtaking
+        // the report for longer than the whole sojourn budget while the writer
+        // stays healthy.
+        tokio::time::advance(Duration::from_secs(15)).await;
+        let write_started_at = Instant::now();
+        assert!(
+            write_started_at.duration_since(report.enqueued_at) >= Duration::from_secs(15),
+            "precondition: the parked carrier's queue age must already exceed the budget, \
+             otherwise this pin does not exercise the eviction window"
+        );
+        assert_eq!(
+            queued_write_deadline(
+                &report,
+                None,
+                &rx,
+                Duration::from_secs(15),
+                write_started_at,
+                false,
+            ),
+            Some(write_started_at + Duration::from_secs(15)),
+            "a parked DeliveryReport must expire by write progress, not by the \
+             queue age its own parking inflated"
         );
     }
 

@@ -2163,9 +2163,10 @@ impl OutboundReceiver {
     /// Oldest timestamp still resident in any queue lane. The control lane is
     /// not timestamp-FIFO because fresh control is inserted ahead of a trailing
     /// causal delivery report, so inspect every resident item rather than only
-    /// each lane's front. The socket writer combines this with in-flight/batched
-    /// timestamps so sustained fresh traffic cannot hide stale work from the
-    /// global sojourn deadline.
+    /// each lane's front. Reliable-lane age (among the writer's per-class
+    /// deadline policies) drives the slow-consumer sojourn close; a parked
+    /// report's age stays observability only — its own write expires by write
+    /// progress, not queue age.
     #[cfg(test)]
     pub fn oldest_enqueued_at(&self) -> Option<Instant> {
         let state = self.shared.state();
@@ -2350,7 +2351,16 @@ impl OutboundReceiver {
     /// When a coalesced unsupported-format report must reach the recipient even
     /// though nothing else is queued for it. The writer races this against its
     /// next item so an idle recipient still learns about the last omissions.
+    ///
+    /// `None` also when the queue cannot ever flush the report: the frame is
+    /// v3-only, so a pre-v3 queue reports no deadline and the writer's idle
+    /// arm keeps sleeping instead of spinning on a deadline its gated flush
+    /// will never meet (pending ranges can only exist on a queue that
+    /// negotiated v3 — see `write_pending_unsupported_report`).
     pub fn pending_unsupported_flush_deadline(&self) -> Option<Instant> {
+        if !self.supports_v3() {
+            return None;
+        }
         self.shared.state().pending_unsupported.flush_deadline()
     }
 
@@ -3171,8 +3181,11 @@ mod tests {
         let report_enqueued_at = rx.oldest_enqueued_at().unwrap();
 
         // A report remains at the control-lane tail so later control can be
-        // delivered first. Its original timestamp must still drive the global
-        // sojourn deadline no matter how often that slot is refilled.
+        // delivered first, and the in-place refills never re-stamp it: its
+        // original timestamp stays the oldest-resident observation no matter
+        // how often that slot is refilled. (The writer expires the carrier's
+        // own write by progress rather than by this age, so a healthy
+        // recipient is not evicted for the server's own parking.)
         for id in 3..=5 {
             tokio::time::advance(std::time::Duration::from_secs(1)).await;
             tx.try_enqueue_control(message(id)).unwrap();
