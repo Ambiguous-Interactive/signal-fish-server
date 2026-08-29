@@ -80,22 +80,20 @@ correctness evidence appears.
   gameplay-facing seams; require a deterministic counterexample or current
   profile before changing production behavior. Prior sessions swept the
   rate limiter internals, the `websocket/sending.rs` v2-projection corridor,
-  shutdown/drain choreography (#454, fully resolved), and the spectator seam
-  (join/detach/prune/retry panic-repair parity). Session-186 swept the
-  reconnect seam (`reconnection_service.rs` handle_reconnect corridor, all
-  four entry points): the concurrency skeleton held — atomic single-use
-  claims, panic-repair parity, capacity re-win, monotonic windows, bounded
-  waits, symmetric identity reassignment — and the drain-admission
-  asymmetry landed as fixes: reconnect and spectator-join attempts inside
-  the drain grace window are now refused with `SERVER_DRAINING` before any
-  claim or durable side effect, and `discard_pending_reconnection` enforces
-  the claimed-record invariant every expiry surface already had. The
-  audit's other candidates were evaluated and deliberately not taken:
-  reconnect capability asymmetry vs the join gate is the documented
-  relay-floor contract (`docs/protocol.md` mixed-path section), and a
-  reconnect rate-limit gate would be toothless (per-socket fresh UUIDs)
-  with floods already bounded by single-flight claims and the IP
-  connection cap. Next session must name new seams from fresh evidence.
+  shutdown/drain choreography (#454, fully resolved), the spectator seam
+  (join/detach/prune/retry panic-repair parity), and the reconnect seam
+  (session-186: drain-admission gates, claim-guard invariant). Session-187
+  swept the heartbeat/reaper + connection-lifecycle seam and the
+  auth/identity + coordination/outbound-queue seam: the reaper-vs-reconnect
+  identity-swap race landed as a fix (a per-socket close pin — activity
+  reaper, idle/slow-consumer, oversized-outbound, teardown — no longer
+  crosses the swap; the record stays spendable for a fresh-socket retry),
+  the advertised-vs-enforced handshake rate-limit contract was made
+  truthful, and the remaining candidates were evaluated and deliberately
+  not taken: token-binding plaintext-key degradation (#462), TransportStatus
+  fan-out holding the room mutation gate (#463), open-policy attacker-chosen
+  application UUID (#464), and the all-liveness-disabled configuration
+  combination (#465). Next session must name new seams from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted
