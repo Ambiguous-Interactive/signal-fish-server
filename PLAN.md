@@ -118,6 +118,20 @@ correctness evidence appears.
    recorded foot-guns (`update_room_authority` `Some(non-member)` grant
    contract, `toggle_player_ready` coordinator-parity divergence,
    rejection-log eviction discarding suppressed counts) are now documented at
+   their sites. Session-193 swept the game-data relay carrier seam
+   (stamping/epoch/replay contract: single counter across carriers,
+   lock-justified baseline interlock, no stamp leak, zero panic surface),
+   the signal routing/sender-attribution seam (structural anti-spoof,
+   four-layer delivery defense, lifecycle-serialized identity swaps,
+   spectator exclusion, uniform lock order), and the room-operation
+   execution seam (echo-only correlation per contract with state-guarded
+   mutations, one room gate + abort-proof FIFO lane per mutation, uniform
+   lock order, seat conservation on every failure arm) — all sound under
+   adversarial re-verification; the one latent trapdoor found (router-level
+   `Reconnect` arms calling identity-unaware entries) is now fail-closed
+   with red-first pins (PR #476), and the `target_not_routed` pre-gate,
+   StartGame ghost-row error shape, retried-`LeaveRoom` `NOT_IN_ROOM`, and
+   acceptance-time `game_data_messages_total` semantics are recorded at
    their sites. Next session: name new seams from fresh evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
