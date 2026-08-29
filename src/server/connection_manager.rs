@@ -207,6 +207,51 @@ pub(crate) enum TransportStatusUpdate {
     UnsupportedTransport,
 }
 
+/// Result of the atomic reconnect identity swap.
+#[derive(Debug)]
+pub(crate) enum ReassignmentOutcome {
+    /// The swap committed; the handle routes to the restored identity.
+    Reassigned(ClientDeliveryHandle),
+    /// The transient connection vanished before the swap.
+    TransientConnectionMissing,
+    /// The transient connection already carried a per-socket close
+    /// (inactivity/idle timeout, slow consumer, oversized outbound frame, or
+    /// teardown) when the swap was attempted. The swap was refused and the
+    /// transient entry restored exactly as it was: the pending close tears
+    /// down only the transient socket — for every close that resolves the
+    /// connection through the connection map, which the removal fences — and
+    /// the reconnection record stays spendable for a retry from a fresh
+    /// connection. Without this refusal the shared close signal would kill
+    /// the freshly restored connection with a stale reason and its teardown
+    /// would remove the restored membership. A same-instant pin from the
+    /// socket's own I/O tasks (which hold signal clones) belongs to the
+    /// shared physical socket and follows the restored identity.
+    /// `Shutdown` and `RoomInactive` are identity/room-scoped and still cross
+    /// the swap (drain must close restored connections; a room pin reflects
+    /// the room the claim just verified).
+    RefusedTransientClose(crate::coordination::CloseReason),
+}
+
+/// Per-socket close reasons that must not cross a reconnect identity swap.
+/// Exhaustive on purpose: a future `CloseReason` variant must be classified
+/// here explicitly instead of silently inheriting either default.
+fn is_transient_socket_close_reason(reason: crate::coordination::CloseReason) -> bool {
+    use crate::coordination::CloseReason;
+    match reason {
+        // Per-socket lifecycle closes: pinned for the transient socket's own
+        // quietness, congestion, or teardown.
+        CloseReason::AuthTimeout
+        | CloseReason::ActivityTimeout
+        | CloseReason::IdleTimeout
+        | CloseReason::SlowConsumer
+        | CloseReason::OutboundMessageTooLarge
+        | CloseReason::Unregistered => true,
+        // Identity/room-scoped: a drain must close restored connections, and
+        // a room pin reflects the room the claim just verified.
+        CloseReason::Shutdown | CloseReason::RoomInactive => false,
+    }
+}
+
 pub(crate) struct ConnectionManager {
     clients: DashMap<PlayerId, ClientConnection>,
     connections_per_ip: DashMap<IpAddr, usize>,
@@ -347,6 +392,13 @@ impl ConnectionManager {
         Ok(player_id)
     }
 
+    /// Test-only registration under an arbitrary player id. Production
+    /// registration always mints a fresh UUID, so map-key collisions with an
+    /// existing entry (including a just-restored reconnection entry) are
+    /// impossible there. Kept `pub` only because
+    /// [`crate::server::EnhancedGameServer::connect_client`] wraps it for
+    /// in-crate test harnesses; embedders must not use it to fabricate
+    /// collisions.
     pub async fn connect_test_client(
         &self,
         player_id: PlayerId,
@@ -856,62 +908,75 @@ impl ConnectionManager {
         reconnect_player_id: &PlayerId,
         room_id: RoomId,
         game_data_epoch: u32,
-    ) -> Option<ClientDeliveryHandle> {
-        // Atomically remove the old entry (no separate get-then-remove race)
-        if let Some((_, old_connection)) = self.clients.remove(current_player_id) {
-            let mut delivery = old_connection.delivery_handle();
-            delivery.sender = delivery.sender.next_generation();
-            let prior_membership_generation = old_connection.membership_generation;
-            let membership_generation = Self::fresh_membership_generation(
-                prior_membership_generation,
-                old_connection.transport_status,
-            );
-            let new_client = ClientConnection {
-                room_id: Some(room_id),
-                lifecycle: Arc::clone(&old_connection.lifecycle),
-                last_ping: Instant::now(),
-                last_heartbeat_update: None, // Reset on reconnection, will update immediately
-                sender: delivery.sender.clone(),
-                close: delivery.close.clone(),
-                client_addr: old_connection.client_addr,
-                game_data_format: old_connection.game_data_format,
-                app_context: old_connection.app_context,
-                reconnection_identity: old_connection.reconnection_identity,
-                protocol: old_connection.protocol,
-                room_operation_ids: old_connection.room_operation_ids,
-                // Preserve any roomless transient-socket status only as rollback
-                // state. Advancing the membership generation below makes it
-                // ineligible for reconnect deduplication, so the restored player
-                // must establish and report its P2P path afresh.
-                transport_status: old_connection.transport_status,
-                membership_generation,
-                prior_membership_generation: Some(prior_membership_generation),
-                // Restart-on-rejoin: a reconnecting sender's relay stamp
-                // stream starts over at 1; recipients treat its
-                // `PlayerReconnected` as a seq reset (field doc above).
-                game_data_seq: 0,
-                // The caller supplies the resumed incarnation epoch (the
-                // surviving reconnection record's `last_epoch + 1`), so the
-                // sender's `(epoch, seq)` stream is strictly increasing for a
-                // recipient that never left from the moment this entry becomes
-                // visible — no provisional value is ever observable. The
-                // transient socket itself never joined a room (epoch 0); the
-                // reconnect path always dominates it.
-                game_data_epoch,
-            };
-
-            // IP slot is already reserved from the old entry -- no need to
-            // release and re-reserve for the same IP address.
-            self.clients.insert(*reconnect_player_id, new_client);
-            old_connection.lifecycle.set_player_id(*reconnect_player_id);
-            // The RelayStats ledger follows the surviving connection so its
-            // cumulative counters stay meaningful across the reassignment.
-            self.metrics
-                .rekey_connection_delivery_stats(current_player_id, *reconnect_player_id);
-            Some(delivery)
-        } else {
-            None
+    ) -> ReassignmentOutcome {
+        // Atomically remove the old entry (no separate get-then-remove race).
+        // The removal is the refusal fence: once it lands, no reaper-style
+        // map lookup can pin the transient entry anymore, so the close-reason
+        // inspection below is the final word for every path that resolves the
+        // connection through this map.
+        let Some((_, old_connection)) = self.clients.remove(current_player_id) else {
+            return ReassignmentOutcome::TransientConnectionMissing;
+        };
+        if let Some(reason) = old_connection.close.requested_reason() {
+            if is_transient_socket_close_reason(reason) {
+                // Restore the entry untouched (same object, same `last_ping`,
+                // same pinned signal) so the pending eviction tears down only
+                // the transient socket. A fresh UUID per connection means no
+                // other producer can race an insert under this key.
+                self.clients.insert(*current_player_id, old_connection);
+                return ReassignmentOutcome::RefusedTransientClose(reason);
+            }
         }
+        let mut delivery = old_connection.delivery_handle();
+        delivery.sender = delivery.sender.next_generation();
+        let prior_membership_generation = old_connection.membership_generation;
+        let membership_generation = Self::fresh_membership_generation(
+            prior_membership_generation,
+            old_connection.transport_status,
+        );
+        let new_client = ClientConnection {
+            room_id: Some(room_id),
+            lifecycle: Arc::clone(&old_connection.lifecycle),
+            last_ping: Instant::now(),
+            last_heartbeat_update: None, // Reset on reconnection, will update immediately
+            sender: delivery.sender.clone(),
+            close: delivery.close.clone(),
+            client_addr: old_connection.client_addr,
+            game_data_format: old_connection.game_data_format,
+            app_context: old_connection.app_context,
+            reconnection_identity: old_connection.reconnection_identity,
+            protocol: old_connection.protocol,
+            room_operation_ids: old_connection.room_operation_ids,
+            // Preserve any roomless transient-socket status only as rollback
+            // state. Advancing the membership generation below makes it
+            // ineligible for reconnect deduplication, so the restored player
+            // must establish and report its P2P path afresh.
+            transport_status: old_connection.transport_status,
+            membership_generation,
+            prior_membership_generation: Some(prior_membership_generation),
+            // Restart-on-rejoin: a reconnecting sender's relay stamp
+            // stream starts over at 1; recipients treat its
+            // `PlayerReconnected` as a seq reset (field doc above).
+            game_data_seq: 0,
+            // The caller supplies the resumed incarnation epoch (the
+            // surviving reconnection record's `last_epoch + 1`), so the
+            // sender's `(epoch, seq)` stream is strictly increasing for a
+            // recipient that never left from the moment this entry becomes
+            // visible — no provisional value is ever observable. The
+            // transient socket itself never joined a room (epoch 0); the
+            // reconnect path always dominates it.
+            game_data_epoch,
+        };
+
+        // IP slot is already reserved from the old entry -- no need to
+        // release and re-reserve for the same IP address.
+        self.clients.insert(*reconnect_player_id, new_client);
+        old_connection.lifecycle.set_player_id(*reconnect_player_id);
+        // The RelayStats ledger follows the surviving connection so its
+        // cumulative counters stay meaningful across the reassignment.
+        self.metrics
+            .rekey_connection_delivery_stats(current_player_id, *reconnect_player_id);
+        ReassignmentOutcome::Reassigned(delivery)
     }
 
     /// Undo a reconnect identity swap after the post-reassign restore path fails.
@@ -1330,6 +1395,14 @@ mod tests {
         mpsc::Receiver<Arc<ServerMessage>>,
     ) {
         mpsc::channel(4)
+    }
+
+    #[track_caller]
+    fn expect_reassigned(outcome: ReassignmentOutcome) -> ClientDeliveryHandle {
+        match outcome {
+            ReassignmentOutcome::Reassigned(delivery) => delivery,
+            other => panic!("expected reassignment, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1779,7 +1852,10 @@ mod tests {
         let new_player_id = Uuid::new_v4();
 
         let reassigned = manager.reassign_connection(&original_id, &new_player_id, room_id, 1);
-        assert!(reassigned.is_some(), "Reassignment should succeed");
+        assert!(
+            matches!(reassigned, ReassignmentOutcome::Reassigned(_)),
+            "Reassignment should succeed"
+        );
 
         // Original player should be gone
         assert!(
@@ -1863,9 +1939,12 @@ mod tests {
             .client_lifecycle(&transient_id)
             .expect("registered connection has lifecycle identity");
 
-        manager
-            .reassign_connection(&transient_id, &restored_id, RoomId::new_v4(), 1)
-            .expect("reassignment succeeds");
+        expect_reassigned(manager.reassign_connection(
+            &transient_id,
+            &restored_id,
+            RoomId::new_v4(),
+            1,
+        ));
         let reassigned_lifecycle = manager
             .client_lifecycle(&restored_id)
             .expect("restored id owns lifecycle identity");
@@ -1884,6 +1963,80 @@ mod tests {
         assert_eq!(lifecycle.player_id(), transient_id);
         assert!(manager.lifecycle_matches(&transient_id, &lifecycle));
         assert!(!manager.lifecycle_matches(&restored_id, &lifecycle));
+    }
+
+    /// A per-socket close pinned on the transient entry must refuse the
+    /// identity swap and restore the entry untouched: the pending close may
+    /// tear down only the transient socket, never the restored connection.
+    #[tokio::test]
+    async fn reassign_refused_while_transient_socket_carries_per_socket_close() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:5104".parse().unwrap();
+        let restored_id = PlayerId::new_v4();
+        let room_id = RoomId::new_v4();
+
+        for reason in [
+            crate::coordination::CloseReason::ActivityTimeout,
+            crate::coordination::CloseReason::IdleTimeout,
+            crate::coordination::CloseReason::SlowConsumer,
+            crate::coordination::CloseReason::AuthTimeout,
+            crate::coordination::CloseReason::OutboundMessageTooLarge,
+            crate::coordination::CloseReason::Unregistered,
+        ] {
+            let (tx, _rx) = channel();
+            let transient_id = manager
+                .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+                .await
+                .expect("registration succeeds");
+            let pinned = manager.request_close_for(&transient_id, reason);
+            assert!(
+                pinned,
+                "{reason:?}: pin must be the first close on the entry"
+            );
+            match manager.reassign_connection(&transient_id, &restored_id, room_id, 1) {
+                ReassignmentOutcome::RefusedTransientClose(pinned) => {
+                    assert_eq!(pinned, reason);
+                }
+                other => panic!("{reason:?}: expected refusal, got {other:?}"),
+            }
+            // The transient entry must be back, keyed by its own id, still the
+            // only registration — the eviction proceeds against it.
+            assert!(
+                manager.has_client(&transient_id),
+                "{reason:?}: refusal must restore the transient entry"
+            );
+            assert!(
+                !manager.has_client(&restored_id),
+                "{reason:?}: refusal must not publish the restored identity"
+            );
+            manager.remove_client(&transient_id);
+        }
+    }
+
+    /// Identity/room-scoped closes still cross the swap: a drain must close
+    /// restored connections, and a room-inactive pin reflects the room the
+    /// claim just verified.
+    #[tokio::test]
+    async fn reassign_still_adopts_entry_pinned_for_shutdown() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:5105".parse().unwrap();
+        for reason in [
+            crate::coordination::CloseReason::Shutdown,
+            crate::coordination::CloseReason::RoomInactive,
+        ] {
+            let (tx, _rx) = channel();
+            let transient_id = manager
+                .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+                .await
+                .expect("registration succeeds");
+            assert!(manager.request_close_for(&transient_id, reason));
+            expect_reassigned(manager.reassign_connection(
+                &transient_id,
+                &PlayerId::new_v4(),
+                RoomId::new_v4(),
+                1,
+            ));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1971,9 +2124,10 @@ mod tests {
 
         let new_pid = Uuid::new_v4();
         let room = RoomId::new_v4();
-        assert!(manager
-            .reassign_connection(&original, &new_pid, room, 1)
-            .is_some());
+        assert!(matches!(
+            manager.reassign_connection(&original, &new_pid, room, 1),
+            ReassignmentOutcome::Reassigned(_)
+        ));
 
         // The migrated connection keeps its negotiated v3 capabilities.
         let proto = manager.protocol(&new_pid);

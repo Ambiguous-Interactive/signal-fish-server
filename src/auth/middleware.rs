@@ -16,13 +16,17 @@ use uuid::Uuid;
 
 /// Per-application rate limit information returned to clients.
 ///
-/// With allowlist enforcement on, `per_minute` limits handshake resolution for
-/// a known public ID. The `per_hour` and `per_day` fields are advisory
+/// With allowlist enforcement on, `per_minute` limits handshake resolution
+/// only for allowlist entries that configure an explicit
+/// `rate_limit_per_minute`; an entry without one advertises the default
+/// projections and enforces nothing — omitting the field is the "unlimited"
+/// configuration. The `per_hour` and `per_day` fields are advisory
 /// projections communicated to clients and are not enforced. Open mode uses
 /// fixed legacy values (`1000`, `10000`, `100000`) and enforces none of them.
 #[derive(Debug, Clone)]
 pub struct RateLimits {
-    /// Known-ID handshake attempts allowed per minute in enforced mode.
+    /// Known-ID handshake attempts allowed per minute — enforced only when
+    /// the allowlist entry configures an explicit limit.
     pub per_minute: u32,
     /// Advisory hourly projection; a fixed legacy value in open mode.
     pub per_hour: u32,
@@ -425,8 +429,14 @@ mod tests {
         assert_eq!(snapshot.room_creation_rejections, 0);
     }
 
+    /// Pins the advertised-vs-enforced pairing for a default-limit app: the
+    /// `Authenticated.rate_limits` projection advertises the default
+    /// 1000/min, while enforcement stays off — omitting
+    /// `rate_limit_per_minute` is the "unlimited" configuration. Both halves
+    /// of that contract are pinned together so a future change to either
+    /// side must consciously update this test.
     #[tokio::test]
-    async fn no_rate_limit_when_none_configured() {
+    async fn default_limit_app_advertises_projection_but_enforces_nothing() {
         let entries = vec![AppRegistrationEntry {
             app_id: "unlimited".to_string(),
             app_name: "Unlimited App".to_string(),
@@ -436,8 +446,23 @@ mod tests {
         }];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
-        // Should succeed many times without rate limit
-        for _ in 0..100 {
+        let info = mw.resolve_app_id("unlimited").await.unwrap();
+        assert_eq!(info.rate_limits.per_minute, DEFAULT_RATE_LIMIT_PER_MINUTE);
+        assert_eq!(
+            info.rate_limits.per_hour,
+            DEFAULT_RATE_LIMIT_PER_MINUTE * 60
+        );
+        assert_eq!(
+            info.rate_limits.per_day,
+            DEFAULT_RATE_LIMIT_PER_MINUTE * 1440
+        );
+        assert_eq!(
+            info.rate_limit_per_minute, None,
+            "enforcement stays off for an entry without an explicit limit"
+        );
+
+        // More resolves than the advertised budget: none are limited.
+        for _ in 0..(DEFAULT_RATE_LIMIT_PER_MINUTE + 4) {
             assert!(mw.resolve_app_id("unlimited").await.is_ok());
         }
     }

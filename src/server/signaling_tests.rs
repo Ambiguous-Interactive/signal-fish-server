@@ -3047,6 +3047,104 @@ async fn reconnect_during_shutdown_drain_is_rejected_with_server_draining() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_on_a_reaper_pinned_socket_is_refused_and_preserves_the_token() {
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    // Reaper-vs-reconnect race: the activity reaper pinned the claiming
+    // (transient) socket for inactivity just before its Reconnect frame was
+    // processed. The close signal is shared across the identity swap, so
+    // admitting the claim would kill the freshly restored connection with a
+    // stale 4003 and tear its membership back out.
+    server
+        .connection_manager
+        .request_close_for(&current, crate::coordination::CloseReason::ActivityTimeout);
+
+    let admitted = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        !admitted,
+        "reconnect admission must be refused when the claiming socket already carries a per-socket close"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::ReconnectionFailed);
+        }
+        other => panic!("expected ReconnectionFailed, got {other:?}"),
+    }
+    assert!(
+        !server.connection_manager.has_client(&reconnecting),
+        "refusal must not publish the restored identity"
+    );
+    assert!(
+        server.connection_manager.has_client(&current),
+        "refusal must restore the transient entry so the reaper's eviction tears down only that socket"
+    );
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("pinned-close refusal must not consume the one-time token");
+
+    // A retry from a fresh (unpinned) socket succeeds with the same token.
+    let (retry_socket, mut retry_rx) = register_client(&server).await;
+    server.set_client_protocol(&retry_socket, v3_webrtc());
+    let retried = server
+        .handle_reconnect(&retry_socket, &reconnecting, &room_id, &token)
+        .await;
+    assert!(
+        retried,
+        "the preserved token must reconnect successfully from an unpinned socket"
+    );
+    match recv(&mut retry_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+            assert_eq!(payload.room_id, room_id);
+        }
+        other => panic!("expected Reconnected after retry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_during_teardown_preserves_token_for_retry() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;

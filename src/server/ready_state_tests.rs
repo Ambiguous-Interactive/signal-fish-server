@@ -835,10 +835,13 @@ async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() 
     // The reclaim renames the parked lifecycle to the restored identity. The
     // epoch mirrors production's `last_epoch + 1` from the surviving
     // reconnection record (nothing here reads game-data stamps).
-    server
+    match server
         .connection_manager
         .reassign_connection(&transient, &player_a, room_id, 1)
-        .expect("reconnect reclaim succeeds");
+    {
+        crate::server::connection_manager::ReassignmentOutcome::Reassigned(_) => {}
+        other => panic!("reconnect reclaim succeeds, got {other:?}"),
+    }
     drop(_parked_gate);
     tokio::time::timeout(Duration::from_secs(1), &mut ready_task)
         .await

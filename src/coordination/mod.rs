@@ -581,6 +581,16 @@ impl ConnectionCloseSignal {
         );
     }
 
+    /// Peek the currently requested close reason, if any.
+    ///
+    /// The reconnection identity swap consults this after atomically removing
+    /// the transient entry: a per-socket close (inactivity/idle timeout, slow
+    /// consumer, teardown) requested for the transient socket must not cross
+    /// the swap and kill the restored connection with a stale reason.
+    pub fn requested_reason(&self) -> Option<CloseReason> {
+        *self.tx.borrow()
+    }
+
     fn request_delivery_timeout_close(&self, delivery_id: Option<u64>) -> bool {
         #[cfg(not(feature = "trace-validation"))]
         let _ = delivery_id;
