@@ -663,6 +663,15 @@ async fn flush_pending_unsupported_report(
     player_id: &PlayerId,
     max_outbound_message_size: usize,
 ) -> bool {
+    // `DeliveryReport` is v3-only and `send_immediate_server_message` carries
+    // no recipient version, so this final flush fail-closes like the live
+    // write path (`websocket::sending::write_pending_unsupported_report`).
+    // Production can never have pending ranges on a pre-v3 queue (versions
+    // are monotone), so the gate is unreachable defense: a violation leaves
+    // the ranges pending rather than leaking the frame onto a v2 wire.
+    if !rx.supports_v3() {
+        return false;
+    }
     let Some(report) = rx.pending_unsupported_report() else {
         return false;
     };
@@ -4071,6 +4080,104 @@ mod tests {
         assert!(
             rx.pending_unsupported_report().is_none(),
             "a flushed report must be retired from pending accounting"
+        );
+        drop(tx);
+        pair.shutdown().await;
+    }
+
+    /// The one write path that bypasses the fail-closed v3-only arm
+    /// (`write_pending_unsupported_report`) must itself fail closed on a
+    /// pre-v3 queue.
+    ///
+    /// Production keeps queue protocol versions monotone (set once at
+    /// negotiation; re-negotiation is refused), so a pre-v3 queue can never
+    /// accumulate a pending unsupported-format report — which is the only
+    /// reason this bypass is sound. This pin simulates that invariant being
+    /// violated after accumulation and requires the write path to fail closed:
+    /// the v3-only frame never reaches the pre-v3 wire, and the unwritable
+    /// ranges stay pending (ranges retire only after the wire, never before).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn pending_omission_report_fails_closed_on_a_pre_v3_wire() {
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+        tx.set_protocol_version(3);
+        let omitted = |seq| crate::coordination::outbound_queue::DataDeliveryMetadata {
+            class: crate::protocol::DeliveryClass::Volatile,
+            key: None,
+            from_player: PlayerId::from_u128(4),
+            room_id: crate::protocol::RoomId::from_u128(11),
+            epoch: 1,
+            seq,
+        };
+        assert!(rx.record_unsupported_format(omitted(7)));
+        assert!(
+            rx.pending_unsupported_report().is_some(),
+            "precondition: the omission must be pending before teardown"
+        );
+        // The only way a pre-v3 queue could hold a pending report: a version
+        // regression after v3 accumulation. Unreachable in production; that is
+        // exactly why the write path may only fail closed.
+        tx.set_protocol_version(2);
+
+        let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let mut pair = UpgradedSocketPair::connect().await;
+        let mut batcher = MessageBatcher::new(1, 1);
+        finalize_closed_connection(
+            &mut pair.server_sink,
+            &mut rx,
+            &mut batcher,
+            Some(CloseReason::OutboundMessageTooLarge),
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // The oracle is the bytes the client received: no DeliveryReport may
+        // appear on the pre-v3 wire, and the coded close still completes.
+        let (reports, close_frame) = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut reports = Vec::new();
+            let mut close_frame = None;
+            while let Some(frame) = pair.client.next().await {
+                match frame.expect("client frame") {
+                    TungsteniteMessage::Text(text) => {
+                        if matches!(
+                            serde_json::from_str::<ServerMessage>(&text),
+                            Ok(ServerMessage::DeliveryReport(_))
+                        ) {
+                            reports.push(text);
+                        }
+                    }
+                    TungsteniteMessage::Close(close) => {
+                        close_frame =
+                            Some(close.expect("the semantic close frame carries its code"));
+                        break;
+                    }
+                    _other_frame => continue,
+                }
+            }
+            (reports, close_frame)
+        })
+        .await
+        .expect("server never closed the upgraded socket");
+        assert!(
+            reports.is_empty(),
+            "a v3-only omission report must be fail-closed on a pre-v3 wire"
+        );
+        let close_frame = close_frame.expect("the teardown ends in its coded close frame");
+        assert_eq!(
+            close_frame.code,
+            1009.into(),
+            "the fail-closed bypass must not disturb the teardown close code"
+        );
+        assert!(
+            rx.pending_unsupported_report().is_some(),
+            "unwritten ranges stay pending: they retire only after the wire"
         );
         drop(tx);
         pair.shutdown().await;

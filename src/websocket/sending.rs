@@ -1084,12 +1084,20 @@ pub(super) async fn write_pending_unsupported_report(
     player_id: &PlayerId,
     max_outbound_message_size: usize,
 ) -> Result<bool, SendMessageError> {
-    // This write path bypasses the fail-closed v3-only arm of
-    // `send_single_message_ref` deliberately: a pre-v3 queue can never HAVE a
-    // pending unsupported report, because the queue refuses to accumulate
-    // pending ranges for a recipient that never negotiated v3
-    // (`OutboundQueueState::record_unsupported_format` /
-    // `hold_unsupported_format`).
+    // `DeliveryReport` is a v3-only server-to-client variant, so this write
+    // path — which bypasses the fail-closed v3-only arm of
+    // `send_single_message_ref` — carries its own fail-closed gate. A pre-v3
+    // queue can never HAVE a pending unsupported report, because the queue
+    // refuses to accumulate pending ranges for a recipient that never
+    // negotiated v3 (`OutboundQueueState::record_unsupported_format` /
+    // `hold_unsupported_format`) and versions are monotone (set once at
+    // negotiation; re-negotiation is refused). Keeping the gate local rather
+    // than trusting that cross-file invariant means a violation can only leave
+    // the ranges pending (they retire only after the wire), never leak the
+    // frame onto a v2 wire.
+    if !receiver.supports_v3() {
+        return Ok(false);
+    }
     let Some(report) = receiver.pending_unsupported_report() else {
         return Ok(false);
     };
