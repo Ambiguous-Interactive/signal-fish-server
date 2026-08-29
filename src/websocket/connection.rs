@@ -666,9 +666,10 @@ async fn flush_pending_unsupported_report(
     // `DeliveryReport` is v3-only and `send_immediate_server_message` carries
     // no recipient version, so this final flush fail-closes like the live
     // write path (`websocket::sending::write_pending_unsupported_report`).
-    // Production can never have pending ranges on a pre-v3 queue (versions
-    // are monotone), so the gate is unreachable defense: a violation leaves
-    // the ranges pending rather than leaking the frame onto a v2 wire.
+    // Pending ranges can only exist on a queue that negotiated v3 (record-time
+    // accumulation gate plus the Authenticate-first rule), so the gate is
+    // unreachable defense: a violation leaves the ranges pending rather than
+    // leaking the frame onto a v2 wire.
     if !rx.supports_v3() {
         return false;
     }
@@ -4089,13 +4090,15 @@ mod tests {
     /// (`write_pending_unsupported_report`) must itself fail closed on a
     /// pre-v3 queue.
     ///
-    /// Production keeps queue protocol versions monotone (set once at
-    /// negotiation; re-negotiation is refused), so a pre-v3 queue can never
-    /// accumulate a pending unsupported-format report — which is the only
-    /// reason this bypass is sound. This pin simulates that invariant being
-    /// violated after accumulation and requires the write path to fail closed:
-    /// the v3-only frame never reaches the pre-v3 wire, and the unwritable
-    /// ranges stay pending (ranges retire only after the wire, never before).
+    /// A pre-v3 queue can never accumulate a pending unsupported-format
+    /// report: accumulation is v3-gated at record time, and a queue's version
+    /// can only regress before any application message has flowed
+    /// (`Authenticate` is refused once any other client message has been
+    /// seen), while omissions require room data flow. This pin simulates that
+    /// invariant being violated anyway and requires the write path to fail
+    /// closed: the v3-only frame never reaches the pre-v3 wire, and the
+    /// unwritable ranges stay pending (ranges retire only after the wire,
+    /// never before).
     #[tokio::test(flavor = "multi_thread")]
     #[cfg_attr(miri, ignore)]
     async fn pending_omission_report_fails_closed_on_a_pre_v3_wire() {

@@ -2350,7 +2350,16 @@ impl OutboundReceiver {
     /// When a coalesced unsupported-format report must reach the recipient even
     /// though nothing else is queued for it. The writer races this against its
     /// next item so an idle recipient still learns about the last omissions.
+    ///
+    /// `None` also when the queue cannot ever flush the report: the frame is
+    /// v3-only, so a pre-v3 queue reports no deadline and the writer's idle
+    /// arm keeps sleeping instead of spinning on a deadline its gated flush
+    /// will never meet (pending ranges can only exist on a queue that
+    /// negotiated v3 — see `write_pending_unsupported_report`).
     pub fn pending_unsupported_flush_deadline(&self) -> Option<Instant> {
+        if !self.supports_v3() {
+            return None;
+        }
         self.shared.state().pending_unsupported.flush_deadline()
     }
 
