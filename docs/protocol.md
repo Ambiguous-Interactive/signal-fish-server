@@ -308,10 +308,10 @@ scheduled to close for a per-socket reason — the activity-timeout reaper, an
 idle/slow-consumer close, or teardown caught up with it just before the
 attempt: the refusal (`ReconnectionFailed` with `RECONNECTION_FAILED`) does
 not consume the token, and the precise cause arrives on the close frame that
-immediately follows. Retrying from a fresh connection reconnects normally
-while the token window is open. For pure-v2 clients the token is still
-minted at disconnect time and never reaches the wire — reconnection is
-effectively a v3+ feature.
+follows. Retrying from a fresh connection reconnects normally while the token
+window is open, barring unrelated lifecycle refusals (drain, room deletion).
+For pure-v2 clients the token is still minted at disconnect time and never
+reaches the wire — reconnection is effectively a v3+ feature.
 
 ### ProvideConnectionInfo
 

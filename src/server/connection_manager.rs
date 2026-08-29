@@ -218,10 +218,14 @@ pub(crate) enum ReassignmentOutcome {
     /// (inactivity/idle timeout, slow consumer, oversized outbound frame, or
     /// teardown) when the swap was attempted. The swap was refused and the
     /// transient entry restored exactly as it was: the pending close tears
-    /// down only the transient socket, and the reconnection record stays
-    /// spendable for a retry from a fresh connection. Without this refusal the
-    /// shared close signal would kill the freshly restored connection with a
-    /// stale reason and its teardown would remove the restored membership.
+    /// down only the transient socket — for every close that resolves the
+    /// connection through the connection map, which the removal fences — and
+    /// the reconnection record stays spendable for a retry from a fresh
+    /// connection. Without this refusal the shared close signal would kill
+    /// the freshly restored connection with a stale reason and its teardown
+    /// would remove the restored membership. A same-instant pin from the
+    /// socket's own I/O tasks (which hold signal clones) belongs to the
+    /// shared physical socket and follows the restored identity.
     /// `Shutdown` and `RoomInactive` are identity/room-scoped and still cross
     /// the swap (drain must close restored connections; a room pin reflects
     /// the room the claim just verified).
@@ -382,6 +386,13 @@ impl ConnectionManager {
         Ok(player_id)
     }
 
+    /// Test-only registration under an arbitrary player id. Production
+    /// registration always mints a fresh UUID, so map-key collisions with an
+    /// existing entry (including a just-restored reconnection entry) are
+    /// impossible there. Kept `pub` only because
+    /// [`crate::server::EnhancedGameServer::connect_client`] wraps it for
+    /// in-crate test harnesses; embedders must not use it to fabricate
+    /// collisions.
     pub async fn connect_test_client(
         &self,
         player_id: PlayerId,
@@ -1996,26 +2007,30 @@ mod tests {
         }
     }
 
-    /// `Shutdown` is identity/process-scoped: it must still cross the swap so
-    /// a drain that raced the claim closes the restored connection too.
+    /// Identity/room-scoped closes still cross the swap: a drain must close
+    /// restored connections, and a room-inactive pin reflects the room the
+    /// claim just verified.
     #[tokio::test]
     async fn reassign_still_adopts_entry_pinned_for_shutdown() {
         let manager = make_manager(4);
         let addr: SocketAddr = "127.0.0.1:5105".parse().unwrap();
-        let (tx, _rx) = channel();
-        let transient_id = manager
-            .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
-            .await
-            .expect("registration succeeds");
-        assert!(
-            manager.request_close_for(&transient_id, crate::coordination::CloseReason::Shutdown)
-        );
-        expect_reassigned(manager.reassign_connection(
-            &transient_id,
-            &PlayerId::new_v4(),
-            RoomId::new_v4(),
-            1,
-        ));
+        for reason in [
+            crate::coordination::CloseReason::Shutdown,
+            crate::coordination::CloseReason::RoomInactive,
+        ] {
+            let (tx, _rx) = channel();
+            let transient_id = manager
+                .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+                .await
+                .expect("registration succeeds");
+            assert!(manager.request_close_for(&transient_id, reason));
+            expect_reassigned(manager.reassign_connection(
+                &transient_id,
+                &PlayerId::new_v4(),
+                RoomId::new_v4(),
+                1,
+            ));
+        }
     }
 
     // -----------------------------------------------------------------------

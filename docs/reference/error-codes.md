@@ -289,9 +289,11 @@ A `Reconnect` delivered on a socket the server has already scheduled to
 close — the activity-timeout reaper fired, an idle/slow-consumer close
 landed, or teardown caught up with the attempt — is refused with
 `ReconnectionFailed` and `RECONNECTION_FAILED` without consuming the
-token. The close frame that immediately follows carries the precise cause
-(for example `4003 activity_timeout`). Retry from a fresh connection:
-while the token window is open, the same token reconnects normally there.
+token. The close frame that follows (best-effort) carries the precise
+cause (for example `4003 activity_timeout`). Retry from a fresh
+connection: while the token window is open — barring unrelated lifecycle
+refusals (drain, room deletion) — the same token reconnects normally
+there.
 
 ### Server draining (`SERVER_DRAINING`)
 
