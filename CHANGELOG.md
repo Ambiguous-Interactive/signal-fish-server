@@ -9,754 +9,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Documentation: record the issue #396 session-192 seam sweeps —
-  authority/relay-policy, room identity/LobbyState state machine, and
-  WebSocket upgrade admission audited sound under adversarial
-  re-verification — and document the three recorded foot-guns at their
-  sites: `DatabaseStorage::update_room_authority` `Some(id)` grants require
-  a current room member (production grants must go through
-  `request_room_authority`); `DatabaseStorage::toggle_player_ready` is a
-  test-only parity surface whose storage gate diverges from the coordinator
-  contract; and upgrade-rejection warning suppression is conserved only
-  modulo window eviction.
-- Documentation: `docs/authentication.md` now states what the
-  connection-bound application UUID means in each mode — under the enforced
-  allowlist it is always derived deterministically from the public app ID,
-  while under the open policy a well-formed UUID sent as `app_id` is used
-  verbatim, so the client chooses the application UUID; nothing consumes
-  open-mode application identity as an authority today, and a future consumer
-  must not treat it as unspoofable (issue #464).
-- Public Rust API: expose `server::run_drain_choreography`, the full
-  post-signal drain sequence (begin, `GoingAway` fan-out, grace wait with an
-  idle fast path, coded `4000` closes, handler settle), so embedded servers
-  running their own accept loop reuse the exact shutdown choreography of the
-  shipped binary instead of dropping clients abruptly. Also public in
-  support: `EnhancedGameServer::has_active_socket_tasks` and
-  `config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES` (issue #396).
-- Reference clients: add a creator-only `--max-players` flag (native and
-  browser, mirrored) that decouples room capacity from the `--peers` ready
-  barrier. Capacity above the barrier leaves open seats after the room
-  finalizes, so a late joiner can seat-fill the running session without any
-  prior departure; the flag is rejected in join mode and below `--peers`
-  (the ready barrier could never be reached). New interop scenarios exercise
-  the open-capacity seat fill end to end on the v2 relay floor — native
-  drivers, and the browser as the creating driver — pinning that the joiner
-  enters the `finalized` room, `GameStarting` is never re-broadcast, and no
-  `Error` frame surfaces, guarding the issue #449 stale-latch class: any
-  post-finalize `StartGame` re-issue would draw `INVALID_ROOM_STATE` and
-  appear there (issue #451).
-- Pin the host-election/readiness residuals of the issue #396 sweep with
-  deterministic, mutation-verified tests: the coordinator's `StartGame`
-  rejections (`NotReady`/`Forbidden`/`AlreadyStarted`) reach the wire with
-  their exact, distinct error codes and mutate nothing; in-flight
-  `PlayerReady`/`StartGame` handlers parked on a lifecycle renamed away by a
-  reconnect reclaim are silent no-ops; an aborted host re-plan publication
-  retains the sticky plan naming the departed host until one subsequent
-  departure heals it; and refreshed finalized-join plans after a mid-game
-  authority departure name no phantom authority (issue #447).
-- Document that `all_ready` in `LobbyStateChanged` is a toggle-driven advisory
-  snapshot: a player who joins later is always unready and triggers no
-  corrective broadcast, so a cached `all_ready: true` is stale after any
-  `PlayerJoined`; the authoritative readiness gate is the `StartGame` re-check
-  (its `GAME_START_NOT_READY` rejection is exact), and clients re-issue
-  `StartGame` when every current player is ready again. Pin the staleness,
-  rejection, and both recovery paths (latecomer readiness toggle, latecomer
-  departure) end to end (issue #447).
-
-- Pin four gameplay-seam guards surfaced by the issue #396 sweep with
-  deterministic, mutation-verified tests: reconnection expiry sweeps never
-  remove a record whose reconnection is claimed mid-flight; an interleaved
-  control frame never consumes an armed protocol v3 `Latest` acceleration
-  window; the documented spectator-cap boundary stays strict (`<`, a full room
-  refuses without mutating its roster, and a departure frees exactly one
-  seat); and spectator maintenance retries void stale rollback rows for
-  republished identities instead of deleting live roster entries. Clarify that
-  a future spectator cap would refuse before any room mutation through the
-  terminal `SpectatorJoinFailed` response carrying `TOO_MANY_SPECTATORS`
-  (verified behavior; no functional change) (issue #396).
-- Pin two eviction-scan guards of the v3 data lane with deterministic
-  regression tests: coalescing matches the full
-  `(from_player, room_id, key)` composition, so an equal application key from
-  another player or room never supersedes another stream's queued value, and
-  both the supersede search and the volatile-victim search see only
-  current-generation rows after a room transition, so stale frames can neither
-  be superseded nor evicted and a saturated lane reports
-  `LatestDroppedFull` instead (verified behavior; no functional change)
-  (issue #396).
-- Add a running-session capability gate for seat-fill joins into finalized
-  rooms: a joiner that did not negotiate the room's sticky session pair
-  (protocol v3 plus its topology **and** transport) is rejected with a new
-  `ROOM_SESSION_INCOMPATIBLE` wire code instead of being seated on a silently
-  split data path, where its WebSocket-relayed traffic reaches the room while
-  peer-to-peer traffic between capable members never reaches it. Relay-floored
-  rooms stay open to everyone (the floor never closes), reconnects of seated
-  incumbents are unchanged, and every plan publication now observes residual
-  mixed-path memberships (a drifted reconnect) via the new
-  `seat_fills_rejected_incompatible` and `mixed_path_members_observed`
-  transport metrics plus a warn log (issue #421).
-- Pin the teardown-behind-an-abandoned-write wire contract with an end-to-end
-  regression test on a real upgraded socket: a cancelled mid-flush write must
-  still deliver every already-buffered byte whole, keep later frames on clean
-  frame boundaries, and preserve the coded close handshake (verified behavior;
-  no functional change) (issue #415).
-- Add a startup warning when token binding is enabled but optional without an
-  effective built-in TLS listener: over plaintext `ws://` the v2 connection
-  key is publicly derivable, so proofs provide replay ordering only, not
-  authentication. Required mode already refused to start in that configuration.
-- Add a configurable aggregate outbound WebSocket payload limit, discoverable
-  before connection through the CORS-enabled `/v2/client-config` and
-  `/v3/client-config` endpoints and also advertised in the HTTP upgrade response
-  and negotiated-v3 `ProtocolInfo`. Bounded serialization rejects oversized
-  text, binary, snapshot, and replay messages whole and closes the affected
-  connection with RFC 6455 code `1009` instead of truncating them; binary
-  fallback decoding is separately bounded against compact-tree allocation
-  amplification (issue #399).
-- Add negotiated protocol-v3 room-operation correlation. Clients that request
-  and receive the `room_operation_ids` capability can wrap join, leave,
-  reconnect, spectator-join, and spectator-leave commands with a UUID and
-  receive exactly matched terminal results without changing legacy v2/0.4/0.7
-  wire shapes. Unexpected owned-task failures also return a correlated internal
-  failure while the connection remains deliverable (issue #395).
-- Pin two previously unpinned game-data guards with deterministic tests: a
-  pre-v3 sender supplying delivery metadata (`class`/`key`) is rejected with
-  `INVALID_DELIVERY_CLASS`, and every game-data write from an unseated
-  connection is answered — nothing can regress to silent vanishing without
-  failing these (verified behavior plus the coded rejections above)
-  (issue #396).
+- Public Rust API: `server::run_drain_choreography` lets embedders run the shipped binary's exact
+  shutdown drain sequence, with `EnhancedGameServer::has_active_socket_tasks` and
+  `config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES` in support (issue #396).
+- Reference clients: creators can pass `--max-players` (native and browser) to leave open seats in
+  finalized rooms for late seat-fill joins; rejected in join mode and below `--peers` (issue #451).
+- Protocol v3 room-operation correlation: wrap join, leave, reconnect, and spectator commands in a
+  UUID and receive exactly matched terminal results (issue #395).
+- Configurable aggregate outbound payload limit, advertised via `/v2/client-config`,
+  `/v3/client-config`, the HTTP upgrade response, and `ProtocolInfo`; oversized messages are
+  rejected whole with close code `1009` instead of truncated (issue #399).
+- New `ROOM_SESSION_INCOMPATIBLE` wire code: seat-fill joins into finalized rooms from clients that
+  did not negotiate the room's protocol, topology, and transport are refused instead of being
+  seated on a silently split data path (issue #421).
+- Startup warnings: token binding over plaintext `ws://` only provides replay ordering, not
+  authentication, and disabling every liveness mechanism at once leaves dead clients un-reaped
+  (issues #462, #465).
+- Documentation: the application UUID's meaning under allowlist versus open policy (issue #464),
+  the enforced lowercase-hyphenated `operation_id` encoding, byte-unit name limits, the room rate
+  limiter's fixed-window semantics, the activity reaper's enforced liveness contract, and the
+  deliberate absence of spectator-name uniqueness.
 
 ### Changed
 
-- Public Rust API: dispatching a `Reconnect` frame (`ClientMessage::Reconnect`
-  or a `RoomOperationRequest::Reconnect` operation) through
-  `EnhancedGameServer::handle_client_message` is now refused fail-closed with a
-  coded `Error` / correlated `OperationFailed` carrying `RECONNECTION_FAILED`
-  instead of running the reconnect transaction. The message router cannot
-  update the socket's `effective_player_id`, so a reconnect reaching it would
-  half-reconnect — the routing map moves to the reconnected identity while the
-  socket keeps stamping frames as the transient sender, and every later frame
-  it sends is dropped silently. Reconnection remains dispatched exclusively by
-  the connection task (issue #396).
-- Metrics: the `signal_fish_game_data_messages_total` HELP text now reads
-  "Total game data messages accepted for room relay" — the counter is
-  acceptance-time by design (it doubles as the contention-test marker that a
-  broadcast was accepted before its builder runs) and also covers
-  accepted-but-cancelled builds, unlike `signal_fish_signals_relayed_total`
-  which is counted at dispatch after every gate. No counter values changed.
-- Documentation: record the issue #396 session-193 seam sweeps — game-data
-  relay carrier (stamping/epoch/replay), signal routing/sender attribution,
-  and room-operation execution audited sound under adversarial
-  re-verification — with the residual facts recorded at their sites: the
-  `target_not_routed` pre-gate is a defensive duplicate unreachable without a
-  cross-thread TOCTOU (the under-gate revalidation is authoritative), StartGame
-  with a durable-detach ghost row reaches `InternalError` only via a storage
-  backend's removal error (structurally unreachable with shipped storage), and
-  retried `LeaveRoom` operations return `NOT_IN_ROOM` per the documented
-  echo-only correlation contract.
-- Tests: pin two previously untested signal-routing branches — a sender pruned
-  from coordinator room routing while gated is rejected with `NOT_IN_ROOM`
-  naming the routing change and never counted as relayed, and spectators are
-  structurally excluded from the signal plane in both directions (cannot send,
-  cannot be targeted) while the seated pair still relays (issue #396).
-
-- `PeerTransportStatus` fan-out delivery no longer holds the room event
-  mutation gate or the reporting connection's lifecycle gate: recipients are
-  resolved under the gates, then delivery is dispatched outside them, so one
-  slow room member's backpressured fan-out leg no longer delays concurrent
-  room mutations (`JoinRoom`, `LeaveRoom`, `PlayerReady`, `StartGame`) for up
-  to a slow-consumer window (issue #463). Dispatch truth is carried by
-  per-recipient revalidation — membership via the routing-checked delivery
-  path, negotiated protocol v3 capability per leg. Defense in depth: the
-  socket writer now fail-closed-suppresses (accounted drop, no queue fence)
-  every server-to-client message variant documented v3-only (`Signal`,
-  `NewPeer`, `SessionPlan`, `PeerTransportStatus`, `RelayStats`, `GoingAway`,
-  `DeliveryReport`, `RoomOperationResult`) if one ever reaches a pre-v3
-  connection's queue — for example through a reconnect identity swap racing a
-  fan-out's recipient snapshot — so a client that cannot parse the variant
-  can never observe it. The rewritten deterministic e2e pins the improved
-  contract: a concurrent `LeaveRoom` is admitted while the stalled member's
-  fan-out leg is still parked, and the parked leg still evicts that member.
-- Protocol: a second `Authenticate` on a connection that already completed the
-  handshake — under either app-ID policy, including a re-`Authenticate` after a
-  reconnect identity swap on the same socket — and a first `Authenticate` sent
-  after any other application message under the open policy are now refused
-  with an `Error` frame carrying `INVALID_INPUT` naming the violation.
-  Previously these frames were silently ignored, so a client waiting on a
-  second `Authenticated` hung until the socket idle deadline; the connection
-  now stays open and receives the coded refusal (issue #468).
-- Configuration: the server logs a startup warning when every liveness
-  mechanism is disabled together (`server.ping_timeout=0`,
-  `websocket.idle_timeout_secs=0`, `websocket.server_ping_interval_secs=0`) —
-  a combination that leaves silently-dead clients holding their connection,
-  per-IP slot, and room seat with no reaping signal. Each knob may still be
-  disabled alone (issue #465).
-- Truthful capability-gate error code (issue #396 session-188 audit): a
-  negotiated-v3 connection that sends `RoomOperation` without the negotiated
-  `room_operation_ids` capability now receives `INVALID_INPUT` naming the
-  capability, instead of `UNSUPPORTED_PROTOCOL_VERSION` — that code's
-  documented meaning is "version below the deployment minimum; upgrade the
-  client", which is wrong retry guidance for a client whose session version
-  is valid and whose remedy is requesting the capability in a fresh
-  handshake. A pre-v3 connection (which has no `RoomOperation` surface at
-  all) still receives `UNSUPPORTED_PROTOCOL_VERSION`, and that code's
-  documentation now covers this frame-class case explicitly. Pinned by a new
-  red-first e2e alongside the existing v2-downgrade pin.
-- Truthful activity-reaper documentation (issue #396 session-188 audit): the
-  `ACTIVITY_TIMEOUT` row stated the reaper fires when the connection
-  "observed no inbound traffic", but frames rejected for size or content and
-  reconnect attempts answered on the direct dispatch arm deliberately do not
-  refresh the activity window — exactly so a flood of invalid frames cannot
-  keep an otherwise dead socket alive (mirroring the oversized-frame policy
-  in the game-data path). The row now states the enforced semantics: no
-  successfully processed inbound application or transport-liveness traffic.
-- Document the canonical `operation_id` encoding in `docs/protocol.md`: the
-  lowercase-hyphenated UUID requirement is enforced and golden-pinned but was
-  never stated in the protocol document (issue #396 session-188 audit).
-- Truthful rate-limit documentation (issue #396 session-187 audit): the
-  `Authenticated.rate_limits` projection and its rustdoc now state that
-  `per_minute` handshake limiting is enforced only for allowlist entries that
-  configure an explicit `rate_limit_per_minute` — omitting the field is the
-  "unlimited" configuration, the advertised 1000/60000/1440000 numbers are
-  projections only, and unknown-ID rejections consume no budget. Public docs
-  were already qualified ("enforced when configured"); the internal rustdoc
-  overclaimed and is corrected. A paired data-driven test pins both halves of
-  the contract (advertised projection AND no enforcement) so a future change
-  to either side must consciously update it.
-- Reject contradictory message-cap pairings at startup: a
-  `security.max_message_size` above `security.max_outbound_message_size`
-  previously started and then admitted relayed game data that could not be
-  re-emitted, closing every recipient with `1009 outbound_message_too_large`
-  — silent total rejection for exactly the traffic the deployment appeared to
-  accept. The pairing now fails both top-level config validation and direct
-  library construction of `EnhancedGameServer` (which likewise enforces the
-  dead-config `max_signal_bytes ≤ max_message_size` pairing), naming the
-  contradictory knobs (issue #396).
-- Reject game data from unseated connections with `NOT_IN_ROOM` instead of
-  dropping it silently: JSON `GameData` and raw binary game data sent before
-  joining, while spectating (spectator connections are never seated), or
-  after losing seat during teardown now surface the same coded error as
-  every other command surface, so clients can distinguish "relayed"
-  from "dropped" and retry meaningfully. Per-frame validation still runs
-  first (`INVALID_DELIVERY_CLASS` / `MESSAGE_TOO_LARGE`).
-- Accept-but-drop honesty for legacy peer metadata:
-  `ProvideConnectionInfo` now returns `INTERNAL_ERROR` when its durable
-  write lands on a membership row that vanished mid-flight instead of
-  silently pretending success, matching the treatment of any other failed
-  persistence; the room-creator rename path likewise mirrors its database
-  result into in-memory state only on confirmed success.
-- **Breaking:** Remove never-wired metric exports that always reported a
-  healthier-than-real server: `signal_fish_queries_total`, the
-  `signal_fish_room_creation_latency`/`signal_fish_room_join_latency`/
-  `signal_fish_query_latency` histogram families, and the
-  `signal_fish_errors_*` family had no production increment sites since
-  inception, so they permanently exported zeros/nulls (and the JSON
-  `performance`/`errors` objects did the same), making error-rate alerts and
-  `created − deleted` style invariants impossible to satisfy honestly. The dead
-  `ServerMetrics::health_status()`/`OperationTimer` APIs, whose failure-rate
-  math was built from those never-incremented counters, are removed with them.
-
-- **Breaking:** Close the remaining exported-but-unwired metric families
-  (issue #434, completing the #396 metrics-truthfulness sweep). The
-  distributed-lock cleanup counters (`signal_fish_distributed_lock_cleanup_runs_total`,
-  `signal_fish_distributed_lock_cleanup_removed_total`) are now wired to the
-  real maintenance sweep, and release failures
-  (`signal_fish_distributed_lock_release_failures_total`) now count every stale
-  or failed lock release on the admission paths instead of being discarded.
-  The public `DistributedLock::release` result is now defined as `true` only
-  when it removes an active matching-token lease; the in-memory backend
-  reclaims an expired matching entry but returns `false`, so callers must not
-  interpret expiry cleanup as a successful owned-lease release.
-  Removed series whose producers cannot exist in this product:
-  `signal_fish_distributed_lock_extend_failures_total` (no production lease
-  extension path), `signal_fish_relay_client_id_reuse_total` and
-  `signal_fish_relay_client_id_exhaustion_total` (the relay server was removed),
-  the JSON-only `relay_health` snapshot object including its unwired
-  `session_timeouts` field, and the cross-instance membership-cache pair
-  `signal_fish_cross_instance_membership_cache_{hits,misses}_total` (no such
-  cache exists in the shipped in-memory backend; the remaining reserved
-  remote-coordination seam series keep their explicit "Reserved" labeling).
-  Raw JSON consumers must also drop `distributed_lock.extend_failures`,
-  `cross_instance.membership_cache_hits`,
-  `cross_instance.membership_cache_misses`, and `relay_health`; the matching
-  public `ServerMetrics` fields/increment methods, snapshot fields, and
-  `RelayHealthMetrics` type are removed.
-
-- **Breaking:** Startup validation now rejects the remaining "zero silently
-  kills an enabled feature" configuration seams (issue #431, following the
-  #430 cap sweep): `server.reconnection_window = 0` issued every reconnection
-  token already expired, silently disabling reconnection while
-  `server.enable_reconnection` read true, and `websocket.batch_size = 0` with
-  `websocket.enable_batching = true` was clamped to one by the receive path,
-  flushing on every message and silently disabling the enabled batching.
-  Both now fail startup with a direct diagnostic naming the field; deliberate
-  disable keeps its dedicated switch (`server.enable_reconnection=false`,
-  `websocket.enable_batching=false`). Default configurations are unaffected.
-- **Breaking:** Startup validation now rejects zero-valued total-rejection
-  caps with a direct diagnostic instead of silently admitting no one:
-  `security.max_connections_per_ip = 0` rejected every WebSocket registration
-  with `IpLimitExceeded` while reading like the conventional "unlimited" value
-  (issue #430). The same failure class is closed for `server.max_rooms_per_game`,
-  `rate_limit.max_room_creations`, `rate_limit.max_join_attempts`,
-  `rate_limit.max_signals`, `protocol.max_game_name_length`,
-  `protocol.max_player_name_length`, and `protocol.max_players_limit`, and for
-  per-app allowlist overrides (`security.allowed_apps[*].max_rooms`,
-  `.max_players_per_room`, `.rate_limit_per_minute`) where zero silently
-  rejects every creation, join, or authentication for exactly that app; each
-  field's documentation now states the `> 0` requirement. Default
-  configurations are unaffected.
-- **Breaking:** Remove the never-wired cross-instance deduplication seam. The
-  `DedupCache` had zero production callers, its `coordination.dedup_cache`
-  configuration block (and `SIGNAL_FISH__COORDINATION__DEDUP_CACHE__*`
-  environment variables) was parsed but consumed by nothing, and the
-  `signal_fish_cross_instance_dedup_{hits,misses,evictions}_total` Prometheus
-  series plus the `MetricsSnapshot.cross_instance.dedup_cache_*` fields
-  exported permanent zeros. The module, its configuration types, the
-  always-zero counters, and the `lru` dependency that existed only for it are
-  gone. Config files carrying a `dedup_cache` block still parse (unknown
-  fields are ignored); embedders referencing the removed public types must
-  drop those references.
-- **Breaking:** The public coordination delivery entry point
-  `deliver_or_disconnect` now takes `&Arc<ServerMetrics>` instead of
-  `&ServerMetrics` (the `_in_room` variants are crate-internal and changed
-  identically). Embedders already holding the server's metrics Arc pass it
-  through unchanged; drop-path accounting needs the owned handle so a
-  cancelled parked delivery resolves the same counters as ordinary outcomes
-  even on queues without an embedded metrics handle.
-- **Breaking:** Bind the `EncryptedSecret` metadata (`key_id`, `created_at`) of
-  `EnvelopeEncryptor` as AES-256-GCM associated data. Bundles encrypted by a
-  previous version no longer decrypt — they carry no authenticated metadata —
-  so re-encrypt any persisted secrets when upgrading (no in-repo caller
-  persists bundles today; this is an embedder-facing surface). Tampering with
-  either metadata field now fails decryption instead of succeeding with
-  attacker-chosen labels.
-- **Breaking:** Remove `MetricsQuery`'s parsed-but-ignored `timeRange`
-  parameter and stop echoing it in the `/metrics` response body. Every
-  reported metric was already a lifetime-cumulative total, so the echoed
-  window string could only mislead window-expecting dashboards; clients can
-  filter `dashboardCache.history` samples by `fetchedAt` client-side.
-  Unknown query parameters remain accepted and ignored.
-- **Breaking:** Remove the dead public `EnhancedGameServer::admin_user_exists`
-  wrapper and its always-false `GameDatabase::admin_user_exists` trait
-  method, which suggested an admin-account seam that does not exist and
-  hard-coded `false` in every trait implementation.
-- **Breaking:** Change `RaceConditionMetrics.retry_success_rate` and
-  `room_code_retry_success_rate` to report `null` while zero attempts have
-  been recorded instead of a fabricated `1.0` (100%), which alert thresholds
-  like `< 0.9` previously read as healthy for servers that never retried.
-  Strict clients typing these fields as non-optional numbers must accept
-  `null`.
-- **Breaking:** Wire `MetricsSnapshot.dashboard_cache.refresh_count` to the
-  real successful refresh counter and remove the hardcoded-zero
-  `refresh_errors` stub field beside the live `refresh_failures` counter it
-  contradicted.
-- Route the conventional top-level `/health` path to the real health handler
-  in the production router instead of falling into the 200-OK catch-all
-  banner that ignored backend state; `/v2/health` remains equivalent.
-- Advertise player/game name length limits as UTF-8 bytes everywhere:
-  validation error messages now say "bytes", and `PlayerNameRulesPayload`
-  documentation states the unit, matching the byte-measured server checks.
-  An 11-character CJK name (33 bytes) still exceeds the default 32-byte
-  limit, as it always has; only the wording changed.
-- Document the deliberate absence of spectator-name uniqueness: spectator
-  names are non-authoritative display metadata on an unbounded admission
-  surface, so enforced uniqueness would enable name-squatting denial of
-  service against spectators (and, across roles, pre-claiming that blocks
-  real players from joining).
-- Throttle unauthorized-metrics-access warnings to one per 60 seconds with a
-  suppressed-repeat count, so anonymous request loops against `/metrics*`
-  can no longer amplify operator log-disk volume before any credential guess
-  matters.
-- Throttle rejected-WebSocket-upgrade warnings to one per source address and
-  outcome per 60 seconds with a suppressed-repeat count, so anonymous request
-  loops against the unauthenticated `/v2/ws` and `/v3/ws` upgrades can no
-  longer amplify operator log-disk volume. The first warning for a source
-  keeps its exact previous field set (`request_id`, `peer_ip`, `outcome`,
-  `http_status`), distinct addresses keep warning independently, tracked
-  sources stay bounded under rotated-address floods, and response headers and
-  status codes are unchanged (issue #411).
-- **Breaking:** Add `max_outbound_message_size` to the public Rust
-  `SecurityConfig`, `ServerConfig`, and `ProtocolInfoPayload` structs.
-  Downstream struct literals must supply the field or use struct update syntax.
-  `ServerMessage::ProtocolInfo` now stores its payload in a `Box`, so downstream
-  constructors must use `ServerMessage::ProtocolInfo(Box::new(payload))` and
-  moved pattern matches receive `Box<ProtocolInfoPayload>`.
-  Valid configured values are `1..=67108864` bytes so the advertised integer is
-  portable across JavaScript and 32-bit clients.
-- **Breaking:** Add `requested_capabilities` to the public Rust
-  `ClientMessage::Authenticate` variant and correlated room-operation variants
-  to the public client/server message enums. Downstream struct-variant
-  constructors and exhaustive matches must handle the new fields and variants.
-- **Breaking:** Reject app IDs containing control characters (newlines, ANSI
-  escapes) or exceeding 256 bytes with `INVALID_APP_ID` in every app-ID policy
-  mode, and refuse to start when a configured allowlist entry fails the same
-  gate. Previously an open policy accepted any string verbatim into log lines,
-  where newlines or ANSI escapes could forge operator-facing logs.
-  The structured log fields recorded before validation or the app-ID gate —
-  the pre-validation `room.join` span's `game_name` and `requested_room_code`
-  and the anomalous post-handshake `Authenticate` warning's `app_id` — now
-  render as Debug values (quoted with escapes) instead of raw Display strings;
-  all other `app_id` log sites keep their previous shape.
-- Refresh compatible Rust dependencies across the server, fuzz, and native
-  reference-client lockfiles, including `uuid` 1.24.1, `saphyr` 0.0.12, and
-  `webrtc`/`rtc` 0.20.3, update `taiki-e/install-action` to 2.86.3, and update
-  `docker/setup-buildx-action` to 4.3.0.
-- Reduce the crates.io source archive from 93 files and 3.3 MiB to 86 files
-  and 2.6 MiB by excluding eight standalone test-only modules while retaining
-  every runtime source and package-verification check (issue #397).
-- Delete the unreachable protocol-v3 `Latest` coalescing arm from the legacy
-  (pre-v3 compatibility) pop path of the outbound queue and make its classing
-  invariant load-bearing. A legacy-lane row can only be forced-`Reliable`
-  data, class-less control messages, or transition barriers, so both the
-  unbatched and batched consumers now treat an impossible `Some(Latest)`
-  front as a terminal accountability breach and stop serving the queue rather
-  than guessing FIFO semantics for it (issue #444). In the exotic mid-flight
-  protocol-downgrade or stale legacy-permit race those rows release
-  immediately without consuming slots of an acceleration window armed before
-  renegotiation, matching the control-lane precedent.
+- A duplicate or post-message `Authenticate` is now refused with a coded `INVALID_INPUT` error
+  frame instead of being silently ignored, so clients no longer hang until the idle deadline
+  (issue #468).
+- A negotiated-v3 connection sending `RoomOperation` without the negotiated capability now
+  receives `INVALID_INPUT` naming the capability instead of the misleading
+  `UNSUPPORTED_PROTOCOL_VERSION`.
+- Game data from unseated connections (not joined, spectating, or mid-teardown) is answered with
+  `NOT_IN_ROOM` instead of being dropped silently.
+- Contradictory message-cap pairings are rejected at startup: a `max_message_size` above
+  `max_outbound_message_size` previously admitted relayed traffic that was then rejected on every
+  recipient with `1009`.
+- `PeerTransportStatus` fan-out no longer holds room mutation gates, so one slow recipient's
+  fan-out leg no longer stalls concurrent `JoinRoom`, `LeaveRoom`, `PlayerReady`, and `StartGame`
+  operations (issue #463).
+- **Breaking:** Removed never-wired metric exports that permanently reported zeros: the queries,
+  room-creation/join/query latency, and `errors_*` families, the JSON `performance`/`errors`
+  objects, and their dead helper APIs.
+- **Breaking:** Removed more unwired or impossible metric series (distributed-lock extend
+  failures, relay client-id reuse/exhaustion, JSON `relay_health`, cross-instance membership
+  cache) and wired the distributed-lock cleanup and release-failure counters to real events;
+  `DistributedLock::release` returns `true` only for an owned-lease removal.
+- **Breaking:** Startup validation rejects zero-valued caps that silently disabled features:
+  `max_connections_per_ip`, `max_rooms_per_game`, room-creation/join/signal budgets, name-length
+  and player limits, per-app overrides, `reconnection_window = 0`, and `batch_size = 0` with
+  batching enabled (issues #430, #431).
+- **Breaking:** Removed the never-wired cross-instance deduplication seam (`DedupCache`, its
+  `coordination.dedup_cache` configuration block, and its always-zero counters).
+- **Breaking:** App IDs containing control characters or exceeding 256 bytes are rejected with
+  `INVALID_APP_ID` in every policy mode, and anomalous app-ID log fields render escaped instead of
+  raw, so log forgery via newlines or ANSI escapes is closed.
+- **Breaking:** Embedder-facing API shape changes: `deliver_or_disconnect` takes
+  `&Arc<ServerMetrics>`; `max_outbound_message_size` and `requested_capabilities` were added to
+  config and message structs; `ServerMessage::ProtocolInfo` stores its payload in a `Box`;
+  `admin_user_exists` was removed; retry-success metrics report `null` before the first attempt
+  instead of a fabricated `100%`; `EncryptedSecret` metadata is now authenticated, so bundles
+  encrypted by a previous version no longer decrypt and must be re-encrypted when upgrading;
+  `MetricsQuery.timeRange` was removed from `/metrics`.
+- Unauthorized-metrics and rejected-upgrade warnings are throttled per source (60-second window
+  with a suppressed-repeat count) so anonymous request loops can no longer amplify operator log
+  volume (issue #411).
+- `/health` now routes to the real health handler instead of the static catch-all banner;
+  `/v2/health` remains equivalent.
+- The `Authenticated.rate_limits` projection and docs now state that per-app handshake limiting is
+  enforced only when `rate_limit_per_minute` is configured, and
+  `signal_fish_game_data_messages_total` counts admission-time acceptance (no values changed).
+- Dependencies: refreshed compatible Rust dependencies (including `webrtc`/`rtc` 0.20.3 and
+  `uuid` 1.24.1) and GitHub Actions; the crates.io source archive shrinks by excluding test-only
+  modules (issue #397).
 
 ### Fixed
 
-- Stop evicting healthy recipients for the server's own report parking
-  (issue #396): a causal `DeliveryReport` parked at the control-lane tail (the
-  queue deliberately lets fresh control overtake it, and in-place gap appends
-  and advisory refreshes keep its original timestamp) expired by queue age, so
-  a control-lane busy period longer than `websocket.max_sojourn_ms` popped the
-  carrier with an already-elapsed deadline once the burst subsided, closing a
-  fully healthy connection with the `4002 slow_consumer` code — killing the
-  report and every gap it carried with it. The carrier's write deadline is now
-  write progress (like the lossy delivery classes), so a genuinely stalled
-  write still evicts through the same budget while non-report control items
-  keep their queue-age deadlines. Pinned red-first at the writer deadline
-  policy.
-
-- Fail closed the two write paths that bypassed the v3-only writer arm when
-  flushing coalesced unsupported-format omission reports (issue #396): the
-  live flush and the teardown final flush could emit the v3-only
-  `DeliveryReport` frame on a pre-v3 wire if a queue's pending ranges ever
-  outlived its negotiated v3 version. In production they cannot —
-  accumulation is v3-gated at record time, and no `Authenticate` is ever
-  processed after any other client message has been seen (later attempts are
-  refused, or the connection is closed outright in allowlist mode), while
-  omissions require room data flow — so the gates are unreachable defense: a
-  violation now leaves the unwritten ranges pending (they retire only after
-  the wire) instead of leaking the frame. Pinned red-first on a real upgraded
-  socket.
-
-- Close the reaper-vs-reconnect identity-swap race surfaced by the session-187
-  seam sweep (issue #396): a reconnect claim that reached the identity swap
-  while its claiming socket already carried a per-socket close pin (activity
-  reaper eviction, idle/slow-consumer close, oversized-outbound or teardown
-  close) used to adopt the pinned signal into the restored identity — killing
-  the freshly reconnected player with a stale close code (for example
-  `4003 activity_timeout`) right after peers saw `PlayerReconnected`, and
-  tearing its restored membership back out. The identity swap now refuses
-  atomically when the transient entry carries such a pin: the pending close
-  tears down only the transient socket, the one-time token is not consumed,
-  and a retry from a fresh connection reconnects normally while the window is
-  open (`ReconnectionFailed` with `RECONNECTION_FAILED`; the precise cause
-  rides on the close frame that follows). `Shutdown` and `RoomInactive`
-  closes still cross the swap — a drain must close restored connections, and
-  a room-inactive pin reflects the room the claim just verified. Pinned
-  red-first end to end and at the manager level.
-
-- Close the shutdown-drain admission gaps surfaced by the session-186 seam
-  sweep (issue #396):
-  - A reconnect attempt delivered inside the drain grace window (only possible
-    from a socket upgraded before the drain flipped) is now refused with
-    `ReconnectionFailed` carrying `SERVER_DRAINING` instead of being admitted,
-    force-closed with `4000`, and stripped of its restored membership — which
-    also consumed the one-time reconnection token. The refusal fires before
-    any claim, so the token stays spendable on a healthy instance.
-  - A spectator join delivered in the same window is now refused with
-    `SpectatorJoinFailed` carrying `SERVER_DRAINING` instead of publishing a
-    role the drain teardown detaches at unregister. The join path's existing
-    contract (new room creation refused; existing-room seat-fills allowed) is
-    unchanged.
-  - `discard_pending_reconnection` now skips records claimed by an in-flight
-    reconnect transaction, matching the invariant every expiry surface already
-    enforced; previously a drain-race discard could remove a claimed record and
-    strand the reconnect (its completion would silently fail while the player
-    observed success). Pinned red-first at the manager level.
-  - `SERVER_DRAINING` docs and client guidance now name reconnection and
-    spectator admission alongside new room creation.
-
-- Close the last actionable issue #454 residuals from the session-182/185
-  seam audits (issues #454, #396):
-  - A client that exhausts its rejection-detail budget (`max_signal_errors`)
-    now receives truthful guidance — "Too many rejected signaling messages;
-    further rejections are reported without detail until the window resets.
-    Valid signals are still relayed" — instead of "Signaling error rate limit
-    exceeded", which wrongly implied a healthy client's signaling was
-    throttled. The budget stays fail-closed; only the rejection detail is
-    suppressed, and valid signals always relay (pinned end to end).
-  - The feature-gated legacy full-mesh server's shutdown semantics are
-    documented as deliberate in `main.rs`: `matchbox_signaling` 0.14 exposes
-    no graceful-shutdown API and the legacy protocol has no close-code
-    contract, so it stops with the process.
-- Spectator join panic-repair parity (issue #396): a panic between the
-  durable spectator admission and the local role publication used to leave
-  a ghost database row that consumed spectator capacity and was invisible
-  to both maintenance sweeps (`prune_missing_rooms`,
-  `retry_disconnected_detaches`). The owned join transaction now catches the
-  unwind, rolls the unpublished admission back, and still delivers the
-  client's terminal `SpectatorJoinFailed`. Also pinned: the broadcast-side
-  drain gate for spectator detaches (a routed member observes no
-  `SpectatorDisconnected` under an active drain while persistence still
-  converges), and the issue-#241 TOCTOU invariant is documented at its
-  enforcement site.
-- Close the actionable issue #454 residuals from the session-182 seam audits
-  (issues #454, #396):
-  - The protocol-v3 text relay carriers (JSON `GameData` and the
-    `GameDataBinary` text fallback projection) now reject zero delivery
-    stamps exactly like the binary encoders, so both carriers share one
-    complete, non-zero stamp contract — a zero stamp can no longer ride the
-    format-mismatch fallback projection that previously bypassed the binary
-    gate. Binary-direct zero stamps keep their fail-closed outcome but are
-    now classified as an invalid v3 stamp instead of a serialization failure.
-  - An observer of a shutdown drain whose stored deadline overflowed to the
-    `u64::MAX` sentinel is now bounded by one grace window instead of
-    sleeping ~`u64::MAX` milliseconds before forcing the coded closes; the
-    same bound absorbs backwards wall-clock steps.
-  - The room rate limiter's fixed-window semantics (all budgets reset
-    together, so a boundary burst can spend up to twice the configured
-    count) are documented in the code and configuration reference,
-    distinguished from the handshake limiter's sliding window.
-- Shutdown drain: `finish_background_shutdown` no longer aborts a drain that
-  has already begun. The drain task flips the process watch only after the
-  drain begins and the `GoingAway` fan-out completes, so a serve future that
-  returned inside that window used to abort the committed drain — dropping
-  every connected client with no `GoingAway` advisory and no coded `4000`
-  close frame. The join-or-abort decision now follows the server's drain
-  state. The grace wait before the shutdown closes is also skipped when no
-  socket handler is live: during a drain new registrations are refused, so
-  an empty grace was pure restart delay against the operator's termination
-  budget (issue #396).
-- Configuration: `security.max_outbound_message_size` must now exceed
-  `security.max_message_size` by at least 256 bytes of relay envelope
-  headroom (constructor-enforced for direct library builds too). The relayed
-  form of an admitted frame is strictly larger than the frame itself — the
-  relay projection attaches the sender id and delivery stamps — so an equal
-  or barely-larger outbound cap admitted frames whose fixed envelope alone
-  overflowed the outbound cap, closing innocent recipients with `1009
-  outbound_message_too_large`; a sender could sever the whole room. Tight
-  pairings are now rejected at startup, and the 1009-close end-to-end
-  scenario pins the close contract through a legal aggregate (`RoomJoined`
-  roster growth) trigger. **Upgrade note:** deployments running equal or
-  near-equal caps must raise `max_outbound_message_size` (or lower
-  `max_message_size`) before upgrading; such pairings previously failed at
-  runtime instead. The headroom covers the fixed envelope; value-level
-  re-serialization growth (JSON number normalization, MessagePack→JSON
-  fallback escaping) can still exceed it and remains enforced fail-closed
-  at write (issue #396).
-- Docs: the rate-limit scenario no longer claims the connection always
-  stays open. Room and spectator admission refusals arrive on
-  `RoomJoinFailed` / `SpectatorJoinFailed` and leave the connection open,
-  but an over-budget per-app handshake is refused with `AuthenticationError`
-  carrying `RATE_LIMIT_EXCEEDED` and the connection is closed — back-off
-  applies to the next connection attempt against the same shared app-wide
-  budget (issue #396).
-- Scope targeted cross-instance bus delivery to the recipient's room: the
-  dormant multi-instance bus path routed targeted messages through the
-  unscoped sender, so a server-stamped relay `GameData` (which classifies only
-  with its room context) would fail closed and loud-close an innocent
-  recipient. No production path reaches the dormant seam today; the fix
-  removes the landmine before any multi-instance re-enable and is pinned by a
-  red-first unit test (issue #446).
-- Fix dropped `EnhancedGameServer` instances retaining their dashboard cache,
-  database, metrics, and refresh task until the Tokio runtime shut down. The
-  cache refresh loop now releases its owners between samples, stops promptly
-  when the cache is dropped, and starts only after server construction has
-  completed successfully. The public `run_server` helper now also scopes its
-  room-cleanup task to the serving future, so bind failure, server return, or
-  caller cancellation cannot detach a task that retains the whole server;
-  unexpected cleanup exit now terminates `run_server` instead of silently
-  serving without maintenance (issue #396).
-- Count room deletions truthfully: the exported
-  `signal_fish_rooms_deleted_total` counter (and the `rooms.deleted` JSON
-  field) had no production data path and stayed at zero forever while rooms
-  were really deleted on the empty-room/inactive-room sweeps and on
-  rolled-back room creations. Every deletion path now increments it exactly
-  once; note that a creation rolled back by the shutdown-drain race counts as
-  a deletion even though its never-published creation was never counted, so
-  brief negative `created − deleted` excursions are possible during drain.
-- Client-initiated RFC 6455 Ping keepalives now refresh activity-reaper
-  liveness. Previously each inbound protocol Ping suppressed the server's own
-  liveness probe (inbound-activity guard) without refreshing the reaper's
-  `last_ping` stamp, so a fully healthy client that kept the connection alive
-  only with standard WebSocket pings was deterministically evicted with close
-  code `4003 activity_timeout` — contradicting the documented reaper contract
-  ("observed no inbound traffic") and the socket-level idle timeout, which
-  already counts every inbound frame. A last-seen persistence update fired by
-  a teardown-racing frame from an already-unregistered player is now suppressed
-  even when the heartbeat throttle is disabled (`heartbeat_throttle = 0`),
-  restoring the once-per-player-per-window throttle contract on every path.
-  Residual semantics: a client flooding protocol Pings keeps its reaper liveness
-  refreshed even if the server→client direction is dead — matching the
-  socket-level idle timeout's "any inbound frame counts" rule and still
-  backstopped by the slow-consumer disconnect.
-- Fix protocol-v3 text game data silently delivering without a complete relay
-  stamp. The binary carrier already failed closed with `InvalidV3Stamp` when a
-  v3 recipient would have observed a partial `(seq, epoch)` stamp, but the text
-  carrier serialized the frame as-is, breaking recipient-side gap
-  accountability without any signal. Both carriers now enforce the same
-  fail-closed stamp contract for v3 cohorts (production senders stamp or
-  suppress, so no legitimate flow changes), and the text failure path gained
-  per-error diagnostics instead of a generic serialization message.
-- Fix readiness snapshots fabricating stale state when room membership cannot
-  be loaded: `current_ready_players` fell back to the unfiltered recorded set
-  on a storage error, reporting departed members as still ready in
-  `RoomJoined` / `Reconnected` / `SpectatorJoined` exactly when the server knew
-  its view was stale. Failed membership reads now fail closed to an empty
-  snapshot (with a warning) and recover normally once storage responds;
-  start-game gating is unaffected (it validates membership independently and
-  already surfaced such failures as infrastructure errors).
-- Fix a reconnecting sender's incarnation epoch passing through a provisional
-  value between connection reassignment and its override: readers of the
-  reassigned entry could observe the transient socket's epoch before the real
-  `last_epoch + 1` was applied. The resumed epoch is now part of the
-  reassignment itself — atomically visible from the first metadata read — and
-  the unchecked standalone epoch-overwrite seam that could regress a sender's
-  `(epoch, seq)` stream is gone.
-- Fix a stale terminal unroute being able to publish a foreign room's live
-  relay stamp as a phantom `PlayerLeft` terminal watermark:
-  `clear_room_assignment_with_tail` now verifies the player is still assigned
-  to the expected room under the same entry lock and refuses mismatches
-  untouched instead of capturing whatever assignment happens to be present.
-- Fix unregistered player ids bypassing the heartbeat persistence throttle:
-  in-flight frames racing a teardown took the "unknown client" branch on every
-  message, inflating the `heartbeat_updates` metric and retrying a futile
-  last-seen write per frame instead of at most once per player per throttle
-  window. Unknown ids are now suppressed; any live seated player or spectator
-  keeps an entry, so legitimate refreshes are unchanged.
-
-- Fix a `1009 outbound_message_too_large` teardown silently discarding still-
-  writable coalesced unsupported-format omission reports. A queued
-  `DeliveryReport` carrier pops with its post-write flush deliberately still
-  ahead of it, so when the carrier itself exceeded the configured outbound
-  message-size limit, the finalize branch abandoned the queue and closed
-  without ever flushing pending ranges — leaving omissions the recipient had
-  observed unreported even though the socket remained writable, and breaking
-  the documented "a closing connection flushes them too" promise. Every close
-  path now flushes coalesced omission reports (the report never advances the
-  data sequence, so it cannot open a hole of its own).
-- Fix overflowed duration configurations inverting into already-expired
-  deadlines on three WebSocket seams (ping write bound, Pong probe deadline,
-  authentication window) and on the reconnection-window deadline: an absurd
-  configured timeout previously closed every fresh connection immediately with
-  an authentication/activity code instead of behaving as effectively
-  unbounded, contradicting the repository doctrine that an overflow must never
-  become immediate expiry. All such seams now saturate to the platform's
-  maximal representable instant via a shared canonical helper.
-
-- Fix the last published member's departure deleting a finalized room's sticky
-  session decision while storage still holds an admitted member whose route
-  has not committed (a failed finalized publication spawns its teardown only
-  after releasing the room mutation gate). Deleting the plan in that window
-  downgraded that member's whole room generation to the relay floor on its
-  next committed route, contradicting sticky topology/transport for the
-  session lifetime; the decision now survives until storage empties too, so
-  the pending member's publication repairs the session (re-electing a capable
-  host) instead.
-- Fix outbound capacity-release witnesses discarding their own evidence after
-  a protocol upgrade while parked: `CapacityReleaseWitness::permits_locked`
-  required lane identity between the lane frozen when Full was observed and
-  the caller's freshly recomputed target lane. A v2→v3 negotiation completing
-  mid-backpressure changed that lane, so genuine pre-deadline release evidence
-  was discarded and a fully drained, on-rate recipient was evicted as a slow
-  consumer purely for upgrading. Release evidence is now evaluated on the
-  witness's own lane; actual space on the current target lane remains enforced
-  by the separate capacity check (issue #416).
-- Fix inactive-room garbage collection deciding liveness from the wall clock
-  while every other reaper (client pings, reconnect windows) uses monotonic
-  time: an NTP correction, manual clock change, or host suspend/resume that
-  stepped the wall clock past `server.inactive_room_timeout` deleted occupied,
-  actively-playing rooms (farewell `RoomInactive`, close code `4005`), and a
-  backward step kept idle rooms alive past their timeout. GC decisions now key
-  off a per-room monotonic activity stamp refreshed in lockstep by every
-  production activity path (create, player/spectator join, departure, explicit
-  refresh); the wall-clock `last_activity` remains the observability record.
-- Fix a parked backpressured delivery vanishing without any accounting when
-  the `BackpressuredDelivery` value itself is dropped unresolved (the owning
-  broadcast future is cancelled while parked): the attempt counter never
-  resolved, no drop was counted, and the recipient's queue ledger never
-  learned of the loss. Dropping that value now resolves the attempt as an
-  accounted drop (global counter, per-connection ledger, and the queue's
-  attempted+abandoned pairing), records a trace-validation event, and leaves
-  the healthy recipient connected.
-- Fix the remaining cancellation windows in the delivery pipeline: cancelling
-  the parked-delivery wait itself (`finish_backpressured_delivery_in_room`)
-  used to defuse the drop guard before its select, and the three conditional
-  waits (`reserve_initial_transition`, `deliver_to_one_if`, `reserve_one_if`)
-  had no cancellation accounting at all. A cancelled wait now resolves its
-  attempt exactly once as an accounted drop with attempted+abandoned queue-
-  ledger pairing, without requesting a close of the healthy recipient
-  (issue #417).
-- Fix room-operation coordination failing with `INTERNAL_ERROR` behind a
-  leaked lock key: the per-operation distributed keys could not coordinate
-  server processes while every coordinator critical section already holds the
-  TTL-free per-room mutation gate first, so the keys excluded nobody while a
-  leaked key burned the full ~22.5 s retry storm before failing. The
-  coordinator-level locks are removed (the mutation gate is the single
-  serializer); for the join-path locks that remain, acquisition backoff is
-  now provably bounded strictly inside the lease TTL it contends on via
-  `RetryConfig::worst_case_total_backoff` / `clamped_to_total_backoff`
-  (issue #414).
-- Fix the `CircuitBreaker` open-state window restarting on every late
-  closed-era straggler failure while already open, which could starve the
-  half-open probe indefinitely; the window is now anchored at the transition
-  into Open. `reset()` also invalidates outcomes from calls admitted before
-  it, so a stale probe failing after an administrative reset can no longer
-  reopen the freshly cleared circuit, and open-window timing uses the
-  monotonic clock like the rest of the server's liveness decisions.
-- Fix a join racing inactive-room deletion reporting
-  `ROOM_CREATION_FAILED` instead of `ROOM_NOT_FOUND`: when the room row
-  disappears between the join path's recheck and its membership write (GC
-  winning the race), the failure is now classified by a fresh existence check
-  so clients see the accurate wire code.
-- Fix TURN credential minting silently emitting an empty (always-rejected)
-  credential if HMAC initialization ever failed: the ICE builder now refuses
-  the whole TURN entry (fail closed, STUN/static entries unaffected) rather
-  than advertising an unusable pair.
-- Fix player-name uniqueness accepting canonically decomposed (NFD) spellings
-  of an already-taken name: comparison now composes both sides to NFC before
-  case folding, so byte-distinct spellings of one visible name (Hangul
-  syllables vs jamo sequences, or decomposed spellings under configurations
-  that allow combining marks) can no longer coexist in a room.
-- Fix the public `CircuitBreaker` opening on isolated failures: a successful
-  closed-state call resets the failure streak so only genuinely consecutive
-  failures trip the threshold, half-open recovery admits exactly one probe and
-  rejects concurrent calls without executing their operations, only the
-  admitted probe resolves the half-open state so straggler calls cannot steal
-  its transition, and an abandoned probe admits a fresh probe instead of
-  wedging half-open admission (issue #403).
-- Fix in-memory distributed lock leases starting before local lock contention
-  completed, which could make a newly acquired or extended lease immediately
-  expire and allow overlapping room-capacity or game-start mutations.
-- Fix room and spectator cleanup races: room garbage collection now preserves
-  reconnectable rooms when a disconnect overlaps a sweep, and failed rollback
-  of an unpublished spectator admission is retained for maintenance repair.
-- Fix rejected oversized binary game-data frames refreshing client and room
-  liveness, so invalid traffic cannot indefinitely postpone inactivity cleanup.
-- Correct the protocol contract for `JoinRoom.relay_transport`: it is a
-  compatibility-only hint that the server ignores, so every accepted value and
-  omission retain the same authenticated WebSocket relay path. New clients
-  should omit it; removal is reserved for a future breaking protocol version.
-  Also clarify that `relay_type` and `ConnectionInfo.relay` are informational,
-  client-untrusted legacy metadata rather than routing authority (issue #393).
-- Re-issue `StartGame` in both maintained reference clients (native and
-  browser) after a readiness invalidation instead of latching after one send:
-  the room creator recomputes all-ready from the authoritative `ready_players`
-  snapshots over the current membership (mirroring the server's gate), latches
-  against duplicate all-ready broadcasts, and re-arms on a join (always
-  unready, no corrective broadcast), a departure (which can restore all-ready
-  with no readiness broadcast), or an authoritative `GAME_START_NOT_READY`
-  rejection; a `RoomJoined`/`LobbyStateChanged`/`Reconnected` snapshot
-  refreshes the readiness baseline without re-arming the latch (so a
-  reconnect can never duplicate an in-flight send), and a `RoomLeft` resets
-  it. A stale one-shot latch stalled lobbies exactly when the server's
-  readiness re-check mattered (issue #449).
-- Bump the yanked `chacha20` 0.10.1 lockfile pin to 0.10.2 across the server,
-  native-client, and fuzz workspaces (pulled in via `rand` 0.10; no API or
-  behavior change).
+- A control-lane busy period no longer closes healthy connections with `4002 slow_consumer`:
+  parked `DeliveryReport` carriers are bounded by write progress instead of queue age.
+- Closed the reaper-versus-reconnect identity-swap race that could kill a freshly reconnected
+  player with a stale close code; the pin now tears down only the transient socket and the
+  one-time token stays spendable (issue #396).
+- Reconnect and spectator-join attempts during a shutdown drain are refused with `SERVER_DRAINING`
+  before consuming the one-time token or publishing a role that teardown would immediately strip.
+- A client that exhausts its rejection-detail budget now receives truthful guidance instead of a
+  message implying that valid signaling was throttled.
+- A spectator-admission panic rolls back the unpublished durable row and still delivers the
+  client's terminal `SpectatorJoinFailed`, instead of leaking a capacity-consuming ghost row.
+- Zero delivery stamps are rejected on the v3 text carriers exactly like the binary encoders, so a
+  partial stamp can no longer ride the JSON fallback, and pre-v3 queues can no longer observe any
+  v3-only server-to-client frame through the omission-report flush paths.
+- `security.max_outbound_message_size` must now exceed `security.max_message_size` by at least the
+  fixed relay-envelope headroom, closing the class where a legal frame closed innocent recipients
+  with `1009 outbound_message_too_large`; deployments with equal or near-equal caps must widen the
+  pairing before upgrading.
+- Every close path now flushes coalesced omission reports, keeping the "a closing connection
+  flushes them too" promise even when teardown races a `1009` close.
+- Client-initiated WebSocket pings now refresh activity-reaper liveness, so ping-only healthy
+  clients are no longer evicted with `4003 activity_timeout`.
+- Readiness snapshots fail closed on storage errors instead of fabricating stale "still ready"
+  state in `RoomJoined`, `Reconnected`, and `SpectatorJoined`.
+- A reconnecting sender's resumed epoch is visible atomically with the identity reassignment, and
+  a stale terminal unroute can no longer publish a foreign room's relay stamp as a phantom
+  `PlayerLeft` watermark.
+- Contract-accounting repairs: `rooms_deleted_total` counts real deletions, targeted cross-inst-
+  ance bus delivery is room-scoped, dropped servers release their cache and tasks promptly,
+  unregistered ids stop bypassing the heartbeat persistence throttle, and `ProvideConnectionInfo`
+  persistence failures surface `INTERNAL_ERROR` instead of pretending success.
+- Overflowed duration configurations now saturate to effectively unbounded instead of inverting
+  into already-expired deadlines that immediately closed every fresh connection.
+- Inactive-room garbage collection keys off monotonic activity, so clock corrections or host
+  suspend/resume can no longer delete occupied rooms or extend idle rooms past their timeout.
+- Delivery-pipeline cancellations now resolve exactly once as accounted drops instead of vanishing
+  without ledger notice, and a v2-to-v3 negotiation while parked no longer discards genuine
+  capacity-release evidence as a slow-consumer eviction (issues #416, #417).
+- A finalized room's sticky session decision survives a last-published-member departure until
+  storage empties, instead of downgrading pending members to the relay floor.
+- Room-operation coordination no longer fails with `INTERNAL_ERROR` behind a leaked distributed-
+  lock key; the per-room mutation gate is the single serializer (issue #414).
+- `CircuitBreaker`: only genuinely consecutive failures open it, the open window is anchored at
+  the transition, `reset()` invalidates stale outcomes, and half-open admission cannot be stolen
+  or wedged (issue #403).
+- More correctness repairs: join-versus-GC races report `ROOM_NOT_FOUND`, in-memory lock leases no
+  longer start before contention completes, cleanup races preserve reconnectable rooms, oversized
+  rejected frames no longer refresh liveness, NFD spellings of taken player names are rejected,
+  TURN credentials fail closed on HMAC errors, and drain observers bound overflowed deadlines to
+  one grace window.
+- Protocol contract correction: `JoinRoom.relay_transport` is a compatibility-only hint the server
+  ignores; new clients should omit it (issue #393).
+- Reference clients re-issue `StartGame` after readiness invalidations instead of latching after
+  one send, unstalling lobbies exactly when the server's readiness re-check mattered (issue #449).
 
 ### Security
 
