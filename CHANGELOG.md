@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A reconnect whose room is deleted between the admission recheck and the membership restore is now
+  refused with `ROOM_NOT_FOUND` — parity with the join path — instead of a misleading storage
+  fault (issue #396).
 - A duplicate or post-message `Authenticate` is now refused with a coded `INVALID_INPUT` error
   frame instead of being silently ignored, so clients no longer hang until the idle deadline
   (issue #468).

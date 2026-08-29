@@ -73,7 +73,9 @@ async fn create_test_database() -> Arc<dyn GameDatabase> {
     database
 }
 
-async fn create_test_server_with_message_coordinator_and_lock(
+/// Shared in-process server builder for sibling `#[cfg(test)]` modules that
+/// need to inject a specific database / coordinator / lock implementation.
+pub(super) async fn create_test_server_with_message_coordinator_and_lock(
     config: ServerConfig,
     message_coordinator: Arc<dyn MessageCoordinator>,
     distributed_lock: Arc<dyn DistributedLock>,

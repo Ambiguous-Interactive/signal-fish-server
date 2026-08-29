@@ -1048,6 +1048,20 @@ impl EnhancedGameServer {
                         .await;
                 }
                 Err(err) => {
+                    // A room deleted between the lane-held existence recheck
+                    // above and this membership write (inactive-room GC)
+                    // surfaces as a storage error here. Reclassify by
+                    // re-checking existence — parity with the join path — so
+                    // the client sees the accurate ROOM_NOT_FOUND wire code
+                    // instead of a storage fault; anything else stays
+                    // internal.
+                    let room_missing =
+                        matches!(self.database.get_room_by_id(room_id).await, Ok(None));
+                    let (reason, error_code) = if room_missing {
+                        ("Room not found", ErrorCode::RoomNotFound)
+                    } else {
+                        ("Storage error", ErrorCode::InternalError)
+                    };
                     tracing::error!(
                         %reconnect_player_id,
                         %room_id,
@@ -1059,8 +1073,8 @@ impl EnhancedGameServer {
                             current_player_id,
                             claim_guard,
                             &restore,
-                            "Storage error",
-                            ErrorCode::InternalError,
+                            reason,
+                            error_code,
                             operation_id,
                         )
                         .await;
