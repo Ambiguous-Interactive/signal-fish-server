@@ -406,12 +406,13 @@ impl EnhancedGameServer {
         // lifecycle lock is already held, so this follows the same
         // lifecycle -> room ordering as join/leave/reconnect. The gate is
         // released BEFORE delivery (see the caller): the snapshot below never
-        // parks, while delivery does. Sequenced publishers satisfy the shared
-        // caller-side rule — no task parks on backpressured delivery while
-        // directly holding the gate — by transferring their guard into the
-        // FIFO job that publishes; this path is strictly stronger: NOTHING
-        // holds the gate during delivery. Truth at dispatch is carried by
-        // per-recipient revalidation instead of the gate:
+        // parks, while delivery does. Sequenced publishers keep their
+        // CALLER's task from parking under the gate by transferring the guard
+        // into the FIFO job that publishes (the job itself may still park on
+        // backpressured delivery while retaining the guard — the documented
+        // sequenced-publication design); this path is stricter: NOTHING holds
+        // the gate at any point during delivery. Truth at dispatch is carried
+        // by per-recipient revalidation instead of the gate:
         // `send_to_player_in_room` re-checks membership under the room
         // routing gate, the fan-out re-checks the negotiated v3 capability
         // per leg, and the socket writer fail-closed-drops any v3-only frame

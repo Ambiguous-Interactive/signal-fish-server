@@ -3793,23 +3793,36 @@ mod tests {
         }
     }
 
-    /// The v3-only server messages must fail closed on a pre-v3 wire.
+    /// The server→client messages documented as v3-only must fail closed on a
+    /// pre-v3 wire.
     ///
-    /// The variants documented as protocol-v3-only (`NewPeer`, `SessionPlan`,
-    /// `PeerTransportStatus`, `RelayStats`, `GoingAway`, `DeliveryReport`)
-    /// exist only on the v3 wire. Every emission site checks the recipient's
-    /// negotiated version before enqueueing, but routing and a reconnect
-    /// identity swap can race that check (issue #463): the writer is the last
-    /// serialization point that owns the recipient's version, so it
+    /// `Signal`, `NewPeer`, `SessionPlan`, `PeerTransportStatus`, `RelayStats`,
+    /// `GoingAway`, and `DeliveryReport`, plus the capability-gated
+    /// `RoomOperationResult`, exist only on the protocol-v3 wire
+    /// (`docs/protocol.md` "New v3 messages"). Every emission site checks the
+    /// recipient's negotiated version before enqueueing, but routing and a
+    /// reconnect identity swap can race that check (issue #463): the writer is
+    /// the last serialization point that owns the recipient's version, so it
     /// suppresses these variants exactly where the per-recipient GameData
     /// stamp projection already lives — accounted, never fenced, never on the
     /// wire of a connection that cannot parse them.
     #[tokio::test(flavor = "multi_thread")]
     #[cfg_attr(miri, ignore)]
     async fn v3_only_messages_fail_closed_on_a_pre_v3_wire() {
-        use crate::protocol::{SessionGeneration, SessionPlanPayload, Topology, Transport};
+        use crate::protocol::{
+            RoomOperationId, RoomOperationResult, SessionGeneration, SessionPlanPayload, Topology,
+            Transport,
+        };
 
         let v3_only_messages: Vec<(&'static str, ServerMessage)> = vec![
+            (
+                "Signal",
+                ServerMessage::Signal {
+                    from: PlayerId::from_u128(4),
+                    generation: SessionGeneration::from_u128(1),
+                    signal: serde_json::json!({ "offer": {} }),
+                },
+            ),
             (
                 "NewPeer",
                 ServerMessage::NewPeer {
@@ -3857,6 +3870,13 @@ mod tests {
             (
                 "DeliveryReport",
                 ServerMessage::DeliveryReport(Box::default()),
+            ),
+            (
+                "RoomOperationResult",
+                ServerMessage::RoomOperationResult {
+                    operation_id: RoomOperationId::from_u128(1),
+                    result: Box::new(RoomOperationResult::RoomLeft),
+                },
             ),
         ];
 

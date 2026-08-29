@@ -1330,12 +1330,12 @@ async fn connect_v3_with_small_recv_buffer(
 
 /// Deterministic counterexample (issue #463) turned contract pin: dispatch of
 /// the `PeerTransportStatus` fan-out releases the room event mutation gate
-/// before backpressured delivery, upholding the codebase invariant that
-/// delivery backpressure never holds the gate. With one member stalled on a
-/// full control queue, the accepted report's stalled leg parks for a whole
-/// slow-consumer window, and a concurrent room mutation (`LeaveRoom`) is
-/// admitted WITHOUT waiting behind that leg's eviction. The stalled member is
-/// still evicted by the parked leg.
+/// before backpressured delivery, so no gate holder parks on delivery on this
+/// path (sequenced publishers instead transfer the guard into their FIFO
+/// job). With one member stalled on a full control queue, the accepted
+/// report's stalled leg parks for a whole slow-consumer window, and a
+/// concurrent room mutation (`LeaveRoom`) is admitted WITHOUT waiting behind
+/// that leg's eviction. The stalled member is still evicted by the parked leg.
 ///
 /// The stall itself is deterministic because the stalled member never reads,
 /// so its eviction is not a timing race (same zero-flaky shape as

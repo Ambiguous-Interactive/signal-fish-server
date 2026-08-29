@@ -709,24 +709,31 @@ pub(super) async fn send_single_message_ref(
             )
             .await?;
         }
-        // Fail-closed protocol gate: these are ALL the variants documented as
-        // protocol-v3-only (`docs/protocol.md`, `src/protocol/messages.rs`),
-        // so a pre-v3 connection can never parse them. Every emission site
-        // checks the recipient's negotiated version before enqueueing, but
-        // routing can still race that check (a reconnect identity swap landing
-        // between a fan-out's recipient snapshot and this write), so the
+        // Fail-closed protocol gate: these are ALL the server→client variants
+        // documented as v3-only (`docs/protocol.md` "New v3 messages",
+        // `src/protocol/messages.rs`), so a pre-v3 connection can never parse
+        // them. Every emission site checks the recipient's negotiated version
+        // (and variant-specific capabilities) before enqueueing, but routing
+        // can still race that check (a reconnect identity swap landing
+        // between a dispatch's recipient validation and this write), so the
         // writer — the last serialization point that owns the recipient's
         // version — suppresses them here, beside the per-recipient GameData
-        // stamp projection. The suppressed frame is accounted like any other
-        // pre-write rejection: counted, never fenced (the sink never saw
-        // bytes), and never written. (Writer-generated report flushes are
-        // covered separately: see `write_pending_unsupported_report`.)
-        ServerMessage::NewPeer { .. }
+        // stamp projection. No legitimate delivery is lost: each variant's
+        // emission gates already exclude pre-v3 recipients (`Signal` also
+        // requires a v3 WebRTC-capable target; `RoomOperationResult` requires
+        // the v3-negotiated `room_operation_ids` capability). The suppressed
+        // frame is accounted like any other pre-write rejection: counted,
+        // never fenced (the sink never saw bytes), and never written.
+        // (Writer-generated report flushes are covered separately: see
+        // `write_pending_unsupported_report`.)
+        ServerMessage::Signal { .. }
+        | ServerMessage::NewPeer { .. }
         | ServerMessage::SessionPlan { .. }
         | ServerMessage::PeerTransportStatus { .. }
         | ServerMessage::RelayStats { .. }
         | ServerMessage::GoingAway { .. }
         | ServerMessage::DeliveryReport { .. }
+        | ServerMessage::RoomOperationResult { .. }
             if !recipient_supports_v3 =>
         {
             accounting.complete_rejected_before_write();
@@ -745,16 +752,18 @@ pub(super) async fn send_single_message_ref(
     Ok(disposition)
 }
 
-/// The wire name of a protocol-v3-only [`ServerMessage`] variant, for
-/// diagnostics; empty for variants that exist below v3.
+/// The wire name of a server→client [`ServerMessage`] variant documented as
+/// v3-only, for diagnostics; empty for variants that exist below v3.
 fn v3_only_message_name(message: &ServerMessage) -> &'static str {
     match message {
+        ServerMessage::Signal { .. } => "Signal",
         ServerMessage::NewPeer { .. } => "NewPeer",
         ServerMessage::SessionPlan { .. } => "SessionPlan",
         ServerMessage::PeerTransportStatus { .. } => "PeerTransportStatus",
         ServerMessage::RelayStats { .. } => "RelayStats",
         ServerMessage::GoingAway { .. } => "GoingAway",
         ServerMessage::DeliveryReport { .. } => "DeliveryReport",
+        ServerMessage::RoomOperationResult { .. } => "RoomOperationResult",
         _ => "",
     }
 }
