@@ -141,12 +141,22 @@ impl EnhancedGameServer {
                 operation,
             } => {
                 if !self.client_supports_room_operation_ids(player_id) {
+                    // A pre-v3 session has no RoomOperation surface at all, so
+                    // the version code is truthful there. A negotiated-v3
+                    // session that never requested the capability has a valid
+                    // version; only the capability constraint is unmet, and
+                    // "upgrade the client" guidance would be wrong.
+                    let error_code = if self.client_protocol(player_id).version >= 3 {
+                        crate::protocol::ErrorCode::InvalidInput
+                    } else {
+                        crate::protocol::ErrorCode::UnsupportedProtocolVersion
+                    };
                     let _ = self
                         .send_error_to_player(
                             player_id,
                             "RoomOperation requires the negotiated room_operation_ids capability"
                                 .to_string(),
-                            Some(crate::protocol::ErrorCode::UnsupportedProtocolVersion),
+                            Some(error_code),
                         )
                         .await;
                     return;

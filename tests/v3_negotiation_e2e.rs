@@ -739,6 +739,59 @@ async fn v2_downgrade_does_not_enable_room_operation_envelopes() {
     running_server.shutdown().await;
 }
 
+/// A negotiated-v3 connection that simply never requested
+/// `room_operation_ids` has a valid session version; only the capability
+/// constraint is unmet, so the precise answer is `INVALID_INPUT` naming the
+/// capability. `UNSUPPORTED_PROTOCOL_VERSION` ("upgrade the client") would be
+/// wrong retry guidance. A pre-v3 connection instead keeps
+/// `UNSUPPORTED_PROTOCOL_VERSION`
+/// (see [`v2_downgrade_does_not_enable_room_operation_envelopes`]).
+#[tokio::test]
+async fn room_operation_without_negotiated_capability_answers_invalid_input() {
+    let running_server = start_allowlist_server().await;
+    let mut ws = connect(running_server.addr(), "/v2/ws").await;
+
+    let info = authenticate(&mut ws, version_only_auth(Some(3))).await;
+    let ServerMessage::ProtocolInfo(info) = info else {
+        panic!("expected ProtocolInfo, got {info:?}");
+    };
+    assert_eq!(info.protocol_version, Some(3));
+    assert!(
+        !info
+            .capabilities
+            .iter()
+            .any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY),
+        "the handshake must not grant room_operation_ids unprompted"
+    );
+
+    let message = ClientMessage::RoomOperation {
+        operation_id: uuid::Uuid::from_u128(2),
+        operation: Box::new(RoomOperationRequest::LeaveRoom),
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&message)
+            .expect("serialize RoomOperation")
+            .into(),
+    ))
+    .await
+    .expect("send RoomOperation");
+    match next_server_message(&mut ws).await {
+        ServerMessage::Error {
+            message,
+            error_code,
+            ..
+        } => {
+            assert_eq!(error_code, Some(ErrorCode::InvalidInput));
+            assert!(
+                message.contains("room_operation_ids"),
+                "error must name the missing capability, got {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    running_server.shutdown().await;
+}
+
 #[tokio::test]
 async fn malformed_room_operation_error_is_explicitly_uncorrelated() {
     let running_server = start_allowlist_server().await;

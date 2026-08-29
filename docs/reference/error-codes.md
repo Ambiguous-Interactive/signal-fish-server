@@ -81,10 +81,10 @@ names do not imply client credentials.
 | `AUTHENTICATION_TIMEOUT` | Authentication input was not observed strictly before the exclusive authentication deadline. |
 | `CONNECTION_IDLE_TIMEOUT` | The connection was closed because no inbound WebSocket frame was observed strictly before the exclusive idle deadline (`websocket.idle_timeout_secs`). Send periodic `Ping` messages to keep the connection alive. |
 | `SLOW_CONSUMER` | The delivery contract failed closed: reliable queue/sojourn timed out, a selected socket write did not complete strictly before its class-aware maximum-sojourn deadline, or the server could not preserve exact report/control ordering. The best-effort error is followed by authoritative close code `4002 slow_consumer`. |
-| `ACTIVITY_TIMEOUT` | The server could not complete an otherwise-idle WebSocket Ping write strictly before its bounded write deadline, the connection missed the matching Pong deadline without superseding application progress, or the activity reaper (`server.ping_timeout`) observed no inbound traffic within its window. A Ping queued after outbound progress uses the earlier capacity-wait/maximum-sojourn delivery boundary and closes `4002 slow_consumer` if it stalls instead. Distinct from `CONNECTION_IDLE_TIMEOUT` (the socket-level `websocket.idle_timeout_secs` close). Compliant WebSocket stacks answer protocol Pings automatically; clients should still send application `Ping` messages when server probes are disabled. |
+| `ACTIVITY_TIMEOUT` | The server could not complete an otherwise-idle WebSocket Ping write strictly before its bounded write deadline, the connection missed the matching Pong deadline without superseding application progress, or the activity reaper (`server.ping_timeout`) observed no successfully processed inbound application or transport-liveness traffic within its window (frames rejected for size or content do not refresh the window). A Ping queued after outbound progress uses the earlier capacity-wait/maximum-sojourn delivery boundary and closes `4002 slow_consumer` if it stalls instead. Distinct from `CONNECTION_IDLE_TIMEOUT` (the socket-level `websocket.idle_timeout_secs` close). Compliant WebSocket stacks answer protocol Pings automatically; clients should still send application `Ping` messages when server probes are disabled. |
 | `SDK_VERSION_UNSUPPORTED` | The SDK version is no longer supported. Upgrade to the latest version. |
 | `UNSUPPORTED_GAME_DATA_FORMAT` | A payload could not be represented in the recipient's negotiated format. For v3, an exact `DeliveryReport` gap with reason `unsupported_format` covers the omission and is written before this supplemental error; consecutive omissions from one sender coalesce into one range, so the report count does not scale with the relayed message count. This supplemental error is best effort, and a failed error write disconnects without exposing a successor. |
-| `UNSUPPORTED_PROTOCOL_VERSION` | The client's highest supported protocol version is below the deployment minimum. Upgrade the client or use a compatible deployment; the server will not silently raise the client's declared maximum. |
+| `UNSUPPORTED_PROTOCOL_VERSION` | The client's highest supported protocol version is below the deployment minimum, or a pre-v3 connection sent a frame class that requires a newer protocol surface (such as the v3 `RoomOperation` envelope). Upgrade the client or use a compatible deployment; the server will not silently raise the client's declared maximum. |
 
 ### Validation Errors (2xxx)
 
@@ -317,6 +317,8 @@ Check that:
 - The overall message size does not exceed the server's limit
 - Delivery metadata uses a known class token, a non-null value, and a `u32` key
   when present
+- `RoomOperation` was sent with the negotiated `room_operation_ids` capability
+  (a pre-v3 connection instead receives `UNSUPPORTED_PROTOCOL_VERSION`)
 
 ### Invalid delivery class (`INVALID_DELIVERY_CLASS`)
 
