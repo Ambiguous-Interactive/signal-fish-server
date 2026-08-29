@@ -7,26 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- `PeerTransportStatus` fan-out delivery no longer holds the room event
-  mutation gate or the reporting connection's lifecycle gate: recipients are
-  resolved under the gates, then delivery is dispatched outside them, so one
-  slow room member's backpressured fan-out leg no longer delays concurrent
-  room mutations (`JoinRoom`, `LeaveRoom`, `PlayerReady`, `StartGame`) for up
-  to a slow-consumer window (issue #463). Dispatch truth is carried by
-  per-recipient revalidation — membership via the routing-checked delivery
-  path, negotiated protocol v3 capability per leg. Defense in depth: the
-  socket writer now fail-closed-suppresses (accounted drop, no queue fence)
-  every server-to-client message variant documented v3-only (`Signal`,
-  `NewPeer`, `SessionPlan`, `PeerTransportStatus`, `RelayStats`, `GoingAway`,
-  `DeliveryReport`, `RoomOperationResult`) if one ever reaches a pre-v3
-  connection's queue — for example through a reconnect identity swap racing a
-  fan-out's recipient snapshot — so a client that cannot parse the variant
-  can never observe it. The rewritten deterministic e2e pins the improved
-  contract: a concurrent `LeaveRoom` is admitted while the stalled member's
-  fan-out leg is still parked, and the parked leg still evicts that member.
-
 ### Added
 
 - Documentation: `docs/authentication.md` now states what the
@@ -136,6 +116,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PeerTransportStatus` fan-out delivery no longer holds the room event
+  mutation gate or the reporting connection's lifecycle gate: recipients are
+  resolved under the gates, then delivery is dispatched outside them, so one
+  slow room member's backpressured fan-out leg no longer delays concurrent
+  room mutations (`JoinRoom`, `LeaveRoom`, `PlayerReady`, `StartGame`) for up
+  to a slow-consumer window (issue #463). Dispatch truth is carried by
+  per-recipient revalidation — membership via the routing-checked delivery
+  path, negotiated protocol v3 capability per leg. Defense in depth: the
+  socket writer now fail-closed-suppresses (accounted drop, no queue fence)
+  every server-to-client message variant documented v3-only (`Signal`,
+  `NewPeer`, `SessionPlan`, `PeerTransportStatus`, `RelayStats`, `GoingAway`,
+  `DeliveryReport`, `RoomOperationResult`) if one ever reaches a pre-v3
+  connection's queue — for example through a reconnect identity swap racing a
+  fan-out's recipient snapshot — so a client that cannot parse the variant
+  can never observe it. The rewritten deterministic e2e pins the improved
+  contract: a concurrent `LeaveRoom` is admitted while the stalled member's
+  fan-out leg is still parked, and the parked leg still evicts that member.
 - Protocol: a second `Authenticate` on a connection that already completed the
   handshake — under either app-ID policy, including a re-`Authenticate` after a
   reconnect identity swap on the same socket — and a first `Authenticate` sent
