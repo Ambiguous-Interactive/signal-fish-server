@@ -1822,6 +1822,157 @@ async fn signal_target_fallback_requires_the_current_room_assignment() {
     }
 }
 
+/// Drain lifecycle/broadcast events a hydration or spectator join can emit,
+/// failing on anything unexpected so signal-assertions below stay exact.
+async fn drain_hydration_events(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
+    loop {
+        match timeout(Duration::from_millis(150), receiver.recv()).await {
+            Err(_elapsed) => return,
+            Ok(None) => panic!("channel closed while draining hydration events"),
+            Ok(Some(message)) => match message.as_ref() {
+                ServerMessage::PlayerJoined { .. }
+                | ServerMessage::PlayerLeft { .. }
+                | ServerMessage::NewSpectatorJoined { .. }
+                | ServerMessage::SpectatorLeft { .. }
+                | ServerMessage::SpectatorDisconnected { .. } => continue,
+                other => panic!("unexpected event while draining: {other:?}"),
+            },
+        }
+    }
+}
+
+/// A sender pruned from coordinator room routing while its connection
+/// assignment and delivery handle survive (e.g. a slow-consumer prune landing
+/// between the pre-gate snapshot and the under-gate revalidation) must get a
+/// coded rejection naming the routing change — and the signal must reach
+/// neither the target nor the relayed counter.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn sender_unrouted_in_room_routing_while_gated_is_rejected_not_relayed() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let relayed_before = server.metrics.signals_relayed.load(Ordering::Relaxed);
+
+    // Prune only the sender's coordinator routing membership (the same
+    // `register_local_client(.., None, ..)` re-route the spectator transition
+    // and slow-consumer paths use): the delivery handle survives, so the
+    // rejection is still deliverable, and every pre-gate (room assignment,
+    // v3 + WebRTC negotiation, target stamp) passes.
+    server
+        .connection_manager
+        .advance_delivery_generation(&alice)
+        .await;
+
+    server
+        .handle_signal(&alice, bob, json!({ "candidate": "ice" }))
+        .await;
+
+    match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::Error {
+            message,
+            error_code: Some(ErrorCode::NotInRoom),
+            ..
+        } => {
+            assert!(
+                message.contains("no longer routed"),
+                "rejection must name the routing revalidation: {message}"
+            );
+        }
+        other => panic!("expected sender-routing-changed rejection, got {other:?}"),
+    }
+    assert_silent(&mut bob_rx).await;
+    assert_eq!(
+        server.metrics.signals_relayed.load(Ordering::Relaxed),
+        relayed_before,
+        "an unrouted sender's signal must not count as relayed"
+    );
+}
+
+/// Spectators are structurally outside the player signaling plane: their
+/// socket carries no room assignment (so they cannot send), and they hold no
+/// coordinator room routing (so they cannot be targeted). Pin both directions
+/// so a future spectator-routing change cannot silently open the signal path.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn spectators_cannot_send_or_receive_webrtc_signals() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    let (spectator, mut spectator_rx) = register_client(&server).await;
+    for player in [alice, bob] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+
+    let room_id = create_db_room(&server, alice).await;
+    let room_code = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists")
+        .code;
+    for player in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+
+    server
+        .handle_join_as_spectator(
+            &spectator,
+            "webrtc-game".to_string(),
+            room_code,
+            "Observer".to_string(),
+        )
+        .await;
+    match recv(&mut spectator_rx).await.as_ref() {
+        ServerMessage::SpectatorJoined(_) => {}
+        other => panic!("expected SpectatorJoined, got {other:?}"),
+    }
+    drain_hydration_events(&mut alice_rx).await;
+    drain_hydration_events(&mut bob_rx).await;
+
+    // A spectator cannot send: gate 1 sees no room assignment on the socket.
+    server
+        .handle_signal(&spectator, alice, json!({ "Offer": "sdp" }))
+        .await;
+    match recv(&mut spectator_rx).await.as_ref() {
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::NotInRoom),
+            ..
+        } => {}
+        other => panic!("expected spectator-send rejection, got {other:?}"),
+    }
+    assert_silent(&mut alice_rx).await;
+
+    // A spectator cannot be targeted: same-room enforcement refuses before
+    // any delivery.
+    server
+        .handle_signal(&alice, spectator, json!({ "Offer": "sdp" }))
+        .await;
+    match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::SignalTargetNotFound),
+            ..
+        } => {}
+        other => panic!("expected spectator-target rejection, got {other:?}"),
+    }
+    assert_silent(&mut spectator_rx).await;
+
+    // The seated pair itself still relays, isolating the refusals to
+    // spectator status rather than a general signal-path break.
+    server
+        .handle_signal(&alice, bob, json!({ "Offer": "sdp" }))
+        .await;
+    match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::Signal { from, .. } => assert_eq!(*from, alice),
+        other => panic!("expected Signal, got {other:?}"),
+    }
+    assert_silent(&mut alice_rx).await;
+    assert_silent(&mut spectator_rx).await;
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {

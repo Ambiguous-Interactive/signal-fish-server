@@ -241,6 +241,15 @@ pub async fn broadcast_game_data_with<'a, F>(
 where
     F: FnOnce() -> Option<ServerMessage> + Send + 'a,
 {
+    // Acceptance-time semantics, deliberately counted BEFORE the one-shot
+    // builder runs: the increment doubles as the synchronization marker that a
+    // broadcast was accepted (contention tests observe `game_data_messages`
+    // moving while the builder has not been consumed yet), so it also covers
+    // accepted-but-cancelled builds (unseated sender / stamp exhaustion).
+    // Delivery attempts are counted separately by the coordinator metrics.
+    // This differs from `signals_relayed`, which is counted at dispatch after
+    // every gate (signaling.rs) — the two families are intentionally not
+    // interchangeable.
     metrics.increment_game_data_messages();
     let mut build_message = one_shot_message_builder(build_message);
     match message_coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(

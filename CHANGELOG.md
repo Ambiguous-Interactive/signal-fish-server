@@ -126,6 +126,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Public Rust API: dispatching a `Reconnect` frame (`ClientMessage::Reconnect`
+  or a `RoomOperationRequest::Reconnect` operation) through
+  `EnhancedGameServer::handle_client_message` is now refused fail-closed with a
+  coded `Error` / correlated `OperationFailed` carrying `RECONNECTION_FAILED`
+  instead of running the reconnect transaction. The message router cannot
+  update the socket's `effective_player_id`, so a reconnect reaching it would
+  half-reconnect — the routing map moves to the reconnected identity while the
+  socket keeps stamping frames as the transient sender, and every later frame
+  it sends is dropped silently. Reconnection remains dispatched exclusively by
+  the connection task (issue #396).
+- Metrics: the `signal_fish_game_data_messages_total` HELP text now reads
+  "Total game data messages accepted for room relay" — the counter is
+  acceptance-time by design (it doubles as the contention-test marker that a
+  broadcast was accepted before its builder runs) and also covers
+  accepted-but-cancelled builds, unlike `signal_fish_signals_relayed_total`
+  which is counted at dispatch after every gate. No counter values changed.
+- Documentation: record the issue #396 session-193 seam sweeps — game-data
+  relay carrier (stamping/epoch/replay), signal routing/sender attribution,
+  and room-operation execution audited sound under adversarial
+  re-verification — with the residual facts recorded at their sites: the
+  `target_not_routed` pre-gate is a defensive duplicate unreachable without a
+  cross-thread TOCTOU (the under-gate revalidation is authoritative), StartGame
+  with a durable-detach ghost row reaches `InternalError` only via a storage
+  backend's removal error (structurally unreachable with shipped storage), and
+  retried `LeaveRoom` operations return `NOT_IN_ROOM` per the documented
+  echo-only correlation contract.
+- Tests: pin two previously untested signal-routing branches — a sender pruned
+  from coordinator room routing while gated is rejected with `NOT_IN_ROOM`
+  naming the routing change and never counted as relayed, and spectators are
+  structurally excluded from the signal plane in both directions (cannot send,
+  cannot be targeted) while the seated pair still relays (issue #396).
+
 - `PeerTransportStatus` fan-out delivery no longer holds the room event
   mutation gate or the reporting connection's lifecycle gate: recipients are
   resolved under the gates, then delivery is dispatched outside them, so one

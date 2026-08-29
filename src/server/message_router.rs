@@ -154,12 +154,27 @@ impl EnhancedGameServer {
             ClientMessage::Ping => {
                 self.handle_ping(player_id).await;
             }
-            ClientMessage::Reconnect {
-                player_id: reconnect_player_id,
-                room_id,
-                auth_token,
-            } => {
-                self.handle_reconnect(player_id, &reconnect_player_id, &room_id, &auth_token)
+            ClientMessage::Reconnect { .. } => {
+                // Reconnection swaps the socket's routing identity and is
+                // driven only by the connection task that owns the socket's
+                // `effective_player_id` (see `websocket/connection.rs`). The
+                // router cannot update that identity, so dispatching here
+                // would half-reconnect: the routing map would move to the
+                // reconnected identity while this socket keeps stamping
+                // frames as the transient sender, and every later frame it
+                // sends would be dropped. Fail closed instead.
+                tracing::warn!(
+                    player = %player_id,
+                    "Reconnect reached the message router; reconnection is dispatched only by the connection task"
+                );
+                let _ = self
+                    .send_error_to_player(
+                        player_id,
+                        "Reconnection is dispatched by the connection that owns the \
+                         reconnection identity"
+                            .to_string(),
+                        Some(crate::protocol::ErrorCode::ReconnectionFailed),
+                    )
                     .await;
             }
             ClientMessage::JoinAsSpectator {
@@ -223,19 +238,27 @@ impl EnhancedGameServer {
                         self.leave_room_operation(player_id, Some(operation_id))
                             .await;
                     }
-                    RoomOperationRequest::Reconnect {
-                        player_id: reconnect_player_id,
-                        room_id,
-                        auth_token,
-                    } => {
-                        self.handle_reconnect_operation(
-                            player_id,
-                            &reconnect_player_id,
-                            &room_id,
-                            &auth_token,
-                            Some(operation_id),
-                        )
-                        .await;
+                    RoomOperationRequest::Reconnect { .. } => {
+                        // Same fail-closed contract as the plain
+                        // `ClientMessage::Reconnect` arm above: only the
+                        // connection task may drive a reconnect identity swap.
+                        tracing::warn!(
+                            player = %player_id,
+                            "Reconnect operation reached the message router; reconnection is dispatched only by the connection task"
+                        );
+                        let _ = self
+                            .message_coordinator
+                            .send_to_player(
+                                player_id,
+                                Arc::new(ServerMessage::room_operation_failed(
+                                    operation_id,
+                                    "Reconnection is dispatched by the connection that owns \
+                                     the reconnection identity"
+                                        .to_string(),
+                                    Some(crate::protocol::ErrorCode::ReconnectionFailed),
+                                )),
+                            )
+                            .await;
                     }
                     RoomOperationRequest::JoinAsSpectator {
                         game_name,
