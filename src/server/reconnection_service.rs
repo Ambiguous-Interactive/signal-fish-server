@@ -532,7 +532,7 @@ impl EnhancedGameServer {
     /// without touching any socket-side identity (no
     /// `effective_player_id` handle is supplied). It must only be driven by a
     /// caller that owns the reconnecting socket's identity — the connection
-    /// task uses [`Self::handle_reconnect_with_identity`]. The message router
+    /// task uses `handle_reconnect_with_identity`. The message router
     /// refuses `Reconnect` frames with a coded error for exactly this reason;
     /// see the `ClientMessage::Reconnect` arm in `message_router.rs`.
     pub async fn handle_reconnect(
