@@ -2163,9 +2163,10 @@ impl OutboundReceiver {
     /// Oldest timestamp still resident in any queue lane. The control lane is
     /// not timestamp-FIFO because fresh control is inserted ahead of a trailing
     /// causal delivery report, so inspect every resident item rather than only
-    /// each lane's front. Reliable-lane age drives the writer's slow-consumer
-    /// sojourn close; a parked report's age stays observability only — its own
-    /// write expires by write progress, not queue age.
+    /// each lane's front. Reliable-lane age (among the writer's per-class
+    /// deadline policies) drives the slow-consumer sojourn close; a parked
+    /// report's age stays observability only — its own write expires by write
+    /// progress, not queue age.
     #[cfg(test)]
     pub fn oldest_enqueued_at(&self) -> Option<Instant> {
         let state = self.shared.state();

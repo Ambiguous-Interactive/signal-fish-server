@@ -4091,10 +4091,10 @@ mod tests {
     /// pre-v3 queue.
     ///
     /// A pre-v3 queue can never accumulate a pending unsupported-format
-    /// report: accumulation is v3-gated at record time, and a queue's version
-    /// can only regress before any application message has flowed
-    /// (`Authenticate` is refused once any other client message has been
-    /// seen), while omissions require room data flow. This pin simulates that
+    /// report: accumulation is v3-gated at record time, and no `Authenticate`
+    /// is ever processed after any other client message has been seen (later
+    /// attempts are refused, or the connection is closed outright in allowlist
+    /// mode), while omissions require room data flow. This pin simulates that
     /// invariant being violated anyway and requires the write path to fail
     /// closed: the v3-only frame never reaches the pre-v3 wire, and the
     /// unwritable ranges stay pending (ranges retire only after the wire,

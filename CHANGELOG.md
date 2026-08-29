@@ -391,12 +391,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live flush and the teardown final flush could emit the v3-only
   `DeliveryReport` frame on a pre-v3 wire if a queue's pending ranges ever
   outlived its negotiated v3 version. In production they cannot —
-  accumulation is v3-gated at record time, and a version can only regress
-  before any application message has flowed (`Authenticate` is refused once
-  any other client message has been seen), while omissions require room data
-  flow — so the gates are unreachable defense: a violation now leaves the
-  unwritten ranges pending (they retire only after the wire) instead of
-  leaking the frame. Pinned red-first on a real upgraded socket.
+  accumulation is v3-gated at record time, and no `Authenticate` is ever
+  processed after any other client message has been seen (later attempts are
+  refused, or the connection is closed outright in allowlist mode), while
+  omissions require room data flow — so the gates are unreachable defense: a
+  violation now leaves the unwritten ranges pending (they retire only after
+  the wire) instead of leaking the frame. Pinned red-first on a real upgraded
+  socket.
 
 - Close the reaper-vs-reconnect identity-swap race surfaced by the session-187
   seam sweep (issue #396): a reconnect claim that reached the identity swap

@@ -1089,11 +1089,12 @@ pub(super) async fn write_pending_unsupported_report(
     // `send_single_message_ref` — carries its own fail-closed gate. A pre-v3
     // queue can never HAVE a pending unsupported report: accumulation is
     // v3-gated at record time (`OutboundQueueState::record_unsupported_format`
-    // / `hold_unsupported_format` refuse a `!v3()` queue), and a version can
-    // only regress before any application message has flowed (an
-    // `Authenticate` is refused once any other client message has been seen),
-    // while omissions require room data flow. So pending ranges always belong
-    // to a queue that negotiated v3 and never left it. Keeping the gate local
+    // / `hold_unsupported_format` refuse a `!v3()` queue), and no
+    // `Authenticate` is ever processed after any other client message has been
+    // seen (later attempts are refused, or the connection is closed outright
+    // in allowlist mode), while omissions require room data flow. So pending
+    // ranges always belong to a queue that negotiated v3 and never left it.
+    // Keeping the gate local
     // rather than trusting that cross-file argument means a violation can only
     // leave the ranges pending (they retire only after the wire), never leak
     // the frame onto a v2 wire.
