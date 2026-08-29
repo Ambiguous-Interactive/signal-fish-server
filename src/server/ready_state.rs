@@ -165,6 +165,14 @@ impl EnhancedGameServer {
                     .await;
             }
             Err(e) => {
+                // The only shipped path into this arm is the StartGame CAS
+                // seeing a membership snapshot change (`SnapshotChanged`) —
+                // i.e. a `pending_durable_player_detaches` ghost row, which
+                // requires a storage-backend removal error and is therefore
+                // structurally unreachable with the shipped in-memory
+                // storage (the detach backlog repairs it for embedders). A
+                // coded typed rejection is deferred until an embedder can
+                // actually reach it (#396 session-193 sweep).
                 tracing::debug!("Player {:?} attempted to start the game: {}", player_id, e);
                 let _ = self
                     .message_coordinator

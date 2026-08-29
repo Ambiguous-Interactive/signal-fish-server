@@ -995,3 +995,216 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
                 && matches!(result.as_ref(), RoomOperationResult::OperationFailed { .. })
     ));
 }
+
+async fn register_router_test_client(
+    server: &EnhancedGameServer,
+) -> (PlayerId, mpsc::Receiver<Arc<ServerMessage>>) {
+    let (sender, receiver) = mpsc::channel(16);
+    let player_id = server
+        .connection_manager
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:50074".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("client registration succeeds");
+    (player_id, receiver)
+}
+
+/// Build a claimable reconnect opportunity: `victim` is a seated v3 member of a
+/// room with `existing`, then disconnects through the standard record-and-unroute
+/// sequence, leaving a live reconnect token behind.
+async fn setup_claimable_reconnect(
+    server: &EnhancedGameServer,
+) -> (
+    PlayerId,
+    uuid::Uuid,
+    String,
+    PlayerId,
+    mpsc::Receiver<Arc<ServerMessage>>,
+) {
+    let (existing, _existing_rx) = register_router_test_client(server).await;
+    let (victim, _old_victim_rx) = register_router_test_client(server).await;
+    let (impostor, impostor_rx) = register_router_test_client(server).await;
+    for player_id in [existing, victim] {
+        server.set_client_protocol(
+            &player_id,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+        );
+    }
+
+    let room_id = server
+        .database
+        .create_room(
+            "router-reconnect".to_string(),
+            None,
+            4,
+            true,
+            existing,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds")
+        .id;
+    server
+        .database
+        .add_player_to_room(
+            &room_id,
+            crate::protocol::PlayerInfo {
+                id: victim,
+                name: "victim".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: chrono::Utc::now(),
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("add victim member");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&victim, room_id)
+        .await;
+
+    let victim_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("room exists")
+        .players
+        .get(&victim)
+        .cloned()
+        .expect("victim member exists");
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(
+            victim,
+            room_id,
+            false,
+            Some(victim_info),
+            server
+                .connection_manager
+                .game_data_epoch(&victim)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &victim)
+        .await
+        .expect("remove disconnected victim");
+    server.connection_manager.remove_client(&victim);
+    server
+        .message_coordinator
+        .unregister_local_client(&victim)
+        .await
+        .expect("unroute disconnected victim");
+
+    (impostor, room_id, token, victim, impostor_rx)
+}
+
+/// The message router is public dispatch surface, but it cannot perform a
+/// reconnect identity swap: only the connection task owns the socket's
+/// `effective_player_id`. Even with a fully valid, claimable token, a
+/// `Reconnect` that reaches the router must be refused with a coded error and
+/// must not move any identity — otherwise the routing map would move to the
+/// reconnected identity while this socket keeps stamping frames as the
+/// transient sender (a silent self-zombie).
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn router_refuses_reconnect_frames_even_with_a_claimable_token() {
+    let server = create_test_server().await;
+    let (impostor, room_id, token, victim, mut impostor_rx) =
+        setup_claimable_reconnect(&server).await;
+
+    server
+        .handle_client_message(
+            &impostor,
+            ClientMessage::Reconnect {
+                player_id: victim,
+                room_id,
+                auth_token: token,
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        next_routed_test_message(&mut impostor_rx, "router reconnect refusal")
+            .await
+            .as_ref(),
+        ServerMessage::Error {
+            error_code: Some(crate::protocol::ErrorCode::ReconnectionFailed),
+            ..
+        }
+    ));
+    assert!(
+        !server.connection_manager.has_client(&victim),
+        "router dispatch must never swap the routing identity to the reconnect target"
+    );
+    assert!(
+        server.connection_manager.has_client(&impostor),
+        "the dispatching connection must remain registered under its own id"
+    );
+}
+
+/// Same fail-closed contract for the correlated `RoomOperation` reconnect form:
+/// the refusal must echo the operation id so the client can correlate it.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn router_refuses_correlated_reconnect_operations_with_an_echoed_id() {
+    let server = create_test_server().await;
+    let (impostor, room_id, token, victim, mut impostor_rx) =
+        setup_claimable_reconnect(&server).await;
+    server.set_client_room_operation_ids(&impostor, true);
+
+    let operation_id = uuid::Uuid::from_u128(77);
+    server
+        .handle_client_message(
+            &impostor,
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::Reconnect {
+                    player_id: victim,
+                    room_id,
+                    auth_token: token,
+                }),
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        next_routed_test_message(&mut impostor_rx, "correlated router reconnect refusal")
+            .await
+            .as_ref(),
+        ServerMessage::RoomOperationResult { operation_id: echoed, result }
+            if *echoed == operation_id
+                && matches!(
+                    result.as_ref(),
+                    RoomOperationResult::OperationFailed {
+                        error_code: Some(crate::protocol::ErrorCode::ReconnectionFailed),
+                        ..
+                    }
+                )
+    ));
+    assert!(
+        !server.connection_manager.has_client(&victim),
+        "router dispatch must never swap the routing identity to the reconnect target"
+    );
+}

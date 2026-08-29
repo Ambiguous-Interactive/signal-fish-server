@@ -212,6 +212,12 @@ impl EnhancedGameServer {
             .await;
             return;
         }
+        // Defensive duplicate of gate 2: this re-reads the same
+        // connection-manager assignment those gates just read, with no
+        // suspension point between, so diverging here requires a true
+        // cross-thread parallel mutation (microsecond TOCTOU). Deliberately
+        // untested — the interleaving is not deterministically constructible;
+        // the under-gate revalidation below is the authoritative re-check.
         let Some(target_epoch) = self
             .connection_manager
             .current_relay_stamp_in_room(&to, &from_room)

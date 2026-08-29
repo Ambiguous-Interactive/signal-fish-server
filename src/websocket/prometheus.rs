@@ -361,7 +361,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_game_data_messages_total",
-        "Total game data messages forwarded through the relays",
+        "Total game data messages accepted for room relay",
         snapshot.players.game_data_messages,
     );
     counter(

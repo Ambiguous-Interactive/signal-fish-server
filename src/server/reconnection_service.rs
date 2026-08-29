@@ -526,7 +526,15 @@ impl EnhancedGameServer {
         .await
     }
 
-    /// Handle player reconnection
+    /// Handle player reconnection.
+    ///
+    /// Identity contract: this entry performs the routing-map identity swap
+    /// without touching any socket-side identity (no
+    /// `effective_player_id` handle is supplied). It must only be driven by a
+    /// caller that owns the reconnecting socket's identity — the connection
+    /// task uses [`Self::handle_reconnect_with_identity`]. The message router
+    /// refuses `Reconnect` frames with a coded error for exactly this reason;
+    /// see the `ClientMessage::Reconnect` arm in `message_router.rs`.
     pub async fn handle_reconnect(
         self: &Arc<Self>,
         current_player_id: &PlayerId,
@@ -552,6 +560,8 @@ impl EnhancedGameServer {
         auth_token: &str,
         operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
+        // See the identity contract on [`Self::handle_reconnect`]: no
+        // socket-side identity is updated here.
         self.spawn_reconnect_transaction(
             *current_player_id,
             *reconnect_player_id,
