@@ -84,31 +84,20 @@ correctness evidence appears.
   (join/detach/prune/retry panic-repair parity), and the reconnect seam
   (session-186: drain-admission gates, claim-guard invariant). Session-187
   swept the heartbeat/reaper + connection-lifecycle seam and the
-  auth/identity + coordination/outbound-queue seam: the reaper-vs-reconnect
-  identity-swap race landed as a fix (a per-socket close pin — activity
-  reaper, idle/slow-consumer, oversized-outbound, teardown — no longer
-  crosses the swap; the record stays spendable for a fresh-socket retry),
-  the advertised-vs-enforced handshake rate-limit contract was made
-  truthful, and the remaining candidates were evaluated and deliberately
-  not taken: token-binding plaintext-key degradation (#462), TransportStatus
-  fan-out holding the room mutation gate (#463), open-policy attacker-chosen
-  application UUID (#464), and the all-liveness-disabled configuration
-  combination (#465). Session-188 swept the room-lifecycle/ownership seam
-  (admission atomicity, reassignment contract call sites, GC-vs-reconnect,
-  ready-state accounting, relay policy — clean) and the protocol
-  parse/validate seam (panic surface, decode bounds, size-limit parity,
-  negotiation, room-code round-trips — clean): the capability-less v3
-  `RoomOperation` rejection was made truthful (`INVALID_INPUT` naming the
-  capability; `UNSUPPORTED_PROTOCOL_VERSION` docs extended to the pre-v3
-  frame-class case), the `ACTIVITY_TIMEOUT` reaper wording was made truthful
-  (rejected frames deliberately do not refresh the window), the canonical
-  `operation_id` encoding sentence landed, and the residuals were filed or
-  refuted: duplicate-Authenticate silence (#468), guarded-None leave abort
-  (#469), ChannelClosed reservation metric gap + spin-claim refutation
-  (#470); restore-failure log-only fallback, `rooms_created` rollback drift,
-  `protocol_version: null` leniency, and Signal precedence docs were
-  evaluated and deliberately not taken. Next session must name new seams
-  from fresh evidence.
+  auth/identity + coordination/outbound-queue seam. Session-188 swept the
+  room-lifecycle/ownership seam and the protocol parse/validate seam.
+  Session-189 resolved the residuals: duplicate/too-late Authenticate now
+  answers a coded refusal (#468, fixed), the all-liveness-disabled
+  configuration warns at startup (#465, fixed), the open-policy application
+  UUID divergence is documented (#464, closed as documented), the
+  ChannelClosed reservation metric gap was refuted (#470, counted once at
+  reservation), the token-binding plaintext warning was already landed
+  (#462, closed with evidence), and the TransportStatus fan-out gate-hold
+  now has its deterministic counterexample pinned as a test (#463 — the
+  production decision/fix remains open: snapshot-then-deliver vs
+  documenting the exception). Next session: decide and implement the #463
+  treatment from the pinned counterexample, then name new seams from fresh
+  evidence.
 - #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
   split the job, accept the measured single-lane duration, or move it to the
   weekly schedule. Preserve full native coverage and retain exact-head hosted
