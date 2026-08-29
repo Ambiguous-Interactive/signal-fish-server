@@ -1602,7 +1602,8 @@ transport. A joiner that cannot run the session is rejected at admission with
 `ROOM_SESSION_INCOMPATIBLE` (see below), so a live non-relay session's membership stays uniformly capable; what
 can remain is an incumbent that **reconnected** with downgraded capabilities (a reconnect owns its seat and is
 never rejected for capability reasons; lifecycle refusals such as `SERVER_DRAINING` shutdown-drain admission,
-or a refusal because the reconnecting socket was already scheduled to close, still apply). Such a member still receives its plan, but with an **empty** `peers`
+or a refusal because the reconnecting socket was already scheduled to close, still apply). Such a member still
+receives its plan, but with an **empty** `peers`
 list — it has no P2P peers and
 participates via the relay floor (`host` stays as elected, informational) — and never appears in other members'
 `peers`. Every publication observes this mixed-path shape (the `mixed_path_members_observed` counter plus a warn
