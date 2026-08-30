@@ -27,7 +27,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load configuration. A present-but-invalid source (unparseable JSON, a
+    // Load configuration. A present-but-invalid source (unparsable JSON, a
     // type-mismatched value or environment override) is a hard error naming
     // the offending source/knob; only absent sources fall back to defaults.
     let cfg = config::load()?;

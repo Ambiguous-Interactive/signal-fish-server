@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking (Rust API):** `config::load()` now returns `anyhow::Result<Config>`. A present-but-
-  invalid configuration source — unparseable JSON in a file, stdin, or `SIGNAL_FISH_CONFIG_JSON`;
+  invalid configuration source — unparsable JSON in a file, stdin, or `SIGNAL_FISH_CONFIG_JSON`;
   an unreadable config file; or a type-mismatched value after merging and `SIGNAL_FISH__*`
   environment overrides — is now a hard startup error naming the offending source or knob
   (via `serde_path_to_error`). Previously any such error was logged and the ENTIRE configuration

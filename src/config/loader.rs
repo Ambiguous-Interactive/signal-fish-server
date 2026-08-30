@@ -20,7 +20,7 @@ use std::path::Path;
 /// `SIGNAL_FISH__LOGGING__LEVEL=debug`.
 ///
 /// Absent sources are optional: with no config file anywhere, the compiled
-/// defaults apply. A source that is present but invalid — unparseable JSON, an
+/// defaults apply. A source that is present but invalid — unparsable JSON, an
 /// unreadable file, or a value whose type does not match its config field
 /// after merging and environment overrides — is a hard error: silently
 /// substituting defaults would revert every operator setting (allowlists,

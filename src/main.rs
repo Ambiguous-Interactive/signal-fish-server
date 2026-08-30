@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Load configuration from config.json if present; otherwise use code defaults.
-    // A present-but-invalid source (unparseable JSON, type-mismatched value) is a
+    // A present-but-invalid source (unparsable JSON, type-mismatched value) is a
     // hard error here: booting on defaults would silently revert every operator
     // setting while the process appears healthy.
     let cfg = Arc::new(config::load()?);
