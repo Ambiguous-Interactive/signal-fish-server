@@ -337,6 +337,12 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
              requested room capacity, so no client can ever join a room"
         );
     }
+    if config.server.default_max_players == 0 {
+        anyhow::bail!(
+            "server.default_max_players must be greater than 0: a zero default rejects every \
+             room created without an explicit capacity with InvalidMaxPlayers"
+        );
+    }
 
     // Cross-field capacity pairing: rooms created without an explicit
     // `max_players` are seated with `server.default_max_players`
@@ -1444,10 +1450,11 @@ mod tests {
     /// `max_players` use `server.default_max_players`
     /// (`room_service` `max_players.unwrap_or(default)`), and
     /// `validate_max_players_with_config` rejects anything above
-    /// `protocol.max_players_limit` with `InvalidMaxPlayers`. A mispairing
-    /// passes startup and then rejects every default-capacity room at
-    /// request time — the deferred total-rejection shape this validator
-    /// exists to prevent. Data-driven over the boundary.
+    /// `protocol.max_players_limit` — or a zero default — with
+    /// `InvalidMaxPlayers`. A mispairing or zero passes startup and then
+    /// rejects every default-capacity room at request time — the deferred
+    /// total-rejection shape this validator exists to prevent. Data-driven
+    /// over the boundary.
     #[test]
     fn default_max_players_must_be_admissible_under_the_protocol_limit() {
         // (default_max_players, max_players_limit, expect_ok)
@@ -1457,6 +1464,7 @@ mod tests {
             (101, 100, false),    // one past: every default-capacity room rejected
             (200, 100, false),    // classic mispairing
             (8, 8, true),         // tight but consistent pairing
+            (0, 100, false),      // zero default: every default-capacity room rejected
         ];
 
         for (default_max_players, max_players_limit, expect_ok) in cases {
@@ -1475,14 +1483,21 @@ mod tests {
             if !expect_ok {
                 let err = result.unwrap_err().to_string();
                 assert!(
-                    err.contains("server.default_max_players")
-                        && err.contains("protocol.max_players_limit"),
-                    "rejection must name both offending fields: {err}"
+                    err.contains("server.default_max_players"),
+                    "rejection must name the offending field: {err}"
                 );
                 assert!(
                     err.contains("InvalidMaxPlayers"),
                     "rejection must state its consequence: {err}"
                 );
+                if default_max_players > 0 {
+                    // Pairing rejections must name both knobs; the zero-floor
+                    // rejection names only the zeroed default.
+                    assert!(
+                        err.contains("protocol.max_players_limit"),
+                        "pairing rejection must name both offending fields: {err}"
+                    );
+                }
             }
         }
     }

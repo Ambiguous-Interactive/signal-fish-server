@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public Rust API: `server::run_drain_choreography` lets embedders run the shipped binary's exact
   shutdown drain sequence, with `EnhancedGameServer::has_active_socket_tasks` and
   `config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES` in support (issue #396).
+- Startup validation guards for the config-admission seam: `server.default_max_players` must be
+  positive and must not exceed `protocol.max_players_limit`, and `server.inactive_room_timeout`
+  must be positive. A mispairing or zero previously passed `--validate-config` and then rejected
+  every default-capacity room with `InvalidMaxPlayers` at request time, or let room GC delete
+  occupied rooms between activity refreshes (issue #396).
+
+### Changed
+
+- **Breaking (Rust API):** `config::load()` now returns `anyhow::Result<Config>`. A present-but-
+  invalid configuration source — unparseable JSON in a file, stdin, or `SIGNAL_FISH_CONFIG_JSON`;
+  an unreadable config file; or a type-mismatched value after merging and `SIGNAL_FISH__*`
+  environment overrides — is now a hard startup error naming the offending source or knob
+  (via `serde_path_to_error`). Previously any such error was logged and the ENTIRE configuration
+  was silently replaced with compiled defaults, reverting every operator setting while the
+  process appeared healthy. Absent sources still fall through to defaults unchanged. Supplying
+  both a canonical and a legacy app-access key in one source is now the same hard error instead
+  of an enforced empty-allowlist substitution.
+- `websocket.batch_interval_ms` is now rejected at startup above 60000 (1 minute) when
 - Reference clients: creators can pass `--max-players` (native and browser) to leave open seats in
   finalized rooms for late seat-fill joins; rejected in join mode and below `--peers` (issue #451).
 - Protocol v3 room-operation correlation: wrap join, leave, reconnect, and spectator commands in a

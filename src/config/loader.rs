@@ -102,6 +102,10 @@ pub fn load() -> anyhow::Result<Config> {
 }
 
 fn deserialize_merged_config(merged: Value) -> anyhow::Result<Config> {
+    // The knob path comes from serde_path_to_error; the contributing source
+    // cannot be named here because the JSON document is already merged
+    // (defaults + files + stdin + inline + env overrides). Source attribution
+    // happens one stage earlier, in `parse_json_document`/`read_file_source`.
     serde_path_to_error::deserialize(merged).map_err(|e| {
         let path = e.path().to_string();
         anyhow::anyhow!(

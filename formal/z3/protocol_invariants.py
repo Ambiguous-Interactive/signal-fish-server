@@ -597,10 +597,11 @@ def proof_set_i() -> None:
 # and the strict relay-envelope headroom kills a failure region equality
 # alone does not (J5, the corrected old pin).
 #
-# Domains mirror the Rust types (u64/usize/u8 fields are non-negative; the
-# `ping_timeout` field is bounded to 2^32 seconds so exact Z3 arithmetic
-# equals the Rust `saturating_mul(1000)` — saturation only bites past
-# ~4.29e9 seconds, ~136 years, where the guard is vacuous anyway).
+# Domains mirror the Rust types: u64/usize fields are non-negative, the u8
+# fields (`default_max_players`, `max_players_limit`) are 0..=255, and
+# `ping_timeout` is bounded to 2^32 seconds so exact Z3 arithmetic equals the
+# Rust `saturating_mul(1000)` — saturation only bites past ~4.29e9 seconds
+# (~136 years), where the guard is vacuous anyway.
 # ---------------------------------------------------------------------------
 def proof_set_j() -> None:
     print("Proof set J — config-admission closure (validation.rs)")
@@ -622,6 +623,7 @@ def proof_set_j() -> None:
         msg >= 0, out >= 0, sig >= 0, ping >= 0, slow >= 0,
         throttle >= 0, inactive >= 0, dmp >= 0, mpl >= 0,
         bim >= 0, sojourn >= 0, ping <= 2**32,
+        dmp <= 255, mpl <= 255,  # u8 fields
     )
 
     max_outbound = 64 * 1024 * 1024      # defaults::MAX_OUTBOUND_MESSAGE_SIZE
@@ -640,8 +642,10 @@ def proof_set_j() -> None:
             headroom_guard,
             sig > 0,
             sig <= msg,
-            dmp <= mpl,                      # session-197 D2 capacity pairing
-            inactive > 0,                    # session-197 D3 occupied-room GC
+            mpl > 0,
+            dmp > 0,                         # zero default rejects at request time
+            dmp <= mpl,                      # session-197 capacity pairing
+            inactive > 0,                    # session-197 occupied-room GC deadline
             Or(throttle == 0, throttle < inactive),
             Or(ping == 0, slow < ping * 1000),
             Implies(batching, And(bim > 0, bim <= max_batch_ms, sojourn > bim)),
@@ -665,8 +669,9 @@ def proof_set_j() -> None:
         # S1: a near-max admitted frame plus the relay envelope still fits
         # the outbound cap (no 1009 outbound_message_too_large total-rejection).
         msg + headroom <= out,
-        # S2: every default-capacity room is admissible at request time.
-        dmp <= mpl,
+        # S2: every default-capacity room is admissible at request time:
+        # a positive default that the per-request validator accepts.
+        And(dmp >= 1, dmp <= mpl),
         # S3: the occupied-room reaping deadline is positive.
         inactive >= 1,
         # S4: batching deadlines stay representable (ceiling honored).
@@ -681,14 +686,19 @@ def proof_set_j() -> None:
     s.add(Not(safety))
     prove("J4 every admitted config satisfies the runtime safety envelope", s)
 
-    # J2 (necessity of the D2 pairing guard): without `dmp <= mpl`, a config
-    # passes every other guard yet every default-capacity room would be
-    # rejected at request time with InvalidMaxPlayers.
+    # J2 (necessity of the capacity-pairing guard): without `dmp <= mpl`, a
+    # config passes every OTHER guard — including the zero floors for
+    # `max_players_limit` and `default_max_players` and the slow-consumer
+    # floor — yet every default-capacity room would be rejected at request
+    # time with InvalidMaxPlayers.
     s = Solver()
     s.add(nonneg)
     relaxed = And(
         msg > 0, out > 0, out <= max_outbound, out >= msg + headroom,
         sig > 0, sig <= msg,
+        mpl > 0,
+        dmp > 0,
+        slow > 0,
         inactive > 0,
         Or(throttle == 0, throttle < inactive),
         Or(ping == 0, slow < ping * 1000),
@@ -699,16 +709,20 @@ def proof_set_j() -> None:
     witness("J2 without the capacity-pairing guard, a legal config rejects " \
             "every default-capacity room", s)
 
-    # J3 (necessity of the D3 zero-deadline guard): without `inactive > 0`,
-    # a config passes every other guard — including the BUG-1 throttle
-    # inversion check via its throttle-disabled arm — yet room GC deletes
-    # occupied rooms in every quiet gap between activity refreshes.
+    # J3 (necessity of the zero-deadline guard): without `inactive > 0`, a
+    # config passes every other guard — including the BUG-1 throttle
+    # inversion check via its throttle-disabled arm and the positive-floor
+    # guards — yet room GC deletes occupied rooms in every quiet gap between
+    # activity refreshes.
     s = Solver()
     s.add(nonneg)
     relaxed = And(
         msg > 0, out > 0, out <= max_outbound, out >= msg + headroom,
         sig > 0, sig <= msg,
+        mpl > 0,
+        dmp > 0,
         dmp <= mpl,
+        slow > 0,
         throttle == 0,  # the exempt arm: refresh every heartbeat
         Or(ping == 0, slow < ping * 1000),
         Implies(batching, And(bim > 0, bim <= max_batch_ms, sojourn > bim)),
@@ -722,12 +736,17 @@ def proof_set_j() -> None:
     # (the old equality-legal pin), a config exists where a maximum-size
     # admitted frame grows by the relay envelope and overflows the outbound
     # cap — the exact 1009 total-rejection region the strict guard removes.
+    # The witness respects every other guard, including the positive floors.
     s = Solver()
     s.add(nonneg)
     relaxed = And(
         msg > 0, out > 0, out <= max_outbound, out >= msg,
         sig > 0, sig <= msg,
-        dmp <= mpl, inactive > 0,
+        mpl > 0,
+        dmp > 0,
+        dmp <= mpl,
+        slow > 0,
+        inactive > 0,
         Or(throttle == 0, throttle < inactive),
         Or(ping == 0, slow < ping * 1000),
         Implies(batching, And(bim > 0, bim <= max_batch_ms, sojourn > bim)),

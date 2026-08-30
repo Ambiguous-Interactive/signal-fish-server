@@ -1100,7 +1100,6 @@ bidirectional relay `GameData` between the v2 replacement and a v3 incumbent.
   best-effort — the server never silently drops a relayed message. A full recipient queue
   backpressures the sender for up to `websocket.slow_consumer_timeout_ms`; a recipient
   that still cannot absorb the message is loudly disconnected (`CloseReason::SlowConsumer`,
-  original join priority, successor-authority retention, and session
   surfaced in metrics), abandoning its queue only together with the connection itself.
   That contract lives in `coordination::deliver_or_disconnect` and is covered by
   paused-clock unit tests plus the real-socket suite in

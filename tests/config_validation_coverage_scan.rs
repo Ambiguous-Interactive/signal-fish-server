@@ -13,6 +13,18 @@
 //! `validate*` function in a config module) or appear, with a recorded
 //! rationale, in [`EXEMPT_NUMERIC_FIELDS`]**. Adding a numeric config field
 //! without deciding its validation story fails the scan.
+//!
+//! Soundness scope (deliberate over-approximations, kept for simplicity):
+//! - "Referenced by a guard" is approximated by identifier collection: ALL
+//!   identifiers in `validation.rs` (its `mod tests` is skipped) and all
+//!   identifiers in every `fn validate*` elsewhere under `src/config/`. A
+//!   field whose name appears in `validation.rs` for an unrelated reason is
+//!   counted as covered; the exemption list is the mechanism for fields with
+//!   no true guard, and the Z3 config-closure proof set (proof set J) checks
+//!   the admitted set's actual semantics.
+//! - Guard detection is name-based (`fn validate*`). Every such function in
+//!   `src/config/` is a real validation guard today; a future non-guard
+//!   `validate*` function that merely mentions a field would mask it here.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -209,6 +221,15 @@ struct NumericFieldVisitor {
 }
 
 impl<'ast> Visit<'ast> for NumericFieldVisitor {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        // Test-helper structs must not join the coverage contract.
+        if item.ident == "tests" {
+            return;
+        }
+        self.current_struct = None;
+        syn::visit::visit_item_mod(self, item);
+    }
+
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
         self.current_struct = Some(item.ident.to_string());
         syn::visit::visit_item_struct(self, item);
@@ -251,8 +272,17 @@ fn validated_identifiers(files: &[(String, String)]) -> std::collections::BTreeS
             .unwrap_or_else(|error| panic!("failed to parse {file} as Rust syntax: {error}"));
 
         if file.ends_with("validation.rs") {
+            // Whole-file identifier collection, minus the test module:
+            // test-only references must not count as guard coverage.
             let mut collector = IdentCollector::default();
-            collector.visit_file(&parsed);
+            for item in &parsed.items {
+                if let syn::Item::Mod(item_mod) = item {
+                    if item_mod.ident == "tests" {
+                        continue;
+                    }
+                }
+                collector.visit_item(item);
+            }
             identifiers.extend(collector.identifiers);
             continue;
         }

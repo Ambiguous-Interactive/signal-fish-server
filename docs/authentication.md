@@ -126,8 +126,9 @@ Existing configuration remains loadable:
   retained, logged, validated, or emitted by `--print-config`.
 
 Migrate to the canonical names. Supplying both a canonical and legacy name in
-the same JSON source rejects that source and installs an enforced empty
-allowlist, so falling back to a lower-priority open config cannot fail open.
+the same JSON source is a startup error naming the source and both keys, so
+the server never boots on an ambiguous allowlist and no lower-priority open
+config can fail open.
 Canonical individual-field environment overrides still have final precedence.
 Duplicate `app_id` entries — and entries that could never authenticate (control
 characters such as newlines or ANSI escapes, or more than 256 bytes) — are
