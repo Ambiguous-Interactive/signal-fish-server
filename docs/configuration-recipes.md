@@ -450,7 +450,8 @@ waits up to `batch_interval_ms` to coalesce same-key values; `reliable`,
 `volatile`, and control are still flushed immediately. Raise `batch_size` and
 `batch_interval_ms` to favor throughput. When `enable_batching` is `true`,
 `batch_interval_ms` must be `> 0` and at most 60000 (1 minute), and
-`max_sojourn_ms` must exceed it (all enforced at startup). Keep `idle_timeout_secs` positive in production — it reclaims zombie
+`max_sojourn_ms` must exceed it (all enforced at startup). Keep
+`idle_timeout_secs` positive in production — it reclaims zombie
 sockets (`0` disables it); `auth_timeout_secs` must be between 5 and 60.
 
 High-rate game data (rollback netcode): choose the v3 JSON delivery class by
