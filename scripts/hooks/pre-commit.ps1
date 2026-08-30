@@ -246,10 +246,18 @@ function Get-WorktreeChangedFiles {
     # detection. Git will report those changes as delete/add records instead.
     $statusArguments = @("status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--") + $Pathspecs
     $untrackedArguments = @("ls-files", "--others", "--exclude-standard", "-z", "--") + $Pathspecs
-    $statusResult = if ($null -eq $script:PendingWorktreeStatus) {
-        Invoke-Git -Arguments $statusArguments
-    } else {
-        Wait-PendingGit -Pending $script:PendingWorktreeStatus -GitArguments $statusArguments
+    $statusResult = $null
+    $statusError = $null
+    try {
+        $statusResult = if ($null -eq $script:PendingWorktreeStatus) {
+            Invoke-Git -Arguments $statusArguments
+        } else {
+            Wait-PendingGit -Pending $script:PendingWorktreeStatus -GitArguments $statusArguments
+        }
+    } catch {
+        # Remember the failure and still drain the sibling walk below, so a
+        # failed tracked query cannot orphan the untracked process.
+        $statusError = $_
     }
     $script:PendingWorktreeStatus = $null
     $untrackedResult = if ($null -eq $script:PendingWorktreeUntracked) {
@@ -258,6 +266,9 @@ function Get-WorktreeChangedFiles {
         Wait-PendingGit -Pending $script:PendingWorktreeUntracked -GitArguments $untrackedArguments
     }
     $script:PendingWorktreeUntracked = $null
+    if ($null -ne $statusError) {
+        throw $statusError
+    }
     $records = $statusResult.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
     $skipRenameSource = $false
     foreach ($record in $records) {
@@ -1645,16 +1656,31 @@ if ($SourceOnly) {
     return
 }
 
+function Remove-PendingGit {
+    param([Parameter(Mandatory = $true)][pscustomobject]$Pending)
+
+    try {
+        $Pending.Process.WaitForExit()
+        [void]$Pending.StdoutTask.GetAwaiter().GetResult()
+        [void]$Pending.StderrTask.GetAwaiter().GetResult()
+    } finally {
+        $Pending.Process.Dispose()
+    }
+}
+
 function Complete-PreCommit {
-    if ($null -ne $script:PendingWorktreeRustDiff) {
-        $pending = $script:PendingWorktreeRustDiff
+    # Drain any discovery process the run never consumed (an early failure can
+    # skip Get-WorktreeChangedFiles / the rust-diff wait) so nothing is orphaned.
+    foreach ($pending in @(
+            $script:PendingWorktreeStatus,
+            $script:PendingWorktreeUntracked,
+            $script:PendingWorktreeRustDiff
+        )) {
+        $script:PendingWorktreeStatus = $null
+        $script:PendingWorktreeUntracked = $null
         $script:PendingWorktreeRustDiff = $null
-        try {
-            $pending.Process.WaitForExit()
-            [void]$pending.StdoutTask.GetAwaiter().GetResult()
-            [void]$pending.StderrTask.GetAwaiter().GetResult()
-        } finally {
-            $pending.Process.Dispose()
+        if ($null -ne $pending) {
+            Remove-PendingGit -Pending $pending
         }
     }
     $script:PreCommitTimer.Stop()

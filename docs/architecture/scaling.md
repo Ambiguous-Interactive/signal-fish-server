@@ -224,8 +224,9 @@ default) — for a fuller batch so same-key values can coalesce; control,
 `Reliable`, and `Volatile` are still released immediately. A full `batch_size`
 flushes earlier. Enabling batching therefore adds at most one `batch_interval_ms`
 per hop, and only to `Latest` traffic. Raise the interval only after measuring
-the syscall/throughput tradeoff, and keep `max_sojourn_ms > batch_interval_ms`
-(enforced at startup).
+the syscall/throughput tradeoff, keep it at or below the 60000 ms startup
+ceiling, and keep `max_sojourn_ms > batch_interval_ms` (both enforced at
+startup).
 
 Accepted sockets disable Nagle (`TCP_NODELAY`) on both the plain (`axum::serve`)
 and TLS (`axum_server`) serve paths, so small bidirectional frames avoid the

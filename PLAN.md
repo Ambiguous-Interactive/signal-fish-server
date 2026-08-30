@@ -131,9 +131,20 @@ correctness evidence appears.
   the #469 guarded-None terminal-unroute suppression was confirmed
   fail-closed-correct (a watermark-less v3 `PlayerLeft` is rejected by both
   maintained clients' accountability layers) and recorded at its site.
-  Next session: name new seams from fresh evidence.
-- #318 — use representative cross-platform measurements to choose the next
-  hook-latency reduction without weakening fail-closed checks.
+  Session-196 swept the per-socket I/O pump seam (`websocket/connection.rs`,
+  `handler.rs`, `batching.rs`): batch-boundary ordering/loss/duplication,
+  unbounded memory, panic surface, half-close propagation, and lock order
+  audited sound with pinned defenses; the one defect — unbounded
+  `websocket.batch_interval_ms` overflowing the `Latest` coalesce deadline
+  into a park-until-queue-progress stall — is closed at the admission
+  boundary with the `MAX_BATCH_INTERVAL_MS` startup ceiling (the queue's
+  pinned unrepresentable-deadline contract is unchanged). Next session:
+  name new seams from fresh evidence.
+- #318 — Linux baseline recorded and the worktree-discovery serialization
+  fixed (concurrent tracked + untracked walks; staged commit path passes
+  the 1000 ms budget with ~2x margin, preflight 1159 → 1067 ms median on
+  9p). Remaining: representative macOS and Windows measurements to confirm
+  or replace the budget, without weakening fail-closed checks.
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
 - #379 — make verification-nightly pull-request fan-out path-aware only after

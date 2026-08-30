@@ -23757,7 +23757,6 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                     $threw = $true
                 }
                 Assert $threw "an untracked record in the tracked query must fail closed"
-                $script:StatusFixture = " M src/lib.rs${nul}"
             "#,
         ])
         .current_dir(&root)
