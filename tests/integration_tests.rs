@@ -775,7 +775,7 @@ async fn test_config_fallback_integration() {
     env::set_var("SIGNAL_FISH_CONFIG_PATH", config_file.to_str().unwrap());
     env::set_var("SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS", "12");
 
-    let config = signal_fish_server::config::load();
+    let config = signal_fish_server::config::load().expect("config loads");
 
     // File value should be used for port
     assert_eq!(config.port, 7777);

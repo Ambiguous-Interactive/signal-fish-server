@@ -33,7 +33,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Load configuration from config.json if present; otherwise use code defaults.
-    let cfg = Arc::new(config::load());
+    // A present-but-invalid source (unparseable JSON, type-mismatched value) is a
+    // hard error here: booting on defaults would silently revert every operator
+    // setting while the process appears healthy.
+    let cfg = Arc::new(config::load()?);
 
     // Handle --print-config: output the loaded configuration as JSON. Secrets
     // (TURN secrets, metrics tokens, ICE credentials) are redacted so credential

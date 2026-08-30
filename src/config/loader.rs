@@ -18,14 +18,20 @@ use std::path::Path;
 /// Additionally, individual fields can be overridden by environment variables
 /// with the `SIGNAL_FISH__` prefix, e.g. `SIGNAL_FISH__PORT=8080` or
 /// `SIGNAL_FISH__LOGGING__LEVEL=debug`.
-/// Any errors while reading/parsing are printed to stderr and defaults are used.
+///
+/// Absent sources are optional: with no config file anywhere, the compiled
+/// defaults apply. A source that is present but invalid — unparseable JSON, an
+/// unreadable file, or a value whose type does not match its config field
+/// after merging and environment overrides — is a hard error: silently
+/// substituting defaults would revert every operator setting (allowlists,
+/// caps, timeouts) while the process appears healthy.
 ///
 /// **Note:** Validation errors from [`validate_config_security`] are logged to stderr but are
-/// *not* propagated — `load()` always returns a `Config`. Callers who need hard failure
+/// *not* propagated — `load()` always returns a semantically well-formed
+/// `Config`. Callers who need hard failure
 /// should call [`validate_config_security()`](super::validation::validate_config_security)
 /// on the returned config and handle the error themselves.
-#[must_use]
-pub fn load() -> Config {
+pub fn load() -> anyhow::Result<Config> {
     use std::env;
     use std::io::Read;
     use std::path::PathBuf;
@@ -34,18 +40,17 @@ pub fn load() -> Config {
     let mut merged =
         serde_json::to_value(&defaults).unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
 
-    let inline_source = env::var("SIGNAL_FISH_CONFIG_JSON")
-        .ok()
-        .and_then(|json| parse_json_document(&json, "SIGNAL_FISH_CONFIG_JSON"));
+    let inline_source = match env::var("SIGNAL_FISH_CONFIG_JSON") {
+        Ok(json) => parse_json_document(&json, "SIGNAL_FISH_CONFIG_JSON")?,
+        Err(_) => None,
+    };
     let stdin_source = if let Ok(val) = env::var("SIGNAL_FISH_CONFIG_STDIN") {
         if env_var_truthy(&val) {
             let mut buf = String::new();
-            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
-                eprintln!("Failed to read config from stdin: {e}");
-                None
-            } else {
-                parse_json_document(&buf, "stdin")
-            }
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow::anyhow!("Failed to read config from stdin: {e}"))?;
+            parse_json_document(&buf, "stdin")?
         } else {
             None
         }
@@ -53,17 +58,21 @@ pub fn load() -> Config {
         None
     };
 
-    let explicit_source = env::var("SIGNAL_FISH_CONFIG_PATH")
-        .ok()
-        .and_then(|path| read_file_source(&PathBuf::from(path)));
-    let cwd_source = read_file_source(&PathBuf::from("config.json"));
-    let executable_source = env::current_exe().ok().and_then(|exe_path| {
-        exe_path.parent().and_then(|exe_dir| {
-            let mut path = exe_dir.to_path_buf();
-            path.push("config.json");
-            read_file_source(&path)
-        })
-    });
+    let explicit_source = match env::var("SIGNAL_FISH_CONFIG_PATH") {
+        Ok(path) => read_file_source(&PathBuf::from(path))?,
+        Err(_) => None,
+    };
+    let cwd_source = read_file_source(&PathBuf::from("config.json"))?;
+    let executable_source = match env::current_exe().ok().and_then(|exe_path| {
+        let mut path = exe_path.parent().map(Path::to_path_buf);
+        if let Some(dir) = path.as_mut() {
+            dir.push("config.json");
+        }
+        path
+    }) {
+        Some(path) => read_file_source(&path)?,
+        None => None,
+    };
 
     // `merge_values` gives the later value precedence, so apply the documented
     // JSON sources from lowest to highest priority.
@@ -81,13 +90,7 @@ pub fn load() -> Config {
     // Environment overrides with prefix SIGNAL_FISH__ and nested separator __
     apply_env_overrides(&mut merged);
 
-    let config = match serde_json::from_value::<Config>(merged) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("Failed to deserialize config; using defaults: {e}");
-            defaults
-        }
-    };
+    let config = deserialize_merged_config(merged)?;
 
     // Security validation for sensitive fields — intentional warn-only behavior;
     // main.rs calls validate_config_security() again and propagates errors properly.
@@ -95,40 +98,53 @@ pub fn load() -> Config {
         eprintln!("Configuration validation error: {e}");
     }
 
-    config
+    Ok(config)
 }
 
-fn parse_json_document(raw: &str, label: &str) -> Option<Value> {
+fn deserialize_merged_config(merged: Value) -> anyhow::Result<Config> {
+    serde_path_to_error::deserialize(merged).map_err(|e| {
+        let path = e.path().to_string();
+        anyhow::anyhow!(
+            "Failed to deserialize merged configuration (compiled defaults + config sources + \
+             SIGNAL_FISH__* environment overrides): {}{e}
+A present-but-invalid value would otherwise silently revert every operator \
+setting to defaults; fix or remove the offending value.",
+            if path.is_empty() {
+                String::new()
+            } else {
+                format!("{path}: ")
+            }
+        )
+    })
+}
+
+fn parse_json_document(raw: &str, label: &str) -> anyhow::Result<Option<Value>> {
     if raw.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
 
     match serde_json::from_str(raw) {
         Ok(mut value) => match normalize_legacy_app_access_config(&mut value, label) {
-            Ok(()) => Some(value),
-            Err(error) => {
-                eprintln!("Invalid config from {label}: {error}");
-                Some(fail_closed_app_access_source())
-            }
+            Ok(()) => Ok(Some(value)),
+            Err(error) => Err(anyhow::anyhow!("Invalid config from {label}: {error}")),
         },
-        Err(err) => {
-            eprintln!("Failed to parse config from {label}: {err}");
-            None
-        }
+        Err(err) => Err(anyhow::anyhow!(
+            "Failed to parse config from {label}: {err}"
+        )),
     }
 }
 
-fn read_file_source(path: &Path) -> Option<Value> {
+fn read_file_source(path: &Path) -> anyhow::Result<Option<Value>> {
     if path.as_os_str().is_empty() || !path.exists() {
-        return None;
+        return Ok(None);
     }
 
     match fs::read_to_string(path) {
         Ok(contents) => parse_json_document(&contents, &format!("file {}", path.display())),
-        Err(err) => {
-            eprintln!("Failed to read config from {}: {}", path.display(), err);
-            None
-        }
+        Err(err) => Err(anyhow::anyhow!(
+            "Failed to read config from {}: {err}",
+            path.display()
+        )),
     }
 }
 
@@ -139,15 +155,6 @@ where
     for source in sources.into_iter().flatten() {
         merge_values(target, source);
     }
-}
-
-fn fail_closed_app_access_source() -> Value {
-    serde_json::json!({
-        "security": {
-            "enforce_app_id_allowlist": true,
-            "allowed_apps": []
-        }
-    })
 }
 
 fn merge_values(target: &mut Value, source: Value) {
@@ -384,7 +391,7 @@ mod tests {
         let mut merged =
             serde_json::to_value(Config::default()).expect("default config serializes");
         apply_env_overrides_from_iter(&mut merged, vars.iter().copied());
-        serde_json::from_value(merged).expect("env overrides deserialize as Config")
+        deserialize_merged_config(merged).expect("env overrides deserialize as Config")
     }
 
     #[test]
@@ -547,7 +554,8 @@ mod tests {
             }"#,
             "test source",
         )
-        .expect("legacy source normalizes");
+        .expect("legacy source normalizes")
+        .expect("normalized legacy source is present");
         merge_values(&mut merged, source);
 
         let config: Config = serde_json::from_value(merged).expect("merged config deserializes");
@@ -559,13 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_mixed_alias_source_overrides_lower_sources_with_fail_closed_policy() {
-        let mut merged = serde_json::json!({
-            "security": {
-                "enforce_app_id_allowlist": false,
-                "allowed_apps": [{"app_id": "lower", "app_name": "Lower"}]
-            }
-        });
+    fn rejected_mixed_alias_source_is_a_hard_error() {
         let rejected = parse_json_document(
             r#"{
                 "security": {
@@ -574,13 +576,17 @@ mod tests {
                 }
             }"#,
             "test source",
-        )
-        .expect("a rejected security source produces a fail-closed override");
-        merge_sources_low_to_high(&mut merged, [Some(rejected)]);
+        );
 
-        let config: Config = serde_json::from_value(merged).expect("config deserializes");
-        assert!(config.security.enforce_app_id_allowlist);
-        assert!(config.security.allowed_apps.is_empty());
+        let err = rejected
+            .expect_err("a source with both canonical and legacy app-access keys must be rejected")
+            .to_string();
+        assert!(
+            err.contains("test source")
+                && err.contains("enforce_app_id_allowlist")
+                && err.contains("require_websocket_auth"),
+            "error must name the source and both conflicting keys: {err}"
+        );
     }
 
     #[test]
@@ -589,7 +595,9 @@ mod tests {
         let executable = parse_json_document(
             r#"{"security":{"enforce_app_id_allowlist":false}}"#,
             "executable config",
-        );
+        )
+        .expect("executable source parses")
+        .expect("parsed executable source is present");
         let inline = parse_json_document(
             r#"{
                 "security": {
@@ -602,15 +610,102 @@ mod tests {
                 }
             }"#,
             "SIGNAL_FISH_CONFIG_JSON",
-        );
+        )
+        .expect("inline source parses")
+        .expect("parsed inline source is present");
         let mut merged = defaults;
-        merge_sources_low_to_high(&mut merged, [executable, inline]);
+        merge_sources_low_to_high(&mut merged, [Some(executable), Some(inline)]);
 
         let config: Config = serde_json::from_value(merged).expect("config deserializes");
         assert!(config.security.enforce_app_id_allowlist);
         assert_eq!(config.security.allowed_apps[0].app_id, "inline");
         let serialized = serde_json::to_string(&config).expect("config serializes");
         assert!(!serialized.contains("discard-me"));
+    }
+
+    /// A present-but-invalid source (malformed JSON) is a hard error naming
+    /// the source, not a silent skip: falling through to defaults would
+    /// revert every operator setting while the process appears healthy.
+    #[test]
+    fn malformed_json_source_is_a_hard_error_naming_the_source() {
+        let err = parse_json_document("{invalid json content", "SIGNAL_FISH_CONFIG_JSON")
+            .expect_err("malformed inline JSON must be a hard error")
+            .to_string();
+        assert!(
+            err.contains("SIGNAL_FISH_CONFIG_JSON"),
+            "error must name the offending source: {err}"
+        );
+
+        let err = parse_json_document("{invalid json content", "file config.json")
+            .expect_err("malformed file JSON must be a hard error")
+            .to_string();
+        assert!(
+            err.contains("file config.json"),
+            "error must name the offending file: {err}"
+        );
+    }
+
+    /// A type-mismatched environment override must fail the merged
+    /// deserialization loudly. The old contract (eprintln + wholesale
+    /// defaults) let one malformed env var — an empty value from a
+    /// container manifest, a numeric string, an uppercase bool — silently
+    /// revert the ENTIRE operator config, including the file's values, to
+    /// compiled defaults. These scenarios are exactly how orchestrators
+    /// inject values, so each is pinned here.
+    #[test]
+    fn type_mismatched_env_override_is_a_hard_error_not_a_defaults_revert() {
+        // (env var, raw value, the config knob the error must name)
+        let cases = [
+            ("SIGNAL_FISH__PORT", "", "port"),
+            (
+                "SIGNAL_FISH__SERVER__ENABLE_RECONNECTION",
+                "TRUE",
+                "enable_reconnection",
+            ),
+            (
+                "SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN",
+                "12345678901234567890",
+                "metrics_auth_token",
+            ),
+            ("SIGNAL_FISH__SERVER", "not-an-object", "server"),
+        ];
+
+        for (key, raw_value, knob) in cases {
+            let defaults =
+                serde_json::to_value(Config::default()).expect("default config serializes");
+            let mut merged = defaults;
+            apply_env_overrides_from_iter(&mut merged, [(key, raw_value)]);
+
+            let err = deserialize_merged_config(merged)
+                .expect_err("a type-mismatched override must be a hard error")
+                .to_string();
+            assert!(
+                err.contains(knob),
+                "error for {key}={raw_value:?} must name the offending knob \
+                 ({knob}): {err}"
+            );
+            assert!(
+                err.contains("SIGNAL_FISH__"),
+                "error must attribute the merged document to the config sources: {err}"
+            );
+        }
+    }
+
+    /// The happy-path counterpart: a valid override over a distinctive file
+    /// value deserializes with BOTH applied — proving the hard error above
+    /// is about invalid values, not about environment overrides in general.
+    #[test]
+    fn valid_env_override_over_file_value_deserializes_with_both_applied() {
+        let defaults = serde_json::to_value(Config::default()).expect("defaults serialize");
+        let file_source = parse_json_document(r#"{"port": 4242}"#, "file config.json")
+            .expect("file source parses")
+            .expect("parsed file source is present");
+        let mut merged = defaults;
+        merge_values(&mut merged, file_source);
+        apply_env_overrides_from_iter(&mut merged, [("SIGNAL_FISH__PORT", "5353")]);
+
+        let config = deserialize_merged_config(merged).expect("merged config deserializes");
+        assert_eq!(config.port, 5353, "env override wins");
     }
 
     #[test]
