@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `websocket.batch_interval_ms` is now rejected at startup above 60000 (1 minute) when
+  `websocket.enable_batching` is true: an oversized coalescing window could overflow the
+  `Latest` batch deadline and park the v3 data lane until queue progress. Previously such a
+  config started and degraded silently (issue #396).
 - A reconnect whose room is deleted between the existence recheck and the membership restore is now
   refused with `ROOM_NOT_FOUND` — parity with the join path — instead of a misleading storage
   fault (issue #396).
