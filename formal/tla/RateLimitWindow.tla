@@ -239,12 +239,18 @@ CurrentWindowWithinCap ==
 (* `RateLimitWindow_NaiveSlidingBound_ExpectedFailure`: fixed windows do    *)
 (* NOT bound admissions inside an arbitrary sliding window of WINDOW ticks  *)
 (* — the boundary burst spends MAX at the end of one window and MAX again   *)
-(* at the start of the next. Must stay violated by the checked model; a     *)
-(* green run here means the implementation quietly became a sliding-window  *)
-(* limiter and its documented trade-off moved without a spec update.        *)
+(* at the start of the next. The audited span is HALF-OPEN — WINDOW          *)
+(* consecutive ticks {t, ..., t + WINDOW - 1}, the same width a real        *)
+(* sliding limiter enforces when it trims stamps with                       *)
+(* `elapsed >= window` (crate::auth::rate_limiter) — so the oracle fails    *)
+(* for exactly the boundary burst and goes quiet if the room limiter ever   *)
+(* genuinely converts to sliding-window accounting. Must stay violated by   *)
+(* the checked model; the _ExpectedFailure cfg turning green in CI (an      *)
+(* unobserved expected failure) is the signal to update this spec           *)
+(* deliberately.                                                            *)
 NaiveSlidingWindowBound ==
     \A t \in 0..HORIZON :
         LogSum(creationLog,
-               {x \in 0..HORIZON : t <= x /\ x <= t + WINDOW}) <= MAX_CREATIONS
+               {x \in 0..HORIZON : t <= x /\ x < t + WINDOW}) <= MAX_CREATIONS
 
 =============================================================================
