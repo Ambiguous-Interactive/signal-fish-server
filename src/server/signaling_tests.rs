@@ -10,6 +10,7 @@ use crate::config::{
     TransportSecurityConfig, TurnConfig, WebSocketConfig,
 };
 use crate::database::{DatabaseConfig, GameDatabase, InMemoryDatabase};
+use crate::distributed::InMemoryDistributedLock;
 use crate::protocol::{
     ClientMessage, ErrorCode, IceServer, LobbyState, PlayerId, PlayerInfo, ServerMessage, Topology,
     Transport,
@@ -25,6 +26,8 @@ use tokio::time::{timeout, Duration};
 
 use super::session_policy::ActiveSessionPlan;
 use super::signaling::local_initiates;
+use super::InMemoryMessageCoordinator;
+use super::MessageCoordinator;
 
 const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
 const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";
@@ -3126,6 +3129,97 @@ async fn reconnect_room_full_failure_releases_claim_for_retry() {
         }
         other => panic!("expected Reconnected after retry, got {other:?}"),
     }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_room_deleted_during_restore_is_classified_room_not_found() {
+    // Inactive-room GC deleting the room between the lane-held existence
+    // recheck and the membership write must be reported truthfully: parity
+    // with the join path's reclassification, `ROOM_NOT_FOUND`, not a storage
+    // fault. The database's one-shot injection performs the deletion inside
+    // the membership write, which is the only difference from the success
+    // flow.
+    let database = Arc::new(InMemoryDatabase::new());
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        },
+        coordinator,
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room_with_max(&server, existing, 2).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    database.delete_room_during_next_add_for_test();
+
+    let attempt = server
+        .handle_reconnect(&current, &reconnecting, &room_id, &token)
+        .await;
+    assert!(!attempt, "reconnect into a deleted room must fail");
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::RoomNotFound);
+        }
+        other => panic!("expected ReconnectionFailed(RoomNotFound), got {other:?}"),
+    }
+    assert!(
+        server
+            .reconnection_manager()
+            .expect("reconnection enabled")
+            .validate_reconnection(&reconnecting, &room_id, &token)
+            .await
+            .is_ok(),
+        "the failed attempt must release the claim for retry"
+    );
 }
 
 #[tokio::test]

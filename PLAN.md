@@ -30,20 +30,6 @@ to risk.
 
 ## External acceptance
 
-### Reviewer capacity for a literal all-green pull request (#377)
-
-- Restore the external Copilot reviewer quota, or disable/reconfigure that
-  administrative integration without weakening repository-owned CI or human
-  review policy.
-- Exercise the integration on the exact pull-request head after the owner-side
-  change, retaining any substantive feedback and its resolution.
-
-Acceptance: the exact pull-request head or a dedicated test pull request has a
-terminal successful review result, or explicitly reports neutral/skipped
-unavailability after owner reconfiguration, with no failed required check.
-Repository-owned green checks alone do not satisfy this administrative
-requirement.
-
 ### P7 — Mobile and Steam interoperability
 
 - Run the documented v3 interoperability matrix with maintained out-of-repo
@@ -103,42 +89,49 @@ correctness evidence appears.
   oracle. Deliberate gate-holds documented in #463 (signaling plan-before-
   signal, session-policy departure snapshot stability) remain by design.
    Session-191 swept the delivery-ledger/DeliveryReport, room-join baseline,
-   and room/maintenance-cleanup seams: the first fixed the tail-parked causal
-   DeliveryReport eviction class (queue-age deadline measured the server's own
-   parking, not recipient progress) and fail-closed the two pending-omission
-   write paths that bypassed the v3-only writer arm; the join-baseline and
-   cleanup seams audited sound (records only). Session-192 swept the
-   authority/relay-policy seam (no dangling authority on any mutation path,
-   deterministic total repair, topology/signal-relay predicate agreement),
-   the room-identity/state-machine seam (bounded collision retry with
-   dual-lock atomicity, exactly two validated atomic LobbyState writers, no
-   half-applied observations), and the upgrade-admission seam (no
-   panic/hang/unbounded-memory, bounded kernel-keyed rejection throttle,
-   fail-closed ordering) — all sound under adversarial re-verification; the
-   recorded foot-guns (`update_room_authority` `Some(non-member)` grant
-   contract, `toggle_player_ready` coordinator-parity divergence,
-   rejection-log eviction discarding suppressed counts) are now documented at
-   their sites. Session-193 swept the game-data relay carrier seam
-   (stamping/epoch/replay contract: single counter across carriers,
-   lock-justified baseline interlock, no stamp leak, zero panic surface),
-   the signal routing/sender-attribution seam (structural anti-spoof,
-   four-layer delivery defense, lifecycle-serialized identity swaps,
-   spectator exclusion, uniform lock order), and the room-operation
-   execution seam (echo-only correlation per contract with state-guarded
-   mutations, one room gate + abort-proof FIFO lane per mutation, uniform
-   lock order, seat conservation on every failure arm) — all sound under
-   adversarial re-verification; the one latent trapdoor found (router-level
-   `Reconnect` arms calling identity-unaware entries) is now fail-closed
-   with red-first pins (PR #476), and the `target_not_routed` pre-gate,
-   StartGame ghost-row error shape, retried-`LeaveRoom` `NOT_IN_ROOM`, and
-   acceptance-time `game_data_messages_total` semantics are recorded at
-   their sites. Session-194 was an issue-hygiene session (public-site copy
-   #478, changelog concision #477, minimal-comments knowledge #479): no new
-   production seam swept; next session: name new seams from fresh evidence.
-- #423 / #424 — choose Miri phase 2 only through the recorded owner decision:
-  split the job, accept the measured single-lane duration, or move it to the
-  weekly schedule. Preserve full native coverage and retain exact-head hosted
-  runner-time evidence for whichever allocation/latency tradeoff is selected.
+  and room/maintenance-cleanup seams: the first fixed the tail-parked causal
+  DeliveryReport eviction class (queue-age deadline measured the server's own
+  parking, not recipient progress) and fail-closed the two pending-omission
+  write paths that bypassed the v3-only writer arm; the join-baseline and
+  cleanup seams audited sound (records only). Session-192 swept the
+  authority/relay-policy seam (no dangling authority on any mutation path,
+  deterministic total repair, topology/signal-relay predicate agreement),
+  the room-identity/state-machine seam (bounded collision retry with
+  dual-lock atomicity, exactly two validated atomic LobbyState writers, no
+  half-applied observations), and the upgrade-admission seam (no
+  panic/hang/unbounded-memory, bounded kernel-keyed rejection throttle,
+  fail-closed ordering) — all sound under adversarial re-verification; the
+  recorded foot-guns (`update_room_authority` `Some(non-member)` grant
+  contract, `toggle_player_ready` coordinator-parity divergence,
+  rejection-log eviction discarding suppressed counts) are now documented at
+  their sites. Session-193 swept the game-data relay carrier seam
+  (stamping/epoch/replay contract: single counter across carriers,
+  lock-justified baseline interlock, no stamp leak, zero panic surface),
+  the signal routing/sender-attribution seam (structural anti-spoof,
+  four-layer delivery defense, lifecycle-serialized identity swaps,
+  spectator exclusion, uniform lock order), and the room-operation
+  execution seam (echo-only correlation per contract with state-guarded
+  mutations, one room gate + abort-proof FIFO lane per mutation, uniform
+  lock order, seat conservation on every failure arm) — all sound under
+  adversarial re-verification; the one latent trapdoor found (router-level
+  `Reconnect` arms calling identity-unaware entries) is now fail-closed
+  with red-first pins (PR #476), and the `target_not_routed` pre-gate,
+  StartGame ghost-row error shape, retried-`LeaveRoom` `NOT_IN_ROOM`, and
+  acceptance-time `game_data_messages_total` semantics are recorded at
+  their sites. Session-194 was an issue-hygiene session (public-site copy
+  #478, changelog concision #477, minimal-comments knowledge #479): no new
+  production seam swept. Session-195 swept the durable-storage seam
+  (`database/mod.rs`): authority/membership coherence, room-code
+  uniqueness, GC liveness, seat capacity, lock order, and panic surface
+  audited sound; the open-room readiness "resurrection" finding was
+  refuted as production-unreachable (no open-room stored-list writer), and
+  the one real defect — a reconnect whose room is GC-deleted between the
+  existence recheck and the membership restore answering a storage fault —
+  now truthfully answers `ROOM_NOT_FOUND` with parity to the join path;
+  the #469 guarded-None terminal-unroute suppression was confirmed
+  fail-closed-correct (a watermark-less v3 `PlayerLeft` is rejected by both
+  maintained clients' accountability layers) and recorded at its site.
+  Next session: name new seams from fresh evidence.
 - #318 — use representative cross-platform measurements to choose the next
   hook-latency reduction without weakening fail-closed checks.
 - #378 — consolidate duplicate hosted link validation only with an atomic

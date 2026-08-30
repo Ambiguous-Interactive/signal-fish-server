@@ -20610,7 +20610,9 @@ fn test_workflow_files_use_two_space_indentation() {
 const SAFETY_JOBS: &[(&str, &str, &str)] = &[
     (
         "miri",
-        "Miri",
+        // Matrix job: the display name expands per lane to `Miri (core)` and
+        // `Miri (remaining)`; the raw template string is the stable contract.
+        "Miri (${{ matrix.lane.name }})",
         "Undefined behavior detection via Miri interpreter",
     ),
     (
@@ -20640,6 +20642,77 @@ fn test_ci_safety_workflow_has_required_jobs() {
     );
 
     validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
+}
+
+#[test]
+fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
+    // The Miri lanes use hand-maintained libtest name filters, so the union
+    // of the lane filters must name every top-level module declared in
+    // `src/lib.rs`. A module named by no filter would silently never run
+    // under Miri — the missed-coverage failure class the previous single
+    // unfiltered run was structurally immune to. libtest runs a test when
+    // any filter is a substring of its full path, so a module is covered
+    // exactly when its name appears among the filter tokens.
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_file(&workflow_path);
+    let documents = Yaml::load_from_str(&content).expect("ci-safety.yml must parse as YAML");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci-safety.yml must define a jobs mapping");
+    let miri = jobs
+        .as_mapping_get("miri")
+        .expect("ci-safety.yml must define the miri job");
+    let lanes = miri
+        .as_mapping_get("strategy")
+        .and_then(|strategy| strategy.as_mapping_get("matrix"))
+        .and_then(|matrix| matrix.as_mapping_get("lane"))
+        .and_then(|lane| lane.as_vec())
+        .expect("miri must define a strategy.matrix.lane sequence");
+    assert!(
+        lanes.len() >= 2,
+        "the #424 split must keep at least two parallel Miri lanes"
+    );
+
+    let mut filter_tokens: Vec<&str> = Vec::new();
+    for lane in lanes {
+        let filters = lane
+            .as_mapping_get("filters")
+            .and_then(|value| value.as_str())
+            .expect("every Miri lane must define string filters");
+        filter_tokens.extend(filters.split_whitespace());
+    }
+
+    let lib_rs = read_file(&root.join("src/lib.rs"));
+    let modules: Vec<String> = lib_rs
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line
+                .strip_prefix("pub mod ")
+                .or_else(|| line.strip_prefix("mod "))?;
+            rest.split_whitespace()
+                .next()?
+                .strip_suffix(';')
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(
+        modules.len() >= 10,
+        "src/lib.rs must expose its module list to this guard; if the \
+         declaration style changed, update this parser before trusting the \
+         coverage assertion"
+    );
+    for module in &modules {
+        assert!(
+            filter_tokens.contains(&module.as_str()),
+            "library module `{module}` is named by no Miri lane filter and \
+             would silently never run under Miri. Add it to a lane in \
+             ci-safety.yml (core or remaining) in the same change.\n\
+             Lane filters: {filter_tokens:?}"
+        );
+    }
 }
 
 #[test]
@@ -21077,15 +21150,26 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
 #[test]
 fn test_ci_safety_workflow_uploads_artifacts() {
     // Validates that both safety jobs upload their output as artifacts.
-    // Artifacts are critical for diagnosing gating safety findings.
+    // Artifacts are critical for diagnosing gating safety findings. The two
+    // Miri lanes must keep DISTINCT names: within one workflow run, a
+    // duplicate artifact name across matrix jobs fails the upload at
+    // runtime, and a substring guard would not catch a regression to one
+    // shared static name.
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_live_file(&workflow_path);
 
     let expected_artifacts = [
-        ("miri-output", "Miri analysis output"),
-        ("asan-output", "AddressSanitizer analysis output"),
+        // The Miri artifact name must stay templated on the matrix lane:
+        // embedding `matrix.lane.name` is what keeps the two lanes'
+        // artifacts distinct within one run (a static shared name fails
+        // the Actions upload at runtime).
+        (
+            "name: miri-output-${{ matrix.lane.name }}",
+            "per-lane Miri analysis output",
+        ),
+        ("name: asan-output", "AddressSanitizer analysis output"),
     ];
 
     let mut missing = Vec::new();
@@ -21166,7 +21250,7 @@ fn test_ci_safety_workflow_artifact_uploads_always_run() {
     assert!(
         upload_count >= 2,
         "Expected at least 2 upload-artifact steps in ci-safety.yml \
-         (miri-output and asan-output), found {upload_count}."
+         (per-lane miri-output-* and asan-output), found {upload_count}."
     );
 
     if !missing_always.is_empty() {

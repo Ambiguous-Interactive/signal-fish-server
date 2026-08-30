@@ -521,6 +521,12 @@ pub struct InMemoryDatabase {
     release_get_room_by_id: tokio::sync::Notify,
     #[cfg(test)]
     fail_remove_player_from_room: std::sync::atomic::AtomicBool,
+    /// One-shot injection: the next `add_player_to_room` first deletes the
+    /// target room, reproducing inactive-room GC winning the race against a
+    /// reconnect's membership restore — the exact storage state whose wire
+    /// classification must not read as a storage fault.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    delete_room_during_add_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     fail_update_player_name: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -579,6 +585,8 @@ impl InMemoryDatabase {
             release_get_room_by_id: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_remove_player_from_room: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            delete_room_during_add_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_update_player_name: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -711,6 +719,14 @@ impl InMemoryDatabase {
     pub(crate) fn fail_remove_player_from_room_for_test(&self, fail: bool) {
         self.fail_remove_player_from_room
             .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Arms the one-shot "delete the room at the next membership write"
+    /// injection (see the `delete_room_during_add_once` field doc).
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn delete_room_during_next_add_for_test(&self) {
+        self.delete_room_during_add_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(all(test, signal_fish_repository_tests))]
@@ -1033,6 +1049,13 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn add_player_to_room(&self, room_id: &RoomId, mut player: PlayerInfo) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .delete_room_during_add_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let _ = self.delete_room(room_id).await;
+        }
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
             .pause_add_player_to_room

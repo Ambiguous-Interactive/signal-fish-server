@@ -19,8 +19,18 @@
 #   setting is independent of whether a workflow reports its own failure.
 #
 # Jobs:
-#   - miri: Interprets test code to detect undefined behavior (UB), uninitialized
-#     reads, data races, and other safety violations unreachable by native tests
+#   - miri (two parallel lanes, the #424 owner decision): Interprets test code
+#     to detect undefined behavior (UB), uninitialized reads, data races, and
+#     other safety violations unreachable by native tests. The single-lane run
+#     measured 12m14s hosted (PR #425 evidence) with a flat long tail, so the
+#     suite is split across two lanes that each compile the library under Miri
+#     and run a filter subset:
+#       - core: `websocket coordination server protocol` (the measured heavy
+#         modules)
+#       - remaining: every other module
+#     The filters are libtest name filters, so the lane union covers the whole
+#     `--lib` suite; a test whose full path merely contains another module's
+#     name may run in both lanes, which duplicates work but never skips it.
 #   - asan: Runs the full test suite under AddressSanitizer to detect memory
 #     errors such as use-after-free, buffer overflows, and memory leaks
 #
@@ -104,11 +114,28 @@ env:
 
 jobs:
   miri:
-    name: Miri
+    name: Miri (${{ matrix.lane.name }})
     runs-on: ubuntu-latest
     # Miri interprets code rather than compiling it natively, which is
-    # significantly slower — 10-50x depending on the test suite size.
+    # significantly slower — 10-50x depending on the test suite size. Two
+    # parallel lanes keep the per-lane step wall near the compile floor
+    # (#424) at the cost of one extra runner allocation per event, and
+    # `fail-fast: false` keeps a failure in one lane from cancelling the
+    # other's diagnostic output.
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - name: core
+            # The measured heavy modules (#425 evidence): websocket::sending,
+            # upgrade admission, room/admission flows, coordination stress,
+            # protocol parsing.
+            filters: "websocket coordination server protocol"
+          - name: remaining
+            filters:
+              "auth config database deadline distributed logging metrics
+              reconnection rate_limit retry security trace_validation"
     env:
       CARGO_TARGET_DIR: target/miri
     steps:
@@ -146,11 +173,15 @@ jobs:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: |
           set -euo pipefail
-          echo "Running Miri on library unit tests (isolation disabled)..."
+          echo "Running Miri on library unit tests (isolation disabled), lane: ${{ matrix.lane.name }}"
           echo "Note: Integration tests are excluded because they use networking,"
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
           echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
-          cargo +nightly-2026-08-01 miri test --locked --lib --no-fail-fast 2>&1 | tee miri-output.txt
+          # The lane filters are libtest name filters (OR-combined, passed
+          # through `--` to the test binary); their union across lanes covers
+          # every module of the library suite.
+          cargo +nightly-2026-08-01 miri test --locked --lib --no-fail-fast -- \
+            ${{ matrix.lane.filters }} 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
       - name: Diagnose Miri failures
@@ -159,7 +190,7 @@ jobs:
           set -euo pipefail
           echo "=== Miri diagnostic context ==="
           echo "workflow: ${{ github.workflow }}"
-          echo "job: Miri"
+          echo "job: Miri (${{ matrix.lane.name }})"
           echo "ref: ${{ github.ref }}"
           echo "sha: ${{ github.sha }}"
           echo "runner: ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown}"
@@ -198,7 +229,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: miri-output
+          name: miri-output-${{ matrix.lane.name }}
           path: miri-output.txt
           retention-days: 14
 
