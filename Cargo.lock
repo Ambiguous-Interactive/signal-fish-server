@@ -2690,6 +2690,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "serde_path_to_error",
  "serial_test",
  "sha1 0.11.0",
  "sha2",

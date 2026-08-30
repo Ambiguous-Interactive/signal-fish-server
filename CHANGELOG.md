@@ -31,9 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the enforced lowercase-hyphenated `operation_id` encoding, byte-unit name limits, the room rate
   limiter's fixed-window semantics, the activity reaper's enforced liveness contract, and the
   deliberate absence of spectator-name uniqueness.
+- Startup validation guards for the config-admission seam: `server.default_max_players` must be
+  positive and must not exceed `protocol.max_players_limit`, and `server.inactive_room_timeout`
+  must be positive. A mispairing or zero previously passed `--validate-config` and then rejected
+  every default-capacity room with `InvalidMaxPlayers` at request time, or let room GC delete
+  occupied rooms between activity refreshes (issue #396).
 
 ### Changed
 
+- **Breaking (Rust API):** `config::load()` now returns `anyhow::Result<Config>`. A present-but-
+  invalid configuration source — unparsable JSON in a file, stdin, or `SIGNAL_FISH_CONFIG_JSON`;
+  an unreadable config file; or a type-mismatched value after merging and `SIGNAL_FISH__*`
+  environment overrides — is now a hard startup error naming the offending source or knob
+  (via `serde_path_to_error`). Previously any such error was logged and the ENTIRE configuration
+  was silently replaced with compiled defaults, reverting every operator setting while the
+  process appeared healthy. Absent sources still fall through to defaults unchanged. Supplying
+  both a canonical and a legacy app-access key in one source is now the same hard error instead
+  of an enforced empty-allowlist substitution.
 - `websocket.batch_interval_ms` is now rejected at startup above 60000 (1 minute) when
   `websocket.enable_batching` is true: an oversized coalescing window could overflow the
   `Latest` batch deadline and park the v3 data lane until queue progress. Previously such a

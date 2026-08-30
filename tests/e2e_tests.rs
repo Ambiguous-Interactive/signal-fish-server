@@ -968,7 +968,7 @@ async fn test_e2e_config_with_file_and_env() {
     env::set_var("SIGNAL_FISH_CONFIG_PATH", config_path);
     env::set_var("SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH", "3"); // Override file config
 
-    let loaded_config = signal_fish_server::config::load();
+    let loaded_config = signal_fish_server::config::load().expect("config loads");
 
     // Verify precedence: env var should override file value
     assert_eq!(loaded_config.protocol.room_code_length, 3); // From env override
@@ -1565,25 +1565,32 @@ async fn test_e2e_room_code_generation_with_custom_length() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn test_e2e_fallback_to_defaults_on_invalid_config() {
+async fn test_e2e_invalid_inline_config_is_a_hard_error() {
     use std::env;
 
-    // Set invalid JSON config - should fallback to defaults
+    // A present-but-invalid config source must fail loudly instead of
+    // silently reverting every operator setting to compiled defaults.
     env::set_var("SIGNAL_FISH_CONFIG_JSON", "{invalid json content}");
 
-    let config = signal_fish_server::config::load();
+    let result = signal_fish_server::config::load();
 
-    // Should use default values despite invalid JSON
-    assert_eq!(config.port, 3536); // Default port
-    assert_eq!(config.protocol.room_code_length, 6); // Default room code length
-    assert_eq!(config.server.default_max_players, 8); // Default max players
+    let err = result
+        .expect_err("malformed inline JSON config must be a hard error")
+        .to_string();
+    assert!(
+        err.contains("SIGNAL_FISH_CONFIG_JSON"),
+        "error must name the offending source: {err}"
+    );
 
     // Clean up
     env::remove_var("SIGNAL_FISH_CONFIG_JSON");
 
     // Test that server still works with these defaults
-    let running_server =
-        start_test_server_with_config_and_protocol(ServerConfig::default(), config.protocol).await;
+    let running_server = start_test_server_with_config_and_protocol(
+        ServerConfig::default(),
+        signal_fish_server::config::Config::default().protocol,
+    )
+    .await;
     let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
 

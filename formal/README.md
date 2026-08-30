@@ -48,9 +48,10 @@ under `-simulate`). Everything else is exhaustive and CI-gating.
 | `tla/ReconnectLossBound.tla` | Additional disconnect/outage exposure: queue + all client-unobserved post-queue stages + burst/rate-bounded outage traffic; exhaustive `_Small` / `_ZeroWindow` + CI-pinned `_ExpectedFailure` |
 | `tla/ReconnectionClaimLifecycle.tla` | Atomic reconnect credential reservation: duplicate valid sockets, invalid identity, stale handles, expiry cleanup, restore failure, and one-time completion; exhaustive `_Small` + four CI-pinned expected failures |
 | `tla/ApplicationOwnerRollback.tla` | Legacy application-owner rollback composition: reachable multi-entry provenance, cleanup/adoption ordering, reconnect takeover/requeue, and deleted-room terminality; exhaustive `_Small` + five CI-pinned expected failures |
+| `tla/RateLimitWindow.tla` | Fixed-window room-operation rate limiter: budget ceilings, honest current-window bound, lazy all-budgets reset, and the documented 2x boundary burst pinned as a CI-pinned expected failure |
 | `traces/slow-consumer-close-flush-invalid.jsonl` | Checked-in negative proving a slow-consumer close cannot enter the healthy lifecycle close-flush path |
 | `traces/post-queue-close-live-drain-invalid.jsonl` | Checked-in negative proving a canceled live writer cannot drain after finalization closes the queue |
-| `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election)     |
+| `z3/protocol_invariants.py`   | Z3 SMT proofs of the pure decision functions (selector, glare, host election, config-admission closure) |
 
 This directory holds **two complementary** formal checks:
 
@@ -221,7 +222,7 @@ evidence is reported as an artifact warning.
 
 ## Z3 proofs
 
-`z3/protocol_invariants.py` discharges 14 proof obligations across four sets, each by
+`z3/protocol_invariants.py` discharges 35 proof obligations across ten sets, each by
 asserting the **negation** of a property and checking it is `unsat` (no counterexample
 exists, so the property holds for every input):
 
@@ -231,6 +232,7 @@ exists, so the property holds for every input):
 | **B** | `all_support` over an unbounded member set (`session_policy.rs:175`) | a single non-v3 member denies every upgrade rung (the relay-floor back-compat invariant), `all_support` implies pointwise support, and an empty room never upgrades |
 | **C** | `local_initiates` glare rule (`signaling.rs:60`) | exactly one peer offers per distinct pair, no peer self-initiates, and the offer orientation is acyclic (no glare deadlock) |
 | **D** | `elect_host` (`session_policy.rs:372`) | `(joined_at, id)` totally orders members (a unique host), and a seated authority is the unambiguous host |
+| **J** | the numeric guards of `validate_config_security` + `WebSocketConfig::validate` (`config/validation.rs`) | the config-admission closure: every admitted config satisfies the runtime safety envelope (relay-envelope headroom, capacity pairing, positive occupied-room GC deadline, batch-deadline ceiling, slow-consumer floor); the compiled defaults pass (non-vacuity); and the session-197 guards plus the strict headroom are necessary — each has an explicit witness config that would violate its runtime property without it |
 
 The proofs are deliberately _decomposed from member counting_ where it sharpens decidability
 (set A abstracts each rung's `all_support` to a free boolean; set B re-attaches it), and the
@@ -1092,8 +1094,8 @@ bidirectional relay `GameData` between the v2 replacement and a v3 incumbent.
 
 ## Intentionally not modeled (and why)
 
-- **Rate limits / complete relay backpressure dynamics** — quantitative throttling and
-  multi-message queue dynamics are orthogonal to the session state machine. Note what this does **not**
+- **Complete relay backpressure dynamics** — quantitative multi-message queue dynamics are
+  orthogonal to the session state machine. Note what this does **not**
   mean: since the slow-consumer hardening (issue #131), per-connection delivery is _not_
   best-effort — the server never silently drops a relayed message. A full recipient queue
   backpressures the sender for up to `websocket.slow_consumer_timeout_ms`; a recipient

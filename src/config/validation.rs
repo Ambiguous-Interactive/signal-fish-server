@@ -337,6 +337,31 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
              requested room capacity, so no client can ever join a room"
         );
     }
+    if config.server.default_max_players == 0 {
+        anyhow::bail!(
+            "server.default_max_players must be greater than 0: a zero default rejects every \
+             room created without an explicit capacity with InvalidMaxPlayers"
+        );
+    }
+
+    // Cross-field capacity pairing: rooms created without an explicit
+    // `max_players` are seated with `server.default_max_players`
+    // (`max_players.unwrap_or(self.config.default_max_players)` in the room
+    // service) and then pass through the same
+    // `validate_max_players_with_config` ceiling as explicit requests. A
+    // default above the ceiling passes startup and then rejects EVERY
+    // default-capacity room creation with `InvalidMaxPlayers` — the deferred
+    // total-rejection shape this validator exists to surface at startup
+    // instead of as per-connection rejection logs.
+    if config.server.default_max_players > config.protocol.max_players_limit {
+        anyhow::bail!(
+            "server.default_max_players ({}) must not exceed protocol.max_players_limit ({}): \
+             rooms created without an explicit capacity use default_max_players, and every \
+             such room would be rejected at request time with InvalidMaxPlayers",
+            config.server.default_max_players,
+            config.protocol.max_players_limit
+        );
+    }
 
     // Token binding validation
     if config.security.transport.token_binding.required
@@ -412,6 +437,24 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         anyhow::bail!(
             "security.transport.token_binding.require_client_fingerprint=true requires \
              security.transport.token_binding.enabled=true"
+        );
+    }
+
+    // Direct zero check for the occupied-room reaping deadline. An occupied
+    // room is deleted whenever its monotonic idle time exceeds
+    // `inactive_room_timeout`, so a zero deadline reaps LIVE rooms in every
+    // quiet gap between activity refreshes (BUG-1 via a legal config). The
+    // throttle inversion check below cannot catch this pairing: its
+    // `heartbeat_throttle_secs == 0` arm is exempt because a disabled throttle
+    // refreshes on every heartbeat, yet even immediate refreshes leave a
+    // reapable gap against a zero deadline. Like the zero total-rejection
+    // caps, room GC has no legitimate "always on" zero value — the operator
+    // who wants rooms to vanish sooner configures a small positive deadline.
+    if config.server.inactive_room_timeout == 0 {
+        anyhow::bail!(
+            "server.inactive_room_timeout must be greater than 0 seconds: a zero deadline \
+             lets room GC delete occupied rooms as soon as their activity refreshes go \
+             quiet between heartbeats and game data"
         );
     }
 
@@ -1397,6 +1440,105 @@ mod tests {
                 assert!(
                     err.contains("1009 outbound_message_too_large"),
                     "rejection must state its consequence: {err}"
+                );
+            }
+        }
+    }
+
+    /// The default room capacity must be admissible through the same ceiling
+    /// that admission enforces per request: rooms created without an explicit
+    /// `max_players` use `server.default_max_players`
+    /// (`room_service` `max_players.unwrap_or(default)`), and
+    /// `validate_max_players_with_config` rejects anything above
+    /// `protocol.max_players_limit` — or a zero default — with
+    /// `InvalidMaxPlayers`. A mispairing or zero passes startup and then
+    /// rejects every default-capacity room at request time — the deferred
+    /// total-rejection shape this validator exists to prevent. Data-driven
+    /// over the boundary.
+    #[test]
+    fn default_max_players_must_be_admissible_under_the_protocol_limit() {
+        // (default_max_players, max_players_limit, expect_ok)
+        let cases = [
+            (8_u8, 100_u8, true), // defaults
+            (100, 100, true),     // exactly at the ceiling: still admissible
+            (101, 100, false),    // one past: every default-capacity room rejected
+            (200, 100, false),    // classic mispairing
+            (8, 8, true),         // tight but consistent pairing
+            (0, 100, false),      // zero default: every default-capacity room rejected
+        ];
+
+        for (default_max_players, max_players_limit, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.server.default_max_players = default_max_players;
+            config.protocol.max_players_limit = max_players_limit;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "default_max_players={default_max_players}, \
+                 max_players_limit={max_players_limit}"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("server.default_max_players"),
+                    "rejection must name the offending field: {err}"
+                );
+                assert!(
+                    err.contains("InvalidMaxPlayers"),
+                    "rejection must state its consequence: {err}"
+                );
+                if default_max_players > 0 {
+                    // Pairing rejections must name both knobs; the zero-floor
+                    // rejection names only the zeroed default.
+                    assert!(
+                        err.contains("protocol.max_players_limit"),
+                        "pairing rejection must name both offending fields: {err}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A zero `server.inactive_room_timeout` is rejected: an occupied room is
+    /// reaped whenever `idle_for > inactive_room_timeout`, so a zero deadline
+    /// deletes live rooms in every quiet gap between activity refreshes. The
+    /// BUG-1 inversion check alone cannot catch this: its
+    /// `heartbeat_throttle_secs == 0` arm (throttle disabled — every heartbeat
+    /// refreshes) is exempt precisely because refreshes are immediate, yet with
+    /// a zero deadline even immediate refreshes leave a reapable gap. The
+    /// direct check keeps the diagnostic precise and independent of the
+    /// throttle pairing. Data-driven across both throttle arms.
+    #[test]
+    fn zero_inactive_room_timeout_is_rejected_including_the_throttle_disabled_arm() {
+        // (heartbeat_throttle_secs, inactive_room_timeout_secs, expect_ok)
+        let cases = [
+            (30_u64, 3600_u64, true), // defaults
+            (0, 3600, true),          // throttle disabled, healthy deadline
+            (3600, 3600, false),      // BUG-1 inversion (throttle >= deadline)
+            (30, 0, false),           // zero deadline, throttled refreshes
+            (0, 0, false),            // the previously-exempt bypass arm
+        ];
+
+        for (throttle, inactive, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.server.heartbeat_throttle_secs = throttle;
+            config.server.inactive_room_timeout = inactive;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "heartbeat_throttle_secs={throttle}, inactive_room_timeout={inactive}"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("server.inactive_room_timeout"),
+                    "rejection must name the inactive-room deadline: {err}"
                 );
             }
         }
