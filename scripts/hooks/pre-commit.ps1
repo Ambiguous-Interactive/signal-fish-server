@@ -1720,11 +1720,24 @@ $changedFilesTimer = if ($script:InspectWorktree) {
 } else {
     [System.Diagnostics.Stopwatch]::StartNew()
 }
-$allChangedFiles = [string[]]@(if ($script:InspectWorktree) {
-        Get-WorktreeChangedFiles -Pathspecs $script:WorktreePolicyPathspecs
-    } else {
-        Get-StagedFiles
-    })
+try {
+    $allChangedFiles = [string[]]@(if ($script:InspectWorktree) {
+            Get-WorktreeChangedFiles -Pathspecs $script:WorktreePolicyPathspecs
+        } else {
+            Get-StagedFiles
+        })
+} catch {
+    # A discovery-stage throw aborts before Complete-PreCommit's sweep can run.
+    # Get-WorktreeChangedFiles already drained the status/untracked pair, so
+    # the only pendency left is the panic-prefilter diff; dispose it before
+    # failing the hook.
+    $pendingRustDiff = $script:PendingWorktreeRustDiff
+    $script:PendingWorktreeRustDiff = $null
+    if ($null -ne $pendingRustDiff) {
+        Remove-PendingGit -Pending $pendingRustDiff
+    }
+    throw
+}
 $changedFilesTimer.Stop()
 Write-Profile -Name "Changed file discovery" -ElapsedMilliseconds $changedFilesTimer.ElapsedMilliseconds
 [void]$script:CheckTimings.Add([pscustomobject]@{
