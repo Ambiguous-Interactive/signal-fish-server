@@ -12,6 +12,19 @@ use serde::{Deserialize, Serialize};
 /// Operational ceiling for a single WebSocket message batch.
 pub const MAX_BATCH_SIZE: usize = 65_536;
 
+/// Operational ceiling for the batch-coalescing window.
+///
+/// The window must stay representable as an `Instant` offset from any
+/// enqueue stamp: a duration this small can never overflow the deadline
+/// arithmetic in the batched receiver (`try_pop_batched` parks a `Latest`
+/// front indefinitely when `front_enqueued_at + batch_interval` overflows,
+/// releasing only on batch fill, producer close, receiver close, or the
+/// queue-saturation slow-consumer close). One minute is far above the
+/// 16 ms default and the 15 s reliable-sojourn default — a coalescing
+/// window beyond it defeats low-latency signaling — while keeping the
+/// overflow region unreachable from any accepted configuration.
+pub const MAX_BATCH_INTERVAL_MS: u64 = 60_000;
+
 /// WebSocket configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WebSocketConfig {
@@ -178,6 +191,20 @@ impl WebSocketConfig {
             anyhow::bail!(
                 "websocket.batch_interval_ms must be greater than 0 when websocket.enable_batching \
                  is true (it is the batch-flush interval, which cannot be zero)"
+            );
+        }
+        // The batched receiver parks a `Latest` front on its coalesce deadline
+        // `front_enqueued_at + batch_interval`; an unrepresentable deadline
+        // (`Instant` overflow) releases only on queue progress. Bounding the
+        // interval keeps that arithmetic overflow-free for every accepted
+        // configuration instead of relying on the self-healing teardowns.
+        // With batching disabled the value is never read, mirroring the zero
+        // rule above.
+        if self.enable_batching && self.batch_interval_ms > MAX_BATCH_INTERVAL_MS {
+            anyhow::bail!(
+                "websocket.batch_interval_ms must not exceed {MAX_BATCH_INTERVAL_MS} (1 minute); \
+                 configured: {}",
+                self.batch_interval_ms
             );
         }
         // A zero batch size shares the zero-interval failure shape (#431): with
@@ -374,6 +401,35 @@ mod tests {
                 mutate: |config| {
                     config.enable_batching = false;
                     config.batch_interval_ms = 0;
+                },
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "batch interval above coalescing ceiling",
+                mutate: |config| {
+                    config.enable_batching = true;
+                    config.batch_interval_ms = MAX_BATCH_INTERVAL_MS + 1;
+                    config.max_sojourn_ms = MAX_BATCH_INTERVAL_MS * 2;
+                },
+                expect_ok: false,
+                expect_error_containing: "batch_interval_ms must not exceed",
+            },
+            Case {
+                name: "batch interval at coalescing ceiling",
+                mutate: |config| {
+                    config.enable_batching = true;
+                    config.batch_interval_ms = MAX_BATCH_INTERVAL_MS;
+                    config.max_sojourn_ms = MAX_BATCH_INTERVAL_MS * 2;
+                },
+                expect_ok: true,
+                expect_error_containing: "",
+            },
+            Case {
+                name: "batch interval above ceiling accepted when batching disabled",
+                mutate: |config| {
+                    config.enable_batching = false;
+                    config.batch_interval_ms = u64::MAX;
                 },
                 expect_ok: true,
                 expect_error_containing: "",
