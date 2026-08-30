@@ -26,6 +26,11 @@ Functions modeled (faithful to the Rust source — anchors are stable):
 - delivery-contract counter deltas      — src/coordination/mod.rs
   (``deliver_or_disconnect`` + ``finalize_closed_connection``; the SMT twin
    of ``formal/tla/DeliveryContract.tla``'s ``Conservation`` invariant)
+- ``validate_config_security`` closure  — src/config/validation.rs +
+  ``WebSocketConfig::validate`` (proof set J: every admitted config satisfies
+  the runtime safety envelope — capacity pairing, occupied-room GC deadline,
+  relay-envelope headroom, batch-deadline representability, timeout floors —
+  and the new guards are NECESSARY, each by an explicit counterexample witness)
 
 Every obligation is an ``unsat`` proof except one deliberate EXISTENCE check:
 ``naive_gap_predicate_unsound`` (set F) asserts a scenario and expects ``sat``,
@@ -578,6 +583,161 @@ def proof_set_i() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Proof set J — the config-admission closure (src/config/validation.rs
+# `validate_config_security` + `WebSocketConfig::validate`, numeric guards).
+#
+# The validator is a pure conjunction of guards over the numeric config
+# fields; this set proves the closure property that justifies it:
+# every config the validator ADMITS satisfies the runtime safety envelope
+# the guards were each written to protect (J4), the admitted set is
+# non-empty (J1: the compiled defaults pass), and the two guards added by
+# the session-197 sweep are NECESSARY — negating either admits a config
+# that passes every other guard yet violates its runtime property (J2, J3),
+# and the strict relay-envelope headroom kills a failure region equality
+# alone does not (J5, the corrected old pin).
+#
+# Domains mirror the Rust types (u64/usize/u8 fields are non-negative; the
+# `ping_timeout` field is bounded to 2^32 seconds so exact Z3 arithmetic
+# equals the Rust `saturating_mul(1000)` — saturation only bites past
+# ~4.29e9 seconds, ~136 years, where the guard is vacuous anyway).
+# ---------------------------------------------------------------------------
+def proof_set_j() -> None:
+    print("Proof set J — config-admission closure (validation.rs)")
+    # Fields (names follow src/config/*).
+    msg = Int("max_message_size")            # security.max_message_size
+    out = Int("max_outbound_message_size")   # security.max_outbound_message_size
+    sig = Int("max_signal_bytes")            # security.max_signal_bytes
+    ping = Int("ping_timeout")               # server.ping_timeout (seconds)
+    slow = Int("slow_consumer_timeout_ms")   # websocket.slow_consumer_timeout_ms
+    throttle = Int("heartbeat_throttle_secs")
+    inactive = Int("inactive_room_timeout")
+    dmp = Int("default_max_players")         # u8
+    mpl = Int("max_players_limit")           # u8
+    batching = Bool("enable_batching")
+    bim = Int("batch_interval_ms")
+    sojourn = Int("max_sojourn_ms")
+
+    nonneg = And(
+        msg >= 0, out >= 0, sig >= 0, ping >= 0, slow >= 0,
+        throttle >= 0, inactive >= 0, dmp >= 0, mpl >= 0,
+        bim >= 0, sojourn >= 0, ping <= 2**32,
+    )
+
+    max_outbound = 64 * 1024 * 1024      # defaults::MAX_OUTBOUND_MESSAGE_SIZE
+    headroom = 256                       # defaults::RELAY_ENVELOPE_HEADROOM_BYTES
+    max_batch_ms = 60_000                # websocket::MAX_BATCH_INTERVAL_MS
+
+    def accepted(relax_headroom_strictness=False):
+        headroom_guard = (
+            # The old (wrong) pin allowed equality: outbound >= msg.
+            out >= msg if relax_headroom_strictness else out >= msg + headroom
+        )
+        return And(
+            msg > 0,
+            out > 0,
+            out <= max_outbound,
+            headroom_guard,
+            sig > 0,
+            sig <= msg,
+            dmp <= mpl,                      # session-197 D2 capacity pairing
+            inactive > 0,                    # session-197 D3 occupied-room GC
+            Or(throttle == 0, throttle < inactive),
+            Or(ping == 0, slow < ping * 1000),
+            Implies(batching, And(bim > 0, bim <= max_batch_ms, sojourn > bim)),
+        )
+
+    # J1 (non-vacuity witness): the compiled defaults are admitted — the
+    # validator is not an accidental total-rejection gate. (Existence: the
+    # exact default field values must SATISFY the full accepted() set.)
+    s = Solver()
+    s.add(nonneg)
+    s.add(
+        msg == 65536, out == 8 * 1024 * 1024, sig == 16384,
+        ping == 30, slow == 5000, throttle == 30, inactive == 3600,
+        dmp == 8, mpl == 100, batching == False, bim == 16, sojourn == 15000,
+    )
+    s.add(accepted())
+    witness("J1 the compiled defaults pass the validator (non-vacuity)", s)
+
+    # Runtime safety envelope: what each guard exists to protect.
+    safety = And(
+        # S1: a near-max admitted frame plus the relay envelope still fits
+        # the outbound cap (no 1009 outbound_message_too_large total-rejection).
+        msg + headroom <= out,
+        # S2: every default-capacity room is admissible at request time.
+        dmp <= mpl,
+        # S3: the occupied-room reaping deadline is positive.
+        inactive >= 1,
+        # S4: batching deadlines stay representable (ceiling honored).
+        Implies(batching, bim <= max_batch_ms),
+        # S5: the slow-consumer park cannot outlast the ping deadline.
+        Or(ping == 0, slow < ping * 1000),
+    )
+
+    # J4 (the closure): every admitted config satisfies the envelope.
+    s = Solver()
+    s.add(nonneg, accepted())
+    s.add(Not(safety))
+    prove("J4 every admitted config satisfies the runtime safety envelope", s)
+
+    # J2 (necessity of the D2 pairing guard): without `dmp <= mpl`, a config
+    # passes every other guard yet every default-capacity room would be
+    # rejected at request time with InvalidMaxPlayers.
+    s = Solver()
+    s.add(nonneg)
+    relaxed = And(
+        msg > 0, out > 0, out <= max_outbound, out >= msg + headroom,
+        sig > 0, sig <= msg,
+        inactive > 0,
+        Or(throttle == 0, throttle < inactive),
+        Or(ping == 0, slow < ping * 1000),
+        Implies(batching, And(bim > 0, bim <= max_batch_ms, sojourn > bim)),
+    )
+    s.add(relaxed)
+    s.add(Not(dmp <= mpl))
+    witness("J2 without the capacity-pairing guard, a legal config rejects " \
+            "every default-capacity room", s)
+
+    # J3 (necessity of the D3 zero-deadline guard): without `inactive > 0`,
+    # a config passes every other guard — including the BUG-1 throttle
+    # inversion check via its throttle-disabled arm — yet room GC deletes
+    # occupied rooms in every quiet gap between activity refreshes.
+    s = Solver()
+    s.add(nonneg)
+    relaxed = And(
+        msg > 0, out > 0, out <= max_outbound, out >= msg + headroom,
+        sig > 0, sig <= msg,
+        dmp <= mpl,
+        throttle == 0,  # the exempt arm: refresh every heartbeat
+        Or(ping == 0, slow < ping * 1000),
+        Implies(batching, And(bim > 0, bim <= max_batch_ms, sojourn > bim)),
+    )
+    s.add(relaxed)
+    s.add(Not(inactive >= 1))
+    witness("J3 without the zero-deadline guard, the throttle-disabled arm " \
+            "reaps occupied rooms", s)
+
+    # J5 (necessity of the STRICT headroom): with only `outbound >= msg`
+    # (the old equality-legal pin), a config exists where a maximum-size
+    # admitted frame grows by the relay envelope and overflows the outbound
+    # cap — the exact 1009 total-rejection region the strict guard removes.
+    s = Solver()
+    s.add(nonneg)
+    relaxed = And(
+        msg > 0, out > 0, out <= max_outbound, out >= msg,
+        sig > 0, sig <= msg,
+        dmp <= mpl, inactive > 0,
+        Or(throttle == 0, throttle < inactive),
+        Or(ping == 0, slow < ping * 1000),
+        Implies(batching, And(bim > 0, bim <= max_batch_ms, sojourn > bim)),
+    )
+    s.add(relaxed)
+    s.add(Not(msg + headroom <= out))
+    witness("J5 with headroom relaxed to equality, a max frame overflows " \
+            "the outbound cap", s)
+
+
 def main() -> int:
     print("Z3 proofs — Signal Fish protocol pure-logic invariants\n")
     proof_set_a()
@@ -589,6 +749,7 @@ def main() -> int:
     proof_set_g()
     proof_set_h()
     proof_set_i()
+    proof_set_j()
     print()
     if _FAILURES:
         print(f"RESULT: {len(_FAILURES)} proof(s) FAILED: {', '.join(_FAILURES)}")
