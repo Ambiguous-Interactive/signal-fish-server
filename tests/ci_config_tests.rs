@@ -23728,10 +23728,15 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 Assert ($script:CapturedArguments -contains "HEAD") "worktree fast gate must include staged and unstaged edits"
 
                 $nul = [char]0
-                $script:StatusFixture = " M src/lib.rs${nul}M  src/main.rs${nul}MM src/server.rs${nul}?? src/new.rs${nul}R  src/new_name.rs${nul}src/old_name.rs${nul}"
+                # Tracked-query fixture carries no "?" records (the tracked
+                # status runs with --untracked-files=no); untracked files come
+                # from the sibling ls-files walk fixture.
+                $script:StatusFixture = " M src/lib.rs${nul}M  src/main.rs${nul}MM src/server.rs${nul}R  src/new_name.rs${nul}src/old_name.rs${nul}"
+                $script:UntrackedFixture = "src/new.rs${nul}"
                 function Invoke-Git {
                     param([string[]]$Arguments)
-                    [pscustomobject]@{ ExitCode = 0; Stdout = $script:StatusFixture; Stderr = ""; Output = $script:StatusFixture }
+                    $stdout = if ($Arguments -contains "ls-files") { $script:UntrackedFixture } else { $script:StatusFixture }
+                    [pscustomobject]@{ ExitCode = 0; Stdout = $stdout; Stderr = ""; Output = $stdout }
                 }
                 $paths = [string[]]@(Get-WorktreeChangedFiles)
                 Assert ($paths.Count -eq 5) "porcelain parser should return each current path once"
@@ -23740,8 +23745,18 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 Assert ($script:StagedChangedFileSet.Contains("src/new_name.rs")) "rename destination should be staged"
                 Assert ($script:WorktreeChangedFileSet.Contains("src/lib.rs")) "worktree-only edit should be tracked"
                 Assert ($script:WorktreeChangedFileSet.Contains("src/server.rs")) "mixed edit should be in the worktree set"
+                Assert ($script:WorktreeChangedFileSet.Contains("src/new.rs")) "untracked edit should be classified in the worktree set"
                 Assert ($script:WorktreeUntrackedFileSet.Contains("src/new.rs")) "untracked edit should fail closed"
                 Assert (-not ($paths -contains "src/old_name.rs")) "rename source metadata is not a current policy path"
+
+                $script:StatusFixture = "?? src/new.rs${nul}"
+                $threw = $false
+                try {
+                    Get-WorktreeChangedFiles | Out-Null
+                } catch {
+                    $threw = $true
+                }
+                Assert $threw "an untracked record in the tracked query must fail closed"
             "#,
         ])
         .current_dir(&root)
@@ -23771,17 +23786,20 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
     assert!(
         content.contains("[switch]$Worktree")
             && content.contains("Get-WorktreeChangedFiles")
+            && content.contains("\"status\", \"--porcelain=v1\", \"-z\", \"--untracked-files=no\"")
             && content
-                .contains("\"status\", \"--porcelain=v1\", \"-z\", \"--untracked-files=all\"")
+                .contains("\"ls-files\", \"--others\", \"--exclude-standard\", \"-z\", \"--\"")
             && content.contains("\"--no-renames\"")
             && content.contains("StagedChangedFileSet")
             && content.contains("WorktreeChangedFileSet")
             && content.contains("WorktreeUntrackedFileSet")
+            && content.contains("Unexpected untracked record from tracked git status query")
             && content.contains("Test-WorktreeIndexPolicyConsistency")
             && content.contains("Worktree/index policy consistency")
             && content.contains("Changed file discovery")
             && content.contains("CheckTimings.Add")
             && content.contains("PendingWorktreeStatus")
+            && content.contains("PendingWorktreeUntracked")
             && content.contains("PendingWorktreeRustDiff")
             && content.contains("ReadToEndAsync")
             && content.contains("Get-WorktreeRustPanicMacroCandidates")
@@ -23793,7 +23811,9 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
         "pre-commit runner must expose a worktree preflight mode so agents can run \
          the same cheap policies before handoff without staging files, while also \
          failing closed when staged policy paths differ from the worktree. The \
-         actual git hook remains staged-index based."
+         actual git hook remains staged-index based. Tracked and untracked \
+         discovery must stay split into concurrent status and ls-files queries \
+         with the untracked classification owned solely by the ls-files walk."
     );
 }
 

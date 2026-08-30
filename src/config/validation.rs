@@ -1294,6 +1294,45 @@ mod tests {
         );
     }
 
+    /// The coalescing-window ceiling holds through the full config admission
+    /// path, not only the `WebSocketConfig` unit seam: an oversized
+    /// `batch_interval_ms` would overflow the `Latest` front's
+    /// `front_enqueued_at + batch_interval` deadline in the batched receiver
+    /// (park-until-queue-progress), so it must be rejected at startup while
+    /// batching is enabled and stay inert when disabled.
+    #[test]
+    fn oversized_batch_interval_follows_batching_gate_through_config_admission() {
+        // (enable_batching, batch_interval_ms, max_sojourn_ms, expect_ok)
+        let cases = [
+            (true, 60_000_u64, 120_000_u64, true), // at the ceiling
+            (true, 60_001, 120_002, false),        // one past the ceiling
+            (true, u64::MAX, u64::MAX, false),     // absurd value → deadline overflow region
+            (false, u64::MAX, u64::MAX, true),     // value unread when batching is disabled
+        ];
+
+        for (enable_batching, batch_interval_ms, max_sojourn_ms, expect_ok) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.websocket.enable_batching = enable_batching;
+            config.websocket.batch_interval_ms = batch_interval_ms;
+            config.websocket.max_sojourn_ms = max_sojourn_ms;
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "enable_batching={enable_batching}, batch_interval_ms={batch_interval_ms}"
+            );
+            if !expect_ok {
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("batch_interval_ms must not exceed"),
+                    "rejection must name the ceiling: {err}"
+                );
+            }
+        }
+    }
+
     /// The inbound and outbound message caps must keep the relay envelope
     /// headroom (#396 sweep). `max_message_size` above `max_outbound_message_size`
     /// is a total-rejection configuration of exactly the class that previously
