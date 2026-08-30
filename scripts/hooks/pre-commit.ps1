@@ -50,6 +50,7 @@ $script:WorktreePolicyPathspecs = @(
     "Cargo.toml"
 ) + $script:DocVersionSyncFiles + $script:HookPolicyFiles
 $script:PendingWorktreeStatus = $null
+$script:PendingWorktreeUntracked = $null
 $script:PendingWorktreeRustDiff = $null
 $script:WorktreeDiscoveryTimer = $null
 $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!)|(#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest))"
@@ -59,34 +60,66 @@ $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unre
 # Worktree discovery is dominated by refreshing the Git index on repository
 # filesystems. Start it before PowerShell registers the policy functions below,
 # so that unavoidable I/O overlaps script setup instead of extending the hook's
-# critical path. The result is consumed exactly once by
+# critical path. The results are consumed exactly once by
 # Get-WorktreeChangedFiles; staged hooks retain their cheaper index-only query.
+function Start-PendingGit {
+    param([string[]]$GitArguments)
+
+    $startInfo = New-NativeProcessStartInfo -FileName "git" -Arguments $GitArguments
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    [pscustomobject]@{
+        Process    = $process
+        StdoutTask = $process.StandardOutput.ReadToEndAsync()
+        StderrTask = $process.StandardError.ReadToEndAsync()
+    }
+}
+
+function Wait-PendingGit {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Pending,
+        [Parameter(Mandatory = $true)][string[]]$GitArguments
+    )
+
+    try {
+        $Pending.Process.WaitForExit()
+        $stdout = $Pending.StdoutTask.GetAwaiter().GetResult()
+        $stderr = $Pending.StderrTask.GetAwaiter().GetResult()
+        if ($Pending.Process.ExitCode -ne 0) {
+            throw "git $($GitArguments -join ' ') failed:`n$stdout$stderr"
+        }
+        [pscustomobject]@{
+            ExitCode = $Pending.Process.ExitCode
+            Stdout   = $stdout
+            Stderr   = $stderr
+            Output   = $stdout + $stderr
+        }
+    } finally {
+        $Pending.Process.Dispose()
+    }
+}
+
 if (-not $SourceOnly) {
     $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
     Set-Location $script:RepoRoot
     $script:InspectWorktree = [bool]$Worktree
     if ($script:InspectWorktree) {
-        $statusArguments = @(
-            "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--no-renames", "--"
-        ) + $script:WorktreePolicyPathspecs
-        $statusStartInfo = New-NativeProcessStartInfo -FileName "git" -Arguments $statusArguments
-        $statusProcess = [System.Diagnostics.Process]::Start($statusStartInfo)
         $script:WorktreeDiscoveryTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        $script:PendingWorktreeStatus = [pscustomobject]@{
-            Process = $statusProcess
-            StdoutTask = $statusProcess.StandardOutput.ReadToEndAsync()
-            StderrTask = $statusProcess.StandardError.ReadToEndAsync()
-        }
+        # The tracked and untracked walks are independent filesystem scans;
+        # starting them as sibling processes lets the two walks overlap instead
+        # of serializing behind one full `status` refresh (issue #318: the
+        # untracked scan was a measurable fraction of worktree discovery).
+        $statusArguments = @(
+            "status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--"
+        ) + $script:WorktreePolicyPathspecs
+        $script:PendingWorktreeStatus = Start-PendingGit -GitArguments $statusArguments
+        $untrackedArguments = @(
+            "ls-files", "--others", "--exclude-standard", "-z", "--"
+        ) + $script:WorktreePolicyPathspecs
+        $script:PendingWorktreeUntracked = Start-PendingGit -GitArguments $untrackedArguments
         $rustDiffArguments = @(
             "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--", "src"
         )
-        $rustDiffStartInfo = New-NativeProcessStartInfo -FileName "git" -Arguments $rustDiffArguments
-        $rustDiffProcess = [System.Diagnostics.Process]::Start($rustDiffStartInfo)
-        $script:PendingWorktreeRustDiff = [pscustomobject]@{
-            Process = $rustDiffProcess
-            StdoutTask = $rustDiffProcess.StandardOutput.ReadToEndAsync()
-            StderrTask = $rustDiffProcess.StandardError.ReadToEndAsync()
-        }
+        $script:PendingWorktreeRustDiff = Start-PendingGit -GitArguments $rustDiffArguments
     }
 }
 
@@ -200,35 +233,31 @@ function Get-WorktreeChangedFiles {
     $script:WorktreeChangedFileSet.Clear()
     $script:WorktreeUntrackedFileSet.Clear()
 
-    # One porcelain query replaces separate staged, unstaged, and untracked
-    # discovery processes. `-z` makes paths literal and NUL-delimited; rename
-    # records carry a second NUL-delimited source path, which is skipped because
-    # policy evaluates the current destination.
+    # Two concurrent queries replace one full status walk: the tracked
+    # porcelain query skips the untracked scan entirely
+    # (--untracked-files=no) and the untracked walk runs as a sibling
+    # `ls-files --others` process, so the two independent filesystem scans
+    # overlap instead of serializing behind one status refresh. Classification
+    # parity: `ls-files --others --exclude-standard` reports exactly the files
+    # porcelain lists under "?" (ignored files stay excluded in both), and
+    # they land in the same worktree and untracked sets below. The pre-push
+    # hook already relies on this parity for its worktree preflight.
     # Policy checks only need the current paths, so skip rename similarity
     # detection. Git will report those changes as delete/add records instead.
-    $arguments = @("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--no-renames", "--") + $Pathspecs
-    if ($null -eq $script:PendingWorktreeStatus) {
-        $statusResult = Invoke-Git -Arguments $arguments
+    $statusArguments = @("status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--") + $Pathspecs
+    $untrackedArguments = @("ls-files", "--others", "--exclude-standard", "-z", "--") + $Pathspecs
+    $statusResult = if ($null -eq $script:PendingWorktreeStatus) {
+        Invoke-Git -Arguments $statusArguments
     } else {
-        $pending = $script:PendingWorktreeStatus
-        $script:PendingWorktreeStatus = $null
-        try {
-            $pending.Process.WaitForExit()
-            $stdout = $pending.StdoutTask.GetAwaiter().GetResult()
-            $stderr = $pending.StderrTask.GetAwaiter().GetResult()
-            $statusResult = [pscustomobject]@{
-                ExitCode = $pending.Process.ExitCode
-                Stdout = $stdout
-                Stderr = $stderr
-                Output = $stdout + $stderr
-            }
-        } finally {
-            $pending.Process.Dispose()
-        }
-        if ($statusResult.ExitCode -ne 0) {
-            throw "git $($arguments -join ' ') failed:`n$($statusResult.Output)"
-        }
+        Wait-PendingGit -Pending $script:PendingWorktreeStatus -GitArguments $statusArguments
     }
+    $script:PendingWorktreeStatus = $null
+    $untrackedResult = if ($null -eq $script:PendingWorktreeUntracked) {
+        Invoke-Git -Arguments $untrackedArguments
+    } else {
+        Wait-PendingGit -Pending $script:PendingWorktreeUntracked -GitArguments $untrackedArguments
+    }
+    $script:PendingWorktreeUntracked = $null
     $records = $statusResult.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
     $skipRenameSource = $false
     foreach ($record in $records) {
@@ -243,23 +272,33 @@ function Get-WorktreeChangedFiles {
         $indexStatus = [string]$record[0]
         $worktreeStatus = [string]$record[1]
         $path = $record.Substring(3)
+        if ($indexStatus -eq "?" -or $worktreeStatus -eq "?") {
+            # Unreachable with --untracked-files=no; reaching it means the
+            # tracked query argv drifted and untracked discovery is no longer
+            # owned by the sibling walk, so fail closed instead of silently
+            # double-owning the classification.
+            throw "Unexpected untracked record from tracked git status query: $record"
+        }
         if ($seenPaths.Add($path)) {
             [void]$orderedPaths.Add($path)
         }
 
-        if ($indexStatus -eq "?" -and $worktreeStatus -eq "?") {
+        if ($indexStatus -ne " ") {
+            [void]$script:StagedChangedFileSet.Add($path)
+        }
+        if ($worktreeStatus -ne " ") {
             [void]$script:WorktreeChangedFileSet.Add($path)
-            [void]$script:WorktreeUntrackedFileSet.Add($path)
-        } else {
-            if ($indexStatus -ne " ") {
-                [void]$script:StagedChangedFileSet.Add($path)
-            }
-            if ($worktreeStatus -ne " ") {
-                [void]$script:WorktreeChangedFileSet.Add($path)
-            }
         }
 
         $skipRenameSource = $indexStatus -in @("R", "C") -or $worktreeStatus -in @("R", "C")
+    }
+
+    foreach ($path in $untrackedResult.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        if ($seenPaths.Add($path)) {
+            [void]$orderedPaths.Add($path)
+        }
+        [void]$script:WorktreeChangedFileSet.Add($path)
+        [void]$script:WorktreeUntrackedFileSet.Add($path)
     }
 
     foreach ($path in $orderedPaths) {
