@@ -9220,20 +9220,27 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
 /// of files, most under ignored local directories on agent machines.
 ///
 /// Fail-closed semantics: if git is unavailable, not a repository, or the
-/// batch call fails outright, every discovered file is kept. Paths containing
-/// a newline cannot use the newline-delimited protocol and are kept unchecked;
-/// untracked-but-not-ignored paths are kept because `check-ignore` only
-/// reports ignored ones.
+/// batch call fails outright, every discovered file is kept. Untracked-but-
+/// not-ignored paths are kept because `check-ignore` only reports ignored
+/// ones.
+///
+/// Pipe discipline: stdin is written from a dedicated thread so the child can
+/// drain stdout concurrently — writing every path before reading stdout would
+/// deadlock once the stdout pipe buffer fills (large ignored trees are the
+/// exact case this batching serves). The `-z` protocol is NUL-terminated and
+/// never C-quotes pathnames, so paths with spaces, quotes, newlines, or
+/// non-UTF-8 bytes round-trip byte-exact and match the retain comparison.
 fn filter_git_ignored(files: &mut Vec<PathBuf>) {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::thread;
 
     if files.is_empty() {
         return;
     }
 
     let mut child = match Command::new("git")
-        .args(["check-ignore", "--stdin", "--"])
+        .args(["check-ignore", "--stdin", "-z", "--"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -9242,32 +9249,38 @@ fn filter_git_ignored(files: &mut Vec<PathBuf>) {
         // git missing/unspawnable: keep everything.
         Err(_) => return,
     };
-    {
-        let stdin = child.stdin.as_mut().expect("piped stdin");
-        for path in files.iter() {
-            if !path.to_string_lossy().contains('\n') {
-                let _ = writeln!(stdin, "{}", path.display());
-            }
+
+    let paths: Vec<Vec<u8>> = files
+        .iter()
+        .map(|path| path.as_os_str().as_encoded_bytes().to_vec())
+        .collect();
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = thread::spawn(move || {
+        for path in &paths {
+            let _ = stdin.write_all(path);
+            let _ = stdin.write_all(&[0]);
         }
-    }
+        // Dropping `stdin` closes the pipe so git can finish.
+    });
+
     let output = match child.wait_with_output() {
         Ok(output) => output,
         Err(_) => return,
     };
+    let _ = writer.join();
     // Exit 0 = at least one ignored path; exit 1 = none ignored. Anything else
     // is a git failure: keep everything rather than silently narrowing scope.
     if !output.status.success() && output.status.code() != Some(1) {
         return;
     }
-    let ignored: std::collections::HashSet<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_string)
+    let ignored: std::collections::HashSet<Vec<u8>> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|segment| !segment.is_empty())
+        .map(<[u8]>::to_vec)
         .collect();
 
-    files.retain(|path| {
-        path.to_string_lossy().contains('\n')
-            || !ignored.contains(&path.to_string_lossy().to_string())
-    });
+    files.retain(|path| !ignored.contains(path.as_os_str().as_encoded_bytes()));
 }
 
 fn markdown_is_heading(line: &str) -> bool {
