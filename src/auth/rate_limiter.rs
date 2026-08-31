@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// against the configured limit.
 ///
 /// The monotonic clock is read only inside the thin [`Self::check_rate_limit`]
-/// and [`Self::cleanup`] wrappers; the `*_at` variants take an explicit
+/// and `cleanup` wrappers; the `*_at` variants take an explicit
 /// timestamp so time-driven behavior is testable deterministically (see
 /// `.llm/context-testing.md`, "Injectable time").
 pub struct InMemoryRateLimiter {
@@ -245,16 +245,18 @@ mod tests {
     #[test]
     fn cleanup_removes_only_fully_expired_windows() {
         let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
-        let now = Instant::now();
         let window = Duration::from_secs(60);
+        // Build the whole timeline by ADDING offsets to an origin: subtracting
+        // from `Instant::now()` panics on a host whose monotonic clock is
+        // younger than the offsets (fresh VM/container boots).
+        let origin = Instant::now();
+        let now = origin + 3 * window;
 
-        // Fully expired: single timestamp older than the window.
+        // Fully expired: single timestamp from two windows ago.
+        limiter.check_rate_limit_at("stale", 100, origin).unwrap();
+        // Partially expired: one timestamp expired, one stamped exactly now.
         limiter
-            .check_rate_limit_at("stale", 100, now - 2 * window)
-            .unwrap();
-        // Partially expired: one timestamp expired, one still live.
-        limiter
-            .check_rate_limit_at("partial", 100, now - window)
+            .check_rate_limit_at("partial", 100, origin + 2 * window)
             .unwrap();
         limiter.check_rate_limit_at("partial", 100, now).unwrap();
         // Fully live.

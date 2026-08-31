@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Public Rust API: `auth::InMemoryRateLimiter::check_rate_limit_at` and `cleanup_at` accept an
+  explicit timestamp so embedders and tests drive sliding-window expiry deterministically; the
+  existing `check_rate_limit`/`cleanup` remain thin clock-reading wrappers (issue #495).
+- Deterministic-time convention: `.llm/context-testing.md` codifies the two sanctioned patterns
+  (tokio paused clocks for async logic, `*_at` timestamp injection for sync logic), pinned by a new
+  `tests/clock_source_scan.rs` hygiene guard that fails any new std clock import or qualified std
+  time use in server code outside a reasoned allowlist (issue #495).
 - Devcontainer agent tooling: Codex, OpenCode, and Nanocoder install to a user-owned npm
   prefix (no sudo) at the latest npm version on create and refresh on every launch through a
   registry version-check fast path that keeps launches fast and works offline; the pinned,
@@ -35,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Startup warnings: token binding over plaintext `ws://` only provides replay ordering, not
   authentication, and disabling every liveness mechanism at once leaves dead clients un-reaped
   (issues #462, #465).
+
+### Changed
+
+- Devcontainer: `opencode.json` now forwards `GITHUB_PERSONAL_ACCESS_TOKEN` into the pinned GitHub
+  MCP server's environment, so opencode-harness sessions start authenticated instead of falling
+  back to the interactive OAuth device-authorization flow every session (issue #496). The
+  pass-through is enforced by `tests/agent_tooling_guards.rs` and `scripts/check-tooling-parity.sh`
+  and documented in the `devcontainer-agent-tooling` skill and the context Tooling Parity Rules.
 - Documentation: the application UUID's meaning under allowlist versus open policy (issue #464),
   the enforced lowercase-hyphenated `operation_id` encoding, byte-unit name limits, the room rate
   limiter's fixed-window semantics, the activity reaper's enforced liveness contract, and the
