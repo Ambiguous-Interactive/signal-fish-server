@@ -205,8 +205,11 @@ fn agent_clis_refresh_to_latest_on_every_launch() {
 fn agent_cli_refresh_is_fast_by_default() {
     let contract = "The post-start CLI refresh must be gated by a registry \
                     version-check fast path: skip the reinstall when the \
-                    installed version is already current, and keep the installed \
-                    CLI when the registry is unreachable. An unconditional \
+                    installed version is already current, and an unreachable \
+                    registry must never block startup — keep the installed \
+                    CLI and skip the otherwise-doomed install of an absent \
+                    CLI instead of paying the full retry/backoff cost on \
+                    every launch. An unconditional \
                     `npm install -g <pkg>@latest` on every launch regresses \
                     container open time.";
 
@@ -216,10 +219,11 @@ fn agent_cli_refresh_is_fast_by_default() {
         &[
             "npm_registry_latest_version",
             "npm_global_installed_version",
-            "[[ -n \"$installed\" && -z \"$latest\" ]]",
+            "[[ -z \"$latest\" ]]",
             "[[ -n \"$latest\" && \"$latest\" = \"$installed\" ]]",
             "skipping reinstall",
             "Registry unreachable; keeping installed",
+            "skipping install (rerun post-create when online)",
         ],
         contract,
     );

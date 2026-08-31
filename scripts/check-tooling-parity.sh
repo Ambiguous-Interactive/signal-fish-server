@@ -305,6 +305,8 @@ assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "npm_registry_latest_version" 
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "npm_global_installed_version" "Agent tooling library reads the installed version via npm"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "skipping reinstall" "Agent tooling library skips reinstall when a CLI is current"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "Registry unreachable; keeping installed" "Agent tooling library keeps installed CLIs when the registry is unreachable"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '[[ -z "$latest" ]]' "Agent tooling library gates every offline path behind a single registry probe"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "skipping install (rerun post-create when online)" "Agent tooling library skips the doomed install of an absent CLI when offline"
 assert_contains_literal "$DEVCONTAINER_POST_START" "SIGNAL_FISH_SKIP_AGENT_REFRESH" "Post-start refresh stays skippable for constrained environments"
 
 # Nanocoder reads project .mcp.json via the `transport` key while Claude Code

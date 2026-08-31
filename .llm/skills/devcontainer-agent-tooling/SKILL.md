@@ -38,9 +38,10 @@ description: >-
    start via `.devcontainer/lib-agent-tools.sh`.
 3. **Fast launches**: the refresh is gated by a registry version-check fast
    path — probe `npm view <spec> version`, compare with `npm ls -g --json`,
-   skip the reinstall when equal, and keep the installed CLI when the
-   registry is unreachable. Never reintroduce an unconditional
-   `npm install -g <pkg>@latest` on the launch path.
+   skip the reinstall when equal, and when the registry is unreachable keep
+   the installed CLI and skip the otherwise-doomed install of an absent CLI
+   (warn and continue; rerun post-create when online). Never reintroduce an
+   unconditional `npm install -g <pkg>@latest` on the launch path.
 4. **Best-effort lifecycle**: every step in post-create/post-start warns and
    continues; a failure must never block the container from opening.
    Bootstrap functions `return`, never `exit`.
