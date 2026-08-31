@@ -578,21 +578,15 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         snapshot.transport.mixed_path_members_observed,
     );
 
-    let cache_age_seconds = {
-        let last_refresh = snapshot.dashboard_cache.last_refresh_timestamp;
-        if last_refresh == 0 {
-            0
-        } else {
-            let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
-            now.saturating_sub(last_refresh)
-        }
-    };
-    gauge(
-        &mut buf,
-        "signal_fish_dashboard_cache_age_seconds",
-        "Age of the cached dashboard metrics snapshot",
-        cache_age_seconds,
-    );
+    if snapshot.dashboard_cache.last_refresh_timestamp != 0 {
+        let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        gauge(
+            &mut buf,
+            "signal_fish_dashboard_cache_age_seconds",
+            "Age of the cached dashboard metrics snapshot (absent until the first successful refresh)",
+            now.saturating_sub(snapshot.dashboard_cache.last_refresh_timestamp),
+        );
+    }
     counter(
         &mut buf,
         "signal_fish_dashboard_cache_refreshes_total",
@@ -670,6 +664,29 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn dashboard_cache_age_gauge_appears_only_after_a_successful_refresh() {
+        let metrics = ServerMetrics::new();
+        metrics.increment_dashboard_cache_refresh_failures();
+        metrics.increment_dashboard_cache_refresh_failures();
+
+        let failing = render_prometheus_metrics(&metrics.snapshot().await);
+        assert!(
+            !failing.contains("signal_fish_dashboard_cache_age_seconds"),
+            "persistent refresh failures must not render a fresh-looking age of 0"
+        );
+        assert!(failing.contains("signal_fish_dashboard_cache_refresh_failures_total 2"));
+
+        metrics.set_dashboard_cache_last_refresh(chrono::Utc::now());
+        let refreshed = render_prometheus_metrics(&metrics.snapshot().await);
+        assert!(
+            refreshed.contains("signal_fish_dashboard_cache_age_seconds"),
+            "a successful refresh must publish the age gauge"
+        );
+        assert!(refreshed.contains("signal_fish_dashboard_cache_refreshes_total 1"));
     }
 
     #[tokio::test]
@@ -756,8 +773,8 @@ mod tests {
             "expected websocket ping RTT histogram sample line"
         );
         assert!(
-            rendered.contains("signal_fish_dashboard_cache_age_seconds"),
-            "expected dashboard cache age gauge"
+            !rendered.contains("signal_fish_dashboard_cache_age_seconds"),
+            "dashboard cache age must not claim 0 (fresh) before the first successful refresh"
         );
         assert!(
             rendered.contains("signal_fish_dashboard_cache_refreshes_total 0"),

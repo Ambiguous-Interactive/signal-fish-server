@@ -342,6 +342,13 @@ fn validate_token_binding(
         if binding.subprotocol.trim().is_empty() {
             anyhow::bail!("security.transport.token_binding.subprotocol must not be empty");
         }
+        if binding.subprotocol != binding.subprotocol.trim() {
+            anyhow::bail!(
+                "security.transport.token_binding.subprotocol must not carry leading or \
+                 trailing whitespace: no client offer can ever match '{}'",
+                binding.subprotocol.trim()
+            );
+        }
         if !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(
             &binding.subprotocol,
         ) {
@@ -798,6 +805,27 @@ mod tests {
                 .expect_err("reserved protocol versions must match the v2 wire contract");
             assert!(error.to_string().contains("reserved protocol namespace"));
             assert!(error.to_string().contains("signalfish.tokenbinding.v2"));
+        }
+    }
+
+    #[test]
+    fn enabled_token_binding_rejects_whitespace_padded_subprotocols() {
+        for subprotocol in [
+            " example.game.token-binding",
+            "example.game.token-binding ",
+            " signalfish.tokenbinding.v2 ",
+        ] {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.transport.token_binding.enabled = true;
+            config.security.transport.token_binding.subprotocol = subprotocol.to_string();
+
+            let error = validate_config_security(&config)
+                .expect_err("a padded subprotocol can never match a client offer");
+            assert!(
+                error.to_string().contains("leading or trailing whitespace"),
+                "unexpected error for {subprotocol:?}: {error}"
+            );
         }
     }
 
