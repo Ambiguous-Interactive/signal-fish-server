@@ -1902,12 +1902,19 @@ async fn create_token_binding_test_server(
         test_server_config(),
         ProtocolConfig::default(),
         TransportSecurityConfig {
+            // Constructor validation (shared with the loaded-config validator)
+            // requires active built-in TLS for required token binding; this
+            // test serves plain HTTP through its own router, so the flag only
+            // satisfies the construction contract.
+            tls: signal_fish_server::config::TlsServerConfig {
+                enabled: true,
+                ..signal_fish_server::config::TlsServerConfig::default()
+            },
             token_binding: TokenBindingConfig {
                 enabled: true,
                 required,
                 ..TokenBindingConfig::default()
             },
-            ..TransportSecurityConfig::default()
         },
     )
     .await
