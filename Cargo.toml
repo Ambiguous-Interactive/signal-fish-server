@@ -110,10 +110,11 @@ semver = "1.0"
 # Parse configured browser origins with the URL Standard's canonical host,
 # port, and IP-address rules before comparing their serialized form exactly.
 url = "2.5"
-# Canonical Unicode composition (NFC) for player-name identity comparison:
-# without it, canonically decomposed (NFD) spellings of a taken name pass the
-# uniqueness check and join rooms under a visually identical name.
+# Canonical Unicode caseless matching for player-name identity. This combines
+# canonical normalization with full, non-Turkic folding without conflating
+# compatibility-only equivalents.
 unicode-normalization = "0.1"
+icu_casemap = { version = "2.3", default-features = false, features = ["compiled_data"] }
 
 # Error handling & logging
 anyhow = "1.0"

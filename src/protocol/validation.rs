@@ -146,15 +146,18 @@ pub fn validate_player_name_with_config(name: &str, config: &ProtocolConfig) -> 
     Ok(())
 }
 
-/// Case-insensitive, canonically-composed identity key for player names.
+/// Return whether player names share one case-insensitive, canonically
+/// equivalent identity.
 ///
 /// Uniqueness must compare what players *see*, not raw bytes: the same visible
 /// name can have byte-distinct spellings, and comparing raw (or
 /// lowercased-raw) bytes let an impersonator join a room under a visually
-/// identical name while it was "taken". Composing to NFC first collapses those
-/// spellings to one byte string; the subsequent lowercase keeps the historical
-/// ASCII case-insensitivity. The transform is deterministic, so byte-equal
-/// inputs stay byte-equal after it.
+/// identical name while it was "taken". Canonical normalization before and
+/// after full Unicode case folding collapses those spellings while handling
+/// both ordinary case differences and fold-only equivalents such as `ß`/`ss`
+/// and the Greek sigma forms. This deliberately does not apply compatibility
+/// normalization, so unrelated compatibility characters remain distinct
+/// identities.
 ///
 /// Reachability note: under the default charset rules the live gap is
 /// Hangul — precomposed syllables are alphanumeric while their decomposed
@@ -164,22 +167,28 @@ pub fn validate_player_name_with_config(name: &str, config: &ProtocolConfig) -> 
 /// operator who allowlists such marks via `allowed_symbols` /
 /// `additional_allowed_characters` reopens that spelling surface, so the
 /// comparison must stay composition-aware for every configuration.
-fn canonical_player_name_key(name: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    name.nfc().collect::<String>().to_lowercase()
-}
-
 pub fn validate_player_name_uniqueness(
     name: &str,
     existing_players: &HashMap<PlayerId, PlayerInfo>,
 ) -> Result<(), String> {
-    let normalized_name = canonical_player_name_key(name);
+    let name_key = canonical_player_name_key(name);
     for player in existing_players.values() {
-        if canonical_player_name_key(&player.name) == normalized_name {
+        if canonical_player_name_key(&player.name) == name_key {
             return Err("Player name already exists in this room".to_string());
         }
     }
     Ok(())
+}
+
+fn canonical_player_name_key(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
+    // Unicode canonical caseless matching (D145): canonical decomposition,
+    // full default/non-Turkic case folding, then canonical decomposition
+    // again because folding can introduce a new decomposed sequence.
+    let decomposed: String = name.nfd().collect();
+    let folded = icu_casemap::CaseMapper::new().fold_string(&decomposed);
+    folded.chars().nfd().collect()
 }
 
 pub fn validate_max_players_with_config(
@@ -362,6 +371,20 @@ mod tests {
         let collisions: &[(&str, &str)] = &[
             ("Player1", "player1"),
             ("Player1", "PLAYER1"),
+            // Full Unicode case folding is broader than lowercase mapping:
+            // sharp-s expands to `ss`, and both Greek sigma forms fold to the
+            // same identity key.
+            ("Straße", "STRASSE"),
+            ("οσ", "ΟΣ"),
+            ("ος", "ΟΣ"),
+            // Folding can itself produce a decomposed sequence, so canonical
+            // equivalence must also be restored after the fold.
+            ("ΐ", "Ϊ\u{0301}"),
+            // Unicode 17 additions pin the casemap data version rather than
+            // relying on the compiler's independently evolving character
+            // properties.
+            ("\u{16ea0}", "\u{16ebb}"),
+            ("\u{a7ce}", "\u{a7cf}"),
             (NFC_CAFE, NFD_CAFE),
             (NFD_CAFE, NFC_CAFE),
             (NFC_HANGUL, NFD_HANGUL),
@@ -389,23 +412,30 @@ mod tests {
             );
         }
 
-        // A genuinely distinct name never collides.
-        let mut players = HashMap::new();
-        players.insert(
-            PlayerId::new_v4(),
-            PlayerInfo {
-                id: PlayerId::new_v4(),
-                name: NFC_CAFE.to_string(),
-                is_authority: false,
-                is_ready: false,
-                connected_at: chrono::Utc::now(),
-                connection_info: None,
-                epoch: None,
-                seq: None,
-                region_id: crate::protocol::types::DEFAULT_REGION_ID.to_string(),
-            },
-        );
-        assert!(validate_player_name_uniqueness("cafe", &players).is_ok());
+        // Genuinely distinct names never collide. Full-width A is a
+        // compatibility equivalent of ASCII A, but not a canonical
+        // equivalent; this pins the deliberate choice of NFC over NFKC.
+        for (member, joiner) in [(NFC_CAFE, "cafe"), ("Ａ", "A"), ("I", "ı"), ("İ", "i")] {
+            let mut players = HashMap::new();
+            players.insert(
+                PlayerId::new_v4(),
+                PlayerInfo {
+                    id: PlayerId::new_v4(),
+                    name: member.to_string(),
+                    is_authority: false,
+                    is_ready: false,
+                    connected_at: chrono::Utc::now(),
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: crate::protocol::types::DEFAULT_REGION_ID.to_string(),
+                },
+            );
+            assert!(
+                validate_player_name_uniqueness(joiner, &players).is_ok(),
+                "joiner {joiner:?} must stay distinct from member {member:?}"
+            );
+        }
     }
 
     #[test]
