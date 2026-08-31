@@ -9211,18 +9211,63 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
     // local artifacts (e.g. the developer-notes `progress/` directory) must
     // not fail the linters on machines that have them. If git is unavailable,
     // keep every discovered file so the checks stay fail-closed.
-    files.retain(|path| !is_git_ignored(path));
+    filter_git_ignored(&mut files);
     files
 }
 
-/// Whether `path` matches the repository's ignore rules (best-effort).
-fn is_git_ignored(path: &Path) -> bool {
-    std::process::Command::new("git")
-        .args(["check-ignore", "-q", "--"])
-        .arg(path)
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+/// Drop gitignored paths from `files` with ONE batched `git check-ignore`
+/// invocation: a per-path spawn costs ~10-25ms and these scans visit hundreds
+/// of files, most under ignored local directories on agent machines.
+///
+/// Fail-closed semantics: if git is unavailable, not a repository, or the
+/// batch call fails outright, every discovered file is kept. Paths containing
+/// a newline cannot use the newline-delimited protocol and are kept unchecked;
+/// untracked-but-not-ignored paths are kept because `check-ignore` only
+/// reports ignored ones.
+fn filter_git_ignored(files: &mut Vec<PathBuf>) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if files.is_empty() {
+        return;
+    }
+
+    let mut child = match Command::new("git")
+        .args(["check-ignore", "--stdin", "--"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        // git missing/unspawnable: keep everything.
+        Err(_) => return,
+    };
+    {
+        let stdin = child.stdin.as_mut().expect("piped stdin");
+        for path in files.iter() {
+            if !path.to_string_lossy().contains('\n') {
+                let _ = writeln!(stdin, "{}", path.display());
+            }
+        }
+    }
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(_) => return,
+    };
+    // Exit 0 = at least one ignored path; exit 1 = none ignored. Anything else
+    // is a git failure: keep everything rather than silently narrowing scope.
+    if !output.status.success() && output.status.code() != Some(1) {
+        return;
+    }
+    let ignored: std::collections::HashSet<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+
+    files.retain(|path| {
+        path.to_string_lossy().contains('\n')
+            || !ignored.contains(&path.to_string_lossy().to_string())
+    });
 }
 
 fn markdown_is_heading(line: &str) -> bool {

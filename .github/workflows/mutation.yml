@@ -202,7 +202,7 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.2
         with:
           shared-key: "mutants"
-          # The baseline job owns the save; shards restore only (avoids 40 shards
+          # The baseline job owns the save; shards restore only (avoids 41 shards
           # racing to write the same key).
           save-if: false
 

@@ -241,8 +241,9 @@ npm_registry_latest_version() {
 npm_global_installed_version() {
     local pkg="$1"
     # The package name is appended AFTER the -e script, so node exposes it as
-    # process.argv[1] (argv[0] is the node executable; argv[1] is only the
-    # literal "[eval]" when no script argument follows).
+    # process.argv[1] (argv[0] is the node executable). Note: some historical
+    # node versions put the literal "[eval]" at argv[1] instead — if that ever
+    # resurfaces, this lookup must switch to process.argv.slice(2).
     npm ls --global --json --depth=0 2>/dev/null | node -e '
         let raw = "";
         process.stdin.setEncoding("utf8");
