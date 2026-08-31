@@ -116,44 +116,60 @@ fn strip_line_comment(line: &str) -> &str {
     line
 }
 
-/// True if the source line references a `std` time type: an import naming
-/// `Instant`/`SystemTime` (including rustfmt's multi-line brace form, which
-/// is detected by an unclosed brace), the glob form `use std::time::*;`, an
-/// alias form `use std::time as ...`, or a qualified `std::time::...` use.
-/// Bare `Instant::now()` is deliberately not flagged: depending on the file's
-/// imports it may resolve to the pause-controllable tokio type, which is the
-/// sanctioned async pattern.
+/// True if the source line references a `std` time type. Imports are flagged
+/// unless the imported surface is provably Duration-only: any `use ...
+/// std::time ...` statement is examined wherever it appears on the line
+/// (including `pub use` re-exports and statements nested in `mod { ... }`),
+/// and the glob (`::*`), alias (` as X`), module (`use std::time;`), brace-
+/// `self`, unclosed-brace (rustfmt multi-line), and `Instant`/`SystemTime`
+/// naming forms all flag. Qualified `std::time::Instant`/`SystemTime` uses
+/// anywhere on the line flag too. Bare `Instant::now()` is deliberately not
+/// flagged: depending on the file's imports it may resolve to the
+/// pause-controllable tokio type, which is the sanctioned async pattern.
+///
+/// Known line-scanning limits (accepted, safe-direction or absent today):
+/// a `//` pair inside a non-URL string literal can hide a later real use,
+/// and a multi-line block comment mentioning the types false-positives.
 fn references_std_time_type(line: &str) -> bool {
     let code = strip_line_comment(line);
-    let trimmed = code.trim();
-    if let Some(import) = trimmed.strip_prefix("use std::time") {
-        let rest = import.trim_start();
-        if rest.starts_with("::*") {
-            // Glob import (`use std::time::*;`): the imported surface cannot
-            // be proven Duration-only, so flag it.
-            return true;
-        }
-        if let Some(names) = rest.strip_prefix("::") {
-            // `use std::time::Duration;` or `use std::time::{Duration, Instant};`
-            if names.contains('{') {
-                // A brace import is provably Duration-only only when it
-                // closes on this line without naming a time type; an unclosed
-                // `use std::time::{` (rustfmt multi-line style) hides the
-                // names on later lines and must be flagged.
-                let closes_on_line = names.contains('}');
-                let names_time = names.contains("Instant") || names.contains("SystemTime");
-                return !closes_on_line || names_time;
-            }
-            return names.contains("Instant") || names.contains("SystemTime");
-        }
-        if rest.starts_with("as ") {
-            // Alias import (`use std::time as stdtime;`): same problem as the
-            // glob form.
-            return true;
-        }
-        return false;
+    if code.contains("std::time::Instant") || code.contains("std::time::SystemTime") {
+        return true;
     }
-    code.contains("std::time::Instant") || code.contains("std::time::SystemTime")
+    // A glob re-export in any position (`pub use std::time::*;`) imports the
+    // types without naming them.
+    if code.contains("std::time::*") {
+        return true;
+    }
+    let Some(statement_start) = code.find("use ") else {
+        return false;
+    };
+    let statement = &code[statement_start + "use ".len()..];
+    let Some(import_position) = statement.find("std::time") else {
+        return false;
+    };
+    let rest = statement[import_position + "std::time".len()..].trim_start();
+    if rest.starts_with("::*")
+        || rest.starts_with(" as ")
+        || rest.starts_with("as ")
+        || rest.starts_with(';')
+    {
+        // Glob, alias, or plain module import: the imported surface cannot
+        // be proven Duration-only.
+        return true;
+    }
+    let Some(names) = rest.strip_prefix("::") else {
+        return false;
+    };
+    if names.contains('{') {
+        // A brace import is provably Duration-only only when it closes on
+        // this line without naming a time type or `self` (which imports the
+        // module itself); an unclosed `use std::time::{` (rustfmt
+        // multi-line style) hides the names on later lines.
+        let closes_on_line = names.contains('}');
+        let names_time = names.contains("Instant") || names.contains("SystemTime");
+        return !closes_on_line || names_time || names.contains("self");
+    }
+    names.contains("Instant") || names.contains("SystemTime")
 }
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -200,10 +216,14 @@ fn server_src_reads_time_only_through_injectable_or_tokio_seams() {
         let lines: Vec<&str> = content.lines().collect();
         for (line_number, line) in lines.iter().enumerate() {
             if line.trim() == "#[cfg(test)]" && test_module_start.is_none() {
+                // The region starts only if the next non-blank,
+                // non-comment, non-attribute line declares a `mod`. A
+                // struct-field attribute (e.g. a test-only field mid-file)
+                // does not start the test region.
                 let next_is_mod = lines[line_number + 1..]
                     .iter()
                     .map(|l| l.trim())
-                    .find(|l| !l.is_empty())
+                    .find(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with("#["))
                     .is_some_and(|next| next.starts_with("mod "));
                 if next_is_mod {
                     test_module_start = Some(line_number);
@@ -280,6 +300,15 @@ fn classifier_matches_imports_and_qualified_uses_only() {
     // Glob and alias imports hide the surface.
     assert!(references_std_time_type("use std::time::*;"));
     assert!(references_std_time_type("use std::time as stdtime;"));
+    // Module import (`use std::time;`) enables `time::Instant::now()` too.
+    assert!(references_std_time_type("use std::time;"));
+    // Brace-self imports the module with the same capability.
+    assert!(references_std_time_type("use std::time::{self, Duration};"));
+    // Re-export and nested-statement positions are still seen.
+    assert!(references_std_time_type("pub use std::time::*;"));
+    assert!(references_std_time_type(
+        "mod m { use std::time::Instant; }"
+    ));
     // Qualified uses.
     assert!(references_std_time_type(
         "let started = std::time::Instant::now();"
