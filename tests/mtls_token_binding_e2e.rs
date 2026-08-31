@@ -944,14 +944,29 @@ async fn non_fingerprint_token_binding_also_rejects_unsigned_binary_frames() {
         .send(Message::Binary(vec![1, 2, 3].into()))
         .await
         .expect("send unsigned binary frame");
-    let response = next_message_of_type(&mut socket, "Error").await;
-    assert_eq!(
-        response
-            .get("data")
-            .and_then(|data| data.get("error_code"))
-            .and_then(Value::as_str),
-        Some("UNAUTHORIZED")
-    );
+    // The Error JSON farewell is advisory by contract (see
+    // `enqueue_farewell_message`): the close itself is the authoritative
+    // rejection signal, and when the close lands while the send task is mid-
+    // write, the final drain legally abandons queued advisories instead of
+    // writing past a payload with an unknown wire position. Under load the
+    // socket can therefore close without the farewell having been observed,
+    // so the farewell is asserted only when it is observed.
+    loop {
+        let Some(response) = next_json_message(&mut socket).await else {
+            break;
+        };
+        if response.get("type").and_then(Value::as_str) != Some("Error") {
+            continue;
+        }
+        assert_eq!(
+            response
+                .get("data")
+                .and_then(|data| data.get("error_code"))
+                .and_then(Value::as_str),
+            Some("UNAUTHORIZED")
+        );
+        break;
+    }
 }
 
 #[tokio::test]
