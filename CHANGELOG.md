@@ -65,8 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `signal_fish_dashboard_cache_age_seconds` is absent until the dashboard cache's first successful
   refresh instead of reporting a misleading fresh-looking `0` (issue #396).
 
-### Changed
-
 - **Breaking (Rust API):** Reject safety-critical invalid settings passed directly to
   `EnhancedGameServer::new` before storage initialization or background-task startup, matching
   the runtime invariants enforced for file-loaded configuration; embedders must correct invalid
