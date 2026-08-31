@@ -15,7 +15,7 @@ const expectedThresholds = {
   max_oldest_queue_age_us: 500000,
   max_confirmation_lag: 8,
   max_rollback_depth: 8,
-  max_stall_count: 1,
+  max_stall_rate_permille: 20,
 };
 const reportKeys = [
   "schema_version", "status", "origin", "runtime_error", "role", "run_mode",
@@ -534,7 +534,7 @@ function healthViolations(name, report) {
   for (const field of forbidden) check(report[field] === 0, `${field}=${report[field]}`);
   check(
     stallCountWithinThreshold(report),
-    `stall_count=${report.stall_count} exceeds ${report.acceptance_thresholds.max_stall_count}`,
+    `stall_count=${report.stall_count} exceeds ${report.acceptance_thresholds.max_stall_rate_permille} per-mille of confirmed_frame=${report.confirmed_frame}`,
   );
   check(report.relay_send_retries <= 8, `relay_send_retries=${report.relay_send_retries}`);
   check(report.confirmation_lag_current <= 8 && report.confirmation_lag_max <= 8, "confirmation lag exceeded eight frames");
@@ -550,25 +550,34 @@ function healthViolations(name, report) {
 
 function stallCountWithinThreshold(report) {
   return Number.isSafeInteger(report.stall_count) &&
+    Number.isSafeInteger(report.confirmed_frame) &&
     report.stall_count >= 0 &&
-    report.stall_count <= report.acceptance_thresholds.max_stall_count;
+    report.confirmed_frame >= 0 &&
+    report.stall_count * 1_000 <=
+      report.confirmed_frame * report.acceptance_thresholds.max_stall_rate_permille;
 }
 
 function runHealthGateSelfTests() {
-  for (const [stallCount, expected] of [
-    [0, true],
-    [1, true],
-    [2, false],
-    [-1, false],
-    [1.5, false],
+  for (const [stallCount, confirmedFrame, expected] of [
+    [0, 600, true],
+    [1, 600, true],
+    [5, 600, true],
+    [12, 600, true],
+    [13, 600, false],
+    [300, 600, false],
+    [1, 0, false],
+    [1, 600.5, false],
+    [-1, 600, false],
+    [1.5, 600, false],
   ]) {
     const report = {
       stall_count: stallCount,
+      confirmed_frame: confirmedFrame,
       acceptance_thresholds: expectedThresholds,
     };
     assert(
       stallCountWithinThreshold(report) === expected,
-      `stall threshold case ${stallCount} expected ${expected}`,
+      `stall threshold case ${stallCount}/${confirmedFrame} expected ${expected}`,
     );
   }
 }

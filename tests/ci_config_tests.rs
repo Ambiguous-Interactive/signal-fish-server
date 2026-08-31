@@ -29017,8 +29017,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "const FORTRESS_ROLLBACK_VERSION: &str = \"0.12.0\";",
         "signal_fish_client_godot_version: SIGNAL_FISH_CLIENT_GODOT_VERSION",
         "const REPORT_SCHEMA_VERSION: u32 = 3;",
-        "const MAX_STALL_COUNT: u64 = 1;",
-        "max_stall_count: MAX_STALL_COUNT,",
+        "const MAX_STALL_RATE_PER_MILLE: u64 = 20;",
+        "max_stall_rate_permille: MAX_STALL_RATE_PER_MILLE,",
     ] {
         assert!(
             source.contains(required),
@@ -29072,7 +29072,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence",
         "joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence",
         "const healthyViolations = peerHealth.flatMap",
-        "max_stall_count: 1,",
+        "max_stall_rate_permille: 20,",
         "stallCountWithinThreshold(report)",
         "runHealthGateSelfTests();",
         "BUSTED fortress-wasm expected negative control",

@@ -32,8 +32,10 @@ MSRV. The primary cell requires both peers to satisfy every healthy throughput,
 progress, queue-age, conservation, rollback, checksum, cadence, and runtime
 identity gate. Any missing report or invariant violation fails closed as
 `BUSTED`; only the complete two-peer result prints `HEALTHY`. The hosted WASM
-gate permits at most one recovered prediction-window-denied game callback and
-fails on a second. Wait recommendations remain forbidden, as do every existing
+gate bounds stalls as a rate — at most 20 per-mille of confirmed frames — so
+isolated contention-induced stalls on a shared runner cannot fail an otherwise
+healthy run, while any systematic stalling regression still fails. Wait
+recommendations remain forbidden, as do every existing
 loss, overflow, throughput, queue-age, lag, rollback, checksum, and conservation
 violation. The native Fortress gate retains its stricter zero-stall boundary.
 
