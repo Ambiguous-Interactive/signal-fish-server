@@ -78,6 +78,30 @@ contention, available CPU/ports, wall-clock, randomness, or test-execution order
   ephemeral port / temp dir / id per test; never share mutable global state.
 - No `Math.random` / `Instant::now`-derived values in assertions; pin fixtures.
 
+## Injectable time (clock convention)
+
+Production time-driven logic must stay deterministic to test. Server code uses
+exactly two sanctioned patterns; both are pinned by `tests/clock_source_scan.rs`:
+
+1. **Async decision logic uses `tokio::time::Instant`** (not
+   `std::time::Instant`), so tests run under
+   `#[tokio::test(start_paused = true)]` and drive time with
+   `tokio::time::advance(...)` — virtual time, no sleeps. This is the default
+   for anything the async runtime schedules (deadlines, reapers, leases,
+   batching windows).
+2. **Sync decision logic reads the clock only in a thin public wrapper** that
+   delegates to an `*_at(..., now: Instant)` / `record_at(..., now)` variant;
+   tests call the injected variant with explicit timestamps (e.g.
+   `src/auth/rate_limiter.rs`, `src/websocket/upgrade_rejection_log.rs`,
+   `src/websocket/metrics.rs`).
+
+Sanctioned exceptions (allowlisted in the scan guard): a **wall-clock
+`SystemTime` stamp for log lines** (`src/server/shutdown.rs`) and test-module
+timing loops. Do not introduce a new std clock read in production decision
+paths — extend the injected-seam pattern instead. Do not add `#[cfg(test)]`
+constructor overrides (window/duration shrinking) to fake time control; they
+hide the real timing behavior the tests claim to cover.
+
 **If a flake cannot be eliminated conclusively in the same change**, it is
 **never left silent**: record it in `PLAN.md` with (1) the observed symptom and
 exact reproduction conditions, (2) the root-cause hypothesis, (3) the mitigation
