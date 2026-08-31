@@ -57,4 +57,4 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Check spelling with typos
-        uses: crate-ci/typos@v1.49.0
+        uses: crate-ci/typos@v1.50.0
