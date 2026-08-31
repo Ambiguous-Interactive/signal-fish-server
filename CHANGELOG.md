@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must be positive. A mispairing or zero previously passed `--validate-config` and then rejected
   every default-capacity room with `InvalidMaxPlayers` at request time, or let room GC delete
   occupied rooms between activity refreshes (issue #396).
+- Startup validation rejects `security.transport.token_binding.subprotocol` values with leading or
+  trailing whitespace: the padded name could never match a client offer, silently disabling
+  optional token binding or locking out required binding (issue #396).
+- `signal_fish_dashboard_cache_age_seconds` is absent until the dashboard cache's first successful
+  refresh instead of reporting a misleading fresh-looking `0` (issue #396).
 
 ### Changed
 
@@ -197,6 +202,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignores; new clients should omit it (issue #393).
 - Reference clients re-issue `StartGame` after readiness invalidations instead of latching after
   one send, unblocking lobbies exactly when the server's readiness re-check mattered (issue #449).
+- In-memory coordination-lock leases expire on the monotonic clock, so wall-clock steps (NTP
+  corrections, host suspend/resume) can no longer silently extend a held join-admission lease into
+  same-code `ROOM_CREATION_FAILED` retry exhaustion, or expire a live lease mid-critical-section
+  (issue #396).
+- The Fortress WASM browser interop gate bounds stalls as a rate (at most 20 per-mille of confirmed
+  frames) instead of an absolute count of one, so isolated shared-runner contention can no longer
+  fail an otherwise-healthy released run while systematic stalling regressions still do (issue
+  #488).
 
 ### Security
 

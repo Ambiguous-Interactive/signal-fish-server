@@ -98,6 +98,14 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 - This policy applies to every repository agent entrypoint (Codex, Claude, and
   GitHub Copilot).
+- GitHub authentication comes from the connected VS Code GitHub
+  connector/extension session: `.vscode/mcp.json` signs the pinned
+  `github-mcp-server` with `GITHUB_PERSONAL_ACCESS_TOKEN` injected through
+  `remoteEnv`, so harnesses running under the connector operate authenticated.
+  When a GitHub MCP tool call surfaces the server's device-authorization
+  fallback instead, retry the call through the connector's session rather than
+  treating the prompt as a blocker or downgrading to unauthenticated REST
+  reads for write operations.
 - Use local `git` for branch management, staging, commits, and pushes.
 - Use the connected VS Code GitHub extension / GitHub app for pull-request
   creation, metadata, comments, reviewer requests, review inspection, and every
