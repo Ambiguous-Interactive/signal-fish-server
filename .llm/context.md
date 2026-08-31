@@ -141,6 +141,39 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   avoid slow no-cache rebuild regressions.
 - Keep `.devcontainer/post-create.sh` cargo warm-up opt-in via
   `SIGNAL_FISH_WARM_CARGO_CHECK`; default path should stay fast.
+- Keep the user-owned npm prefix (`NPM_CONFIG_PREFIX=/home/vscode/.npm-global`)
+  RUNTIME-ONLY: set in `.devcontainer/devcontainer.json` `containerEnv` and
+  re-applied by `configure_user_npm_prefix` — never via Dockerfile `ENV`.
+  Devcontainer features install in layers appended after the Dockerfile, and
+  the nvm-based Node feature aborts its install when `NPM_CONFIG_PREFIX` (or
+  `PREFIX`) is already set, failing every image build.
+  `npm install -g` must never require sudo.
+- Keep `.github/workflows/devcontainer-build.yml` building the devcontainer
+  image on `.devcontainer/**` changes and on a monthly schedule: feature
+  installs only fail at image-build time, so this workflow is the only check
+  that catches devcontainer-only breakage and upstream base-image/feature
+  drift.
+- Keep the terminal agent CLIs (OpenAI Codex, OpenCode, Nanocoder) installed
+  and refreshed through `.devcontainer/lib-agent-tools.sh` (sourced by
+  `post-create.sh` on create and `post-start.sh` on every launch) and through
+  the user-owned npm prefix (`NPM_CONFIG_PREFIX=/home/vscode/.npm-global`) —
+  `npm install -g` must never require sudo.
+- Keep the launch-path CLI refresh behind the registry version-check fast
+  path (`npm view` vs `npm ls -g`, offline-safe, skip when current) — never
+  reintroduce an unconditional `npm install -g <pkg>@latest` on container
+  start; lifecycle scripts stay best-effort (`return`, never `exit`).
+- Keep the pinned GitHub MCP server (`GITHUB_MCP_VERSION` in
+  `.devcontainer/Dockerfile`) wired into every harness:
+  `.vscode/mcp.json` (VS Code + Copilot), `.mcp.json` (Claude Code +
+  Nanocoder), `opencode.json` (OpenCode), and `~/.codex/config.toml`
+  (written idempotently for Codex). It authenticates via
+  `GITHUB_PERSONAL_ACCESS_TOKEN` passed through `remoteEnv`. The shared
+  `.mcp.json` must keep BOTH keys — `type` (Claude Code) and `transport`
+  (Nanocoder) — or one harness silently loses GitHub.
+- Any change to the agent-tooling contract (npm prefix, CLI refresh, MCP
+  wiring) must update `tests/agent_tooling_guards.rs`,
+  `scripts/check-tooling-parity.sh`, and the
+  `devcontainer-agent-tooling` skill together in the same commit.
 - Run `bash scripts/check-tooling-parity.sh` after tooling changes.
 
 ---

@@ -250,40 +250,41 @@ Bash-specific features silently fail or produce unexpected results.
 ### Common Pitfalls
 
 ```dockerfile
-# ❌ WRONG: Brace expansion is bash-only — /bin/sh treats it as a literal string
+# ❌ WRONG: brace expansion and [[ ]] are bash-only — /bin/sh treats them literally
 RUN rm -rf /path/{cache,src}
-
-# ✅ CORRECT: Spell out each path explicitly
-RUN rm -rf /path/cache /path/src
-```
-
-```dockerfile
-# ❌ WRONG: [[ ]] is bash-only
 RUN if [[ -f /app/config.json ]]; then echo "found"; fi
 
-# ✅ CORRECT: Use single brackets (POSIX)
+# ✅ CORRECT: spell out each path explicitly; use single brackets (POSIX)
+RUN rm -rf /path/cache /path/src
 RUN if [ -f /app/config.json ]; then echo "found"; fi
 ```
 
 ### Validation
 
-Run `scripts/check-dockerfile-portability.sh` to catch bash-isms in Dockerfiles.
-This check runs automatically in the pre-commit hook when Dockerfiles are staged.
+`scripts/check-dockerfile-portability.sh` catches bash-isms in Dockerfiles and
+runs automatically in the pre-commit hook when Dockerfiles are staged.
 
 ### If You Need Bash
 
-If a RUN command genuinely requires bash, set the shell explicitly:
+If a RUN command genuinely requires bash, set the shell explicitly, or use
+`bash -c` for a single command:
 
 ```dockerfile
 SHELL ["/bin/bash", "-c"]
 RUN echo "Now bash features like {a,b} work"
-```
-
-Or use `bash -c` for a single command:
-
-```dockerfile
 RUN bash -c 'rm -rf /path/{cache,src}'
 ```
+
+---
+
+## Devcontainer Features and Build-Time ENV
+
+Devcontainer features install in image layers appended **after** the
+Dockerfile, so Dockerfile `ENV` values are set while feature install scripts
+run — and some features abort on specific variables: exporting
+`NPM_CONFIG_PREFIX`/`PREFIX` makes the nvm Node feature fail every image
+build. Set such variables at runtime only (`containerEnv`); see
+[Devcontainer Agent Tooling](../devcontainer-agent-tooling/SKILL.md).
 
 ---
 

@@ -1,0 +1,17 @@
+// GitHub MCP server for VS Code and GitHub Copilot (agent mode).
+// The server binary is pinned and checksum-verified in .devcontainer/Dockerfile.
+// The token comes from the container environment (see remoteEnv in
+// .devcontainer/devcontainer.json); VS Code expands ${env:VAR} at start.
+// Limit the token surface per project with `--toolsets` (see the
+// github/github-mcp-server README) if the default toolset list is too broad.
+{
+    "servers": {
+        "github": {
+            "command": "github-mcp-server",
+            "args": ["stdio"],
+            "env": {
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_PERSONAL_ACCESS_TOKEN}"
+            }
+        }
+    }
+}

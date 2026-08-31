@@ -14,6 +14,12 @@ ARG ACTIONLINT_ARM64_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7
 ARG LYCHEE_VERSION=0.24.2
 ARG LYCHEE_X86_64_MUSL_SHA256=73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5
 ARG LYCHEE_AARCH64_MUSL_SHA256=5d0b0e3aeab240f41920c633a6eaf97599be6eedda034b36e858ede7dba5e535
+# Official GitHub MCP server (github/github-mcp-server), pinned for reproducible
+# builds. Wired into every agent harness via .vscode/mcp.json, .mcp.json,
+# opencode.json, and ~/.codex/config.toml (see .devcontainer/post-create.sh).
+ARG GITHUB_MCP_VERSION=1.11.0
+ARG GITHUB_MCP_X86_64_SHA256=3b73bb7be0c8b043f861e90410df8ebdfc71b83128c54ced75fb32c4ff697fc5
+ARG GITHUB_MCP_ARM64_SHA256=3f7615254f6b619469c471c5d275029299ff7431c93d6075496ea4b2eec020cb
 ARG POWERSHELL_VERSION=7.6.2
 ARG POWERSHELL_X64_SHA256=6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292
 ARG POWERSHELL_ARM64_SHA256=a8d4e386dfafda385d0604045eed03ce6f3a843d45fc8f0b9588b836ca17cdb8
@@ -62,6 +68,8 @@ RUN set -eux; \
     actionlint_sha256="$ACTIONLINT_AMD64_SHA256"; \
     lychee_target="x86_64-unknown-linux-musl"; \
     lychee_sha256="$LYCHEE_X86_64_MUSL_SHA256"; \
+    github_mcp_arch="x86_64"; \
+    github_mcp_sha256="$GITHUB_MCP_X86_64_SHA256"; \
     powershell_arch="x64"; \
     powershell_sha256="$POWERSHELL_X64_SHA256"; \
     yq_arch="amd64"; \
@@ -72,6 +80,8 @@ RUN set -eux; \
     actionlint_sha256="$ACTIONLINT_ARM64_SHA256"; \
     lychee_target="aarch64-unknown-linux-musl"; \
     lychee_sha256="$LYCHEE_AARCH64_MUSL_SHA256"; \
+    github_mcp_arch="arm64"; \
+    github_mcp_sha256="$GITHUB_MCP_ARM64_SHA256"; \
     powershell_arch="arm64"; \
     powershell_sha256="$POWERSHELL_ARM64_SHA256"; \
     yq_arch="arm64"; \
@@ -96,6 +106,11 @@ RUN set -eux; \
     echo "${lychee_sha256}  ${lychee_archive}" | sha256sum -c -; \
     tar -xzf "$lychee_archive" "${lychee_dir}/lychee"; \
     install -m 0755 "${lychee_dir}/lychee" /usr/local/bin/lychee; \
+    github_mcp_archive="github-mcp-server_Linux_${github_mcp_arch}.tar.gz"; \
+    curl -fsSL "${curl_retry_args[@]}" -o "$github_mcp_archive" "https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_VERSION}/${github_mcp_archive}"; \
+    echo "${github_mcp_sha256}  ${github_mcp_archive}" | sha256sum -c -; \
+    tar -xzf "$github_mcp_archive" github-mcp-server; \
+    install -m 0755 github-mcp-server /usr/local/bin/github-mcp-server; \
     yq_binary="yq_linux_${yq_arch}"; \
     curl -fsSL "${curl_retry_args[@]}" -o "$yq_binary" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq_binary}"; \
     echo "${yq_sha256}  ${yq_binary}" | sha256sum -c -; \
@@ -117,6 +132,7 @@ RUN set -eux; \
     shellcheck --version; \
     actionlint -version; \
     lychee --version; \
+    github-mcp-server --version; \
     yq --version; \
     yamllint --version; \
     gawk --version; \
@@ -129,6 +145,21 @@ RUN set -eux; \
 # Install developer toolchains as the final non-root user so ownership is
 # correct without a recursive chown layer that duplicates the toolchains.
 USER vscode
+
+# npm global installs land in a user-owned prefix so `npm install -g ...`
+# never needs sudo (the nvm-managed Node under /usr/local/share/nvm is
+# root-owned; without this, global installs fail with EACCES). The agent CLIs
+# (codex, opencode, nanocoder) are installed/refreshed through this prefix by
+# .devcontainer/lib-agent-tools.sh on create and on every container start.
+#
+# NEVER set NPM_CONFIG_PREFIX (or PREFIX) via ENV here. Devcontainer features
+# install in layers appended AFTER this Dockerfile, and the nvm-based Node
+# feature aborts its install when NPM_CONFIG_PREFIX is already set in the
+# build environment ("nvm is not compatible with the NPM_CONFIG_PREFIX
+# environment variable"), failing every no-cache image build. The prefix is
+# runtime-only: devcontainer.json containerEnv + configure_user_npm_prefix.
+ENV PATH="/home/vscode/.npm-global/bin:${PATH}"
+RUN mkdir -p /home/vscode/.npm-global
 
 # Rust components
 RUN rustup component add \

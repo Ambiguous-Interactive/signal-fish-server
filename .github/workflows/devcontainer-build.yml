@@ -1,0 +1,89 @@
+# Dev Container Build Validation
+#
+# Builds the development container image from .devcontainer/ so devcontainer-only
+# breakage cannot reach main. No other workflow builds this image:
+# docker-publish.yml builds the production release image from the root Dockerfile.
+# Devcontainer features (ghcr.io/devcontainers/features/*) only run during an
+# image build, so a broken feature install — e.g. nvm aborting because a
+# Dockerfile ENV leaked NPM_CONFIG_PREFIX into the feature's build environment —
+# is invisible to every other check. This workflow is that check.
+#
+# Runs on:
+#   - Push to main branch (only for devcontainer file changes)
+#   - Pull requests to main (only for devcontainer file changes)
+#   - Monthly schedule: catches upstream drift (a devcontainers/features release
+#     or a mcr.microsoft.com/devcontainers base image update) even without any
+#     local change
+#   - Manual dispatch
+#
+# Features:
+#   - Build-only validation via devcontainers/ci (never publishes the image)
+#   - Runtime smoke checks of the installed features: the Node feature must
+#     resolve `node`, and the user-owned npm prefix directory must exist and
+#     belong to the non-root `vscode` user
+#   - Enforced by scripts/check-tooling-parity.sh and
+#     tests/agent_tooling_guards.rs (deleting this workflow fails CI)
+
+name: Dev Container Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.devcontainer/**'
+      - '.github/workflows/devcontainer-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.devcontainer/**'
+      - '.github/workflows/devcontainer-build.yml'
+  schedule:
+    # Monthly on the 1st at 05:00 UTC — upstream image/feature drift detection.
+    - cron: '0 5 1 * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build devcontainer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Build dev container image
+        uses: devcontainers/ci@v0.3.1900000450
+        with:
+          # Build-only validation; the image is tagged locally, never pushed.
+          imageName: signal-fish-devcontainer-ci
+          push: never
+
+      - name: Smoke-check installed features at runtime
+        run: |
+          set -euo pipefail
+          image="signal-fish-devcontainer-ci:latest"
+
+          # The Node feature must have installed a working, PATH-resolvable Node.
+          node_version=$(docker run --rm "$image" node --version)
+          echo "node --version: ${node_version}"
+
+          npm_version=$(docker run --rm "$image" npm --version)
+          echo "npm --version: ${npm_version}"
+
+          # The user-owned npm global prefix directory must pre-exist in the
+          # image and belong to the non-root runtime user, so `npm install -g`
+          # (routed there at runtime via containerEnv) never needs sudo.
+          prefix_owner=$(docker run --rm "$image" bash -c \
+            'stat -c %U /home/vscode/.npm-global')
+          if [ "${prefix_owner}" != "vscode" ]; then
+            echo "ERROR: /home/vscode/.npm-global is owned by '${prefix_owner}', expected 'vscode' (the user-owned npm prefix contract)." >&2
+            exit 1
+          fi
+          echo "npm prefix owner: ${prefix_owner}"
