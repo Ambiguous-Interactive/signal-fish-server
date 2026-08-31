@@ -27,10 +27,12 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load configuration. A present-but-invalid source (unparsable JSON, a
-    // type-mismatched value or environment override) is a hard error naming
-    // the offending source/knob; only absent sources fall back to defaults.
+    // Loading rejects malformed sources and type mismatches, but deliberately
+    // only logs semantic validation errors so tools can inspect the merged
+    // configuration. Embedders must make semantic failure fatal before mapping
+    // the loaded values into runtime types.
     let cfg = config::load()?;
+    config::validate_config_security(&cfg)?;
 
     // Build server configuration
     // Note: Only key fields shown for brevity - see src/server.rs ServerConfig for all required fields

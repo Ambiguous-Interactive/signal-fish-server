@@ -36,6 +36,244 @@ fn chrono_duration_from_std(duration: Duration) -> chrono::Duration {
 }
 
 #[cfg(test)]
+mod constructor_validation_tests {
+    use super::{EnhancedGameServer, ServerConfig};
+    use crate::config::{
+        AppRegistrationEntry, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
+        SessionConfig, TransportSecurityConfig, TurnConfig,
+    };
+    use crate::database::DatabaseConfig;
+    use crate::protocol::IceServer;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct ConstructorInputs {
+        server: ServerConfig,
+        protocol: ProtocolConfig,
+        session: SessionConfig,
+        turn: TurnConfig,
+        transport: TransportSecurityConfig,
+        allowed_apps: Vec<AppRegistrationEntry>,
+    }
+
+    struct InvalidConstructorCase {
+        name: &'static str,
+        mutate: fn(&mut ConstructorInputs),
+        expected: &'static str,
+    }
+
+    #[tokio::test]
+    async fn constructor_rejects_invalid_runtime_inputs_before_initialization() {
+        let cases = [
+            InvalidConstructorCase {
+                name: "oversized event buffer",
+                mutate: |inputs| {
+                    inputs.server.event_buffer_size =
+                        crate::config::server::MAX_EVENT_BUFFER_SIZE + 1;
+                },
+                expected: "event_buffer_size must not exceed",
+            },
+            InvalidConstructorCase {
+                name: "zero inbound and signal caps",
+                mutate: |inputs| {
+                    inputs.server.max_message_size = 0;
+                    inputs.server.max_signal_bytes = 0;
+                },
+                expected: "max_message_size must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero signal cap",
+                mutate: |inputs| inputs.server.max_signal_bytes = 0,
+                expected: "max_signal_bytes must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero cleanup interval",
+                mutate: |inputs| inputs.server.room_cleanup_interval = Duration::ZERO,
+                expected: "room_cleanup_interval must be greater than 0 seconds",
+            },
+            InvalidConstructorCase {
+                name: "zero rate-limit window",
+                mutate: |inputs| inputs.server.rate_limit_config.time_window = Duration::ZERO,
+                expected: "time_window must be greater than 0 seconds",
+            },
+            InvalidConstructorCase {
+                name: "sub-second reconnection window truncates to zero",
+                mutate: |inputs| {
+                    inputs.server.reconnection_window = Duration::from_millis(999);
+                },
+                expected: "reconnection_window must be at least 1 second",
+            },
+            InvalidConstructorCase {
+                name: "zero connection cap",
+                mutate: |inputs| inputs.server.max_connections_per_ip = 0,
+                expected: "max_connections_per_ip must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero room cap",
+                mutate: |inputs| inputs.server.max_rooms_per_game = 0,
+                expected: "max_rooms_per_game must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero game-name cap",
+                mutate: |inputs| inputs.protocol.max_game_name_length = 0,
+                expected: "max_game_name_length must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero player-name cap",
+                mutate: |inputs| inputs.protocol.max_player_name_length = 0,
+                expected: "max_player_name_length must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero player-count ceiling",
+                mutate: |inputs| inputs.protocol.max_players_limit = 0,
+                expected: "max_players_limit must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero default room capacity",
+                mutate: |inputs| inputs.server.default_max_players = 0,
+                expected: "default_max_players must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "default room capacity above protocol ceiling",
+                mutate: |inputs| inputs.protocol.max_players_limit = 7,
+                expected: "default_max_players (8) must not exceed protocol.max_players_limit (7)",
+            },
+            InvalidConstructorCase {
+                name: "zero occupied-room timeout",
+                mutate: |inputs| inputs.server.inactive_room_timeout = Duration::ZERO,
+                expected: "inactive_room_timeout must be greater than 0 seconds",
+            },
+            InvalidConstructorCase {
+                name: "heartbeat throttle reaches occupied-room timeout",
+                mutate: |inputs| {
+                    inputs.server.inactive_room_timeout = Duration::from_secs(30);
+                    inputs.server.heartbeat_throttle = Duration::from_secs(30);
+                },
+                expected: "heartbeat_throttle",
+            },
+            InvalidConstructorCase {
+                name: "unbounded batching deadline",
+                mutate: |inputs| {
+                    inputs.server.websocket_config.enable_batching = true;
+                    inputs.server.websocket_config.batch_interval_ms = 60_001;
+                },
+                expected: "batch_interval_ms must not exceed",
+            },
+            InvalidConstructorCase {
+                name: "zero reliable sojourn bound",
+                mutate: |inputs| inputs.server.websocket_config.max_sojourn_ms = 0,
+                expected: "max_sojourn_ms must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "zero Pong deadline",
+                mutate: |inputs| inputs.server.websocket_config.pong_timeout_secs = 0,
+                expected: "pong_timeout_secs must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "slow-consumer and activity timeout inversion",
+                mutate: |inputs| {
+                    inputs.server.ping_timeout = Duration::from_secs(30);
+                    inputs.server.websocket_config.slow_consumer_timeout_ms = 30_000;
+                },
+                expected: "slow_consumer_timeout_ms",
+            },
+            InvalidConstructorCase {
+                name: "malformed static ICE URL",
+                mutate: |inputs| {
+                    inputs.session.ice_servers = vec![IceServer {
+                        urls: vec!["https://not-an-ice-server.example".to_string()],
+                        username: None,
+                        credential: None,
+                    }];
+                },
+                expected: "session.ice_servers[0].urls[0]",
+            },
+            InvalidConstructorCase {
+                name: "enabled TURN without a secret",
+                mutate: |inputs| {
+                    inputs.turn.enabled = true;
+                    inputs.turn.urls = vec!["turn:turn.example.com:3478".to_string()];
+                    inputs.turn.static_auth_secret.clear();
+                },
+                expected: "turn.static_auth_secret must be set",
+            },
+            InvalidConstructorCase {
+                name: "required token binding while disabled",
+                mutate: |inputs| inputs.transport.token_binding.required = true,
+                expected: "token_binding.required=true requires",
+            },
+            InvalidConstructorCase {
+                name: "blank allowlist application name",
+                mutate: |inputs| {
+                    inputs.allowed_apps.push(AppRegistrationEntry {
+                        app_id: "game".to_string(),
+                        app_name: " \t".to_string(),
+                        max_rooms: None,
+                        max_players_per_room: None,
+                        rate_limit_per_minute: None,
+                    });
+                },
+                expected: "allowed_apps[0].app_name must not be blank",
+            },
+            InvalidConstructorCase {
+                name: "log-unsafe allowlist application id (control character)",
+                mutate: |inputs| {
+                    inputs.allowed_apps.push(AppRegistrationEntry {
+                        app_id: "game\n".to_string(),
+                        app_name: "Game".to_string(),
+                        max_rooms: None,
+                        max_players_per_room: None,
+                        rate_limit_per_minute: None,
+                    });
+                },
+                expected: "allowed_apps[0].app_id contains control characters",
+            },
+            InvalidConstructorCase {
+                name: "log-unsafe allowlist application id (over byte limit)",
+                mutate: |inputs| {
+                    inputs.allowed_apps.push(AppRegistrationEntry {
+                        app_id: "a".repeat(crate::auth::MAX_APP_ID_LENGTH + 1),
+                        app_name: "Game".to_string(),
+                        max_rooms: None,
+                        max_players_per_room: None,
+                        rate_limit_per_minute: None,
+                    });
+                },
+                expected: "allowed_apps[0].app_id contains control characters or exceeds",
+            },
+        ];
+
+        for case in cases {
+            let mut inputs = ConstructorInputs::default();
+            (case.mutate)(&mut inputs);
+            let result = EnhancedGameServer::new(
+                inputs.server,
+                inputs.protocol,
+                RelayTypeConfig::default(),
+                inputs.session,
+                inputs.turn,
+                DatabaseConfig::InMemory,
+                MetricsConfig::default(),
+                CoordinationConfig::default(),
+                inputs.transport,
+                inputs.allowed_apps,
+            )
+            .await;
+
+            let error = match result {
+                Ok(_) => panic!("{} must fail constructor validation", case.name),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(case.expected),
+                "{} returned the wrong error: {error}",
+                case.name,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod duration_conversion_tests {
     use super::*;
 
@@ -319,6 +557,24 @@ impl Default for ServerConfig {
 }
 
 impl EnhancedGameServer {
+    /// Construct the runtime server after validating every setting this type
+    /// makes live.
+    ///
+    /// Validation runs before database initialization or background-task
+    /// creation and shares its core rules with
+    /// [`crate::config::validate_config_security`]. CORS policy and TLS
+    /// certificate files remain listener-owned and must be validated by the
+    /// embedding layer (the top-level validator does this for the shipped
+    /// binary).
+    ///
+    /// Direct library construction deliberately permits zero room-operation
+    /// rate budgets, which provide an explicit total-rejection policy and make
+    /// rejection metrics deterministic in tests. A zero
+    /// `max_signal_errors` budget likewise selects generic errors immediately.
+    /// Metrics auth with no token is also fail-closed at the route (every scrape
+    /// is unauthorized); the binary validator reports it as an operator error.
+    /// Zero metrics-cache intervals are normalized to one second, coordination
+    /// settings are reserved, and relay/region strings are informational.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub async fn new(
         config: ServerConfig,
@@ -332,43 +588,14 @@ impl EnhancedGameServer {
         transport_security: crate::config::TransportSecurityConfig,
         allowed_apps: Vec<AppRegistrationEntry>,
     ) -> anyhow::Result<Arc<Self>> {
-        // Library embedders can construct `ServerConfig` directly without the
-        // top-level config loader. Enforce the same generation/join closure
-        // here before initializing storage or background tasks.
-        protocol_config.validate_room_code_generation(config.room_code_prefix.as_deref())?;
-        anyhow::ensure!(
-            (1..=crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE)
-                .contains(&config.max_outbound_message_size),
-            "max_outbound_message_size must be between 1 and {} bytes, got {}",
-            crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
-            config.max_outbound_message_size,
-        );
-        // Same contradictory-cap pairing guards as `validate_config_security`,
-        // so direct library construction cannot ship what config validation
-        // rejects. The relay projection attaches the sender id and delivery
-        // stamps to every re-emitted frame, so the outbound cap must keep the
-        // envelope headroom above the inbound cap, not merely match it.
-        anyhow::ensure!(
-            config.max_outbound_message_size
-                >= config
-                    .max_message_size
-                    .saturating_add(crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES),
-            "max_message_size ({}) leaves max_outbound_message_size ({}) without the \
-             required {}-byte relay projection headroom: a frame admitted by the \
-             inbound cap grows when re-emitted with the relay envelope, closing every \
-             recipient with `1009 outbound_message_too_large`",
-            config.max_message_size,
-            config.max_outbound_message_size,
-            crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
-        );
-        anyhow::ensure!(
-            config.max_signal_bytes <= config.max_message_size,
-            "max_signal_bytes ({}) must not exceed max_message_size ({}): a Signal frame \
-             that large would be rejected by the message size cap first, so the \
-             configured signal cap could never take effect",
-            config.max_signal_bytes,
-            config.max_message_size,
-        );
+        crate::config::validation::validate_constructor_inputs(
+            &config,
+            &protocol_config,
+            &session_config,
+            &turn_config,
+            &transport_security,
+            &allowed_apps,
+        )?;
 
         let database: Arc<dyn GameDatabase> =
             Arc::from(create_database(database_config.clone()).await?);
@@ -4326,7 +4553,13 @@ mod relay_projection_cache_tests {
 
     #[tokio::test]
     async fn library_constructor_rejects_nonportable_outbound_limits() {
-        for invalid in [0, crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE + 1] {
+        for (invalid, expected) in [
+            (0, "max_outbound_message_size must be greater than 0"),
+            (
+                crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE + 1,
+                "max_outbound_message_size (67108865) must not exceed",
+            ),
+        ] {
             let config = super::ServerConfig {
                 max_outbound_message_size: invalid,
                 ..super::ServerConfig::default()
@@ -4350,9 +4583,7 @@ mod relay_projection_cache_tests {
                 Err(error) => error,
             };
             assert!(
-                error
-                    .to_string()
-                    .contains("max_outbound_message_size must be between 1"),
+                error.to_string().contains(expected),
                 "constructor must report the invalid outbound limit: {error}"
             );
         }
@@ -4458,7 +4689,7 @@ mod relay_projection_cache_tests {
         assert!(
             error
                 .to_string()
-                .contains("max_signal_bytes (65537) must not exceed max_message_size"),
+                .contains("max_signal_bytes (65537) must not exceed security.max_message_size"),
             "constructor must name the dead signal cap: {error}"
         );
     }
