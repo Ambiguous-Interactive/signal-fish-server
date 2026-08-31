@@ -62,10 +62,19 @@ description: >-
 | VS Code + Copilot | `.vscode/mcp.json` | `servers.github`, `command`, `${env:GITHUB_PERSONAL_ACCESS_TOKEN}` |
 | Claude Code | `.mcp.json` | `mcpServers.github`, **`"type": "stdio"`** |
 | Nanocoder | `.mcp.json` (same file) | `mcpServers.github`, **`"transport": "stdio"`** |
-| OpenCode | `opencode.json` | `mcp.github`, `"type": "local"`, `command: [...]` |
+| OpenCode | `opencode.json` | `mcp.github`, `"type": "local"`, `command: [...]`, **`environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "{env:GITHUB_PERSONAL_ACCESS_TOKEN}" }`** |
 
 **Dual-key invariant**: `.mcp.json` must carry BOTH `type` (Claude Code) and
 `transport` (Nanocoder) — dropping either silently unwires one harness.
+
+**OpenCode env pass-through invariant**: observed in issue #496, the
+OpenCode-launched `github-mcp-server` fell back to the interactive OAuth
+device-authorization flow every session even with
+`GITHUB_PERSONAL_ACCESS_TOKEN` present in the container shell, while every
+other harness authenticated — so `opencode.json` must forward the token
+explicitly via its `environment` map
+(`"{env:GITHUB_PERSONAL_ACCESS_TOKEN}"` substitution). Do not rely on
+shell-environment inheritance for opencode-launched MCP processes.
 
 ---
 
@@ -109,6 +118,9 @@ every change, so rely on it in CI and on the static guards above.
   the NPM_CONFIG_PREFIX environment variable", exit code 11) and the container
   never starts. The prefix belongs in `containerEnv` only.
 - Removing `type` or `transport` from `.mcp.json` → a harness loses GitHub.
+- Removing the `environment` pass-through from `opencode.json` → the OpenCode
+  GitHub MCP server starts unauthenticated and prompts the OAuth device flow
+  every session (issue #496).
 - Bumping `GITHUB_MCP_VERSION` without fresh SHA256 ARGs → build fails
   checksum verification (that is the supply-chain guard working).
 - Making post-start fail the container on a network error → violates

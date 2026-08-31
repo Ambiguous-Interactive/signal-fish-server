@@ -4,6 +4,9 @@
         "github": {
             "type": "local",
             "command": ["github-mcp-server", "stdio"],
+            "environment": {
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "{env:GITHUB_PERSONAL_ACCESS_TOKEN}"
+            },
             "enabled": true
         }
     }

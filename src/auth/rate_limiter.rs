@@ -12,6 +12,11 @@ use std::time::{Duration, Instant};
 /// timestamps of recent requests. When `check_rate_limit` is called the
 /// window is trimmed to the last 60 seconds before comparing the count
 /// against the configured limit.
+///
+/// The monotonic clock is read only inside the thin [`Self::check_rate_limit`]
+/// and `cleanup` wrappers; the `*_at` variants take an explicit
+/// timestamp so time-driven behavior is testable deterministically (see
+/// `.llm/context-testing.md`, "Injectable time").
 pub struct InMemoryRateLimiter {
     windows: DashMap<String, VecDeque<Instant>>,
     cleanup_interval: Duration,
@@ -28,20 +33,26 @@ impl InMemoryRateLimiter {
         }
     }
 
-    /// Override the sliding-window duration (default 60s). Only intended for
-    /// tests that need to verify expiration with a very short window.
-    #[cfg(test)]
-    pub fn with_window_duration(mut self, window: Duration) -> Self {
-        self.window_duration = window;
-        self
-    }
-
     /// Check whether `app_id` has exceeded `limit_per_minute` requests in the
     /// last 60 seconds. If the request is allowed, the current timestamp is
     /// recorded and `Ok(())` is returned. Otherwise
     /// `Err(AuthError::RateLimitExceeded)` is returned.
     pub fn check_rate_limit(&self, app_id: &str, limit_per_minute: u32) -> Result<(), AuthError> {
-        let now = Instant::now();
+        self.check_rate_limit_at(app_id, limit_per_minute, Instant::now())
+    }
+
+    /// Injected-time variant of [`Self::check_rate_limit`]: the caller supplies
+    /// the current monotonic timestamp so window expiry is deterministic.
+    ///
+    /// A recorded timestamp stops counting against the limit once
+    /// `now - recorded >= window_duration` (the boundary is inclusive: a
+    /// request at exactly `recorded + window_duration` no longer observes it).
+    pub fn check_rate_limit_at(
+        &self,
+        app_id: &str,
+        limit_per_minute: u32,
+        now: Instant,
+    ) -> Result<(), AuthError> {
         let window = self.window_duration;
 
         let mut entry = self.windows.entry(app_id.to_owned()).or_default();
@@ -93,7 +104,11 @@ impl InMemoryRateLimiter {
     /// Remove entries whose sliding windows are completely empty (all
     /// timestamps have expired).
     pub(crate) fn cleanup(&self) {
-        let now = Instant::now();
+        self.cleanup_at(Instant::now())
+    }
+
+    /// Injected-time variant of [`Self::cleanup`].
+    pub(crate) fn cleanup_at(&self, now: Instant) {
         let window = self.window_duration;
 
         self.windows.retain(|_key, timestamps| {
@@ -115,76 +130,150 @@ impl InMemoryRateLimiter {
 mod tests {
     use super::*;
 
-    #[test]
-    fn allows_requests_under_limit() {
+    /// One stop on an injected timeline: a request placed `elapsed_ms` after
+    /// the origin, expected to be admitted or rejected.
+    struct Stop {
+        elapsed_ms: u64,
+        admitted: bool,
+    }
+
+    fn window_admission_timeline(limit: u32, stops: &[Stop]) {
         let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
-        for _ in 0..5 {
-            assert!(limiter.check_rate_limit("app1", 10).is_ok());
+        let origin = Instant::now();
+        for stop in stops {
+            let now = origin + Duration::from_millis(stop.elapsed_ms);
+            let result = limiter.check_rate_limit_at("app", limit, now);
+            assert_eq!(
+                result.is_ok(),
+                stop.admitted,
+                "request at +{}ms (limit {limit}) should be {}",
+                stop.elapsed_ms,
+                if stop.admitted {
+                    "admitted"
+                } else {
+                    "rejected"
+                }
+            );
         }
     }
 
     #[test]
-    fn rejects_requests_over_limit() {
-        let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
-        for _ in 0..10 {
-            limiter.check_rate_limit("app1", 10).unwrap();
-        }
-        let result = limiter.check_rate_limit("app1", 10);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AuthError::RateLimitExceeded));
-    }
-
-    #[test]
-    fn independent_limits_per_app() {
-        let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
-        for _ in 0..5 {
-            limiter.check_rate_limit("app1", 5).unwrap();
-        }
-        // app1 is now at limit
-        assert!(limiter.check_rate_limit("app1", 5).is_err());
-        // app2 should still be fine
-        assert!(limiter.check_rate_limit("app2", 5).is_ok());
-    }
-
-    #[test]
-    fn cleanup_removes_empty_entries() {
-        let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
-        // Insert an entry then immediately make it empty by not exceeding the window
-        limiter.check_rate_limit("app1", 100).unwrap();
-        assert!(!limiter.windows.is_empty());
-
-        // After cleanup, entry should still exist (timestamp is recent)
-        limiter.cleanup();
-        assert!(!limiter.windows.is_empty());
+    fn window_admits_up_to_limit_then_expires_at_the_inclusive_boundary() {
+        let window_ms = 60_000u64;
+        window_admission_timeline(
+            3,
+            &[
+                // Stagger the initial stamps so expiry frees one slot at a time.
+                Stop {
+                    elapsed_ms: 0,
+                    admitted: true,
+                },
+                Stop {
+                    elapsed_ms: 1_000,
+                    admitted: true,
+                },
+                Stop {
+                    elapsed_ms: 2_000,
+                    admitted: true,
+                },
+                // Window is full.
+                Stop {
+                    elapsed_ms: 2_100,
+                    admitted: false,
+                },
+                Stop {
+                    elapsed_ms: 30_000,
+                    admitted: false,
+                },
+                // One millisecond before the first stamp expires the window is
+                // still full.
+                Stop {
+                    elapsed_ms: window_ms - 1,
+                    admitted: false,
+                },
+                // At exactly `first + window` the first timestamp expires
+                // (trim is `>=`), freeing exactly one slot.
+                Stop {
+                    elapsed_ms: window_ms,
+                    admitted: true,
+                },
+                Stop {
+                    elapsed_ms: window_ms,
+                    admitted: false,
+                },
+                // The second stamp expires one tick later.
+                Stop {
+                    elapsed_ms: window_ms + 1_000,
+                    admitted: true,
+                },
+                Stop {
+                    elapsed_ms: window_ms + 1_000,
+                    admitted: false,
+                },
+                // The third stamp expires too.
+                Stop {
+                    elapsed_ms: window_ms + 2_000,
+                    admitted: true,
+                },
+                Stop {
+                    elapsed_ms: window_ms + 2_000,
+                    admitted: false,
+                },
+            ],
+        );
     }
 
     #[test]
     fn zero_limit_always_rejects() {
         let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
-        let result = limiter.check_rate_limit("app1", 0);
+        let result = limiter.check_rate_limit_at("app", 0, Instant::now());
         assert!(matches!(result.unwrap_err(), AuthError::RateLimitExceeded));
     }
 
     #[test]
-    fn limit_of_one_allows_single_request() {
+    fn limits_are_independent_per_app_on_the_same_timeline() {
         let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
-        assert!(limiter.check_rate_limit("app1", 1).is_ok());
-        assert!(limiter.check_rate_limit("app1", 1).is_err());
+        let now = Instant::now();
+        for _ in 0..5 {
+            limiter.check_rate_limit_at("app1", 5, now).unwrap();
+        }
+        // app1 is at limit; app2 shares only the clock, not the budget.
+        assert!(limiter.check_rate_limit_at("app1", 5, now).is_err());
+        assert!(limiter.check_rate_limit_at("app2", 5, now).is_ok());
     }
 
     #[test]
-    fn cleanup_removes_expired_entries() {
-        let limiter =
-            InMemoryRateLimiter::new(Duration::from_secs(60)).with_window_duration(Duration::ZERO);
+    fn cleanup_removes_only_fully_expired_windows() {
+        let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
+        let window = Duration::from_secs(60);
+        // Build the whole timeline by ADDING offsets to an origin: subtracting
+        // from `Instant::now()` panics on a host whose monotonic clock is
+        // younger than the offsets (fresh VM/container boots).
+        let origin = Instant::now();
+        let now = origin + 3 * window;
 
-        limiter.check_rate_limit("app1", 100).unwrap();
-        assert!(!limiter.windows.is_empty());
+        // Fully expired: single timestamp from two windows ago.
+        limiter.check_rate_limit_at("stale", 100, origin).unwrap();
+        // Partially expired: one timestamp expired, one stamped exactly now.
+        limiter
+            .check_rate_limit_at("partial", 100, origin + 2 * window)
+            .unwrap();
+        limiter.check_rate_limit_at("partial", 100, now).unwrap();
+        // Fully live.
+        limiter.check_rate_limit_at("live", 100, now).unwrap();
 
-        limiter.cleanup();
-        assert!(
-            limiter.windows.is_empty(),
-            "expired entry should have been removed by cleanup"
-        );
+        limiter.cleanup_at(now);
+
+        // DashMap iteration order is hash-based, so compare as a set.
+        let mut keys: Vec<_> = limiter
+            .windows
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["live".to_owned(), "partial".to_owned()]);
+        assert!(limiter.windows.get("stale").is_none());
+        assert_eq!(limiter.windows.get("partial").unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

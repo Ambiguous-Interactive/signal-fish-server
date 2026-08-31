@@ -73,5 +73,10 @@ correctness evidence appears.
   fail-closed triggers raised them to 569. Do not add per-lane status runners;
   prefer a required classifier with server-side job skips and retain hosted
   before/after evidence.
+- #498 — triage production `Utc::now()` wall-clock reads in server `src/`
+  (~115 sites across 26 files): classify durable-record vs embedder-
+  convenience vs in-process-decision, convert the decision reads to
+  monotonic/injected seams, then extend `tests/clock_source_scan.rs` with a
+  reasoned chrono rule.
 - #207 — pursue the next optimization only from current allocation and latency
   profiles, with exact wire and delivery semantics held constant.

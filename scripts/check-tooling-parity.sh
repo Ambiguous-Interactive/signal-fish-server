@@ -11,8 +11,12 @@
 #   7. Post-create keeps required Rust tool verification and opt-in warm-up behavior.
 #   8. Agent CLIs (Codex, OpenCode, Nanocoder) install/refresh without sudo on
 #      create and on every launch, and every harness is wired to the pinned
-#      GitHub MCP server. The npm prefix is runtime-only (containerEnv);
-#      exporting it via Dockerfile ENV breaks the nvm-based Node feature.
+#      GitHub MCP server — including OpenCode's explicit
+#      GITHUB_PERSONAL_ACCESS_TOKEN environment pass-through (observed in
+#      #496: the opencode-launched server device-flowed even with the token
+#      in the container shell). The npm prefix is runtime-only
+#      (containerEnv); exporting it via Dockerfile ENV breaks the nvm-based
+#      Node feature.
 #   9. Launch speed: the post-start CLI refresh is gated by a registry
 #      version-check fast path (no unconditional npm reinstall per launch).
 #  10. The devcontainer image itself is built in CI (devcontainer-build.yml):
@@ -297,6 +301,11 @@ assert_contains_literal "$ROOT_MCP_JSON" "github-mcp-server" "Claude Code/Nanoco
 assert_contains_literal "$OPENCODE_JSON" '"github"' "OpenCode config registers the GitHub MCP server"
 assert_contains_literal "$OPENCODE_JSON" "github-mcp-server" "OpenCode config uses the pinned GitHub MCP server binary"
 assert_contains_literal "$OPENCODE_JSON" '"type": "local"' "OpenCode config registers GitHub MCP as a local server"
+# Observed in #496: the opencode-launched github-mcp-server device-flowed
+# every session even with the token present in the container shell, so the
+# config must forward it explicitly or the server starts unauthenticated.
+assert_contains_literal "$OPENCODE_JSON" '"environment"' "OpenCode config declares an MCP server environment"
+assert_contains_literal "$OPENCODE_JSON" '"GITHUB_PERSONAL_ACCESS_TOKEN": "{env:GITHUB_PERSONAL_ACCESS_TOKEN}"' "OpenCode config forwards the GitHub token into the MCP server environment"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "[mcp_servers.github]" "Agent tooling library registers the Codex GitHub MCP server table"
 
 # Launch speed: post-start refreshes must be gated by a registry version-check
