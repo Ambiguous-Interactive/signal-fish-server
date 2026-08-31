@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Devcontainer agent tooling: Codex, OpenCode, and Nanocoder install to a user-owned npm
+  prefix (no sudo) at the latest npm version on create and refresh on every launch through a
+  registry version-check fast path that keeps launches fast and works offline; the pinned,
+  checksum-verified GitHub MCP server is wired into every harness (Codex, Claude Code,
+  Copilot, VS Code, OpenCode, Nanocoder). The contract is enforced by
+  `tests/agent_tooling_guards.rs`, extended `scripts/check-tooling-parity.sh` (CI), shellcheck
+  coverage of `.devcontainer/*.sh` in `scripts/validate-ci.sh`, and the
+  `devcontainer-agent-tooling` LLM skill.
 - Public Rust API: `server::run_drain_choreography` lets embedders run the shipped binary's exact
   shutdown drain sequence, with `EnhancedGameServer::has_active_socket_tasks` and
   `config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES` in support (issue #396).
@@ -39,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (Rust API):** Reject safety-critical invalid settings passed directly to
+  `EnhancedGameServer::new` before storage initialization or background-task startup, matching
+  the runtime invariants enforced for file-loaded configuration; embedders must correct invalid
+  caps, intervals, protocol limits, ICE/TURN policy, token binding, or app registrations (issue
+  #484). The shared validator also now rejects log-unsafe `allowed_apps` IDs (control characters
+  or IDs over 256 bytes) on both the loaded-config and constructor paths.
 - **Breaking (Rust API):** `config::load()` now returns `anyhow::Result<Config>`. A present-but-
   invalid configuration source — unparsable JSON in a file, stdin, or `SIGNAL_FISH_CONFIG_JSON`;
   an unreadable config file; or a type-mismatched value after merging and `SIGNAL_FISH__*`
@@ -112,6 +126,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix devcontainer image builds failing with `nvm is not compatible with the
+  "NPM_CONFIG_PREFIX" environment variable` during the Node feature install
+  (features install in layers appended after the Dockerfile): the user-owned npm
+  prefix is now runtime-only (`containerEnv` + `configure_user_npm_prefix`), the
+  Dockerfile may never export it, guards in `tests/agent_tooling_guards.rs` and
+  `scripts/check-tooling-parity.sh` forbid a build-time export, and a new Dev
+  Container Build workflow (`.github/workflows/devcontainer-build.yml`) builds
+  the image on `.devcontainer/**` changes and monthly to catch this class of
+  feature-install failure and upstream image/feature drift.
+- Fix player-name uniqueness to use full Unicode canonical caseless matching, so fold-equivalent
+  names such as `Straße`/`STRASSE` and Greek sigma variants cannot coexist while compatibility-only
+  equivalents remain distinct (issue #485).
+- Fix file-logging initialization to continue with stdout logging when the configured file cannot
+  be opened instead of panicking during process startup (issue #486).
 - A control-lane busy period no longer closes healthy connections with `4002 slow_consumer`:
   parked `DeliveryReport` carriers are bounded by write progress instead of queue age.
 - A serve future returning mid-drain no longer aborts the committed shutdown drain (which used to
