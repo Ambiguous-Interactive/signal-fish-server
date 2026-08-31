@@ -344,6 +344,9 @@ async fn slow_consumer_eviction_closes_with_4002() {
 async fn activity_reaper_eviction_closes_with_4003() {
     let mut config = base_config();
     config.ping_timeout = std::time::Duration::from_secs(1);
+    // Constructor validation rejects a slow-consumer park that can outlast
+    // the ping deadline (timeout inversion); keep the cap under the reaper.
+    config.websocket_config.slow_consumer_timeout_ms = 500;
     config.room_cleanup_interval = std::time::Duration::from_secs(1);
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     // The test router does not run the maintenance loop (production wiring
@@ -393,6 +396,9 @@ async fn inactive_room_cleanup_closes_with_4005() {
     let mut config = base_config();
     config.room_cleanup_interval = std::time::Duration::from_secs(1);
     config.inactive_room_timeout = std::time::Duration::from_secs(1);
+    // Constructor validation requires the heartbeat throttle to stay below
+    // the inactive-room deadline; keep it under the 1s test window.
+    config.heartbeat_throttle = std::time::Duration::from_millis(500);
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let cleanup = server.clone();
     tokio::spawn(async move { cleanup.cleanup_task().await });

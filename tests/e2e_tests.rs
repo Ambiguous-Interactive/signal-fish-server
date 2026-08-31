@@ -1737,6 +1737,9 @@ async fn test_silent_client_is_reaped_with_activity_timeout() {
     // this connection.
     let mut config = idle_timeout_server_config(300);
     config.ping_timeout = tokio::time::Duration::from_millis(500);
+    // Constructor validation rejects a slow-consumer park that can outlast
+    // the ping deadline (timeout inversion); keep the cap under the reaper.
+    config.websocket_config.slow_consumer_timeout_ms = 250;
     let game_server = create_test_server_with_config(config, test_protocol_config()).await;
     // Run the maintenance reaper (main.rs spawns it the same way); the e2e
     // harness does not start it by default.
