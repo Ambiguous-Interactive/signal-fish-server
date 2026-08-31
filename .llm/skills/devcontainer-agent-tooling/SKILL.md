@@ -67,12 +67,14 @@ description: >-
 **Dual-key invariant**: `.mcp.json` must carry BOTH `type` (Claude Code) and
 `transport` (Nanocoder) — dropping either silently unwires one harness.
 
-**OpenCode env pass-through invariant**: OpenCode launches local MCP servers
-WITHOUT inheriting the shell environment (unlike VS Code `remoteEnv` or Codex).
-`opencode.json` must forward the token explicitly via the `environment` map
-(`"{env:GITHUB_PERSONAL_ACCESS_TOKEN}"` substitution); without it,
-`github-mcp-server` starts unauthenticated and falls back to the interactive
-OAuth device-authorization prompt every session.
+**OpenCode env pass-through invariant**: observed in issue #496, the
+OpenCode-launched `github-mcp-server` fell back to the interactive OAuth
+device-authorization flow every session even with
+`GITHUB_PERSONAL_ACCESS_TOKEN` present in the container shell, while every
+other harness authenticated — so `opencode.json` must forward the token
+explicitly via its `environment` map
+(`"{env:GITHUB_PERSONAL_ACCESS_TOKEN}"` substitution). Do not rely on
+shell-environment inheritance for opencode-launched MCP processes.
 
 ---
 

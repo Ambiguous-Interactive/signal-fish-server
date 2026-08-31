@@ -10,12 +10,19 @@
 //!   1. Async logic uses `tokio::time::Instant`, controllable in tests via
 //!      `#[tokio::test(start_paused = true)]` + `tokio::time::advance`.
 //!   2. Sync logic reads the clock only inside a thin public wrapper that
-//!      delegates to an `*_at(..., now: Instant)` injected-time variant.
+//!      delegates to an `*_at(..., now: Instant)` / `*_since(..., now)`
+//!      injected-time variant.
 //!
-//! A new `use std::time::...Instant/SystemTime...` import (or a qualified
-//! `std::time::Instant::now()` / `std::time::SystemTime::now()` call) in
-//! `src/` therefore fails this guard unless the file is on the explicit
-//! allowlist below with a stated reason. `clients/` is out of scope: its
+//! A new `use std::time::...Instant/SystemTime...` import (including glob,
+//! alias, and rustfmt's multi-line brace forms) or a qualified
+//! `std::time::Instant` / `std::time::SystemTime` use in `src/` fails this
+//! guard unless the file is on the explicit allowlist below with a stated
+//! reason. Entries marked `test_module_only` additionally require every
+//! match to sit after the file's first `#[cfg(test)]` marker.
+//!
+//! Scope note: this guard pins `std` clock sources. `chrono` `Utc::now()`
+//! wall-clock reads (durable-record timestamps, embedder conveniences) are a
+//! separate tracked surface (#498). `clients/` is out of scope: its
 //! remaining `std` clock sites are upstream-API boundaries (e.g. matchbox
 //! `get_stats(std::time::Instant, ...)`) or test code.
 
@@ -27,52 +34,126 @@ use common::{read_file, repo_root};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Why an allowlisted file may name a `std` time type. Entries with
+/// `test_module_only` are pinned to the file's `#[cfg(test)]` region: a
+/// production-code match above the first marker fails the scan.
+struct Exemption {
+    reason: &'static str,
+    test_module_only: bool,
+}
+
 /// Files allowed to name `std::time::Instant` / `std::time::SystemTime`,
 /// each with the reason the allowlisting is sound. Everything else in `src/`
 /// must use tokio time or an injected-time seam.
-fn std_time_allowlist() -> BTreeMap<&'static str, &'static str> {
+fn std_time_allowlist() -> BTreeMap<&'static str, Exemption> {
     BTreeMap::from([
         (
             "src/auth/rate_limiter.rs",
-            "clock reads confined to the thin check_rate_limit/cleanup wrappers \
-             over the check_rate_limit_at/cleanup_at injection seams",
+            Exemption {
+                reason: "clock reads confined to the thin check_rate_limit/cleanup \
+                         wrappers over the check_rate_limit_at/cleanup_at injection \
+                         seams",
+                test_module_only: false,
+            },
         ),
         (
             "src/websocket/upgrade_rejection_log.rs",
-            "clock read confined to the thin record() wrapper over record_at",
+            Exemption {
+                reason: "clock read confined to the thin record() wrapper over record_at",
+                test_module_only: false,
+            },
         ),
         (
             "src/websocket/metrics.rs",
-            "clock read confined to the thin record() wrapper over record_at",
+            Exemption {
+                reason: "clock read confined to the thin record() wrapper over record_at",
+                test_module_only: false,
+            },
         ),
         (
             "src/server/shutdown.rs",
-            "wall-clock SystemTime epoch stamp in the shutdown log line only; \
-             monotonic shutdown logic uses tokio time",
+            Exemption {
+                reason: "absolute epoch-ms drain deadline advertised to v3 clients and \
+                         the wait_before_close grace computation, both behind thin \
+                         wrappers over the *_since injected variants; the wall clock \
+                         is the point of those deadlines (clients see absolute ms); \
+                         monotonic shutdown logic uses tokio time",
+                test_module_only: false,
+            },
         ),
-        ("src/main.rs", "test module only: startup-timing assertion"),
+        (
+            "src/main.rs",
+            Exemption {
+                reason: "startup-timing assertion",
+                test_module_only: true,
+            },
+        ),
         (
             "src/coordination/mod.rs",
-            "test module only: progress deadline loop",
+            Exemption {
+                reason: "progress deadline loop",
+                test_module_only: true,
+            },
         ),
     ])
 }
 
-/// True if the source line references a `std` time type (an import naming
-/// `Instant`/`SystemTime`, or a qualified `std::time::...` use). Line comments
-/// are stripped first so documentation *about* the convention does not trip
-/// the guard.
+/// Strip a trailing `//` line comment, but not `://` inside a string literal
+/// (URLs). A `//` pair directly preceded by `:` is treated as part of a
+/// scheme and scanning continues past it.
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut index = 1;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && bytes[index - 1] == b'/' {
+            let preceded_by_colon = index >= 2 && bytes[index - 2] == b':';
+            if !preceded_by_colon {
+                return &line[..index - 1];
+            }
+        }
+        index += 1;
+    }
+    line
+}
+
+/// True if the source line references a `std` time type: an import naming
+/// `Instant`/`SystemTime` (including rustfmt's multi-line brace form, which
+/// is detected by an unclosed brace), the glob form `use std::time::*;`, an
+/// alias form `use std::time as ...`, or a qualified `std::time::...` use.
+/// Bare `Instant::now()` is deliberately not flagged: depending on the file's
+/// imports it may resolve to the pause-controllable tokio type, which is the
+/// sanctioned async pattern.
 fn references_std_time_type(line: &str) -> bool {
-    let code = line.split("//").next().unwrap_or("");
+    let code = strip_line_comment(line);
     let trimmed = code.trim();
-    let is_std_time_import = trimmed.starts_with("use std::time::")
-        && (trimmed.contains("Instant") || trimmed.contains("SystemTime"));
-    // Only qualified std paths count: a bare `Instant::now()` may resolve to
-    // the pause-controllable tokio type depending on the file's imports, and
-    // the import rule above already covers files that resolve it to std.
-    let is_qualified_use =
-        code.contains("std::time::Instant") || code.contains("std::time::SystemTime");
-    is_std_time_import || is_qualified_use
+    if let Some(import) = trimmed.strip_prefix("use std::time") {
+        let rest = import.trim_start();
+        if rest.starts_with("::*") {
+            // Glob import (`use std::time::*;`): the imported surface cannot
+            // be proven Duration-only, so flag it.
+            return true;
+        }
+        if let Some(names) = rest.strip_prefix("::") {
+            // `use std::time::Duration;` or `use std::time::{Duration, Instant};`
+            if names.contains('{') {
+                // A brace import is provably Duration-only only when it
+                // closes on this line without naming a time type; an unclosed
+                // `use std::time::{` (rustfmt multi-line style) hides the
+                // names on later lines and must be flagged.
+                let closes_on_line = names.contains('}');
+                let names_time = names.contains("Instant") || names.contains("SystemTime");
+                return !closes_on_line || names_time;
+            }
+            return names.contains("Instant") || names.contains("SystemTime");
+        }
+        if rest.starts_with("as ") {
+            // Alias import (`use std::time as stdtime;`): same problem as the
+            // glob form.
+            return true;
+        }
+        return false;
+    }
+    code.contains("std::time::Instant") || code.contains("std::time::SystemTime")
 }
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -103,25 +184,55 @@ fn server_src_reads_time_only_through_injectable_or_tokio_seams() {
 
     let mut violations = Vec::new();
     for path in &files {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
         let relative = path
             .strip_prefix(repo_root())
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        if allowlist.contains_key(relative.as_str()) {
-            continue;
+        let exemption = allowlist.get(relative.as_str());
+        // Panics loudly on read failure: a scan that silently skips files is
+        // a false-negative factory.
+        let content = read_file(path);
+        // Module-level `#[cfg(test)]`: the marker's next non-blank line must
+        // declare a `mod`. A struct-field attribute (e.g. a test-only field
+        // mid-file) does not start the test region.
+        let mut test_module_start: Option<usize> = None;
+        let lines: Vec<&str> = content.lines().collect();
+        for (line_number, line) in lines.iter().enumerate() {
+            if line.trim() == "#[cfg(test)]" && test_module_start.is_none() {
+                let next_is_mod = lines[line_number + 1..]
+                    .iter()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty())
+                    .is_some_and(|next| next.starts_with("mod "));
+                if next_is_mod {
+                    test_module_start = Some(line_number);
+                }
+            }
         }
-        for (line_number, line) in content.lines().enumerate() {
-            if references_std_time_type(line) {
-                violations.push(format!(
+        for (line_number, line) in lines.iter().enumerate() {
+            if !references_std_time_type(line) {
+                continue;
+            }
+            match exemption {
+                None => violations.push(format!(
                     "{relative}:{}: {line}\n  use tokio::time::Instant (pause-controllable) \
                      or an injected *_at(.., now) seam; allowlist \
                      tests/clock_source_scan.rs only with a sound reason",
                     line_number + 1
-                ));
+                )),
+                Some(entry) if entry.test_module_only => {
+                    let after_test_marker =
+                        test_module_start.is_some_and(|marker| line_number > marker);
+                    if !after_test_marker {
+                        violations.push(format!(
+                            "{relative}:{}: {line}\n  allowlisted as test-module-only, but \
+                             this std time reference is not inside the file's test module",
+                            line_number + 1
+                        ));
+                    }
+                }
+                Some(_) => {}
             }
         }
     }
@@ -141,24 +252,35 @@ fn server_src_reads_time_only_through_injectable_or_tokio_seams() {
 fn allowlist_entries_stay_relevant() {
     let allowlist = std_time_allowlist();
     assert!(!allowlist.is_empty());
-    for (relative, reason) in &allowlist {
+    for (relative, exemption) in &allowlist {
         let path = repo_root().join(relative);
         assert!(path.is_file(), "allowlisted file is missing: {relative}");
         let content = read_file(&path);
         assert!(
             content.lines().any(references_std_time_type),
             "allowlisted file no longer uses a std time type; drop the stale \
-             entry from tests/clock_source_scan.rs: {relative} ({reason})"
+             entry from tests/clock_source_scan.rs: {relative} ({})",
+            exemption.reason
         );
     }
 }
 
 #[test]
 fn classifier_matches_imports_and_qualified_uses_only() {
+    // Imports.
     assert!(references_std_time_type(
         "use std::time::{Duration, Instant};"
     ));
     assert!(references_std_time_type("use std::time::SystemTime;"));
+    // rustfmt multi-line brace form: the type names live on later lines.
+    assert!(references_std_time_type("use std::time::{"));
+    assert!(references_std_time_type("    use std::time::{"));
+    // A brace import that closes on the line without naming a time type is safe.
+    assert!(!references_std_time_type("use std::time::{Duration};"));
+    // Glob and alias imports hide the surface.
+    assert!(references_std_time_type("use std::time::*;"));
+    assert!(references_std_time_type("use std::time as stdtime;"));
+    // Qualified uses.
     assert!(references_std_time_type(
         "let started = std::time::Instant::now();"
     ));
@@ -175,11 +297,15 @@ fn classifier_matches_imports_and_qualified_uses_only() {
     assert!(!references_std_time_type(
         "record_at(peer_ip, outcome, Instant::now())"
     ));
-    // Comments about the convention are not uses of it.
+    // Comments about the convention are not uses of it...
     assert!(!references_std_time_type(
         "// `tokio::time::Instant` (not `std::time::Instant`) so the reaper pauses"
     ));
     assert!(!references_std_time_type(
         "/// See the injectable-time convention; never call std::time::Instant::now()"
+    ));
+    // ...and a scheme's `://` must not truncate the code before a real use.
+    assert!(references_std_time_type(
+        "let url = \"https://example.com\"; let t = std::time::Instant::now();"
     ));
 }

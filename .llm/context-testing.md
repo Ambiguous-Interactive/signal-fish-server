@@ -95,12 +95,21 @@ exactly two sanctioned patterns; both are pinned by `tests/clock_source_scan.rs`
    `src/auth/rate_limiter.rs`, `src/websocket/upgrade_rejection_log.rs`,
    `src/websocket/metrics.rs`).
 
-Sanctioned exceptions (allowlisted in the scan guard): a **wall-clock
-`SystemTime` stamp for log lines** (`src/server/shutdown.rs`) and test-module
-timing loops. Do not introduce a new std clock read in production decision
-paths — extend the injected-seam pattern instead. Do not add `#[cfg(test)]`
-constructor overrides (window/duration shrinking) to fake time control; they
-hide the real timing behavior the tests claim to cover.
+Sanctioned exceptions (allowlisted in the scan guard): the **absolute
+epoch-ms drain deadline** in `src/server/shutdown.rs` (clients see absolute
+millisecond timestamps, so the wall clock is the point; the reads sit behind
+thin wrappers over `*_since` injected variants; monotonic shutdown logic uses
+tokio time) and **test-module timing loops** (`src/main.rs`,
+`src/coordination/mod.rs`, pinned to each file's test module by the guard).
+Do not introduce a new std clock read in production decision paths — extend
+the injected-seam pattern instead. Do not add `#[cfg(test)]` constructor
+overrides (window/duration shrinking) to fake time control; they hide the real
+timing behavior the tests claim to cover.
+
+Scope note: the guard pins `std` clock sources. `chrono` `Utc::now()` reads
+(durable-record timestamps, embedder conveniences) are a separate tracked
+surface — see #498 for the per-site triage and guard extension before adding
+new production wall-clock decision logic.
 
 **If a flake cannot be eliminated conclusively in the same change**, it is
 **never left silent**: record it in `PLAN.md` with (1) the observed symptom and

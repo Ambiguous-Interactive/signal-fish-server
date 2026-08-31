@@ -31,11 +31,11 @@
 //! Cross-harness subtlety encoded below: Nanocoder loads project `.mcp.json`
 //! via the `transport` key while Claude Code requires `type`, so the shared
 //! committed file must carry BOTH keys — dropping either one silently
-//! unwires a whole harness from GitHub. OpenCode has the mirror-image subtlety:
-//! it launches local MCP servers without inheriting the shell environment, so
-//! `opencode.json` must forward `GITHUB_PERSONAL_ACCESS_TOKEN` explicitly via
-//! its `environment` map — without that pass-through the server falls back to
-//! the interactive OAuth device-authorization flow on every session.
+//! unwires a whole harness from GitHub. OpenCode has the mirror-image
+//! subtlety: observed in issue #496, its `github-mcp-server` fell back to
+//! the OAuth device-authorization flow even with the token present in the
+//! container shell, so `opencode.json` must forward
+//! `GITHUB_PERSONAL_ACCESS_TOKEN` explicitly via its `environment` map.
 
 mod common;
 
@@ -293,9 +293,9 @@ fn every_harness_is_wired_to_the_github_mcp_server() {
             "\"github\"",
             "github-mcp-server",
             "\"type\": \"local\"",
-            // OpenCode launches local MCP servers without inheriting the
-            // shell environment: the token must be forwarded explicitly or
-            // github-mcp-server falls back to interactive device authorization.
+            // Observed in #496: the opencode-launched server device-flowed
+            // even with the token in the container shell — the pass-through
+            // is mandatory, shell inheritance cannot be relied on.
             "\"environment\"",
             "\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{env:GITHUB_PERSONAL_ACCESS_TOKEN}\"",
         ],

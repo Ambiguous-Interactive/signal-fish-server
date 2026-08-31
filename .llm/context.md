@@ -177,9 +177,10 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   (written idempotently for Codex). It authenticates via
   `GITHUB_PERSONAL_ACCESS_TOKEN` passed through `remoteEnv`;
   `opencode.json` must additionally forward the token through its
-  `environment` map (`{env:GITHUB_PERSONAL_ACCESS_TOKEN}`) because
-  OpenCode-launched local MCP servers do not inherit the shell
-  environment. The shared
+  `environment` map (`{env:GITHUB_PERSONAL_ACCESS_TOKEN}`) — observed in
+  #496, an opencode-launched MCP server device-flowed even with the token
+  present in the container shell, so shell-environment inheritance must
+  not be relied on. The shared
   `.mcp.json` must keep BOTH keys — `type` (Claude Code) and `transport`
   (Nanocoder) — or one harness silently loses GitHub.
 - Any change to the agent-tooling contract (npm prefix, CLI refresh, MCP
