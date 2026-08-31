@@ -31,7 +31,11 @@
 //! Cross-harness subtlety encoded below: Nanocoder loads project `.mcp.json`
 //! via the `transport` key while Claude Code requires `type`, so the shared
 //! committed file must carry BOTH keys — dropping either one silently
-//! unwires a whole harness from GitHub.
+//! unwires a whole harness from GitHub. OpenCode has the mirror-image subtlety:
+//! it launches local MCP servers without inheriting the shell environment, so
+//! `opencode.json` must forward `GITHUB_PERSONAL_ACCESS_TOKEN` explicitly via
+//! its `environment` map — without that pass-through the server falls back to
+//! the interactive OAuth device-authorization flow on every session.
 
 mod common;
 
@@ -285,7 +289,16 @@ fn every_harness_is_wired_to_the_github_mcp_server() {
     let opencode = read_live("opencode.json");
     require_fragments(
         &opencode,
-        &["\"github\"", "github-mcp-server", "\"type\": \"local\""],
+        &[
+            "\"github\"",
+            "github-mcp-server",
+            "\"type\": \"local\"",
+            // OpenCode launches local MCP servers without inheriting the
+            // shell environment: the token must be forwarded explicitly or
+            // github-mcp-server falls back to interactive device authorization.
+            "\"environment\"",
+            "\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{env:GITHUB_PERSONAL_ACCESS_TOKEN}\"",
+        ],
         contract,
     );
 
@@ -308,7 +321,8 @@ fn ci_enforces_the_agent_tooling_contract() {
                     the cargo test matrix is skipped: \
                     scripts/check-tooling-parity.sh (run by ci.yml) must cover the \
                     agent CLIs, the fast-path refresh, the shared .mcp.json dual \
-                    keys, OpenCode local wiring, and shellcheck coverage of the \
+                    keys, OpenCode local wiring (including the GitHub token \
+                    environment pass-through), and shellcheck coverage of the \
                     devcontainer lifecycle scripts (scripts/validate-ci.sh).";
 
     let parity = read_live("scripts/check-tooling-parity.sh");
@@ -320,6 +334,7 @@ fn ci_enforces_the_agent_tooling_contract() {
             "npm_global_installed_version",
             "\"transport\": \"stdio\"",
             "\"type\": \"local\"",
+            "\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{env:GITHUB_PERSONAL_ACCESS_TOKEN}\"",
             ".devcontainer/*.sh",
             // The flipped npm-prefix guard lives in the parity script too.
             "ENV NPM_CONFIG_PREFIX",
