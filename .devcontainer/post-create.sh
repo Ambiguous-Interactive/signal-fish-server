@@ -2,53 +2,20 @@
 # Signal Fish Server — Post-create setup for the dev container
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=lib-agent-tools.sh
+. "$SCRIPT_DIR/lib-agent-tools.sh"
+
 echo ""
 echo "============================================"
 echo "  Signal Fish Server — Setting up dev env"
 echo "============================================"
 echo ""
 
-# Install or update OpenAI Codex CLI from npm on each container create.
-# This keeps the CLI current even when Docker reuses cached image layers.
-run_with_retries() {
-    local max_attempts="$1"
-    local initial_delay_seconds="$2"
-    shift 2
-
-    local attempt=1
-    local delay_seconds="$initial_delay_seconds"
-    while true; do
-        if "$@"; then
-            return 0
-        fi
-
-        if ((attempt >= max_attempts)); then
-            echo "[setup] ERROR: Command failed after $max_attempts attempts: $*"
-            return 1
-        fi
-
-        echo "[setup] Command failed (attempt $attempt/$max_attempts); retrying in ${delay_seconds}s..."
-        sleep "$delay_seconds"
-        attempt=$((attempt + 1))
-        if ((delay_seconds < 30)); then
-            delay_seconds=$((delay_seconds * 2))
-            if ((delay_seconds > 30)); then
-                delay_seconds=30
-            fi
-        fi
-    done
-}
-
-is_truthy() {
-    case "${1:-}" in
-    1 | true | TRUE | yes | YES | on | ON)
-        return 0
-        ;;
-    *)
-        return 1
-        ;;
-    esac
-}
+# Shared agent-tooling helpers (npm prefix, Codex/OpenCode/Nanocoder install,
+# GitHub MCP wiring) live in lib-agent-tools.sh, which also powers
+# .devcontainer/post-start.sh on every container launch.
 
 prepare_worktree_cache_dirs() {
     local cache_dir
@@ -103,141 +70,6 @@ configure_git_safe_directory() {
         echo "[setup] ERROR: Git still rejects the workspace after configuring safe.directory."
         return 1
     fi
-}
-
-remove_user_npm_prefix_config() {
-    local user_npmrc="${HOME:-}/.npmrc"
-    local tmp_npmrc
-
-    if [[ -z "${HOME:-}" || ! -f "$user_npmrc" ]]; then
-        return 0
-    fi
-
-    if ! grep -Eq '^[[:space:]]*prefix[[:space:]]*=' "$user_npmrc"; then
-        return 0
-    fi
-
-    echo "[setup] Removing user npm prefix from $user_npmrc so nvm can manage global npm installs."
-    tmp_npmrc="$(mktemp)"
-    awk '!/^[[:space:]]*prefix[[:space:]]*=/' "$user_npmrc" >"$tmp_npmrc"
-    cat "$tmp_npmrc" >"$user_npmrc"
-    rm -f "$tmp_npmrc"
-}
-
-install_bash_nvm_compatibility_block() {
-    local nvm_dir="$1"
-    local bashrc="${HOME:-}/.bashrc"
-    local tmp_bashrc
-
-    if [[ -z "${HOME:-}" ]]; then
-        return 0
-    fi
-
-    if ! touch "$bashrc"; then
-        echo "[setup] Warning: could not update $bashrc with nvm compatibility block."
-        return 0
-    fi
-
-    if ! tmp_bashrc="$(mktemp)"; then
-        echo "[setup] Warning: could not create temp file for nvm compatibility block."
-        return 0
-    fi
-
-    cat >"$tmp_bashrc" <<EOF
-# >>> signal-fish nvm compatibility >>>
-# Keep nvm-managed Node available without npm prefix overrides.
-unset NPM_CONFIG_PREFIX
-unset npm_config_prefix
-unset PREFIX
-unset prefix
-export NVM_DIR="\${NVM_DIR:-$nvm_dir}"
-if [ -d "\$NVM_DIR/current/bin" ]; then
-    case ":\$PATH:" in
-        *":\$NVM_DIR/current/bin:"*) ;;
-        *) export PATH="\$NVM_DIR/current/bin:\$PATH" ;;
-    esac
-fi
-# <<< signal-fish nvm compatibility <<<
-
-EOF
-
-    if ! awk '
-        $0 == "# >>> signal-fish nvm compatibility >>>" { skip = 1; next }
-        $0 == "# <<< signal-fish nvm compatibility <<<" { skip = 0; next }
-        $0 == "# >>> signal-fish nvm PATH fallback >>>" { skip = 1; next }
-        $0 == "# <<< signal-fish nvm PATH fallback <<<" { skip = 0; next }
-        !skip { print }
-    ' "$bashrc" >>"$tmp_bashrc"; then
-        echo "[setup] Warning: could not prepare nvm compatibility block."
-        rm -f "$tmp_bashrc"
-        return 0
-    fi
-
-    if ! cat "$tmp_bashrc" >"$bashrc"; then
-        echo "[setup] Warning: could not write nvm compatibility block to $bashrc."
-        rm -f "$tmp_bashrc"
-        return 0
-    fi
-
-    rm -f "$tmp_bashrc"
-}
-
-load_node_toolchain() {
-    local nvm_dir="${NVM_DIR:-/usr/local/share/nvm}"
-
-    unset NPM_CONFIG_PREFIX
-    unset npm_config_prefix
-    unset PREFIX
-    unset prefix
-    remove_user_npm_prefix_config
-
-    if [[ -s "$nvm_dir/nvm.sh" ]]; then
-        # shellcheck disable=SC1091
-        . "$nvm_dir/nvm.sh"
-
-        if command -v nvm >/dev/null 2>&1; then
-            nvm use --silent default >/dev/null 2>&1 \
-                || nvm use --silent --lts >/dev/null 2>&1 \
-                || true
-        fi
-    fi
-
-    if [[ -d "$nvm_dir/current/bin" ]]; then
-        export PATH="$nvm_dir/current/bin:$PATH"
-    fi
-
-    install_bash_nvm_compatibility_block "$nvm_dir"
-
-    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-        echo "[setup] ERROR: Node.js and npm are required to install OpenAI Codex CLI."
-        echo "[setup] Rebuild the dev container so the Node devcontainer feature is applied."
-        # Return (don't exit): the sole caller, install_codex_cli, is invoked as a
-        # best-effort `if ! install_codex_cli` step, so this must stay recoverable.
-        return 1
-    fi
-}
-
-install_codex_cli() {
-    local codex_npm_spec="${CODEX_NPM_SPEC:-@openai/codex@latest}"
-
-    # Propagate a missing-toolchain failure as our own non-zero return so the
-    # best-effort caller can warn and continue (a bare call would let setup limp
-    # on to `npm install` with no node/npm).
-    load_node_toolchain || return 1
-
-    echo "[setup] Installing OpenAI Codex CLI from npm: $codex_npm_spec"
-    run_with_retries 5 3 npm install --global --include=optional "$codex_npm_spec"
-
-    if ! command -v codex >/dev/null 2>&1; then
-        echo "[setup] ERROR: Codex CLI install completed, but 'codex' is not on PATH."
-        echo "[setup] npm global prefix: $(npm prefix --global)"
-        # Return (don't exit): the caller (`if ! install_codex_cli`) warns and
-        # continues; an exit here would abort the entire dev-container setup.
-        return 1
-    fi
-
-    echo "[setup] Codex CLI version:"
-    codex --version
 }
 
 verify_required_rust_tools() {
@@ -313,6 +145,21 @@ if ! install_codex_cli; then
     echo "[setup] Warning: Codex CLI installation failed after retries; continuing setup."
     echo "[setup] You can retry later with: npm install --global --include=optional ${CODEX_NPM_SPEC:-@openai/codex@latest}"
 fi
+
+if ! install_opencode_cli; then
+    echo "[setup] Warning: OpenCode CLI installation failed after retries; continuing setup."
+    echo "[setup] You can retry later with: npm install --global --include=optional ${OPENCODE_NPM_SPEC:-opencode-ai@latest}"
+fi
+
+if ! install_nanocoder_cli; then
+    echo "[setup] Warning: Nanocoder CLI installation failed after retries; continuing setup."
+    echo "[setup] You can retry later with: npm install --global --include=optional ${NANOCODER_NPM_SPEC:-@nanocollective/nanocoder@latest}"
+fi
+
+if ! configure_codex_github_mcp; then
+    echo "[setup] Warning: Codex GitHub MCP configuration failed; continuing setup."
+fi
+
 verify_required_rust_tools
 
 # Pre-download all dependencies
@@ -359,6 +206,15 @@ echo "    cargo llvm-cov --all-features --html"
 echo "                                        Generate coverage report"
 echo "    cargo bench                         Run benchmarks"
 echo "    codex                               Start Codex CLI; sign in if prompted"
+echo "    opencode                            Start OpenCode"
+echo "    nanocoder                           Start Nanocoder"
+echo ""
+echo "  Agent CLIs refresh on every container start (.devcontainer/post-start.sh);"
+echo "  rerun manually with: bash .devcontainer/post-start.sh"
+echo ""
+echo "  GitHub MCP is wired into every harness (Codex, Claude Code, Copilot,"
+echo "  VS Code, OpenCode, Nanocoder). Export GITHUB_PERSONAL_ACCESS_TOKEN to"
+echo "  authenticate it (set it on your host before opening the container)."
 echo ""
 echo "  Full check (mandatory before commit):"
 echo "    cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features"

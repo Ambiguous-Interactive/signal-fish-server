@@ -3,20 +3,440 @@
 use super::security::ClientAuthMode;
 use super::Config;
 use std::path::Path;
+use std::time::Duration;
+
+/// Constructor-owned settings projected into one validation view.
+///
+/// The file-loaded configuration stores seconds as integers while the public
+/// library API uses [`Duration`]. Keeping both projections behind this view
+/// makes the binary and library construction paths share the exact runtime
+/// invariants without coupling the constructor to listener-only CORS/TLS-file
+/// validation.
+struct RuntimeServerValidation<'a> {
+    default_max_players: u8,
+    ping_timeout: Duration,
+    room_cleanup_interval: Duration,
+    max_rooms_per_game: usize,
+    rate_limit_time_window: Duration,
+    max_room_creations: u32,
+    max_join_attempts: u32,
+    max_signals: u32,
+    inactive_room_timeout: Duration,
+    max_message_size: usize,
+    max_outbound_message_size: usize,
+    max_signal_bytes: usize,
+    max_connections_per_ip: usize,
+    reconnection_window: Duration,
+    event_buffer_size: usize,
+    heartbeat_throttle: Duration,
+    websocket: &'a super::WebSocketConfig,
+}
+
+impl<'a> RuntimeServerValidation<'a> {
+    fn from_loaded(config: &'a Config) -> Self {
+        Self {
+            default_max_players: config.server.default_max_players,
+            ping_timeout: Duration::from_secs(config.server.ping_timeout),
+            room_cleanup_interval: Duration::from_secs(config.server.room_cleanup_interval),
+            max_rooms_per_game: config.server.max_rooms_per_game,
+            rate_limit_time_window: Duration::from_secs(config.rate_limit.time_window),
+            max_room_creations: config.rate_limit.max_room_creations,
+            max_join_attempts: config.rate_limit.max_join_attempts,
+            max_signals: config.rate_limit.max_signals,
+            inactive_room_timeout: Duration::from_secs(config.server.inactive_room_timeout),
+            max_message_size: config.security.max_message_size,
+            max_outbound_message_size: config.security.max_outbound_message_size,
+            max_signal_bytes: config.security.max_signal_bytes,
+            max_connections_per_ip: config.security.max_connections_per_ip,
+            reconnection_window: Duration::from_secs(config.server.reconnection_window),
+            event_buffer_size: config.server.event_buffer_size,
+            heartbeat_throttle: Duration::from_secs(config.server.heartbeat_throttle_secs),
+            websocket: &config.websocket,
+        }
+    }
+
+    fn from_runtime(config: &'a crate::server::ServerConfig) -> Self {
+        Self {
+            default_max_players: config.default_max_players,
+            ping_timeout: config.ping_timeout,
+            room_cleanup_interval: config.room_cleanup_interval,
+            max_rooms_per_game: config.max_rooms_per_game,
+            rate_limit_time_window: config.rate_limit_config.time_window,
+            max_room_creations: config.rate_limit_config.max_room_creations,
+            max_join_attempts: config.rate_limit_config.max_join_attempts,
+            max_signals: config.rate_limit_config.max_signals,
+            inactive_room_timeout: config.inactive_room_timeout,
+            max_message_size: config.max_message_size,
+            max_outbound_message_size: config.max_outbound_message_size,
+            max_signal_bytes: config.max_signal_bytes,
+            max_connections_per_ip: config.max_connections_per_ip,
+            reconnection_window: config.reconnection_window,
+            event_buffer_size: config.event_buffer_size,
+            heartbeat_throttle: config.heartbeat_throttle,
+            websocket: &config.websocket_config,
+        }
+    }
+
+    fn validate(
+        &self,
+        protocol: &super::ProtocolConfig,
+        reject_zero_rate_budgets: bool,
+    ) -> anyhow::Result<()> {
+        if self.event_buffer_size > super::server::MAX_EVENT_BUFFER_SIZE {
+            anyhow::bail!(
+                "server.event_buffer_size must not exceed {} (configured: {})",
+                super::server::MAX_EVENT_BUFFER_SIZE,
+                self.event_buffer_size
+            );
+        }
+
+        if self.max_message_size == 0 {
+            anyhow::bail!(
+                "security.max_message_size must be greater than 0: a zero cap rejects every \
+                 WebSocket message before it can be processed"
+            );
+        }
+        if self.max_outbound_message_size == 0 {
+            anyhow::bail!(
+                "security.max_outbound_message_size must be greater than 0: a zero cap rejects every server message"
+            );
+        }
+        if self.max_outbound_message_size > crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE {
+            anyhow::bail!(
+                "security.max_outbound_message_size ({}) must not exceed the portable protocol maximum ({})",
+                self.max_outbound_message_size,
+                crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
+            );
+        }
+        if self.max_outbound_message_size
+            < self
+                .max_message_size
+                .saturating_add(crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES)
+        {
+            anyhow::bail!(
+                "security.max_message_size ({}) leaves security.max_outbound_message_size ({}) \
+                 without the required {}-byte relay projection headroom: the server re-emits \
+                 an admitted frame with the relay envelope (sender id, delivery stamps), \
+                 which grows it past the outbound cap and would close every recipient with \
+                 `1009 outbound_message_too_large`",
+                self.max_message_size,
+                self.max_outbound_message_size,
+                crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
+            );
+        }
+        if self.max_signal_bytes == 0 {
+            anyhow::bail!("security.max_signal_bytes must be greater than 0");
+        }
+        if self.max_signal_bytes > self.max_message_size {
+            anyhow::bail!(
+                "security.max_signal_bytes ({}) must not exceed security.max_message_size ({}): \
+                 a Signal frame that large would be rejected by the message size cap first, \
+                 so the configured signal cap could never take effect",
+                self.max_signal_bytes,
+                self.max_message_size
+            );
+        }
+
+        if self.room_cleanup_interval.is_zero() {
+            anyhow::bail!(
+                "server.room_cleanup_interval must be greater than 0 seconds \
+                 (it is the period of the room/client/token cleanup task)"
+            );
+        }
+        if self.rate_limit_time_window.is_zero() {
+            anyhow::bail!(
+                "rate_limit.time_window must be greater than 0 seconds \
+                 (it is the rate-limit window width and the limiter cleanup interval)"
+            );
+        }
+        // ReconnectionManager stores whole seconds. A positive sub-second
+        // Duration is therefore just as dead as zero at this boundary.
+        if self.reconnection_window < Duration::from_secs(1) {
+            anyhow::bail!(
+                "server.reconnection_window must be at least 1 second: a shorter window \
+                 expires every reconnection token instantly, silently disabling reconnection \
+                 while server.enable_reconnection is true; disable reconnection explicitly \
+                 with server.enable_reconnection=false instead"
+            );
+        }
+
+        if self.max_connections_per_ip == 0 {
+            anyhow::bail!(
+                "security.max_connections_per_ip must be greater than 0: a zero cap rejects every \
+                 WebSocket registration with IpLimitExceeded"
+            );
+        }
+        if self.max_rooms_per_game == 0 {
+            anyhow::bail!(
+                "server.max_rooms_per_game must be greater than 0: a zero cap rejects every \
+                 room creation"
+            );
+        }
+        // Direct library users deliberately use zero operation budgets to test
+        // and observe exact rejection behavior. The production Config path has
+        // no total-lockdown use case and retains its stricter admission rule.
+        if reject_zero_rate_budgets {
+            if self.max_room_creations == 0 {
+                anyhow::bail!(
+                    "rate_limit.max_room_creations must be greater than 0: a zero budget rejects every \
+                     room creation before the per-game room cap is even consulted"
+                );
+            }
+            if self.max_join_attempts == 0 {
+                anyhow::bail!(
+                    "rate_limit.max_join_attempts must be greater than 0: a zero budget rejects every \
+                     room-creation, seated-join, and spectator-join attempt"
+                );
+            }
+            if self.max_signals == 0 {
+                anyhow::bail!(
+                    "rate_limit.max_signals must be greater than 0: a zero budget rejects every \
+                     WebRTC Signal message, so peers can never exchange connection candidates"
+                );
+            }
+        }
+
+        if protocol.max_game_name_length == 0 {
+            anyhow::bail!(
+                "protocol.max_game_name_length must be greater than 0: a zero cap rejects every \
+                 game name, so no room can ever be created"
+            );
+        }
+        if protocol.max_player_name_length == 0 {
+            anyhow::bail!(
+                "protocol.max_player_name_length must be greater than 0: a zero cap rejects every \
+                 player name, so no client can ever join a room"
+            );
+        }
+        if protocol.max_players_limit == 0 {
+            anyhow::bail!(
+                "protocol.max_players_limit must be greater than 0: a zero ceiling rejects every \
+                 requested room capacity, so no client can ever join a room"
+            );
+        }
+        if self.default_max_players == 0 {
+            anyhow::bail!(
+                "server.default_max_players must be greater than 0: a zero default rejects every \
+                 room created without an explicit capacity with InvalidMaxPlayers"
+            );
+        }
+        if self.default_max_players > protocol.max_players_limit {
+            anyhow::bail!(
+                "server.default_max_players ({}) must not exceed protocol.max_players_limit ({}): \
+                 rooms created without an explicit capacity use default_max_players, and every \
+                 such room would be rejected at request time with InvalidMaxPlayers",
+                self.default_max_players,
+                protocol.max_players_limit
+            );
+        }
+
+        if self.inactive_room_timeout.is_zero() {
+            anyhow::bail!(
+                "server.inactive_room_timeout must be greater than 0 seconds: a zero deadline \
+                 lets room GC delete occupied rooms as soon as their activity refreshes go \
+                 quiet between heartbeats and game data"
+            );
+        }
+        if !self.heartbeat_throttle.is_zero()
+            && self.heartbeat_throttle >= self.inactive_room_timeout
+        {
+            anyhow::bail!(
+                "server.heartbeat_throttle_secs ({}) must be less than \
+                 server.inactive_room_timeout ({}): the room-activity refresh is throttled on \
+                 heartbeat_throttle_secs, so a throttle at or above the inactive-room deadline \
+                 lets GC reap an occupied room whose members are still active",
+                self.heartbeat_throttle.as_secs_f64(),
+                self.inactive_room_timeout.as_secs_f64()
+            );
+        }
+
+        self.websocket.validate()?;
+        let slow_consumer_timeout = Duration::from_millis(self.websocket.slow_consumer_timeout_ms);
+        if !self.ping_timeout.is_zero() && slow_consumer_timeout >= self.ping_timeout {
+            anyhow::bail!(
+                "websocket.slow_consumer_timeout_ms ({}) must be less than \
+                 server.ping_timeout ({:?} = {} ms): a slow-consumer park that can outlast the \
+                 ping deadline lets the activity reaper evict the HEALTHY sender (close 4003) \
+                 before its slow recipient is disconnected (timeout inversion)",
+                self.websocket.slow_consumer_timeout_ms,
+                self.ping_timeout,
+                self.ping_timeout.as_millis(),
+            );
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_app_registrations(apps: &[super::AppRegistrationEntry]) -> anyhow::Result<()> {
+    let mut app_ids = std::collections::HashSet::new();
+    for (index, app) in apps.iter().enumerate() {
+        if app.app_id.trim().is_empty() {
+            anyhow::bail!("security.allowed_apps[{index}].app_id must not be blank");
+        }
+        if !crate::auth::app_id_is_log_safe(&app.app_id) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].app_id contains control characters or exceeds \
+                 the {}-byte limit",
+                crate::auth::MAX_APP_ID_LENGTH
+            );
+        }
+        if !app_ids.insert(app.app_id.as_str()) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].app_id duplicates an earlier entry: {:?}",
+                app.app_id
+            );
+        }
+        if app.app_name.trim().is_empty() {
+            anyhow::bail!("security.allowed_apps[{index}].app_name must not be blank");
+        }
+        if app.max_rooms == Some(0) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].max_rooms must be greater than 0 when set: a \
+                 zero cap rejects every room creation for this app"
+            );
+        }
+        if app.max_players_per_room == Some(0) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].max_players_per_room must be greater than 0 when \
+                 set: a zero cap rejects every join for this app"
+            );
+        }
+        if app.rate_limit_per_minute == Some(0) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].rate_limit_per_minute must be greater than 0 \
+                 when set: a zero budget rejects every Authenticate for this app"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_token_binding(
+    transport: &super::TransportSecurityConfig,
+    built_in_tls_active: bool,
+) -> anyhow::Result<()> {
+    let binding = &transport.token_binding;
+    if binding.required && !binding.enabled {
+        anyhow::bail!(
+            "security.transport.token_binding.required=true requires \
+             security.transport.token_binding.enabled=true"
+        );
+    }
+    if binding.enabled {
+        if binding.scheme
+            == crate::security::token_binding::TokenBindingScheme::SecWebsocketKeySha256
+        {
+            anyhow::bail!(
+                "security.transport.token_binding.scheme=sec_websocket_key_sha256 is protocol-v1 \
+                 compatibility syntax and cannot be enabled because it lacks server freshness; use \
+                 server_nonce_hkdf_sha256"
+            );
+        }
+        if binding.required && !built_in_tls_active {
+            anyhow::bail!(
+                "security.transport.token_binding.required=true requires active built-in TLS \
+                 (set security.transport.tls.enabled=true and compile with `--features tls`)"
+            );
+        }
+        if binding.subprotocol.trim().is_empty() {
+            anyhow::bail!("security.transport.token_binding.subprotocol must not be empty");
+        }
+        if !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(
+            &binding.subprotocol,
+        ) {
+            anyhow::bail!(
+                "security.transport.token_binding.subprotocol={} uses Signal Fish's reserved \
+                 protocol namespace but does not name the v2 wire contract; use {} or a custom \
+                 non-reserved alias",
+                binding.subprotocol,
+                crate::security::token_binding::TOKEN_BINDING_SUBPROTOCOL_V2
+            );
+        }
+        if binding.require_client_fingerprint {
+            if !binding.required {
+                anyhow::bail!(
+                    "security.transport.token_binding.require_client_fingerprint=true requires \
+                     security.transport.token_binding.required=true so clients cannot bypass \
+                     certificate binding by omitting the subprotocol"
+                );
+            }
+            if !built_in_tls_active {
+                anyhow::bail!(
+                    "security.transport.token_binding.require_client_fingerprint=true requires \
+                     active built-in TLS so the fingerprint comes from an authenticated rustls \
+                     peer certificate"
+                );
+            }
+            if matches!(transport.tls.client_auth, ClientAuthMode::None) {
+                anyhow::bail!(
+                    "security.transport.token_binding.require_client_fingerprint=true requires \
+                     security.transport.tls.client_auth to be `optional` or `require`"
+                );
+            }
+        }
+    } else if binding.require_client_fingerprint {
+        anyhow::bail!(
+            "security.transport.token_binding.require_client_fingerprint=true requires \
+             security.transport.token_binding.enabled=true"
+        );
+    }
+    Ok(())
+}
+
+/// Validate every setting that becomes live inside [`crate::server::EnhancedGameServer`].
+///
+/// Listener-owned CORS and TLS certificate-file admission stays in
+/// [`validate_config_security`]. Zero operation budgets are deliberately valid
+/// for direct library construction, where they provide deterministic
+/// total-rejection policies and rejection-metric tests.
+pub(crate) fn validate_constructor_inputs(
+    server: &crate::server::ServerConfig,
+    protocol: &super::ProtocolConfig,
+    session: &super::SessionConfig,
+    turn: &super::TurnConfig,
+    transport: &super::TransportSecurityConfig,
+    allowed_apps: &[super::AppRegistrationEntry],
+) -> anyhow::Result<()> {
+    validate_runtime_inputs(
+        &RuntimeServerValidation::from_runtime(server),
+        protocol,
+        session,
+        turn,
+        transport,
+        allowed_apps,
+        server.room_code_prefix.as_deref(),
+        false,
+        transport.tls.enabled && cfg!(feature = "tls"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_inputs(
+    server: &RuntimeServerValidation<'_>,
+    protocol: &super::ProtocolConfig,
+    session: &super::SessionConfig,
+    turn: &super::TurnConfig,
+    transport: &super::TransportSecurityConfig,
+    allowed_apps: &[super::AppRegistrationEntry],
+    room_code_prefix: Option<&str>,
+    reject_zero_rate_budgets: bool,
+    built_in_tls_active: bool,
+) -> anyhow::Result<()> {
+    server.validate(protocol, reject_zero_rate_budgets)?;
+    validate_app_registrations(allowed_apps)?;
+    validate_token_binding(transport, built_in_tls_active)?;
+    protocol.validate_room_code_generation(room_code_prefix)?;
+    session.validate()?;
+    turn.validate()?;
+    Ok(())
+}
 
 /// Validate configuration security and warn about potential credential leaks
 pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
     let is_prod = is_production_mode();
 
     crate::security::OriginPolicy::parse(&config.security.cors_origins)?;
-
-    if config.server.event_buffer_size > super::server::MAX_EVENT_BUFFER_SIZE {
-        anyhow::bail!(
-            "server.event_buffer_size must not exceed {} (configured: {})",
-            super::server::MAX_EVENT_BUFFER_SIZE,
-            config.server.event_buffer_size
-        );
-    }
 
     // Validate metrics authentication
     if config.security.require_metrics_auth {
@@ -63,45 +483,6 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
              export SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=\"$(openssl rand -hex 32)\"\n\
              ===================================================================\n"
         );
-    }
-
-    let mut app_ids = std::collections::HashSet::new();
-    for (index, app) in config.security.allowed_apps.iter().enumerate() {
-        if app.app_id.trim().is_empty() {
-            anyhow::bail!("security.allowed_apps[{index}].app_id must not be blank");
-        }
-        if !app_ids.insert(app.app_id.as_str()) {
-            anyhow::bail!(
-                "security.allowed_apps[{index}].app_id duplicates an earlier entry: {:?}",
-                app.app_id
-            );
-        }
-        if app.app_name.trim().is_empty() {
-            anyhow::bail!("security.allowed_apps[{index}].app_name must not be blank");
-        }
-        // Per-app overrides of the total-rejection caps above share their
-        // failure shape: an override of `0` silently rejects every creation,
-        // join, or authentication for exactly this app while reading like the
-        // conventional "unlimited" value. A deliberate lockdown is expressed
-        // by removing the entry from the allowlist, not by zeroing its caps.
-        if app.max_rooms == Some(0) {
-            anyhow::bail!(
-                "security.allowed_apps[{index}].max_rooms must be greater than 0 when set: a \
-                 zero cap rejects every room creation for this app"
-            );
-        }
-        if app.max_players_per_room == Some(0) {
-            anyhow::bail!(
-                "security.allowed_apps[{index}].max_players_per_room must be greater than 0 when \
-                 set: a zero cap rejects every join for this app"
-            );
-        }
-        if app.rate_limit_per_minute == Some(0) {
-            anyhow::bail!(
-                "security.allowed_apps[{index}].rate_limit_per_minute must be greater than 0 \
-                 when set: a zero budget rejects every Authenticate for this app"
-            );
-        }
     }
 
     // TLS validation
@@ -162,384 +543,20 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // Message size cap validation. A zero cap would reject every inbound
-    // frame AND derive a zero transport-layer cap on the WebSocket upgrade
-    // (`2 * max_message_size`), so no message could ever be admitted. The
-    // signal-cap checks below happen to reject this transitively
-    // (`max_signal_bytes > 0` and `<= max_message_size` force a nonzero
-    // message cap), but the direct check keeps the diagnostic precise and the
-    // invariant independent of that coupling.
-    if config.security.max_message_size == 0 {
-        anyhow::bail!(
-            "security.max_message_size must be greater than 0: a zero cap rejects every \
-             WebSocket message before it can be processed"
-        );
-    }
-
-    if config.security.max_outbound_message_size == 0 {
-        anyhow::bail!(
-            "security.max_outbound_message_size must be greater than 0: a zero cap rejects every server message"
-        );
-    }
-    if config.security.max_outbound_message_size
-        > crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE
-    {
-        anyhow::bail!(
-            "security.max_outbound_message_size ({}) must not exceed the portable protocol maximum ({})",
-            config.security.max_outbound_message_size,
-            crate::config::defaults::MAX_OUTBOUND_MESSAGE_SIZE,
-        );
-    }
-
-    // Contradictory cap pairing (#396 sweep): an inbound cap at or above the
-    // outbound cap admits relayed game data that cannot be re-emitted. The
-    // relay projection attaches the sender id and delivery stamps, so the
-    // relayed frame is strictly larger than the admitted inbound frame —
-    // equality alone already overflows the outbound cap for near-max frames.
-    // Every recipient would instead be fail-closed with `1009
-    // outbound_message_too_large`, turning the deployment into silent
-    // total-rejection for exactly the traffic it appears to accept. Like the
-    // signal-cap check below, this is rejected rather than warned about so
-    // the misconfiguration can never ship.
-    if config.security.max_outbound_message_size
-        < config
-            .security
-            .max_message_size
-            .saturating_add(crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES)
-    {
-        anyhow::bail!(
-            "security.max_message_size ({}) leaves security.max_outbound_message_size ({}) \
-             without the required {}-byte relay projection headroom: the server re-emits \
-             an admitted frame with the relay envelope (sender id, delivery stamps), \
-             which grows it past the outbound cap and would close every recipient with \
-             `1009 outbound_message_too_large`",
-            config.security.max_message_size,
-            config.security.max_outbound_message_size,
-            crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
-        );
-    }
-
-    // Signal payload cap validation. `max_signal_bytes` larger than
-    // `max_message_size` is rejected (not just warned about) because it is
-    // contradictory dead config: a frame that large is rejected by the
-    // `max_message_size` cap before the signal cap could ever apply, so the
-    // configured value silently never takes effect.
-    if config.security.max_signal_bytes == 0 {
-        anyhow::bail!("security.max_signal_bytes must be greater than 0");
-    }
-    if config.security.max_signal_bytes > config.security.max_message_size {
-        anyhow::bail!(
-            "security.max_signal_bytes ({}) must not exceed security.max_message_size ({}): \
-             a Signal frame that large would be rejected by the message size cap first, \
-             so the configured signal cap could never take effect",
-            config.security.max_signal_bytes,
-            config.security.max_message_size
-        );
-    }
-
-    // Background-task interval validation. These values become the period of a
-    // `tokio::time::interval`, which PANICS on a zero period — killing the
-    // spawned task while the process keeps serving, so the failure is silent and
-    // severe. `room_cleanup_interval` drives the maintenance sweep (expired
-    // rooms/clients/reconnection records/tokens/locks); losing it leaks memory
-    // unboundedly. `time_window` is both the rate-limiter cleanup period and the
-    // width of every rate-limit window (zero ⇒ the window resets on every check,
-    // disabling the limits). `batch_interval_ms` is validated in
-    // `WebSocketConfig::validate` below (it only feeds an interval when batching
-    // is on). Rejecting a zero here turns an operator typo into a loud startup
-    // error; the use sites below ALSO clamp defensively (the server is
-    // constructible directly via the public API, bypassing this check). Loud
-    // rejection is reserved for these panic-prone periods — other interval
-    // sites that already clamp and therefore never panic keep their non-fatal
-    // use-site handling.
-    if config.server.room_cleanup_interval == 0 {
-        anyhow::bail!(
-            "server.room_cleanup_interval must be greater than 0 seconds \
-             (it is the period of the room/client/token cleanup task)"
-        );
-    }
-    if config.rate_limit.time_window == 0 {
-        anyhow::bail!(
-            "rate_limit.time_window must be greater than 0 seconds \
-             (it is the rate-limit window width and the limiter cleanup interval)"
-        );
-    }
-
-    // Reconnection-window validation (#431). A zero window shares the #430
-    // "zero silently kills a feature" failure shape without being a rejection
-    // cap: every reconnection token is issued already expired and every
-    // reconnect-eligibility deadline is already past, so reconnection is
-    // silently dead while `enable_reconnection` reads true and the only symptom
-    // is per-reconnect rejection logs. Deliberate disable has a dedicated
-    // switch (`server.enable_reconnection = false`), so a configured `0` has no
-    // legitimate meaning.
-    if config.server.reconnection_window == 0 {
-        anyhow::bail!(
-            "server.reconnection_window must be greater than 0 seconds: a zero window \
-             expires every reconnection token instantly, silently disabling reconnection \
-             while server.enable_reconnection is true; disable reconnection explicitly \
-             with server.enable_reconnection=false instead"
-        );
-    }
-
-    // Total-rejection cap validation (#430). Each cap below shares one failure
-    // shape: a configured `0` silently rejects EVERY registration, room
-    // creation, join, or signal while reading like the conventional "unlimited"
-    // value, and the only symptom is per-connection rejection logs. None of
-    // them has a meaningful "admit nothing" deployment (a deliberate lockdown
-    // is expressed by shutting the listener down), so they must be nonzero —
-    // like the sibling size caps above.
-    if config.security.max_connections_per_ip == 0 {
-        anyhow::bail!(
-            "security.max_connections_per_ip must be greater than 0: a zero cap rejects every \
-             WebSocket registration with IpLimitExceeded"
-        );
-    }
-    if config.server.max_rooms_per_game == 0 {
-        anyhow::bail!(
-            "server.max_rooms_per_game must be greater than 0: a zero cap rejects every \
-             room creation"
-        );
-    }
-    if config.rate_limit.max_room_creations == 0 {
-        anyhow::bail!(
-            "rate_limit.max_room_creations must be greater than 0: a zero budget rejects every \
-             room creation before the per-game room cap is even consulted"
-        );
-    }
-    if config.rate_limit.max_join_attempts == 0 {
-        anyhow::bail!(
-            "rate_limit.max_join_attempts must be greater than 0: a zero budget rejects every \
-             room-creation, seated-join, and spectator-join attempt"
-        );
-    }
-    if config.rate_limit.max_signals == 0 {
-        anyhow::bail!(
-            "rate_limit.max_signals must be greater than 0: a zero budget rejects every \
-             WebRTC Signal message, so peers can never exchange connection candidates"
-        );
-    }
-    if config.protocol.max_game_name_length == 0 {
-        anyhow::bail!(
-            "protocol.max_game_name_length must be greater than 0: a zero cap rejects every \
-             game name, so no room can ever be created"
-        );
-    }
-    if config.protocol.max_player_name_length == 0 {
-        anyhow::bail!(
-            "protocol.max_player_name_length must be greater than 0: a zero cap rejects every \
-             player name, so no client can ever join a room"
-        );
-    }
-    if config.protocol.max_players_limit == 0 {
-        anyhow::bail!(
-            "protocol.max_players_limit must be greater than 0: a zero ceiling rejects every \
-             requested room capacity, so no client can ever join a room"
-        );
-    }
-    if config.server.default_max_players == 0 {
-        anyhow::bail!(
-            "server.default_max_players must be greater than 0: a zero default rejects every \
-             room created without an explicit capacity with InvalidMaxPlayers"
-        );
-    }
-
-    // Cross-field capacity pairing: rooms created without an explicit
-    // `max_players` are seated with `server.default_max_players`
-    // (`max_players.unwrap_or(self.config.default_max_players)` in the room
-    // service) and then pass through the same
-    // `validate_max_players_with_config` ceiling as explicit requests. A
-    // default above the ceiling passes startup and then rejects EVERY
-    // default-capacity room creation with `InvalidMaxPlayers` — the deferred
-    // total-rejection shape this validator exists to surface at startup
-    // instead of as per-connection rejection logs.
-    if config.server.default_max_players > config.protocol.max_players_limit {
-        anyhow::bail!(
-            "server.default_max_players ({}) must not exceed protocol.max_players_limit ({}): \
-             rooms created without an explicit capacity use default_max_players, and every \
-             such room would be rejected at request time with InvalidMaxPlayers",
-            config.server.default_max_players,
-            config.protocol.max_players_limit
-        );
-    }
-
-    // Token binding validation
-    if config.security.transport.token_binding.required
-        && !config.security.transport.token_binding.enabled
-    {
-        anyhow::bail!(
-            "security.transport.token_binding.required=true requires \
-             security.transport.token_binding.enabled=true"
-        );
-    }
-    if config.security.transport.token_binding.enabled {
-        let binding = &config.security.transport.token_binding;
-        if binding.scheme
-            == crate::security::token_binding::TokenBindingScheme::SecWebsocketKeySha256
-        {
-            anyhow::bail!(
-                "security.transport.token_binding.scheme=sec_websocket_key_sha256 is protocol-v1 \
-                 compatibility syntax and cannot be enabled because it lacks server freshness; use \
-                 server_nonce_hkdf_sha256"
-            );
-        }
-        if binding.required && !built_in_tls_active(config, cfg!(feature = "tls")) {
-            anyhow::bail!(
-                "security.transport.token_binding.required=true requires active built-in TLS \
-                 (set security.transport.tls.enabled=true and compile with `--features tls`)"
-            );
-        }
-        if binding.subprotocol.trim().is_empty() {
-            anyhow::bail!("security.transport.token_binding.subprotocol must not be empty");
-        }
-        if !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(
-            &binding.subprotocol,
-        ) {
-            anyhow::bail!(
-                "security.transport.token_binding.subprotocol={} uses Signal Fish's reserved \
-                 protocol namespace but does not name the v2 wire contract; use {} or a custom \
-                 non-reserved alias",
-                binding.subprotocol,
-                crate::security::token_binding::TOKEN_BINDING_SUBPROTOCOL_V2
-            );
-        }
-        if binding.require_client_fingerprint {
-            if !binding.required {
-                anyhow::bail!(
-                    "security.transport.token_binding.require_client_fingerprint=true requires \
-                     security.transport.token_binding.required=true so clients cannot bypass \
-                     certificate binding by omitting the subprotocol"
-                );
-            }
-            if !built_in_tls_active(config, cfg!(feature = "tls")) {
-                anyhow::bail!(
-                    "security.transport.token_binding.require_client_fingerprint=true requires \
-                     active built-in TLS so the fingerprint comes from an authenticated rustls \
-                     peer certificate"
-                );
-            }
-            if matches!(
-                config.security.transport.tls.client_auth,
-                ClientAuthMode::None
-            ) {
-                anyhow::bail!(
-                    "security.transport.token_binding.require_client_fingerprint=true requires \
-                     security.transport.tls.client_auth to be `optional` or `require`"
-                );
-            }
-        }
-    } else if config
-        .security
-        .transport
-        .token_binding
-        .require_client_fingerprint
-    {
-        anyhow::bail!(
-            "security.transport.token_binding.require_client_fingerprint=true requires \
-             security.transport.token_binding.enabled=true"
-        );
-    }
-
-    // Direct zero check for the occupied-room reaping deadline. An occupied
-    // room is deleted whenever its monotonic idle time exceeds
-    // `inactive_room_timeout`, so a zero deadline reaps LIVE rooms in every
-    // quiet gap between activity refreshes (BUG-1 via a legal config). The
-    // throttle inversion check below cannot catch this pairing: its
-    // `heartbeat_throttle_secs == 0` arm is exempt because a disabled throttle
-    // refreshes on every heartbeat, yet even immediate refreshes leave a
-    // reapable gap against a zero deadline. Like the zero total-rejection
-    // caps, room GC has no legitimate "always on" zero value — the operator
-    // who wants rooms to vanish sooner configures a small positive deadline.
-    if config.server.inactive_room_timeout == 0 {
-        anyhow::bail!(
-            "server.inactive_room_timeout must be greater than 0 seconds: a zero deadline \
-             lets room GC delete occupied rooms as soon as their activity refreshes go \
-             quiet between heartbeats and game data"
-        );
-    }
-
-    // Cross-field: the room-activity refresh piggybacks on the per-player
-    // heartbeat throttle (`maybe_update_last_seen`), so a room with active
-    // members has its `last_activity` refreshed at most once per
-    // `heartbeat_throttle_secs`. If that throttle is >= `inactive_room_timeout`,
-    // steady ping/GameData/Signal traffic can leave `last_activity` stale past
-    // the reaper deadline and GC an occupied room while its members are still
-    // connected (BUG-1 reintroduced by misconfiguration). Require the throttle
-    // to stay strictly below the inactive-room deadline. (`heartbeat_throttle_secs
-    // == 0` disables throttling — every heartbeat refreshes — so it is always
-    // safe and exempt.)
-    if config.server.heartbeat_throttle_secs > 0
-        && config.server.heartbeat_throttle_secs >= config.server.inactive_room_timeout
-    {
-        anyhow::bail!(
-            "server.heartbeat_throttle_secs ({}) must be less than \
-             server.inactive_room_timeout ({}): the room-activity refresh is throttled on \
-             heartbeat_throttle_secs, so a throttle at or above the inactive-room deadline \
-             lets GC reap an occupied room whose members are still active",
-            config.server.heartbeat_throttle_secs,
-            config.server.inactive_room_timeout
-        );
-    }
-
-    // WebSocket configuration validation
-    config.websocket.validate()?;
-
-    // Cross-field: the slow-consumer grace period must be shorter than the
-    // activity-reaper deadline (BUG-2 / timeout inversion). A message handler
-    // records sender activity at dispatch, then parks on the broadcast
-    // `join_all` while a slow recipient drains — up to `slow_consumer_timeout_ms`.
-    // If that park can outlast `server.ping_timeout`, the reaper evicts the
-    // HEALTHY sender (close 4003) before its own slow recipient is ever
-    // disconnected: a legal config gets a healthy player kicked. Require the
-    // grace period to be strictly less than the ping deadline so the sender's
-    // recorded activity is always still fresh when its park ends. (Guarded on
-    // `ping_timeout > 0`: a zero deadline disables the reaper, so no inversion
-    // exists to prevent.)
-    //
-    // `formal/tla/SenderPacingReaper.tla` derives this strict `<` as
-    // the NECESSARY floor. It models the pre-park delay `d` — the
-    // `maybe_update_last_seen` throttle-boundary DB write + `rooms` write-lock
-    // that runs after the activity record and before the park — and TLC shows
-    // that `slow >= ping` is unsafe (the peak reaper-visible gap `d + slow`
-    // exceeds the deadline), which is EXACTLY the region rejected here. The
-    // `<` is not, however, proven SUFFICIENT: the model bounds `d` to one
-    // tick, but the lock/DB delay is unbounded under contention, so a config
-    // with a thin margin can still invert if `d` exceeds that margin. Full
-    // safety is an operator sizing concern — keep the margin
-    // `ping_timeout * 1000 - slow_consumer_timeout_ms` (both in ms; note
-    // `ping_timeout` is seconds, `slow_consumer_timeout_ms` is milliseconds)
-    // above the worst-case pre-park delay (the default 30000 - 5000 = 25000 ms
-    // dwarfs it). This check is the guardrail against the provable inversion
-    // region, not a liveness proof under unbounded load.
-    if config.server.ping_timeout > 0 {
-        let ping_timeout_ms = config.server.ping_timeout.saturating_mul(1000);
-        if config.websocket.slow_consumer_timeout_ms >= ping_timeout_ms {
-            anyhow::bail!(
-                "websocket.slow_consumer_timeout_ms ({}) must be less than \
-                 server.ping_timeout ({} s = {} ms): a slow-consumer park that can \
-                 outlast the ping deadline lets the activity reaper evict the HEALTHY \
-                 sender (close 4003) before its slow recipient is disconnected \
-                 (timeout inversion)",
-                config.websocket.slow_consumer_timeout_ms,
-                config.server.ping_timeout,
-                ping_timeout_ms
-            );
-        }
-    }
-
-    // Protocol bounds plus generated-room-code closure: every automatically
-    // generated code must be admissible through the explicit join path.
-    config
-        .protocol
-        .validate_room_code_generation(config.server.room_code_prefix.as_deref())?;
-
-    // Session topology/transport policy validation
-    config.session.validate()?;
-
-    // TURN / STUN ICE-server policy validation
-    config.turn.validate()?;
-
-    Ok(())
+    // The same constructor-owned projection is checked by
+    // `EnhancedGameServer::new`; production additionally rejects zero operation
+    // budgets, which remain a deliberate direct-library testing policy.
+    validate_runtime_inputs(
+        &RuntimeServerValidation::from_loaded(config),
+        &config.protocol,
+        &config.session,
+        &config.turn,
+        &config.security.transport,
+        &config.security.allowed_apps,
+        config.server.room_code_prefix.as_deref(),
+        true,
+        built_in_tls_active(config, cfg!(feature = "tls")),
+    )
 }
 
 /// Whether startup should warn that signaling is not TLS-terminated while the
@@ -994,6 +1011,50 @@ mod tests {
             .expect_err("duplicate public app IDs must not use last-entry-wins semantics");
         assert!(error.to_string().contains("allowed_apps[1].app_id"));
         assert!(error.to_string().contains("duplicates an earlier entry"));
+    }
+
+    /// Allowlist IDs are echoed into logs and metrics labels; a control
+    /// character or oversized byte string would poison that surface, so the
+    /// shared validator refuses such an entry before policy construction.
+    #[test]
+    fn allowed_apps_reject_log_unsafe_ids_with_indexed_errors() {
+        let cases: [(&str, fn(&mut AppRegistrationEntry)); 2] = [
+            ("contains control characters", |app| {
+                app.app_id = "game\n".to_string();
+            }),
+            ("exceeds", |app| {
+                app.app_id = "a".repeat(crate::auth::MAX_APP_ID_LENGTH + 1);
+            }),
+        ];
+
+        for (expected, mutate) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.allowed_apps = vec![AppRegistrationEntry {
+                app_id: "game".to_string(),
+                app_name: "Game".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: None,
+            }];
+            let mut unsafe_app = AppRegistrationEntry {
+                app_id: "probe".to_string(),
+                app_name: "Probe".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: None,
+            };
+            mutate(&mut unsafe_app);
+            config.security.allowed_apps.push(unsafe_app);
+
+            let err = validate_config_security(&config)
+                .expect_err("log-unsafe allowlist IDs are rejected at startup");
+            let message = err.to_string();
+            assert!(
+                message.contains("security.allowed_apps[1].app_id") && message.contains(expected),
+                "error must name the log-unsafe ID at index 1 ({expected}): {err}"
+            );
+        }
     }
 
     #[test]

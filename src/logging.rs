@@ -89,12 +89,63 @@ where
         return None;
     }
 
-    let file_appender =
-        tracing_appender::rolling::RollingFileAppender::new(rotation, &cfg.dir, &cfg.filename);
+    let file_appender = match tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(rotation)
+        .filename_prefix(cfg.filename.clone())
+        .build(&cfg.dir)
+    {
+        Ok(file_appender) => file_appender,
+        Err(error) => {
+            eprintln!(
+                "Failed to initialize log file '{}/{}': {error}, continuing with stdout logs",
+                cfg.dir, cfg.filename
+            );
+            return None;
+        }
+    };
     let (non_blocking, file_guard) = tracing_appender::non_blocking(file_appender);
 
     // Keep guard alive for process lifetime
     let _leaked: &'static _ = Box::leak(Box::new(file_guard));
 
     Some(build_layer(non_blocking))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_appender_init_failure_falls_back_without_panicking() {
+        let log_root = tempfile::tempdir().expect("temporary log root");
+        let blocked_filename = "existing-directory";
+        std::fs::create_dir(log_root.path().join(blocked_filename))
+            .expect("directory that cannot be opened as a log file");
+        let cfg = LoggingConfig {
+            dir: log_root.path().display().to_string(),
+            filename: blocked_filename.to_string(),
+            rotation: "never".to_string(),
+            enable_file_logging: true,
+            ..LoggingConfig::default()
+        };
+
+        let text_layer = build_file_layer(&cfg, |writer| {
+            tracing_subscriber::fmt::layer::<tracing_subscriber::Registry>()
+                .with_ansi(false)
+                .with_timer(UtcTime::rfc_3339())
+                .with_writer(writer)
+        });
+        let json_layer = build_file_layer(&cfg, |writer| {
+            tracing_subscriber::fmt::layer::<tracing_subscriber::Registry>()
+                .json()
+                .with_ansi(false)
+                .with_timer(UtcTime::rfc_3339())
+                .with_writer(writer)
+        });
+
+        assert!(
+            text_layer.is_none() && json_layer.is_none(),
+            "an unusable log target must preserve stdout-only text and JSON logging"
+        );
+    }
 }

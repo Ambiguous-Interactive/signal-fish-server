@@ -688,6 +688,18 @@ validate_shell_scripts() {
         fi
     done
 
+    # Validate devcontainer lifecycle scripts (post-create, post-start, and the
+    # shared agent-tooling library they source). These run on every container
+    # create/start, so a silent syntax regression there blocks the whole team.
+    for script in .devcontainer/*.sh; do
+        [ -f "$script" ] || continue
+        shell_checked=$((shell_checked + 1))
+
+        if ! run_shellcheck "bash" "$sc_severity" "$script"; then
+            shell_errors=$((shell_errors + 1))
+        fi
+    done
+
     # Validate all git hook wrappers. PowerShell policy lives in scripts/hooks/*.ps1;
     # extensionless .githooks/* files remain small POSIX wrappers for Git.
     for hook in .githooks/*; do

@@ -240,6 +240,69 @@ async fn generated_room_code_collision_retries_instead_of_joining_existing_room(
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn room_join_rejects_unicode_case_fold_equivalent_player_name() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48039".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "unicode-name-game".to_string(),
+            Some("FOLD01".to_string()),
+            "Straße".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let created = timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .expect("room creation should finish")
+        .expect("room creation should respond");
+    assert!(
+        matches!(created.as_ref(), ServerMessage::RoomJoined(_)),
+        "creator must be seated before the uniqueness check: {created:?}"
+    );
+
+    let (joiner, mut joiner_rx) =
+        register_client(&server, "127.0.0.1:48040".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &joiner,
+            "unicode-name-game".to_string(),
+            Some("FOLD01".to_string()),
+            "STRASSE".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let rejected = timeout(Duration::from_secs(1), joiner_rx.recv())
+        .await
+        .expect("duplicate-name join should finish")
+        .expect("duplicate-name join should respond");
+    match rejected.as_ref() {
+        ServerMessage::RoomJoinFailed { reason, error_code } => {
+            assert_eq!(reason, "Player name already exists in this room");
+            assert_eq!(*error_code, Some(ErrorCode::RoomCreationFailed));
+        }
+        other => panic!("fold-equivalent joiner must be rejected, got {other:?}"),
+    }
+
+    let room = server
+        .database
+        .get_room("unicode-name-game", "FOLD01")
+        .await
+        .expect("room lookup should succeed")
+        .expect("created room should remain present");
+    assert_eq!(room.players.len(), 1);
+    assert!(room.players.contains_key(&creator));
+    assert!(!room.players.contains_key(&joiner));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
     let message_coordinator: Arc<dyn MessageCoordinator> =
@@ -5159,10 +5222,24 @@ async fn draining_unregister_removes_membership_without_roomleft_noise() {
 #[cfg_attr(miri, ignore)]
 async fn max_room_cap_denial_releases_join_coordination_locks() {
     let server = create_test_server_with_config(ServerConfig {
-        max_rooms_per_game: 0,
+        max_rooms_per_game: 1,
         ..ServerConfig::default()
     })
     .await;
+    server
+        .database
+        .create_room(
+            "test-game".to_string(),
+            Some("EXISTS".to_string()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("fixture room reaches the valid per-game cap");
     let (player_id, mut receiver) =
         register_client(&server, "127.0.0.1:48001".parse().unwrap()).await;
 
@@ -6493,11 +6570,11 @@ async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn maintenance_cleanup_removes_expired_reconnections() {
     let server = create_test_server_with_config(ServerConfig {
-        reconnection_window: Duration::ZERO,
+        reconnection_window: Duration::from_secs(1),
         ..ServerConfig::default()
     })
     .await;
@@ -6524,6 +6601,7 @@ async fn maintenance_cleanup_removes_expired_reconnections() {
         1
     );
 
+    tokio::time::advance(Duration::from_secs(1) + Duration::from_nanos(1)).await;
     let cleaned = server.cleanup_expired_reconnections().await;
 
     assert_eq!(cleaned, 1);
@@ -7187,7 +7265,11 @@ async fn activity_refresh_after_cleanup_snapshot_prevents_eviction() {
 #[cfg_attr(miri, ignore)]
 async fn activity_reaper_does_not_override_an_existing_close_owner() {
     let server = create_test_server_with_config(ServerConfig {
-        ping_timeout: Duration::from_nanos(1),
+        ping_timeout: Duration::from_millis(2),
+        websocket_config: WebSocketConfig {
+            slow_consumer_timeout_ms: 1,
+            ..WebSocketConfig::default()
+        },
         ..ServerConfig::default()
     })
     .await;
@@ -7247,7 +7329,11 @@ async fn activity_reaper_does_not_override_an_existing_close_owner() {
 #[cfg_attr(miri, ignore)]
 async fn draining_cleanup_task_exits_without_activity_timeout_eviction() {
     let server = create_test_server_with_config(ServerConfig {
-        ping_timeout: Duration::from_nanos(1),
+        ping_timeout: Duration::from_millis(2),
+        websocket_config: WebSocketConfig {
+            slow_consumer_timeout_ms: 1,
+            ..WebSocketConfig::default()
+        },
         ..ServerConfig::default()
     })
     .await;

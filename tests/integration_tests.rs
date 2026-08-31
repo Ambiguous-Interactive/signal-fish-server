@@ -792,7 +792,12 @@ async fn test_config_fallback_integration() {
 /// Test server behavior with custom protocol configuration
 #[tokio::test]
 async fn test_custom_protocol_config() {
-    let server_config = ServerConfig::default();
+    // The constructor rejects a default capacity above the protocol ceiling,
+    // so the reduced max_players_limit pairs with a matching default capacity.
+    let server_config = ServerConfig {
+        default_max_players: 4,
+        ..ServerConfig::default()
+    };
     let protocol_config = signal_fish_server::config::ProtocolConfig {
         max_game_name_length: 32,   // Reduced from default 64
         room_code_length: 4,        // Reduced from default 6

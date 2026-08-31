@@ -638,6 +638,11 @@ async fn start_server_with_reaper_window(
         websocket_config: WebSocketConfig {
             server_ping_interval_secs: 1,
             pong_timeout_secs: 30,
+            // Constructor validation rejects a slow-consumer park that can
+            // outlast the ping deadline (timeout inversion).
+            slow_consumer_timeout_ms: (u64::try_from(ping_timeout.as_millis()).unwrap_or(u64::MAX)
+                / 2)
+            .max(1),
             ..WebSocketConfig::default()
         },
         ..ServerConfig::default()
