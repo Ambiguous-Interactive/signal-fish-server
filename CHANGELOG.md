@@ -60,21 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authentication, and disabling every liveness mechanism at once leaves dead clients un-reaped
   (issues #462, #465).
 
-### Fixed
-
-- Fix room storage commits that could tear under future cancellation: room creation, player and
-  spectator joins/leaves, activity refresh, and room deletion now acquire the monotonic liveness
-  guard before the first mutation, so a dropped future can no longer commit the primary row
-  change without its liveness stamp (degrading GC to the wall-clock fallback) or delete a room
-  while leaving an orphaned liveness entry that no sweep ever removes (issue #396).
-- Fix reconnect identity swaps silently stomping a live connection entry under the restored id:
-  the swap now refuses (`RefusedTargetOccupied`) before any map mutation — mirroring the rollback
-  sibling's collision check — leaving the transient connection intact and the reconnection record
-  spendable for a retry (issue #396).
-- Fix the `heartbeat_updates` metric label claiming "updates performed" while the counter fired
-  before the persistence attempt: the field docs now state the truthful semantics (throttle
-  windows consumed, failed persistences included) (issue #396).
-
 ### Changed
 
 - Exported Prometheus HELP for `signal_fish_websocket_backpressure_events_total` no longer claims
@@ -197,6 +182,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix room storage commits that could tear under future cancellation: room creation, player and
+  spectator joins/leaves, activity refresh, and room deletion now acquire the monotonic liveness
+  guard before the first mutation, so a dropped future can no longer commit the primary row
+  change without its liveness stamp (degrading GC to the wall-clock fallback) or delete a room
+  while leaving an orphaned liveness entry that no sweep ever removes (issue #396).
+- Fix reconnect identity swaps silently stomping a live connection entry under the restored id:
+  the swap now refuses (`RefusedTargetOccupied`) before any map mutation — mirroring the rollback
+  sibling's collision check — leaving the transient connection intact and the reconnection record
+  spendable for a retry (issue #396).
+- Fix the `heartbeat_updates` metric label claiming "updates performed" while the counter fired
+  before the persistence attempt: the field docs now state the truthful semantics (throttle
+  windows consumed, failed persistences included) (issue #396).
 - Fix devcontainer image builds failing with `nvm is not compatible with the
   "NPM_CONFIG_PREFIX" environment variable` during the Node feature install
   (features install in layers appended after the Dockerfile): the user-owned npm

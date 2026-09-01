@@ -508,7 +508,8 @@ ever contacted and no external credentials are required.
 - `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled`
 - `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled`
 - `stun_urls` - Public STUN URLs advertised on WebRTC plans regardless of `enabled` (default: `["stun:stun.l.google.com:19302"]`)
-- `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` and at most `86400` (24 hours) when enabled (default: 3600)
+- `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` and at
+  most `86400` (24 hours) when enabled (default: 3600)
 
 ### Security: `static_auth_secret` is server-only
 
