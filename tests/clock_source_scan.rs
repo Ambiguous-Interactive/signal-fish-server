@@ -499,11 +499,13 @@ fn collapse_path_separators(code: &str) -> String {
 /// so multi-line literals cannot leak braces into the depth — and a `'` that
 /// is not a char literal (a lifetime) is ignored. When a gate attribute is
 /// seen, the next non-attribute, non-blank, non-comment line opens the gated
-/// item. The region covers the item's signature lines and every body line
-/// until brace depth falls back to the item's opening depth; self-terminating
-/// items (enum variant / struct field / match arm, ending `,`) and brace-less
-/// items (`;`) close without a body, while unbalanced parens or a `where`
-/// clause mark a signature that continues onto later lines.
+/// item, and the item's HEAD TOKEN decides how the gate resolves: a
+/// brace-bodied or `;`-terminated item (fn with a possibly multi-line
+/// signature and where clauses, mod, struct, enum, impl, trait, use, const,
+/// static, type) stays open until its `{` or `;`, while a bare inner item
+/// (enum variant, struct field, match arm, or a `#[cfg(test)]` fn parameter)
+/// closes at its `,` once parens are back to the depth the item head started
+/// at — so no later production code can be swallowed by a stuck gate.
 ///
 /// Known limits (accepted): gate recognition is exact-match on the trimmed
 /// attribute line, so trailing comments on a gate line or
@@ -513,15 +515,15 @@ fn collapse_path_separators(code: &str) -> String {
 fn cfg_test_gated_regions(lines: &[&str]) -> (Vec<bool>, i64) {
     let mut in_region = vec![false; lines.len()];
     let mut depth: i64 = 0;
-    // Parenthesis balance across lines: a gated item whose parens are still
-    // open at end-of-line is a multi-line signature in progress.
+    // Parenthesis balance across lines: a bare inner item (variant, field,
+    // match arm, fn parameter) only self-terminates at a `,` written at the
+    // paren depth its head started at.
     let mut paren_depth: i64 = 0;
     // Gated items whose region is still open (innermost last). A gate is
     // `AwaitingBody` until its item resolves: a `{` switches it to
     // `DepthWatch`, a `;` closes a brace-less item (`mod foo;`,
-    // `const X: u32 = 1;`), a `,` at balanced parens closes a field/variant/
-    // match-arm item, and a `,` with unbalanced parens (or a `where` clause)
-    // marks a signature that continues onto later lines.
+    // `const X: u32 = 1;`), and a `,` at the head's paren depth closes a
+    // bare inner item.
     let mut open_gates: Vec<(i64, GateBody)> = Vec::new();
     let mut pending_gate: Option<i64> = None;
     // Literal/comment lexer state persists across lines: multi-line raw
@@ -539,7 +541,13 @@ fn cfg_test_gated_regions(lines: &[&str]) -> (Vec<bool>, i64) {
             let opens_item =
                 !trimmed.is_empty() && !trimmed.starts_with("//") && !trimmed.starts_with("#[");
             if opens_item {
-                open_gates.push((gate_depth, GateBody::AwaitingBody { signature: false }));
+                open_gates.push((
+                    gate_depth,
+                    GateBody::AwaitingBody {
+                        body_seeking: item_head_seeks_body(trimmed),
+                        open_paren: paren_depth,
+                    },
+                ));
                 pending_gate = None;
             }
         }
@@ -649,29 +657,34 @@ fn cfg_test_gated_regions(lines: &[&str]) -> (Vec<bool>, i64) {
 
         // Resolve awaiting-body gates against what this line revealed, then
         // close any depth-watched gate whose body has ended.
-        if let Some((_, GateBody::AwaitingBody { signature })) = open_gates.last_mut() {
+        if let Some((
+            _,
+            GateBody::AwaitingBody {
+                body_seeking,
+                open_paren,
+            },
+        )) = open_gates.last_mut()
+        {
             if saw_open_brace {
-                // The item's body opened (possibly a multi-line signature
-                // that just closed with `) {`).
-                *signature = false;
+                // The item's body opened (for a fn-like head, possibly after
+                // a multi-line signature and where clauses).
                 open_gates.last_mut().expect("just inspected").1 = GateBody::DepthWatch;
             } else if saw_semicolon {
-                // Brace-less item (`mod foo;`, `use ...;`, `const ...;`).
+                // Brace-less item (`mod foo;`, `use ...;`, `const ...;`,
+                // a tuple struct's `);`).
                 open_gates.pop();
-            } else if *signature
-                || paren_depth > 0
-                || line_is_where_clause(strip_line_comment(trimmed).trim())
+            } else if !*body_seeking
+                && paren_depth == *open_paren
+                && strip_line_comment(trimmed).trim().ends_with(',')
             {
-                // Signature continues onto later lines (unbalanced parens,
-                // a `where` clause, or already in signature mode).
-                *signature = true;
-            } else if trimmed.ends_with(',') {
-                // Self-terminating inner item: enum variant, struct field,
-                // or match arm.
+                // Self-terminating bare inner item: enum variant (including
+                // a multi-line one ending `),`), struct field, match arm, or
+                // a `#[cfg(test)]` function parameter.
                 open_gates.pop();
             }
-            // Otherwise: a one-line item head (`fn f() -> T`) whose `{`,
-            // `;`, or signature continues on a later line — stay open.
+            // Otherwise stay open: a body-seeking head continues (`fn f() -> T
+            // where ..`), or the bare item's line is still inside its own
+            // parens or simply has not terminated yet.
         }
         while let Some(&(gate_depth, GateBody::DepthWatch)) = open_gates.last() {
             if depth <= gate_depth {
@@ -684,25 +697,65 @@ fn cfg_test_gated_regions(lines: &[&str]) -> (Vec<bool>, i64) {
     (in_region, depth)
 }
 
-/// True for a line that is (part of) a `where` clause: exactly `where`, a
-/// bound list continuing a where clause, or a line ending in `where`.
-fn line_is_where_clause(trimmed: &str) -> bool {
-    trimmed == "where"
-        || trimmed.starts_with("where ")
-        || trimmed.ends_with(" where")
-        || trimmed.contains(" where ")
+/// True when a gated item's head declares a brace-bodied or `;`-terminated
+/// item — a function (whose signature and `where` clauses may span lines), a
+/// module, an aggregate, or a declaration — as opposed to a bare inner item
+/// (enum variant, struct field, match arm) that self-terminates at a `,`.
+fn item_head_seeks_body(trimmed: &str) -> bool {
+    let mut rest = trimmed;
+    loop {
+        let token_end = rest.find(' ').unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        match token {
+            "pub" | "async" | "const" | "unsafe" | "extern" => {
+                rest = rest[token_end..].trim_start();
+                // `pub(crate)` / `pub(super)` / `pub(in path)`.
+                if rest.starts_with('(') {
+                    let bytes = rest.as_bytes();
+                    let mut nesting = 0i64;
+                    let mut cursor = 0;
+                    while cursor < bytes.len() {
+                        match bytes[cursor] {
+                            b'(' => nesting += 1,
+                            b')' => {
+                                nesting -= 1;
+                                if nesting == 0 {
+                                    cursor += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        cursor += 1;
+                    }
+                    rest = rest[cursor..].trim_start();
+                }
+                // `extern "C"`.
+                if token == "extern" && rest.starts_with('"') {
+                    if let Some(close) = rest[1..].find('"') {
+                        rest = rest[close + 2..].trim_start();
+                    }
+                }
+            }
+            "fn" | "mod" | "struct" | "enum" | "union" | "impl" | "trait" | "type" | "static"
+            | "use" | "macro_rules!" => return true,
+            _ => return false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum GateBody {
     /// The item's head has been seen but its shape is not yet resolved: a
-    /// multi-line signature (with or without a `where` clause) keeps this
-    /// state until the `{`; a self-terminating line (`,`) or a brace-less
-    /// item (`;`) resolves it without a body.
+    /// body-seeking head (fn-like/braced/`;`-terminated) waits for its `{`
+    /// or `;` however many lines that takes, while a bare inner item closes
+    /// at its `,` once parens return to `open_paren`.
     AwaitingBody {
-        /// A signature is in progress (unbalanced parens or a `where`
-        /// clause was seen).
-        signature: bool,
+        /// The head declares a brace-bodied or `;`-terminated item.
+        body_seeking: bool,
+        /// Paren depth at the item head; a bare inner item's terminating
+        /// `,` must bring parens back here.
+        open_paren: i64,
     },
     /// The item's body is open; close when depth falls back to the gate.
     DepthWatch,
@@ -1059,6 +1112,54 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         regions,
         vec![false, true, true, true, true, true, true, false]
     );
+
+    // A multi-line enum variant closes at its terminating `),` — a stuck
+    // gate here would swallow every later production read.
+    let lines = [
+        "enum RoomLiveness {",
+        "    Live(tokio::time::Instant),",
+        "    #[cfg(test)]",
+        "    AgedFor(",
+        "        std::time::Duration,",
+        "    ),",
+        "}",
+        "fn production() { let y = Utc::now(); }",
+    ];
+    let (regions, _) = cfg_test_gated_regions(&lines);
+    assert_eq!(
+        regions,
+        vec![false, false, false, true, true, true, false, false]
+    );
+
+    // A `#[cfg(test)]` fn parameter inside a production signature closes at
+    // its own comma: the production function's body must stay ungated.
+    let lines = [
+        "fn f(",
+        "    a: u8,",
+        "    #[cfg(test)]",
+        "    b: u8,",
+        ") {",
+        "    let y = Utc::now();",
+        "}",
+    ];
+    let (regions, _) = cfg_test_gated_regions(&lines);
+    assert_eq!(
+        regions,
+        vec![false, false, false, true, false, false, false]
+    );
+
+    // A tuple struct declaration is a body-seeking head: it closes at its
+    // `;`, never at an interior field comma.
+    let lines = [
+        "#[cfg(test)]",
+        "struct Point(",
+        "    u8,",
+        "    u8,",
+        ");",
+        "fn production() { let y = Utc::now(); }",
+    ];
+    let (regions, _) = cfg_test_gated_regions(&lines);
+    assert_eq!(regions, vec![false, true, true, true, true, false]);
 
     // Nested block comments are tracked, so they cannot hide a gate's body.
     let lines = [
