@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn rejects_whitespace_and_control_characters_inside_the_remainder() {
         // An embedded space, tab, newline, NUL, or other control character makes
-        // the URL unparseable for every browser-side `RTCIceServer.urls` grammar
+        // the URL unparsable for every browser-side `RTCIceServer.urls` grammar
         // (RFC 3986/7065), so admitting it at startup would broadcast an entry
         // that can only fail at client gather time — exactly what this module
         // exists to prevent. Only whitespace-*only* remainders were rejected
