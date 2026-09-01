@@ -630,6 +630,7 @@ mod tests {
     /// channel-closed, fail-closed, or cancelled loss), and the drop counter
     /// must enumerate every cause, including cancelled backpressured waits.
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn delivery_loss_help_lines_match_their_accounted_semantics() {
         let rendered = render_prometheus_metrics(&ServerMetrics::new().snapshot().await);
         for (name, help) in [
