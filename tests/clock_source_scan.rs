@@ -704,32 +704,17 @@ fn cfg_test_gated_regions(lines: &[&str]) -> (Vec<bool>, i64) {
 fn item_head_seeks_body(trimmed: &str) -> bool {
     let mut rest = trimmed;
     loop {
+        // Visibility qualifier: `pub`, `pub(crate)`, `pub (crate)` — note
+        // rustfmt glues the scope to `pub` with no space, so it must be
+        // stripped as a prefix before first-space tokenization.
+        if let Some(stripped) = strip_visibility(rest) {
+            rest = stripped;
+        }
         let token_end = rest.find(' ').unwrap_or(rest.len());
         let token = &rest[..token_end];
         match token {
-            "pub" | "async" | "const" | "unsafe" | "extern" => {
+            "async" | "const" | "unsafe" | "extern" => {
                 rest = rest[token_end..].trim_start();
-                // `pub(crate)` / `pub(super)` / `pub(in path)`.
-                if rest.starts_with('(') {
-                    let bytes = rest.as_bytes();
-                    let mut nesting = 0i64;
-                    let mut cursor = 0;
-                    while cursor < bytes.len() {
-                        match bytes[cursor] {
-                            b'(' => nesting += 1,
-                            b')' => {
-                                nesting -= 1;
-                                if nesting == 0 {
-                                    cursor += 1;
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                        cursor += 1;
-                    }
-                    rest = rest[cursor..].trim_start();
-                }
                 // `extern "C"`.
                 if token == "extern" && rest.starts_with('"') {
                     if let Some(close) = rest[1..].find('"') {
@@ -742,6 +727,41 @@ fn item_head_seeks_body(trimmed: &str) -> bool {
             _ => return false,
         }
     }
+}
+
+/// Consume a leading `pub` visibility qualifier (`pub`, `pub(scope)`, or
+/// `pub (scope)`), returning the rest of the head, or `None` when the line
+/// does not start with one (e.g. the identifier `published`).
+fn strip_visibility(rest: &str) -> Option<&str> {
+    let after = rest.strip_prefix("pub")?;
+    let after = if after.is_empty() || after.starts_with(' ') {
+        after.trim_start()
+    } else if after.starts_with('(') {
+        after
+    } else {
+        return None;
+    };
+    if after.starts_with('(') {
+        let bytes = after.as_bytes();
+        let mut nesting = 0i64;
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'(' => nesting += 1,
+                b')' => {
+                    nesting -= 1;
+                    if nesting == 0 {
+                        return Some(after[cursor + 1..].trim_start());
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        // Unbalanced scope parens: malformed code, do not consume.
+        return None;
+    }
+    Some(after)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1160,6 +1180,60 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(regions, vec![false, true, true, true, true, false]);
+
+    // Visibility-qualified heads stay body-seeking through a where clause
+    // whose bound list ends in a comma: rustfmt glues the scope to `pub`
+    // (`pub(crate)` with no space), which must not degrade the head to a
+    // bare comma-terminated item.
+    let lines = [
+        "#[cfg(test)]",
+        "pub(crate) fn pick<T>(x: T) -> T",
+        "where",
+        "    T: Default,",
+        "{",
+        "    let _ = Utc::now();",
+        "    x",
+        "}",
+        "fn production() { let y = Utc::now(); }",
+    ];
+    let (regions, _) = cfg_test_gated_regions(&lines);
+    assert_eq!(
+        regions,
+        vec![false, true, true, true, true, true, true, true, false]
+    );
+
+    // Spaced (`pub (crate)`) and declaration (`pub(super) const`)
+    // visibility forms are body-seeking too.
+    let lines = [
+        "#[cfg(test)]",
+        "pub (crate) fn g() {",
+        "    let x = 1;",
+        "}",
+        "fn p() {}",
+    ];
+    let (regions, _) = cfg_test_gated_regions(&lines);
+    assert_eq!(regions, vec![false, true, true, true, false]);
+
+    let lines = [
+        "#[cfg(test)]",
+        "pub(super) const X: u32 = 1;",
+        "fn p() { let y = 1; }",
+    ];
+    let (regions, _) = cfg_test_gated_regions(&lines);
+    assert_eq!(regions, vec![false, true, false]);
+
+    // An identifier merely starting with "pub" (`published`) is a bare
+    // inner item: it still closes at its comma.
+    let lines = [
+        "enum E {",
+        "    A(u8),",
+        "    #[cfg(test)]",
+        "    published(u8),",
+        "}",
+        "fn production() { let y = Utc::now(); }",
+    ];
+    let (regions, _) = cfg_test_gated_regions(&lines);
+    assert_eq!(regions, vec![false, false, false, true, false, false]);
 
     // Nested block comments are tracked, so they cannot hide a gate's body.
     let lines = [
