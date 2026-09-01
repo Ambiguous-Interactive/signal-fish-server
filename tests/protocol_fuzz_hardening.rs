@@ -87,7 +87,9 @@
 //! (tests/ci_config_tests.rs::test_proptest_tests_ignored_under_miri).
 
 use proptest::prelude::*;
-use signal_fish_server::protocol::{ClientMessage, DeliveryClass, ServerMessage};
+use signal_fish_server::protocol::{
+    decode_v3_binary_game_data, ClientMessage, DeliveryClass, ServerMessage,
+};
 
 /// Run `body` on a thread with a generous (32 MiB) stack and return its
 /// result. Used only for the deep-nesting probes so the rmp_serde / serde_json
@@ -107,13 +109,21 @@ fn run_on_deep_stack<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'stati
         .expect("deep-stack probe thread must return (not overflow)")
 }
 
-/// Feed one byte slice to all four fuzzed decoders (the single production
-/// decode site plus the three defense-in-depth/SDK-parity decoders — see the
-/// module header); assert only that each returns (any panic/abort fails the
+/// Feed one byte slice to all five fuzzed decoders (the single production
+/// decode site, the strict v3 binary game-data envelope decoder, and the three
+/// defense-in-depth/SDK-parity decoders — see the module header); assert only
+/// that each returns (any panic/abort fails the
 /// test naturally). A successful parse must additionally survive
 /// re-serialization to both wire encodings without panicking (errors are
 /// acceptable; aborts are not).
 fn assert_decoders_return(bytes: &[u8]) {
+    // The strict v3 binary game-data envelope decoder (SDK-parity public API
+    // and the e2e conformance oracle) must also return on any input; a
+    // successful parse must re-serialize without panicking.
+    if let Ok(frame) = decode_v3_binary_game_data(bytes) {
+        let _ = rmp_serde::to_vec_named(&frame);
+        let _ = serde_json::to_vec(&frame);
+    }
     if let Ok(message) = serde_json::from_slice::<ClientMessage>(bytes) {
         let _ = serde_json::to_string(&message);
         let _ = rmp_serde::to_vec_named(&message);

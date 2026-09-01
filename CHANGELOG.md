@@ -62,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Startup validation of `session.ice_servers`, `turn.urls`, and `turn.stun_urls` now rejects URLs
+  containing whitespace or control characters anywhere (for example `"turn: host"` or an embedded
+  NUL): browsers parse `RTCIceServer.urls` with the WebRTC ICE grammar, so admitting such a URL at
+  startup broadcast an ICE entry that could only throw at client `RTCPeerConnection` construction
+  or die silently at gather time (issue #396).
 - Exported Prometheus HELP for `signal_fish_websocket_backpressure_events_total` no longer claims
   the parked message was still delivered: a backpressured wait can also resolve as a
   channel-closed, fail-closed, or cancelled loss, and the HELP now points at the drop and
@@ -182,6 +187,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix the process hanging forever after a completed SIGTERM drain when any client holds a stalled
+  connection (for example one parked mid-HTTP-request with partial bytes buffered): the plain-TCP
+  serve future is now raced against a post-drain settle bound and exits with a loud error when the
+  listener has not stopped within it, and the TLS server's graceful shutdown passes the same bound
+  instead of waiting forever for every connection to end (issue #396).
+- Fix background drain/cleanup task panics being silently swallowed during shutdown (exit code 0,
+  no log): a panicked drain choreography or reaper now surfaces its `JoinError` and the process
+  exits with a truthful error instead of reporting a clean shutdown (issue #396).
+- Fix `--print-config`/`--validate-config` panicking with exit code 101 when stdout is unwritable
+  (full disk, closed file descriptor, dead pipe in a container): CLI output now reports the write
+  failure and exits 1, and the validation-failure path can no longer panic on a broken stderr
+  either (issue #396).
+- Fix the TLS startup log claiming "Server started" before the listener bind and TLS setup have
+  succeeded (a log scraper could read a successful start that never happened), and the
+  `legacy-fullmesh` feature deriving its sibling port with a saturating add that collides with the
+  main listener at port 65535: the mode is now refused with a loud error and the main server
+  starts normally (issue #396).
 - Fix room storage commits that could tear under future cancellation: room creation, player and
   spectator joins/leaves, activity refresh, and room deletion now acquire the monotonic liveness
   guard before the first mutation, so a dropped future can no longer commit the primary row

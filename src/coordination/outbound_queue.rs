@@ -566,6 +566,15 @@ impl PendingUnsupported {
 
     /// Drop exactly the ranges a written report carried, in the order
     /// [`Self::peek`] emitted them.
+    ///
+    /// INVARIANT (load-bearing): this drains *positionally* — the first
+    /// `report.gaps.len()` pending ranges, not a match of their contents. That
+    /// is only correct because every [`Self::append`] and every
+    /// peek/commit pair executes on the single per-recipient socket-writer
+    /// task, so no range can be appended between a report being built and its
+    /// write resolving. A second flusher (or a direct append from a relay
+    /// task) would silently retire merged/extended ranges the wire report
+    /// never advertised — an accounting loss. Keep appends writer-task-local.
     fn commit(&mut self, report: &DeliveryReportPayload) {
         let mut remaining = report.gaps.len();
         for bucket in [&mut self.reliable, &mut self.latest, &mut self.volatile] {

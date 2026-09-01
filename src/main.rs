@@ -11,6 +11,9 @@ use signal_fish_server::websocket;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::watch;
 
+use std::fmt::Write as _;
+use std::future::IntoFuture as _;
+
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
 #[command(name = "signal-fish-server")]
@@ -26,6 +29,31 @@ struct Cli {
     /// Useful for debugging configuration loading from multiple sources.
     #[arg(long, conflicts_with = "validate_config")]
     print_config: bool,
+}
+
+/// Write one line to an `io::Write` sink: the value, then a newline.
+fn write_line_to<W: std::io::Write>(out: &mut W, value: &str) -> std::io::Result<()> {
+    out.write_all(value.as_bytes())?;
+    out.write_all(b"\n")
+}
+
+/// Write one line to stdout, treating an unwritable stdout as a clean CLI
+/// error instead of a panic: `--print-config`/`--validate-config` run in
+/// pipelines and containers where stdout can be a full disk, a closed file
+/// descriptor, or a dead pipe, and the resulting `println!` panic (exit 101)
+/// would both violate the zero-panic bootstrap policy and misreport the
+/// failure to callers.
+fn emit_to_stdout_or_exit(value: &str) {
+    if let Err(error) = write_line_to(&mut std::io::stdout().lock(), value) {
+        // The stderr fallback is best-effort too (`let _ =`): if stderr is
+        // broken there is nowhere left to report, and a panic here would
+        // replace the intended exit(1) with an abort.
+        let _ = write_line_to(
+            &mut std::io::stderr().lock(),
+            &format!("error: cannot write to stdout: {error}"),
+        );
+        std::process::exit(1);
+    }
 }
 
 #[tokio::main]
@@ -44,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.print_config {
         let json = serde_json::to_string_pretty(&cfg.redacted_for_display())
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {e}"))?;
-        println!("{json}");
+        emit_to_stdout_or_exit(&json);
         return Ok(());
     }
 
@@ -58,23 +86,43 @@ async fn main() -> anyhow::Result<()> {
     if cli.validate_config {
         match validation_result {
             Ok(()) => {
-                println!("Configuration validation passed");
-                println!();
-                println!("Configuration summary:");
-                println!("  Port: {}", cfg.port);
-                println!("  Storage backend: InMemory");
-                println!("  TLS enabled: {}", cfg.security.transport.tls.enabled);
-                println!(
+                // `write!` to a `String` is infallible; the results are
+                // discarded deliberately (the buffer always accepts).
+                let mut summary =
+                    String::from("Configuration validation passed\n\nConfiguration summary:\n");
+                let _ = writeln!(summary, "  Port: {}", cfg.port);
+                summary.push_str("  Storage backend: InMemory\n");
+                let _ = writeln!(
+                    summary,
+                    "  TLS enabled: {}",
+                    cfg.security.transport.tls.enabled
+                );
+                let _ = writeln!(
+                    summary,
                     "  Metrics auth required: {}",
                     cfg.security.require_metrics_auth
                 );
-                println!("  Reconnection enabled: {}", cfg.server.enable_reconnection);
-                println!("  Max players per room: {}", cfg.server.default_max_players);
-                println!("  Deployment region: {}", cfg.server.region_id);
+                let _ = writeln!(
+                    summary,
+                    "  Reconnection enabled: {}",
+                    cfg.server.enable_reconnection
+                );
+                let _ = writeln!(
+                    summary,
+                    "  Max players per room: {}",
+                    cfg.server.default_max_players
+                );
+                let _ = writeln!(summary, "  Deployment region: {}", cfg.server.region_id);
+                emit_to_stdout_or_exit(&summary);
                 return Ok(());
             }
             Err(e) => {
-                eprintln!("Configuration validation failed:\n{e}");
+                // Best-effort stderr (see `emit_to_stdout_or_exit`): a broken
+                // stderr must not panic, only a truthful exit code remains.
+                let _ = write_line_to(
+                    &mut std::io::stderr().lock(),
+                    &format!("Configuration validation failed:\n{e}"),
+                );
                 std::process::exit(1);
             }
         }
@@ -200,7 +248,17 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let shutdown_server = game_server.clone();
-    let shutdown_task = tokio::spawn(run_shutdown_drain(shutdown_server, shutdown_tx.clone()));
+    // Signals choreography COMPLETION, not the process watch: the
+    // choreography flips the process watch before its grace wait and coded
+    // closes, so post-drain bounds must anchor here instead or they fire
+    // mid-grace. The sender lives in the drain task, so a panic mid-drain
+    // also releases the watchers (sender drop without a send).
+    let (drain_done_tx, drain_done_rx) = watch::channel(false);
+    let shutdown_task = tokio::spawn(run_shutdown_drain(
+        shutdown_server,
+        shutdown_tx.clone(),
+        drain_done_tx,
+    ));
 
     // One parsed policy governs HTTP CORS responses and both WebSocket
     // upgrades, so the browser-facing allowlist cannot drift between layers.
@@ -230,22 +288,40 @@ async fn main() -> anyhow::Result<()> {
     // abort here would add code without changing any observable behavior.
     #[cfg(feature = "legacy-fullmesh")]
     {
-        let legacy_port = port.saturating_add(1);
-        let legacy_addr = SocketAddr::from(([0, 0, 0, 0], legacy_port));
-        let legacy_server = matchbox_signaling::SignalingServer::full_mesh_builder(legacy_addr)
-            .cors()
-            .trace()
-            .build();
+        // A main port of 65535 saturates to itself: the "sibling" listener
+        // would collide with the main bind, and whichever lost the race would
+        // either kill startup from a config that passed validation or run
+        // without the mode the startup log claimed enabled. Refuse the top
+        // port with a loud error and a working main server instead.
+        match legacy_fullmesh_addr(port) {
+            Some(legacy_addr) => {
+                let legacy_server =
+                    matchbox_signaling::SignalingServer::full_mesh_builder(legacy_addr)
+                        .cors()
+                        .trace()
+                        .build();
 
-        tokio::spawn(async move {
-            if let Err(e) = legacy_server.serve().await {
-                tracing::error!(error = %e, "Legacy full-mesh signaling server stopped");
+                tokio::spawn(async move {
+                    if let Err(e) = legacy_server.serve().await {
+                        tracing::error!(error = %e, "Legacy full-mesh signaling server stopped");
+                    }
+                });
+                // Truthful voice: the legacy task binds inside `serve()` (the
+                // #454 rationale above keeps it unwired), so this announces
+                // the attempt, not a bound listener.
+                tracing::info!(
+                    %legacy_addr,
+                    "Starting legacy full-mesh signaling server on separate port"
+                );
             }
-        });
-        tracing::info!(
-            %legacy_addr,
-            "Legacy full-mesh signaling mode enabled on separate port"
-        );
+            None => {
+                tracing::error!(
+                    port,
+                    "Cannot enable legacy full-mesh signaling: the main port is 65535, so \
+                     the derived sibling port would collide with the main listener"
+                );
+            }
+        }
     }
 
     // Complete the router.
@@ -277,40 +353,58 @@ async fn main() -> anyhow::Result<()> {
 
     let make_service = combined_router.into_make_service_with_connect_info::<SocketAddr>();
 
+    // The settle budget the drain choreography grants registered connections
+    // for their close frames. It is also the bound on how long the process
+    // will keep the listener alive after the drain completes: a client parked
+    // mid-HTTP-request (or mid-TLS handshake) can otherwise hold the serve
+    // future open forever, hanging the process after a *successful* drain.
+    let post_drain_settle_budget = websocket::registered_connection_shutdown_settle_timeout();
+
     #[cfg(feature = "tls")]
     if cfg.security.transport.tls.enabled {
         let tls_config =
             signal_fish_server::security::build_rustls_config(&cfg.security.transport.tls)
                 .map_err(|err| anyhow::anyhow!("failed to initialize TLS configuration: {err}"))?;
 
-        tracing::info!(
-            %addr,
-            client_auth = ?cfg.security.transport.tls.client_auth,
-            "Server started over HTTPS with TLS enabled - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
-        );
-
         let tls_handle = axum_server::Handle::new();
         let tls_shutdown_handle = tls_handle.clone();
-        let tls_shutdown_rx = shutdown_rx.clone();
+        let tls_drain_done_rx = drain_done_rx.clone();
         tokio::spawn(async move {
-            wait_for_shutdown(tls_shutdown_rx).await;
-            tls_shutdown_handle.graceful_shutdown(None);
+            // Arm the bounded graceful shutdown only when the choreography
+            // has COMPLETED (sender drop on a panicked drain releases this
+            // too): arming at the process-watch flip would force-close every
+            // connection before the choreography's grace wait and coded
+            // `4000` close step even run.
+            wait_for_shutdown(tls_drain_done_rx).await;
+            // Bounded, not unbounded: `None` waits for *every* connection to
+            // end, and a stalled client (e.g. one parked mid-handshake with
+            // partial bytes buffered) never ends, so the serve future — and
+            // the process — would hang forever after a completed drain.
+            tls_shutdown_handle.graceful_shutdown(Some(post_drain_settle_budget));
         });
 
         let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?
             .into_std()?;
-        let serve_result = axum_server::from_tcp_rustls(listener, tls_config)?
+        let server = axum_server::from_tcp_rustls(listener, tls_config)?
             // Disable Nagle on the raw TCP stream before the TLS handshake (#197).
             .map(|rustls| {
                 signal_fish_server::security::VerifiedClientCertificateAcceptor::new(
                     rustls.acceptor(websocket::ConfiguredAcceptor),
                 )
             })
-            .handle(tls_handle)
-            .serve(make_service)
-            .await;
+            .handle(tls_handle);
+        // Log "started" only after the bind and TLS setup have actually
+        // succeeded: a log scraper reading the earlier placement would see a
+        // successful start that never happened whenever the port was taken or
+        // the material invalid. The plain path below already had this order.
+        tracing::info!(
+            %addr,
+            client_auth = ?cfg.security.transport.tls.client_auth,
+            "Server started over HTTPS with TLS enabled - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
+        );
+        let serve_result = server.serve(make_service).await;
 
-        finish_background_shutdown(&game_server, shutdown_tx, shutdown_task, cleanup_task).await;
+        finish_background_shutdown(&game_server, shutdown_tx, shutdown_task, cleanup_task).await?;
         serve_result?;
 
         return Ok(());
@@ -325,19 +419,83 @@ async fn main() -> anyhow::Result<()> {
         "Server started over HTTP - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
     );
 
-    let serve_result = axum::serve(listener, make_service)
-        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
-        .await;
+    let serve_result = serve_with_post_drain_bound(
+        axum::serve(listener, make_service)
+            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+            .into_future(),
+        drain_done_rx,
+        post_drain_settle_budget,
+    )
+    .await;
 
-    finish_background_shutdown(&game_server, shutdown_tx, shutdown_task, cleanup_task).await;
-    serve_result?;
+    finish_background_shutdown(&game_server, shutdown_tx, shutdown_task, cleanup_task).await?;
+    match serve_result {
+        Some(result) => result.map_err(|error| anyhow::anyhow!("server error: {error}"))?,
+        None => anyhow::bail!(
+            "forced exit: the listener did not stop within {post_drain_settle_budget:?} after \
+             the drain completed (a client likely holds a stalled partial request)"
+        ),
+    }
 
     Ok(())
 }
 
-async fn run_shutdown_drain(server: Arc<EnhancedGameServer>, shutdown_tx: watch::Sender<bool>) {
+/// Resolves once the drain choreography has **completed** — or its task has
+/// died without completing (sender drop) — and the settle budget has elapsed:
+/// the moment a still-running serve future has outlived every close-frame
+/// budget it was granted. Deliberately NOT anchored to the process watch: the
+/// choreography flips that watch before its grace wait and coded closes, so a
+/// watch-anchored bound would fire mid-drain on every healthy shutdown.
+async fn post_drain_settle_bound(
+    drain_done_rx: watch::Receiver<bool>,
+    settle: std::time::Duration,
+) {
+    wait_for_shutdown(drain_done_rx).await;
+    tokio::time::sleep(settle).await;
+}
+
+/// Await the serve future, but never unboundedly: once the drain choreography
+/// has finished and `settle` has elapsed without the serve future returning (a
+/// client parked mid-HTTP-request keeps hyper's connection task alive, so
+/// axum's graceful shutdown can wait forever), return `None` so the caller can
+/// log and exit instead of hanging the process after a *successful* drain.
+async fn serve_with_post_drain_bound(
+    serve: impl std::future::Future<Output = std::io::Result<()>>,
+    drain_done_rx: watch::Receiver<bool>,
+    settle: std::time::Duration,
+) -> Option<std::io::Result<()>> {
+    tokio::pin!(serve);
+    tokio::select! {
+        result = &mut serve => Some(result),
+        () = post_drain_settle_bound(drain_done_rx, settle) => {
+            tracing::warn!(
+                settle = ?settle,
+                "drain completed but the listener did not stop within the settle budget; \
+                 forcing exit"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(feature = "legacy-fullmesh")]
+/// The legacy full-mesh signaling address: the main port + 1. `None` when the
+/// main port is the top of the range and no sibling port exists.
+fn legacy_fullmesh_addr(port: u16) -> Option<SocketAddr> {
+    Some(SocketAddr::from(([0, 0, 0, 0], port.checked_add(1)?)))
+}
+
+async fn run_shutdown_drain(
+    server: Arc<EnhancedGameServer>,
+    shutdown_tx: watch::Sender<bool>,
+    drain_done_tx: watch::Sender<bool>,
+) {
     shutdown_signal().await;
     signal_fish_server::server::run_drain_choreography(&server, shutdown_tx).await;
+    // Signal choreography completion for the post-drain bounds. `let _ =`:
+    // no receiver can be left (main holds one for the process lifetime), and
+    // if the drop happens first the bounds still resolve via sender-drop.
+    let _ = drain_done_tx.send(true);
 }
 
 async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
@@ -356,7 +514,7 @@ async fn finish_background_shutdown(
     shutdown_tx: watch::Sender<bool>,
     shutdown_task: tokio::task::JoinHandle<()>,
     cleanup_task: tokio::task::JoinHandle<()>,
-) {
+) -> anyhow::Result<()> {
     // Decide on the server's drain state, not the process watch: the drain
     // task flips the watch only after the drain begins and the GoingAway
     // fan-out completes. If the serve future returns inside that window, a
@@ -376,11 +534,23 @@ async fn finish_background_shutdown(
     let drain_begun = server.is_draining();
     let _ = shutdown_tx.send(true);
     if drain_begun {
-        let _ = shutdown_task.await;
+        // A panicked drain task is not a clean shutdown: the choreography
+        // may have stopped mid-way (clients closed without their coded
+        // 4000 frames, background work skipped), so the process must not
+        // report success. Surface the JoinError instead of swallowing it.
+        if let Err(error) = shutdown_task.await {
+            return Err(anyhow::anyhow!("shutdown drain task failed: {error}"));
+        }
     } else {
         shutdown_task.abort();
     }
-    let _ = cleanup_task.await;
+    // Same truthfulness for the reaper: a panic here means the process ran
+    // with cleanup silently dead (the library supervisor already refuses
+    // this — see the serve supervisor's cleanup-task propagation).
+    if let Err(error) = cleanup_task.await {
+        return Err(anyhow::anyhow!("background cleanup task failed: {error}"));
+    }
+    Ok(())
 }
 
 async fn shutdown_signal() {
@@ -526,11 +696,62 @@ mod cli_tests {
             "Ctrl+C installation failure must not trigger shutdown"
         );
     }
+
+    /// The CLI summary writer must place the value and the newline on the wire
+    /// byte-for-byte (the `--validate-config` summary is machine-scraped).
+    #[test]
+    fn cli_line_writer_writes_the_value_and_a_newline() {
+        let mut buffer = Vec::new();
+        super::write_line_to(&mut buffer, "Configuration validation passed")
+            .expect("in-memory writer cannot fail");
+        assert_eq!(buffer, b"Configuration validation passed\n");
+    }
+
+    /// Regression pin for the `println!`-panics-on-unwritable-stdout defect
+    /// (exit 101 from `--print-config > /dev/full`): the CLI writer reports a
+    /// broken sink as an `io::Error`, never a panic.
+    #[test]
+    fn cli_line_writer_reports_a_failing_writer_instead_of_panicking() {
+        struct BrokenWriter;
+
+        impl std::io::Write for BrokenWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(io::Error::other("synthetic broken stdout"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let result = super::write_line_to(&mut BrokenWriter, "payload");
+        assert!(
+            result.is_err(),
+            "a broken stdout must surface as an error the CLI maps to a clean exit, \
+             not as a panic"
+        );
+    }
+
+    #[cfg(feature = "legacy-fullmesh")]
+    #[test]
+    fn legacy_fullmesh_addr_derives_the_sibling_port_and_refuses_the_top_port() {
+        use std::net::SocketAddr;
+        assert_eq!(
+            super::legacy_fullmesh_addr(8080),
+            Some(SocketAddr::from(([0, 0, 0, 0], 8081))),
+            "the legacy listener must bind one port above the main listener"
+        );
+        assert_eq!(
+            super::legacy_fullmesh_addr(u16::MAX),
+            None,
+            "a 65535 main port has no sibling port: saturating derivation would collide \
+             with the main listener, so it must be refused instead"
+        );
+    }
 }
 
 #[cfg(test)]
 mod shutdown_drain_tests {
-    use super::finish_background_shutdown;
+    use super::{finish_background_shutdown, post_drain_settle_bound, serve_with_post_drain_bound};
     use signal_fish_server::config::{
         CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
         TransportSecurityConfig, TurnConfig,
@@ -586,7 +807,9 @@ mod shutdown_drain_tests {
         };
         let cleanup_task = tokio::spawn(async {});
 
-        finish_background_shutdown(&server, shutdown_tx, drain_task, cleanup_task).await;
+        finish_background_shutdown(&server, shutdown_tx, drain_task, cleanup_task)
+            .await
+            .expect("a joined, healthy drain finish must succeed");
 
         assert!(
             choreography_ran.load(Ordering::Acquire),
@@ -625,6 +848,158 @@ mod shutdown_drain_tests {
             finished.is_ok(),
             "shutdown finish must abort a drain task that never began draining instead \
              of blocking process exit on the parked signal wait"
+        );
+        assert!(
+            finished.expect("timeout guard").is_ok(),
+            "a healthy abort-path finish must not report an error"
+        );
+    }
+
+    /// A drain task that panics mid-choreography is not a clean shutdown:
+    /// clients may have been dropped without their coded close frames and
+    /// background work skipped, so the JoinError must surface as an error
+    /// instead of being swallowed into an `Ok(())` exit.
+    #[tokio::test(start_paused = true)]
+    async fn finish_background_shutdown_surfaces_a_panicked_drain_task() {
+        let server = test_server_with_grace(std::time::Duration::from_secs(10)).await;
+        server.begin_shutdown_drain();
+
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let drain_task = tokio::spawn(async {
+            panic!("synthetic drain panic");
+        });
+        let cleanup_task = tokio::spawn(async {});
+
+        let result =
+            finish_background_shutdown(&server, shutdown_tx, drain_task, cleanup_task).await;
+
+        assert!(
+            result.is_err(),
+            "a panicked drain task must not report a clean shutdown"
+        );
+    }
+
+    /// The inverse seat: a cleanup-task panic means the process ran with its
+    /// reaper dead, so the finish must surface the failure rather than exit 0
+    /// (parity with the library supervisor's cleanup-task propagation).
+    #[tokio::test(start_paused = true)]
+    async fn finish_background_shutdown_surfaces_a_panicked_cleanup_task() {
+        let server = test_server_with_grace(std::time::Duration::from_secs(10)).await;
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let drain_task = tokio::spawn(async {
+            // Stands in for the real drain task parked in the signal wait.
+            std::future::pending::<()>().await;
+        });
+        let cleanup_task = tokio::spawn(async {
+            panic!("synthetic cleanup panic");
+        });
+
+        let result =
+            finish_background_shutdown(&server, shutdown_tx, drain_task, cleanup_task).await;
+
+        assert!(
+            result.is_err(),
+            "a panicked cleanup task must not report a clean exit"
+        );
+    }
+
+    /// Regression pin for the mid-drain forced exit: the choreography flips
+    /// the PROCESS watch *before* its grace wait and coded closes
+    /// (shutdown.rs sends at the top of the choreography), so the bound must
+    /// ignore that flip entirely and anchor on choreography completion.
+    #[tokio::test(start_paused = true)]
+    async fn post_drain_settle_bound_ignores_the_process_watch_and_waits_for_choreography_completion(
+    ) {
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (drain_done_tx, drain_done_rx) = watch::channel(false);
+        let settle = std::time::Duration::from_secs(5);
+
+        let bound = tokio::spawn(post_drain_settle_bound(drain_done_rx, settle));
+
+        shutdown_tx
+            .send(true)
+            .expect("process watch receiver is held");
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        assert!(
+            !bound.is_finished(),
+            "a process-watch flip (which happens mid-drain) must not fire the bound: \
+             firing there force-exits healthy drains during the grace wait"
+        );
+
+        drain_done_tx
+            .send(true)
+            .expect("bound task still holds the receiver");
+        tokio::time::advance(settle).await;
+        bound
+            .await
+            .expect("the bound fires after choreography completion and the settle");
+    }
+
+    /// A panicked drain task drops its sender without signaling: the bound
+    /// must still fire after one settle, so a stalled client cannot hang the
+    /// process behind a choreography that will never complete.
+    #[tokio::test(start_paused = true)]
+    async fn post_drain_settle_bound_fires_when_the_drain_task_dies_without_signaling() {
+        let (drain_done_tx, drain_done_rx) = watch::channel(false);
+        let settle = std::time::Duration::from_secs(5);
+
+        let bound = tokio::spawn(post_drain_settle_bound(drain_done_rx, settle));
+        drop(drain_done_tx);
+
+        tokio::time::advance(settle).await;
+        bound
+            .await
+            .expect("sender drop releases the bound after the settle");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_serve_returns_the_result_when_the_serve_future_completes_first() {
+        let (_drain_done_tx, drain_done_rx) = watch::channel(false);
+
+        let result = serve_with_post_drain_bound(
+            std::future::ready(Ok(())),
+            drain_done_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        assert_eq!(
+            result
+                .expect("a completing serve future must yield its result")
+                .expect("serve must succeed"),
+            (),
+            "a serve future that finishes inside the budget must pass through unchanged"
+        );
+    }
+
+    /// The core regression pin for the unbounded-serve hang: a client parked
+    /// mid-HTTP-request keeps hyper's connection task alive forever, so the
+    /// serve future never returns even though the drain completed. The bound
+    /// must convert that hang into a forced exit after one settle budget.
+    #[tokio::test(start_paused = true)]
+    async fn bounded_serve_forces_exit_when_the_listener_never_settles() {
+        let (drain_done_tx, drain_done_rx) = watch::channel(false);
+        let settle = std::time::Duration::from_secs(30);
+
+        let bounded = tokio::spawn(serve_with_post_drain_bound(
+            std::future::pending::<std::io::Result<()>>(),
+            drain_done_rx,
+            settle,
+        ));
+
+        drain_done_tx
+            .send(true)
+            .expect("bounded serve still holds the receiver");
+        tokio::time::advance(settle).await;
+
+        let result = bounded
+            .await
+            .expect("the bounded serve returns after the bound fires");
+        assert!(
+            result.is_none(),
+            "a serve future that outlives the post-drain settle budget must be reported \
+             as a forced exit, not awaited forever"
         );
     }
 
