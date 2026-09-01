@@ -188,9 +188,10 @@ pub struct ServerMetrics {
     pub game_data_messages: AtomicU64,
 
     // Heartbeat throttling metrics
-    /// Updates performed for player last_seen timestamps
+    /// Player last_seen persistence attempts admitted by the throttle window
+    /// (a failed persistence still consumed the window and counts here)
     pub heartbeat_updates: AtomicU64,
-    /// Updates skipped due to threshold-based throttling
+    /// Persistence attempts suppressed by threshold-based throttling
     pub heartbeat_skipped: AtomicU64,
 
     // Reconnection metrics
@@ -470,9 +471,10 @@ pub struct PlayerMetrics {
     pub players_left: u64,
     pub authority_transfers: u64,
     pub game_data_messages: u64,
-    /// Updates performed for player last_seen timestamps
+    /// Player last_seen persistence attempts admitted by the throttle window
+    /// (a failed persistence still consumed the window and counts here)
     pub heartbeat_updates: u64,
-    /// Updates skipped due to threshold-based throttling
+    /// Persistence attempts suppressed by threshold-based throttling
     pub heartbeat_skipped: u64,
 }
 

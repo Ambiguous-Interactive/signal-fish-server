@@ -186,7 +186,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET` | `turn.static_auth_secret` | `""` | coturn `--static-auth-secret` (server-only; never sent to clients) |
 | `SIGNAL_FISH__TURN__URLS` | `turn.urls` | `[]` | JSON array of TURN server URLs (e.g. `turn:turn.example.com:3478`) |
 | `SIGNAL_FISH__TURN__STUN_URLS` | `turn.stun_urls` | `["stun:stun.l.google.com:19302"]` | JSON array of STUN URLs advertised on WebRTC plans |
-| `SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS` | `turn.credential_ttl_secs` | `3600` | Lifetime in seconds of a minted TURN credential |
+| `SIGNAL_FISH__TURN__CREDENTIAL_TTL_SECS` | `turn.credential_ttl_secs` | `3600` | Lifetime in seconds of a minted TURN credential (max `86400` when enabled) |
 | `SIGNAL_FISH__WEBSOCKET__ENABLE_BATCHING` | `websocket.enable_batching` | `false` | Opt-in outbound message batching (off keeps real-time relay latency low; on trades up to `batch_interval_ms` per hop for fewer writes) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch (must be > 0 when `enable_batching` is true; maximum: 65,536) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 and ≤ 60000 when `enable_batching` is true) |
@@ -508,7 +508,8 @@ ever contacted and no external credentials are required.
 - `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled`
 - `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled`
 - `stun_urls` - Public STUN URLs advertised on WebRTC plans regardless of `enabled` (default: `["stun:stun.l.google.com:19302"]`)
-- `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` when enabled (default: 3600)
+- `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` and at
+  most `86400` (24 hours) when enabled (default: 3600)
 
 ### Security: `static_auth_secret` is server-only
 

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Public Rust API: `config::MAX_CREDENTIAL_TTL_SECS` bounds `turn.credential_ttl_secs` at 24 hours
+  when TURN is enabled; startup validation now rejects a pathological TTL whose mint would
+  otherwise saturate into an effectively never-expiring credential, defeating the
+  short-lived-credential scheme (issue #396).
+- Panic-repair parity for the spectator detach transaction: a panic after the durable removal
+  commits is completed by compensation (local role removal plus the one delivery-generation
+  advance the transaction never ran) instead of leaving a live connection wedged out of
+  re-spectating until it retries or disconnects — the same containment every other multi-step
+  write transaction already had (issue #396).
 - Public Rust API: `auth::InMemoryRateLimiter::check_rate_limit_at` and `cleanup_at` accept an
   explicit timestamp so embedders and tests drive sliding-window expiry deterministically; the
   existing `check_rate_limit`/`cleanup` remain thin clock-reading wrappers (issue #495).
@@ -173,6 +182,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix room storage commits that could tear under future cancellation: room creation, player and
+  spectator joins/leaves, activity refresh, and room deletion now acquire the monotonic liveness
+  guard before the first mutation, so a dropped future can no longer commit the primary row
+  change without its liveness stamp (degrading GC to the wall-clock fallback) or delete a room
+  while leaving an orphaned liveness entry that no sweep ever removes (issue #396).
+- Fix reconnect identity swaps silently stomping a live connection entry under the restored id:
+  the swap now refuses (`RefusedTargetOccupied`) before any map mutation — mirroring the rollback
+  sibling's collision check — leaving the transient connection intact and the reconnection record
+  spendable for a retry (issue #396).
+- Fix the `heartbeat_updates` metric label claiming "updates performed" while the counter fired
+  before the persistence attempt: the field docs now state the truthful semantics (throttle
+  windows consumed, failed persistences included) (issue #396).
 - Fix devcontainer image builds failing with `nvm is not compatible with the
   "NPM_CONFIG_PREFIX" environment variable` during the Node feature install
   (features install in layers appended after the Dockerfile): the user-owned npm
