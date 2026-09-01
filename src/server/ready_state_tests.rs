@@ -236,17 +236,19 @@ async fn prune_ready_players_drops_only_dead_rooms() {
 
     // Give each room a coordinator ready entry, then delete the dead room from
     // storage so its entry is orphaned (a room-removal path that bypasses the
-    // per-room empty-cleanup clear).
-    server
-        .room_coordinator
-        .handle_player_ready(&live_room.id, &live_player, None)
-        .await
-        .expect("ready toggle on live room");
-    server
-        .room_coordinator
-        .handle_player_ready(&dead_room.id, &dead_player, None)
-        .await
-        .expect("ready toggle on dead room");
+    // per-room empty-cleanup clear). Each client is routed to its room first so
+    // the toggle's membership gate accepts it.
+    for (room_id, player_id) in [(live_room.id, live_player), (dead_room.id, dead_player)] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player_id, room_id)
+            .await;
+        server
+            .room_coordinator
+            .handle_player_ready(&room_id, &player_id, None)
+            .await
+            .expect("ready toggle on routed member");
+    }
     assert!(
         server
             .database

@@ -53,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Exported Prometheus HELP for `signal_fish_websocket_backpressure_events_total` no longer claims
+  the parked message was still delivered: a backpressured wait can also resolve as a
+  channel-closed, fail-closed, or cancelled loss, and the HELP now points at the drop and
+  channel-closed counters. The drop counter's HELP enumerates cancelled backpressured waits
+  (for example shutdown drain) among its causes — those recipients are not at fault (issue #396).
+- Room readiness toggles from a non-member are refused with `ROOM_NOT_FOUND` instead of silently
+  minting an empty ready entry for a live room and publishing a stale `LobbyStateChanged`
+  snapshot; a membership row that vanished mid-toggle (teardown race) is now a loud refusal
+  instead of a no-op the client believes took effect (issue #396).
+- Room readiness snapshots (`RoomJoined` / `Reconnected` / `SpectatorJoined`) that straddle a
+  `StartGame` commit report the durable finalized ready set instead of an all-unready game: the
+  snapshot's coordinator read falls back to the persisted room record when the start transaction
+  has already dropped the live ready entry (issue #396).
 - In-memory database cleanup-claim dedupe keys off a uniform monotonic re-claim window (5 minutes
   from the claim, inclusive expiry) instead of a wall-clock bucket id, and the retention prune
   runs on monotonic elapsed time: an NTP step can no longer shorten, extend, or revive a dedupe

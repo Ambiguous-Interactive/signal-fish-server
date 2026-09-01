@@ -74,4 +74,11 @@ correctness evidence appears.
   prefer a required classifier with server-side job skips and retain hosted
   before/after evidence.
 - #207 — pursue the next optimization only from current allocation and latency
-  profiles, with exact wire and delivery semantics held constant.
+  profiles, with exact wire and delivery semantics held constant. The
+  2026-09-01 profile found the fan-out core at its floor (0–1 allocation ops
+  per relay across room sizes; the classified queue lane at zero) and
+  per-relay projection cost proportional to the distinct wire cohorts the
+  room's recipient mix requires (4–5 allocs/relay single-encoding; 14–21
+  for v2+v3 mixed rooms, with each cohort's frame cached once per relay and
+  sibling recipients reusing clones), so no allocation-level target remains at
+  these layers without changing wire bytes or delivery semantics.
