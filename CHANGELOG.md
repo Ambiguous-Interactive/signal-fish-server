@@ -12,6 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Public Rust API: `auth::InMemoryRateLimiter::check_rate_limit_at` and `cleanup_at` accept an
   explicit timestamp so embedders and tests drive sliding-window expiry deterministically; the
   existing `check_rate_limit`/`cleanup` remain thin clock-reading wrappers (issue #495).
+- Public Rust API: `protocol::Room::is_expired_at` accepts an explicit instant so embedders and
+  tests evaluate room-expiry boundaries deterministically; the existing `is_expired` remains a
+  thin wall-clock wrapper and the server's own GC already decides on monotonic liveness stamps
+  (issue #498).
+- Injectable-time convention extended to chrono wall clocks: every production `Utc::now()`/
+  `Local::now()` read in server code is classified at the site (durable record / embedder
+  convenience) or converted, and `tests/clock_source_scan.rs` now fails any new unallowlisted
+  production chrono clock read or clock-hiding chrono import (issues #498, #495).
+
+### Changed
+
+- In-memory database cleanup-claim dedupe keys off a uniform monotonic re-claim window (5 minutes
+  from the claim, inclusive expiry) instead of a wall-clock bucket id, and the retention prune
+  runs on monotonic elapsed time: an NTP step can no longer shorten, extend, or revive a dedupe
+  window. Re-claim now becomes possible exactly 5 minutes after a claim (previously anywhere from
+  0 to 5 minutes depending on where the claim landed in its wall-clock bucket) (issue #498).
+- Dashboard metrics staleness is decided from the snapshot's monotonic capture instant instead of
+  the wall clock, so a wall-clock step cannot flag a fresh cache stale or keep a dead one fresh;
+  the reported `fetched_at` wall stamp is unchanged (issue #498).
+- Devcontainer: `opencode.json` now forwards `GITHUB_PERSONAL_ACCESS_TOKEN` into the pinned GitHub
+  MCP server's environment, so opencode-harness sessions start authenticated instead of falling
+  back to the interactive OAuth device-authorization flow every session (issue #496). The
+  `signal_fish_game_data_messages_total` counts admission-time acceptance (no values changed).
 - Deterministic-time convention: `.llm/context-testing.md` codifies the two sanctioned patterns
   (tokio paused clocks for async logic, `*_at` timestamp injection for sync logic), pinned by a new
   `tests/clock_source_scan.rs` hygiene guard that fails any new std clock import or qualified std

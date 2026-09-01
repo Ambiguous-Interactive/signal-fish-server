@@ -1077,8 +1077,9 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
 /// production reads pass, and an unallowlisted production read produces a
 /// violation naming the file and line.
 /// The region lexer must return every real `src/` file to brace depth 0:
-/// a nonzero final depth means a literal/comment was mis-modeled and every
-/// region classification after that point in the file is untrustworthy.
+/// a nonzero final depth means a literal or comment was modeled incorrectly
+/// and every region classification after that point in the file is
+/// untrustworthy.
 #[test]
 fn region_lexer_returns_every_src_file_to_depth_zero() {
     let mut files = Vec::new();
@@ -1101,7 +1102,7 @@ fn region_lexer_returns_every_src_file_to_depth_zero() {
     }
     assert!(
         drifted.is_empty(),
-        "the region lexer mis-models literals/comments in these files (region \
+        "the region lexer models literals/comments incorrectly in these files (region \
          classification after the drift point is untrustworthy):\n{}",
         drifted.join("\n")
     );
