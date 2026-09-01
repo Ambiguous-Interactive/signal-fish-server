@@ -1764,6 +1764,8 @@ impl EnhancedGameServer {
                             .iter()
                             .map(|member| member.player_id)
                             .collect();
+                        // Wall clock (durable record): TURN credentials carry
+                        // absolute expiry instants the client sees.
                         let now_unix = resolved
                             .decision
                             .uses_webrtc_signaling()

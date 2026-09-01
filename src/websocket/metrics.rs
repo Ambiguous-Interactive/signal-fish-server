@@ -147,6 +147,9 @@ pub async fn metrics_handler(
         enforce_metrics_auth(&headers, server.as_ref()).await?;
     }
     // Get current time
+    // Wall clock (durable record): the age readout is derived from the
+    // snapshot's durable wall stamp for API consumers; the staleness
+    // decision itself runs on monotonic time (see DashboardMetricsCache).
     let now = chrono::Utc::now();
 
     let dashboard_metrics = server.dashboard_metrics_view().await;

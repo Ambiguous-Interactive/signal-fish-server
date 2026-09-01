@@ -414,6 +414,8 @@ impl SpectatorService {
         let spectator = SpectatorInfo {
             id: *player_id,
             name: spectator_name.clone(),
+            // Wall clock (durable record): membership stamp on a durable
+            // room-state row.
             connected_at: chrono::Utc::now(),
         };
 

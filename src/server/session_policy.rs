@@ -785,6 +785,8 @@ impl EnhancedGameServer {
             );
             let relay_floor = decision.is_relay();
             let emits_v3_plan = decision.members.iter().any(SessionMember::supports_v3);
+            // Wall clock (durable record): TURN credentials carry absolute
+            // expiry instants the client sees; capture once per emission.
             let now_unix = decision
                 .uses_webrtc_signaling()
                 .then(|| chrono::Utc::now().timestamp());
@@ -1192,6 +1194,8 @@ impl EnhancedGameServer {
 
         let decision = updated.decision_with(members);
         self.observe_mixed_path_members(room_id, &decision);
+        // Wall clock (durable record): TURN credentials carry absolute
+        // expiry instants the client sees; capture once per emission.
         let now_unix = decision
             .uses_webrtc_signaling()
             .then(|| chrono::Utc::now().timestamp());
@@ -1287,6 +1291,7 @@ impl EnhancedGameServer {
         // TURN credential expiry (deterministic and testable). Evaluated only
         // for WebRTC plans, where ICE is built per recipient; Host+Direct and
         // explicit Relay/Relay plans carry an empty list and never read it.
+        // Wall clock (durable record): credentials are absolute-time records.
         let now_unix = decision
             .uses_webrtc_signaling()
             .then(|| chrono::Utc::now().timestamp());
@@ -1467,6 +1472,8 @@ impl EnhancedGameServer {
             return Vec::new();
         }
 
+        // Wall clock (durable record): TURN credentials carry absolute
+        // expiry instants the client sees.
         let now_unix = chrono::Utc::now().timestamp();
         let (ice_servers, minted) = self.composed_ice_servers_for(*player_id, now_unix);
         if ice_servers.is_empty() {

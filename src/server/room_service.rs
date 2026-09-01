@@ -829,6 +829,8 @@ impl EnhancedGameServer {
                                 name: player_name.clone(),
                                 is_authority: room.authority_player == Some(*player_id),
                                 is_ready: false,
+                                // Wall clock (durable record): membership
+                                // stamp on a durable room-state row.
                                 connected_at: chrono::Utc::now(),
                                 connection_info: None,
                                 epoch: None,
@@ -885,6 +887,8 @@ impl EnhancedGameServer {
                             name: player_name,
                             is_authority,
                             is_ready: false,
+                            // Wall clock (durable record): membership stamp
+                            // on a durable room-state row.
                             connected_at: chrono::Utc::now(),
                             connection_info: None,
                             epoch: None,
@@ -2052,6 +2056,8 @@ impl EnhancedGameServer {
                             name: player_name.to_string(),
                             is_authority: false,
                             is_ready: false,
+                            // Wall clock (durable record): membership stamp
+                            // on a durable room-state row.
                             connected_at: chrono::Utc::now(),
                             connection_info: None,
                             // Room-state record (stored in the DB + `room.players`),

@@ -1248,6 +1248,8 @@ impl ServerMetrics {
             .then(|| (room_code_retry_successes as f64) / (room_code_retry_operations as f64));
 
         MetricsSnapshot {
+            // Wall clock (durable record): absolute snapshot stamp surfaced
+            // to dashboard/API consumers.
             timestamp: chrono::Utc::now(),
             connections: ConnectionMetrics {
                 total_connections: self.total_connections.load(Ordering::Relaxed),

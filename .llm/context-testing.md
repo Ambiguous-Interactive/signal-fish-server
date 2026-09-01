@@ -106,10 +106,24 @@ the injected-seam pattern instead. Do not add `#[cfg(test)]` constructor
 overrides (window/duration shrinking) to fake time control; they hide the real
 timing behavior the tests claim to cover.
 
-Scope note: the guard pins `std` clock sources. `chrono` `Utc::now()` reads
-(durable-record timestamps, embedder conveniences) are a separate tracked
-surface — see #498 for the per-site triage and guard extension before adding
-new production wall-clock decision logic.
+Scope note: the guard pins `std` clock sources. `chrono` wall-clock reads
+(`Utc::now()` / `Local::now()`) are pinned by the same guard file's chrono
+rule (#498): every production-region chrono read must be (1) classified at
+the site with a `Wall clock (durable record):` / `Wall clock (embedder
+convenience):` comment — absolute-time semantics by design, e.g. reconnection
+token mints, room lifecycle stamps, TURN credential expiry clients see,
+snapshot/gauge stamps — or (2) `converted`, meaning the decision itself runs
+on monotonic tokio time or an injected `*_at(..., now)` seam. A new
+unallowlisted production chrono read fails
+`server_src_reads_chrono_time_only_through_documented_or_injected_seams`;
+add new wall-clock decision logic only by extending the injected-seam or
+monotonic patterns, never by growing the allowlist without a sound reason.
+Boundary convention: each seam pins its own boundary explicitly in a test —
+claim/prune-style windows expire **inclusively** (`>=` closes the window /
+`<` is still inside; rate-limiter and cleanup-claim timelines), while
+freshness/expiry predicates that must not flip early (`is_expired_at`,
+the dashboard staleness gate, token expiry) use strict `>` and survive at
+the exact boundary.
 
 **If a flake cannot be eliminated conclusively in the same change**, it is
 **never left silent**: record it in `PLAN.md` with (1) the observed symptom and

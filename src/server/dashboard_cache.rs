@@ -91,7 +91,13 @@ struct DashboardMetricsSnapshot {
     player_percentiles: HashMap<String, f64>,
     game_percentiles: HashMap<String, HashMap<String, f64>>,
     active_rooms: usize,
+    /// Wall clock (durable record): the absolute sample stamp surfaced in the
+    /// dashboard payload, history, and the prometheus last-refresh gauge.
     fetched_at: chrono::DateTime<chrono::Utc>,
+    /// Monotonic capture instant: the only input to the staleness decision,
+    /// so a wall-clock step cannot flag a fresh cache stale or keep a dead
+    /// one fresh. Deterministic under paused tokio time.
+    fetched_at_instant: tokio::time::Instant,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,7 +271,10 @@ impl DashboardMetricsCache {
             player_percentiles,
             game_percentiles,
             active_rooms,
+            // Wall clock (durable record): absolute sample stamp; the
+            // staleness decision reads `fetched_at_instant` instead.
             fetched_at: chrono::Utc::now(),
+            fetched_at_instant: tokio::time::Instant::now(),
         })
     }
 
@@ -286,10 +295,15 @@ impl DashboardMetricsCache {
 
         let history = guard.history.clone();
 
-        let stale = if let Some(ts) = fetched_at {
-            chrono::Utc::now().signed_duration_since(ts) > self.stale_after
-        } else {
-            true
+        // Staleness is a monotonic elapsed decision (see the snapshot's
+        // `fetched_at_instant`); the wall stamp is surfaced but never decides.
+        let stale = match &guard.snapshot {
+            Some(snapshot) => {
+                let elapsed = snapshot.fetched_at_instant.elapsed();
+                chrono::Duration::from_std(elapsed).unwrap_or(chrono::Duration::MAX)
+                    > self.stale_after
+            }
+            None => true,
         };
 
         DashboardMetricsView {
@@ -368,6 +382,56 @@ impl HistoryFields {
 mod tests {
     use super::*;
     use crate::database::InMemoryDatabase;
+
+    /// The staleness gate is a monotonic elapsed decision: with no snapshot it
+    /// reports stale, a fresh snapshot clears it, and it flips only when
+    /// tokio time passes `stale_after`. Paused time would keep the gate fresh
+    /// forever against a wall-clock implementation, so this test pins the
+    /// decision input, not just the boundary.
+    #[tokio::test(start_paused = true)]
+    async fn staleness_gate_decides_on_monotonic_elapsed_time() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let stale_after = Duration::from_secs(120);
+        let cache = DashboardMetricsCache::new(
+            Duration::from_secs(60),
+            stale_after,
+            metrics,
+            1,
+            &[DashboardHistoryField::ActiveRooms],
+        );
+
+        assert!(
+            cache.view().await.stale,
+            "no snapshot yet: the cache must report stale"
+        );
+
+        let fresh = DashboardMetricsSnapshot {
+            rooms_by_game: HashMap::new(),
+            player_percentiles: HashMap::new(),
+            game_percentiles: HashMap::new(),
+            active_rooms: 0,
+            fetched_at: chrono::Utc::now(),
+            fetched_at_instant: tokio::time::Instant::now(),
+        };
+        cache.inner.write().await.snapshot = Some(fresh);
+        assert!(
+            !cache.view().await.stale,
+            "a fresh snapshot must not report stale"
+        );
+
+        // Exactly at the boundary the cache is still fresh; one tick past it
+        // the gate flips.
+        tokio::time::advance(stale_after).await;
+        assert!(
+            !cache.view().await.stale,
+            "staleness boundary is strict (elapsed > stale_after)"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            cache.view().await.stale,
+            "a snapshot older than stale_after must report stale"
+        );
+    }
 
     #[tokio::test]
     async fn spawned_refresh_task_does_not_outlive_cache_owner() {
@@ -506,6 +570,7 @@ mod tests {
             )]),
             active_rooms: 42,
             fetched_at: chrono::Utc::now(),
+            fetched_at_instant: tokio::time::Instant::now(),
         };
 
         let fields = HistoryFields::from_fields(&[

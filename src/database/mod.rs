@@ -464,12 +464,38 @@ pub async fn create_database(config: DatabaseConfig) -> Result<Box<dyn GameDatab
     }
 }
 
+/// How long after a claimed cleanup a room may be re-claimed for the same
+/// cleanup type (the room was re-created and became empty again).
+///
+/// Strictly longer than the wall-clock bucket scheme this replaced, whose
+/// phase-dependent roll let a re-claim through anywhere from 0 to 5 minutes
+/// after a claim: the monotonic window is a uniform 5 minutes from the claim
+/// itself, so a re-created room is re-cleanable at a known, wall-jump-proof
+/// instant.
+const CLEANUP_RECLAIM_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
+
+/// How long a claimed-cleanup entry is retained before the maintenance prune
+/// forgets it.
+const CLEANUP_EVENT_RETENTION: chrono::Duration = chrono::Duration::hours(1);
+
+/// Saturating `std::time::Duration` → `chrono::Duration` conversion for
+/// monotonic elapsed values (an `Instant` elapsed cannot be negative, but it
+/// can exceed the chrono range).
+fn chrono_elapsed(duration: std::time::Duration) -> chrono::Duration {
+    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+}
+
 /// Entry tracking a claimed room cleanup operation for idempotency
 #[derive(Debug, Clone)]
 struct CleanupEventEntry {
     #[allow(dead_code)]
     instance_id: uuid::Uuid,
-    processed_at: chrono::DateTime<chrono::Utc>,
+    /// Monotonic instant of the claim. Both timing decisions — the
+    /// re-claim window and the retention prune — read this stamp, never the
+    /// wall clock, so an NTP step cannot shorten, extend, or revive a dedupe
+    /// window, and the boundaries are deterministic to test under paused
+    /// tokio time.
+    claimed_at: tokio::time::Instant,
 }
 
 /// Simple in-memory database for testing and single-instance deployments
@@ -871,6 +897,8 @@ fn room_idle_for(
         // Every shipped creation path stamps at insert time under the same
         // lock, so this arm cannot occur through the shipped API; it keeps a
         // foreign row insertion from becoming an immortal room.
+        // Wall clock (durable record): the only input available for a
+        // pre-stamp row.
         None => chrono::Utc::now().signed_duration_since(last_activity_wall),
     }
 }
@@ -935,6 +963,8 @@ impl GameDatabase for InMemoryDatabase {
             name: "Creator".to_string(), // This will be updated later when we have the actual name
             is_authority: authority_player == Some(creator_id),
             is_ready: false,
+            // Wall clock (durable record): membership stamp on a durable
+            // room-state row.
             connected_at: chrono::Utc::now(),
             connection_info: None,
             // Room-state record, not a wire snapshot: the v3 incarnation epoch
@@ -978,6 +1008,10 @@ impl GameDatabase for InMemoryDatabase {
             id
         };
 
+        // Wall clock (durable record): `created_at`/`last_activity` key GC
+        // windows that must survive process restarts; the in-process GC
+        // decision pairs them with a monotonic liveness stamp (see
+        // `room_idle_for`).
         let now = chrono::Utc::now();
         let room = Room {
             id: room_id,
@@ -1099,6 +1133,8 @@ impl GameDatabase for InMemoryDatabase {
                 room.players.insert(player.id, player);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
+                // Wall clock (durable record), paired with the monotonic
+                // liveness stamp below.
                 room.last_activity = chrono::Utc::now();
                 self.room_liveness_monotonic
                     .write()
@@ -1138,6 +1174,8 @@ impl GameDatabase for InMemoryDatabase {
             // on an ACTUAL removal — a no-op remove (player already gone) is not
             // activity and must not keep an otherwise-stale room alive.
             if removed_player.is_some() {
+                // Wall clock (durable record), paired with the monotonic
+                // liveness stamp below.
                 room.last_activity = chrono::Utc::now();
                 self.room_liveness_monotonic
                     .write()
@@ -1416,6 +1454,8 @@ impl GameDatabase for InMemoryDatabase {
     async fn update_room_activity(&self, room_id: &RoomId) -> Result<()> {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
+            // Wall clock (durable record), paired with the monotonic
+            // liveness stamp below.
             room.last_activity = chrono::Utc::now();
             self.room_liveness_monotonic
                 .write()
@@ -1625,6 +1665,7 @@ impl GameDatabase for InMemoryDatabase {
         }
         room.ready_players = member_ids;
         room.lobby_state = crate::protocol::LobbyState::Finalized;
+        // Wall clock (durable record): absolute lifecycle stamp.
         room.game_finalized_at = Some(chrono::Utc::now());
         Ok(FinalizeRoomGameOutcome::Finalized)
     }
@@ -1753,33 +1794,48 @@ impl GameDatabase for InMemoryDatabase {
     ) -> Result<bool> {
         let mut cleanup_events = self.cleanup_events.write().await;
 
-        // Create a cleanup ID with time bucket (5 minute window) to allow re-cleanup
-        // if the room somehow gets recreated and becomes empty again
-        let time_bucket = chrono::Utc::now().timestamp() / 300;
-        let cleanup_id = format!("{room_id}:{cleanup_type}:{time_bucket}");
-
-        // Try to claim the cleanup operation using entry API
-        if let std::collections::hash_map::Entry::Vacant(e) = cleanup_events.entry(cleanup_id) {
-            // We claimed it
-            e.insert(CleanupEventEntry {
-                instance_id: *instance_id,
-                processed_at: chrono::Utc::now(),
-            });
-            Ok(true)
-        } else {
-            // Already processed by another instance
-            Ok(false)
+        // A claim blocks re-cleanup of the same room for the reclaim window,
+        // then expires so a room that is re-created and becomes empty again
+        // can be cleaned once more. Monotonic decision input: a wall-clock
+        // step must not revive or shorten the dedupe window.
+        let cleanup_id = format!("{room_id}:{cleanup_type}");
+        let now = tokio::time::Instant::now();
+        match cleanup_events.entry(cleanup_id) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                // We claimed it
+                e.insert(CleanupEventEntry {
+                    instance_id: *instance_id,
+                    claimed_at: now,
+                });
+                Ok(true)
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let elapsed = now.saturating_duration_since(e.get().claimed_at);
+                if chrono_elapsed(elapsed) >= CLEANUP_RECLAIM_WINDOW {
+                    // The previous claim's window has passed: take over the
+                    // claim and restart the window.
+                    e.insert(CleanupEventEntry {
+                        instance_id: *instance_id,
+                        claimed_at: now,
+                    });
+                    Ok(true)
+                } else {
+                    // Already processed by this instance within the window
+                    Ok(false)
+                }
+            }
         }
     }
 
     async fn cleanup_old_room_cleanup_events(&self) -> Result<u64> {
         let mut cleanup_events = self.cleanup_events.write().await;
-        let cutoff = chrono::Utc::now()
-            .checked_sub_signed(chrono::Duration::hours(1))
-            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+        let now = tokio::time::Instant::now();
 
         let initial_count = cleanup_events.len();
-        cleanup_events.retain(|_, entry| entry.processed_at > cutoff);
+        cleanup_events.retain(|_, entry| {
+            let elapsed = now.saturating_duration_since(entry.claimed_at);
+            chrono_elapsed(elapsed) < CLEANUP_EVENT_RETENTION
+        });
         let deleted_count = initial_count.saturating_sub(cleanup_events.len());
 
         Ok(u64::try_from(deleted_count).unwrap_or(u64::MAX))
@@ -1877,6 +1933,91 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// The cleanup-claim dedupe runs entirely on monotonic tokio time: a
+    /// claim blocks re-cleanup for `CLEANUP_RECLAIM_WINDOW` (inclusive
+    /// expiry: at exactly `claim + window` the window is closed), then
+    /// expires so a re-created room can be cleaned again; the maintenance
+    /// prune forgets entries once they reach `CLEANUP_EVENT_RETENTION`.
+    /// Paused time proves the boundaries without any real waiting — and
+    /// would fail against a wall-clock implementation, since advancing tokio
+    /// time does not move the wall clock.
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_claim_and_prune_boundaries_run_on_monotonic_time() {
+        let db = InMemoryDatabase::new();
+        let room_id = Uuid::new_v4();
+        let instance = Uuid::new_v4();
+        let window = CLEANUP_RECLAIM_WINDOW.to_std().expect("positive window");
+        let retention = CLEANUP_EVENT_RETENTION
+            .to_std()
+            .expect("positive retention");
+
+        // First claim wins.
+        assert!(db
+            .try_claim_room_cleanup(&room_id, "empty_cleanup", &instance)
+            .await
+            .expect("first claim succeeds"));
+
+        // One tick inside the window a re-claim is blocked; exactly at the
+        // boundary the window has expired and the claim is taken over.
+        tokio::time::advance(window - std::time::Duration::from_secs(1)).await;
+        assert!(
+            !db.try_claim_room_cleanup(&room_id, "empty_cleanup", &instance)
+                .await
+                .expect("re-claim inside the window is blocked"),
+            "the same cleanup must stay claimed until the window elapses"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(
+            db.try_claim_room_cleanup(&room_id, "empty_cleanup", &instance)
+                .await
+                .expect("re-claim at the window boundary succeeds"),
+            "a room re-created and re-emptied after the window must be cleanable again"
+        );
+
+        // Different cleanup types and rooms never interfere; they are claimed
+        // one tick before the first entry's window boundary to keep the ages
+        // distinct for the prune assertions below.
+        tokio::time::advance(window - std::time::Duration::from_secs(1)).await;
+        assert!(db
+            .try_claim_room_cleanup(&room_id, "inactive_cleanup", &instance)
+            .await
+            .expect("a different cleanup type claims independently"));
+        assert!(db
+            .try_claim_room_cleanup(&Uuid::new_v4(), "empty_cleanup", &instance)
+            .await
+            .expect("a different room claims independently"));
+
+        // The retention prune forgets an entry exactly when it reaches the
+        // retention age (inclusive expiry), and nothing before that. Advance
+        // so the takeover entry is exactly retention-old while the two fresh
+        // claims are one window younger.
+        tokio::time::advance(retention - (window - std::time::Duration::from_secs(1))).await;
+        let deleted = db
+            .cleanup_old_room_cleanup_events()
+            .await
+            .expect("prune succeeds");
+        assert_eq!(
+            deleted, 1,
+            "exactly the entry that reached the retention boundary is forgotten"
+        );
+
+        // The remaining claims age out the same way; pruning is idempotent.
+        tokio::time::advance(window).await;
+        let deleted = db
+            .cleanup_old_room_cleanup_events()
+            .await
+            .expect("prune succeeds");
+        assert_eq!(
+            deleted, 2,
+            "both remaining entries reach retention and are forgotten together"
+        );
+        let deleted = db
+            .cleanup_old_room_cleanup_events()
+            .await
+            .expect("prune succeeds");
+        assert_eq!(deleted, 0, "pruning is idempotent");
     }
 
     #[test]

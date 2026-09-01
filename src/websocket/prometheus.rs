@@ -579,6 +579,9 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
 
     if snapshot.dashboard_cache.last_refresh_timestamp != 0 {
+        // Wall clock (durable record): the gauge derives its value from the
+        // cache's durable unix last-refresh stamp (scrape-time age in
+        // seconds); the staleness decision itself is monotonic.
         let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
         gauge(
             &mut buf,
