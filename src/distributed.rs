@@ -55,6 +55,9 @@ impl LockHandle {
         Self {
             key,
             token: Uuid::new_v4(),
+            // Wall clock (durable record): informational acquisition stamp on
+            // the embedder-facing handle; the lease decision itself runs on
+            // monotonic time (`try_acquire`).
             acquired_at: chrono::Utc::now(),
             ttl,
         }
@@ -175,6 +178,9 @@ impl DistributedLock for InMemoryDistributedLock {
         let handle = LockHandle {
             key: key.to_string(),
             token: Uuid::new_v4(),
+            // Wall clock (durable record): informational acquisition stamp;
+            // the lease expiry that decides contention is the monotonic
+            // `expires_at` above.
             acquired_at: chrono::Utc::now(),
             ttl,
         };
@@ -269,6 +275,7 @@ impl SequencedMessage {
         Self {
             sequence_id,
             instance_id,
+            // Wall clock (durable record): wire/diagnostic message stamp.
             timestamp: chrono::Utc::now(),
             message,
             room_id,

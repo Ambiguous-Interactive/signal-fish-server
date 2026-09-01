@@ -560,6 +560,8 @@ impl EnhancedGameServer {
                             server.observe_mixed_path_members(&room_id, &resolved.decision);
                             mixed_path_observed = true;
                         }
+                        // Wall clock (durable record): TURN credentials carry
+                        // absolute expiry instants the client sees.
                         let now_unix = resolved
                             .decision
                             .uses_webrtc_signaling()

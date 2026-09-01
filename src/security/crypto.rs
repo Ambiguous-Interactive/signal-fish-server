@@ -135,6 +135,8 @@ impl EnvelopeEncryptor {
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         fill_random(&mut nonce_bytes).map_err(|_| EncryptionError::EntropyUnavailable)?;
         let nonce = Nonce::from(nonce_bytes);
+        // Wall clock (durable record): authenticated (AAD) creation stamp of
+        // the encrypted bundle, meaningful across process restarts.
         let created_at = Utc::now();
 
         let ciphertext = self

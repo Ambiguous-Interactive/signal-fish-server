@@ -222,6 +222,8 @@ impl Room {
         supports_authority: bool,
         relay_type: String,
     ) -> Self {
+        // Wall clock (durable record): creation/last-activity stamps must stay
+        // meaningful across process restarts.
         let now = chrono::Utc::now();
         Self {
             id: Uuid::new_v4(),
@@ -248,18 +250,28 @@ impl Room {
     /// Update the last activity timestamp
     #[allow(dead_code)]
     pub fn update_activity(&mut self) {
+        // Wall clock (durable record): `last_activity` keys the GC windows,
+        // which must survive process restarts; the in-process GC decision
+        // pairs this stamp with a monotonic liveness stamp (see
+        // `InMemoryDatabase`).
         self.last_activity = chrono::Utc::now();
     }
 
-    /// Check if room is expired based on the given timeouts
+    /// Check if room is expired at the given instant, based on the given
+    /// timeouts.
+    ///
+    /// This is the decision seam: the comparison runs entirely on the caller's
+    /// `now`, so expiry boundaries are deterministic to test and immune to
+    /// wall-clock steps. The production GC decision lives in
+    /// `InMemoryDatabase`'s monotonic liveness path; this method is an embedder
+    /// surface over the same `last_activity` policy.
     #[allow(dead_code)]
-    pub fn is_expired(
+    pub fn is_expired_at(
         &self,
+        now: chrono::DateTime<chrono::Utc>,
         empty_timeout: chrono::Duration,
         inactive_timeout: chrono::Duration,
     ) -> bool {
-        let now = chrono::Utc::now();
-
         if !self.has_occupants() {
             // Empty room - time from the LAST activity (which `remove_player_from_room`
             // refreshes on the final departure), not `created_at`. A long-lived room
@@ -273,6 +285,20 @@ impl Room {
             // Occupied room - check against last activity
             now.signed_duration_since(self.last_activity) > inactive_timeout
         }
+    }
+
+    /// Check if room is expired based on the given timeouts.
+    ///
+    /// Wall clock (embedder convenience): the server's own GC decision never
+    /// comes through here (see `is_expired_at` and the monotonic liveness path
+    /// in `InMemoryDatabase`).
+    #[allow(dead_code)]
+    pub fn is_expired(
+        &self,
+        empty_timeout: chrono::Duration,
+        inactive_timeout: chrono::Duration,
+    ) -> bool {
+        self.is_expired_at(chrono::Utc::now(), empty_timeout, inactive_timeout)
     }
 
     /// Whether a player or spectator still occupies this room.
@@ -375,6 +401,8 @@ impl Room {
     pub fn enter_lobby(&mut self) -> bool {
         if self.should_enter_lobby() {
             self.lobby_state = LobbyState::Lobby;
+            // Wall clock (durable record): lifecycle timestamps are absolute
+            // by design.
             self.lobby_started_at = Some(chrono::Utc::now());
             self.ready_players.clear();
             true
@@ -429,6 +457,8 @@ impl Room {
     pub fn finalize_game(&mut self) -> bool {
         if self.lobby_state != LobbyState::Finalized && self.all_players_ready() {
             self.lobby_state = LobbyState::Finalized;
+            // Wall clock (durable record): lifecycle timestamps are absolute
+            // by design.
             self.game_finalized_at = Some(chrono::Utc::now());
             true
         } else {
@@ -501,85 +531,123 @@ mod tests {
         )
     }
 
-    /// An empty room's expiry is timed from `last_activity` (refreshed on the
-    /// final departure), NOT `created_at`. A long-lived room that only just
-    /// emptied must NOT be considered expired off its stale creation time — that
-    /// would collapse the reconnection window (BUG-1 corollary B).
+    /// `is_expired_at` times every window off `last_activity` at the caller's
+    /// `now`, so the whole matrix is deterministic:
+    /// - an empty room uses `empty_timeout` from the FINAL departure refresh,
+    ///   NOT `created_at` (BUG-1 corollary B);
+    /// - an occupied room (players or spectators) uses `inactive_timeout`
+    ///   (BUG-1 corollary A);
+    /// - the boundary is strict: exactly at the timeout the room survives.
     #[test]
-    fn is_expired_empty_room_keys_off_last_activity_not_created_at() {
+    fn is_expired_at_times_windows_off_last_activity_at_the_callers_now() {
         let empty = chrono::Duration::seconds(300);
         let inactive = chrono::Duration::seconds(3600);
+        let now = chrono::Utc::now();
 
-        // Created long ago but just emptied (fresh last_activity): NOT expired.
-        let mut room = empty_room();
-        room.created_at = chrono::Utc::now() - chrono::Duration::hours(2);
-        room.last_activity = chrono::Utc::now();
-        assert!(
-            !room.is_expired(empty, inactive),
-            "a freshly-emptied room must survive even if created hours ago"
-        );
+        let created_long_ago = now - chrono::Duration::hours(2);
+        let player_room = |last_activity: chrono::DateTime<chrono::Utc>| {
+            let mut room = empty_room();
+            room.created_at = created_long_ago;
+            room.last_activity = last_activity;
+            let player_id = Uuid::new_v4();
+            room.players.insert(
+                player_id,
+                PlayerInfo {
+                    id: player_id,
+                    name: "P".to_string(),
+                    is_authority: false,
+                    is_ready: false,
+                    connected_at: last_activity,
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: "us-east-1".to_string(),
+                },
+            );
+            room
+        };
+        let spectator_room = |last_activity: chrono::DateTime<chrono::Utc>| {
+            let mut room = empty_room();
+            room.created_at = created_long_ago;
+            room.last_activity = last_activity;
+            let spectator_id = Uuid::new_v4();
+            room.spectators.insert(
+                spectator_id,
+                SpectatorInfo {
+                    id: spectator_id,
+                    name: "Watcher".to_string(),
+                    connected_at: last_activity,
+                },
+            );
+            room
+        };
 
-        // Emptied long ago (stale last_activity): expired.
-        room.last_activity = chrono::Utc::now() - chrono::Duration::hours(1);
-        assert!(
-            room.is_expired(empty, inactive),
-            "a room empty past empty_timeout must be reaped"
-        );
-    }
+        let cases: Vec<(Room, bool, &str)> = vec![
+            (
+                {
+                    let mut room = empty_room();
+                    room.created_at = created_long_ago;
+                    room.last_activity = now;
+                    room
+                },
+                false,
+                "freshly-emptied long-lived room: survives off fresh last_activity, \
+                 not the stale creation time",
+            ),
+            (
+                {
+                    let mut room = empty_room();
+                    room.created_at = created_long_ago;
+                    room.last_activity = now - empty;
+                    room
+                },
+                false,
+                "empty room exactly at empty_timeout: boundary is strict",
+            ),
+            (
+                {
+                    let mut room = empty_room();
+                    room.created_at = created_long_ago;
+                    room.last_activity = now - empty - chrono::Duration::seconds(1);
+                    room
+                },
+                true,
+                "empty room past empty_timeout from the last departure: reaped",
+            ),
+            (
+                player_room(now),
+                false,
+                "active room with fresh activity: alive",
+            ),
+            (
+                player_room(now - inactive),
+                false,
+                "occupied room exactly at inactive_timeout: boundary is strict",
+            ),
+            (
+                player_room(now - inactive - chrono::Duration::seconds(1)),
+                true,
+                "occupied room past inactive_timeout: reaped",
+            ),
+            (
+                spectator_room(now - inactive),
+                false,
+                "spectator-only room is occupied: inactive_timeout, boundary strict",
+            ),
+            (
+                spectator_room(now - inactive - chrono::Duration::seconds(1)),
+                true,
+                "spectator-only room past inactive_timeout: reaped",
+            ),
+        ];
 
-    /// A room with players is timed from `last_activity`; refreshing it (as the
-    /// join/leave/heartbeat paths now do) keeps an active room alive past
-    /// `inactive_room_timeout` measured from creation (BUG-1 corollary A).
-    #[test]
-    fn is_expired_active_room_keys_off_last_activity() {
-        let empty = chrono::Duration::seconds(300);
-        let inactive = chrono::Duration::seconds(3600);
-
-        let mut room = empty_room();
-        let player_id = Uuid::new_v4();
-        room.players.insert(
-            player_id,
-            PlayerInfo {
-                id: player_id,
-                name: "P".to_string(),
-                is_authority: false,
-                is_ready: false,
-                connected_at: chrono::Utc::now(),
-                connection_info: None,
-                epoch: None,
-                seq: None,
-                region_id: "us-east-1".to_string(),
-            },
-        );
-        // Created 2h ago but activity is fresh: NOT expired.
-        room.created_at = chrono::Utc::now() - chrono::Duration::hours(2);
-        room.last_activity = chrono::Utc::now();
-        assert!(
-            !room.is_expired(empty, inactive),
-            "an active room with fresh activity must not be reaped mid-game"
-        );
-    }
-
-    #[test]
-    fn is_expired_spectator_only_room_uses_inactive_timeout() {
-        let empty = chrono::Duration::seconds(300);
-        let inactive = chrono::Duration::seconds(3600);
-        let mut room = empty_room();
-        let spectator_id = Uuid::new_v4();
-        room.spectators.insert(
-            spectator_id,
-            SpectatorInfo {
-                id: spectator_id,
-                name: "Watcher".to_string(),
-                connected_at: chrono::Utc::now(),
-            },
-        );
-        room.last_activity = chrono::Utc::now() - chrono::Duration::minutes(10);
-
-        assert!(
-            !room.is_expired(empty, inactive),
-            "a spectator-only room is occupied and must use inactive_timeout"
-        );
+        for (room, expected_expired, description) in cases {
+            assert_eq!(
+                room.is_expired_at(now, empty, inactive),
+                expected_expired,
+                "{description}"
+            );
+        }
     }
 
     fn watcher(id: Uuid) -> SpectatorInfo {

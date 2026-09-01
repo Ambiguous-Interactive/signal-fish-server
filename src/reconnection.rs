@@ -84,6 +84,8 @@ pub struct ReconnectionToken {
 impl ReconnectionToken {
     /// Create a new reconnection token
     pub fn new(player_id: PlayerId, room_id: RoomId, validity_seconds: i64) -> Self {
+        // Wall clock (durable record): `created_at`/`expires_at` are absolute
+        // instants the token must keep across process restarts.
         let now = Utc::now();
         Self {
             token: Uuid::new_v4().to_string(),
@@ -99,6 +101,7 @@ impl ReconnectionToken {
         room_id: RoomId,
         validity_seconds: u64,
     ) -> Self {
+        // Wall clock (durable record): same cross-restart semantics as `new`.
         let now = Utc::now();
         Self {
             token: Uuid::new_v4().to_string(),
@@ -109,7 +112,11 @@ impl ReconnectionToken {
         }
     }
 
-    /// Check if token is expired
+    /// Check if token is expired.
+    ///
+    /// Wall clock (embedder convenience): the server's own admission runs on
+    /// the manager's monotonic deadline captured at the disconnect; this
+    /// absolute-time answer exists for embedders inspecting a token.
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.expires_at
     }
@@ -218,6 +225,8 @@ impl EventBuffer {
     pub fn push(&mut self, message: ServerMessage, sequence: u64) -> usize {
         let event = BufferedEvent {
             message,
+            // Wall clock (durable record): replay/diagnostic stamp on the
+            // buffered event.
             timestamp: Utc::now(),
             sequence,
         };
@@ -311,9 +320,10 @@ impl DisconnectedPlayer {
     /// Whether `window_seconds` has elapsed since the captured wall-clock
     /// disconnect instant.
     ///
-    /// Diagnostic only. The manager decides real reconnect eligibility from a
-    /// monotonic deadline captured at the genuine disconnect, so this answer
-    /// can differ from the server's after a wall-clock adjustment.
+    /// Wall clock (embedder convenience): diagnostic only. The manager decides
+    /// real reconnect eligibility from a monotonic deadline captured at the
+    /// genuine disconnect, so this answer can differ from the server's after a
+    /// wall-clock adjustment.
     pub fn is_expired(&self, window_seconds: i64) -> bool {
         let expiry = expiration_from_signed(self.disconnected_at, window_seconds);
         Utc::now() > expiry
@@ -359,6 +369,9 @@ struct ReconnectionClaimState {
 
 impl ReconnectionClaimState {
     fn new(claimed_by: PlayerId) -> Self {
+        // Wall clock (durable record): crash-recovery/diagnostic stamp for
+        // the two-phase claim; claim validity is the manager's monotonic
+        // window.
         let claimed_at = Utc::now();
         Self {
             claim_id: Uuid::new_v4(),
@@ -693,8 +706,8 @@ impl ReconnectionManager {
         };
 
         // Both clocks are read at the same moment: the UTC captures stay the
-        // human-readable record, while the monotonic instant anchors the only
-        // deadline that decides eligibility.
+        // human-readable durable record (wall clock), while the monotonic
+        // instant anchors the only deadline that decides eligibility.
         let now = Utc::now();
         let monotonic_now = Instant::now();
         // Token, in preference order: (1) the token from an existing same-room
@@ -1543,9 +1556,11 @@ mod tests {
 
     /// `rooms_with_active_reconnections` reports the rooms that room GC must
     /// spare. A registered (unexpired) disconnection lists its room; an empty
-    /// manager lists nothing; completing the reconnection drops the room. Per-
-    /// record expiry is delegated to `DisconnectedPlayer::is_expired` (covered
-    /// by `reconnection_error_maps_each_variant_to_its_client_code` semantics).
+    /// manager lists nothing; completing the reconnection drops the room.
+    /// Per-record expiry is decided by the manager's monotonic
+    /// `window_closed_at` deadline, not the wall-clock
+    /// `DisconnectedPlayer::is_expired` diagnostic (which the manager never
+    /// consults for eligibility).
     #[tokio::test]
     async fn rooms_with_active_reconnections_tracks_protected_rooms() {
         let metrics = Arc::new(ServerMetrics::new());
