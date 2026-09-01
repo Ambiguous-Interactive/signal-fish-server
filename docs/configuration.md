@@ -472,7 +472,9 @@ the exact gap-authorization contract.
   (finalize / late-join / host-failover re-plan) (see [TURN deployment](deployment-turn.md))
 - `ice_servers` - Static ICE (STUN/TURN) servers advertised in a WebRTC `SessionPlan` and in the pre-gather list;
   appended before any TURN-derived entries. Every URL must use a `stun:`/`stuns:`/`turn:`/`turns:` scheme
-  (validated at startup)
+  and contain no whitespace or control characters anywhere (both validated at startup: browsers
+  parse these URLs with the WebRTC ICE grammar, so a URL they cannot parse must never be
+  advertised)
 
 Every upgrade gracefully degrades to the `relay` floor, so a fully-disabled
 deployment keeps working exactly like v2. ICE servers are advertised only when a
@@ -508,6 +510,8 @@ ever contacted and no external credentials are required.
 - `static_auth_secret` - coturn `--static-auth-secret`. Required when `enabled`
 - `urls` - TURN server URLs, e.g. `["turn:turn.example.com:3478"]`. Required (non-empty) when `enabled`
 - `stun_urls` - Public STUN URLs advertised on WebRTC plans regardless of `enabled` (default: `["stun:stun.l.google.com:19302"]`)
+- Both URL lists follow the same ICE URL hygiene as `session.ice_servers`: an ICE scheme and no
+  whitespace or control characters anywhere, validated at startup
 - `credential_ttl_secs` - Lifetime in seconds of a minted TURN credential. Must be `> 0` and at
   most `86400` (24 hours) when enabled (default: 3600)
 
