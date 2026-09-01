@@ -52,6 +52,10 @@ pub(crate) struct SpectatorService {
     /// (mirrors `EnhancedGameServer::owned_room_operation_panic`).
     #[cfg(test)]
     join_panic_point: Arc<AtomicU8>,
+    /// Dev-only panic-injection slot for the owned spectator detach
+    /// transaction (same discipline as [`Self::join_panic_point`]).
+    #[cfg(test)]
+    detach_panic_point: Arc<AtomicU8>,
 }
 
 /// Where an injected owned-transaction panic fires (test-only).
@@ -66,6 +70,20 @@ pub(crate) enum SpectatorJoinPanicPoint {
     /// Fires after the advance: the compensation must roll both the row and
     /// the delivery generation back.
     JoinAfterGenerationAdvance = 2,
+}
+
+/// Where an injected owned-detach panic fires (test-only).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpectatorDetachPanicPoint {
+    /// Fires after the durable spectator removal committed, BEFORE the local
+    /// completion (delivery-generation advance + local role removal): the
+    /// compensation must complete the local transition or the live connection
+    /// stays wedged out of re-spectating until it retries or disconnects.
+    DetachAfterDurableRemove = 1,
+    /// Fires after the local completion: nothing is left to repair, so the
+    /// compensation must be a no-op.
+    DetachAfterLocalCompletion = 2,
 }
 
 #[derive(Debug)]
@@ -109,6 +127,8 @@ impl SpectatorService {
             rate_limiter,
             #[cfg(test)]
             join_panic_point: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            detach_panic_point: Arc::new(AtomicU8::new(0)),
         }
     }
 
@@ -116,6 +136,28 @@ impl SpectatorService {
     pub(crate) fn panic_spectator_join_for_test(&self, point: SpectatorJoinPanicPoint) {
         self.join_panic_point
             .store(point as u8, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_spectator_detach_for_test(&self, point: SpectatorDetachPanicPoint) {
+        self.detach_panic_point
+            .store(point as u8, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn trigger_spectator_detach_panic_for_test(&self, point: SpectatorDetachPanicPoint) {
+        if self
+            .detach_panic_point
+            .compare_exchange(
+                point as u8,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            panic!("injected spectator detach panic");
+        }
     }
 
     #[cfg(test)]
@@ -896,27 +938,89 @@ impl SpectatorService {
         operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         let service = self.clone();
+        // Same panic-repair parity as the join transaction: the marker records
+        // how far the durable-to-local transition committed, so a panic can be
+        // completed instead of leaving a live connection wedged out of
+        // re-spectating until it retries or disconnects.
+        let pending_completion = Arc::new(std::sync::Mutex::new(None::<(RoomId, bool)>));
+        let pending_completion_in_task = Arc::clone(&pending_completion);
+        // `detach_owned` consumes the service clone, so the compensation arm
+        // needs its own handle.
+        let compensation_service = self.clone();
         tokio::spawn(async move {
             // A voluntary detach creates its own always-false drain channel.
             // Keep that sender with the owned transaction: dropping the caller
             // must not make `changed()` look like shutdown cancellation.
             let _drain_owner = drain_owner;
-            service
-                .detach_owned(
-                    player_id,
-                    reason,
-                    send_notifications,
-                    drain,
-                    lifecycle_guard,
-                    operation_id,
-                )
-                .await
+            let outcome = std::panic::AssertUnwindSafe(service.detach_owned(
+                player_id,
+                reason,
+                send_notifications,
+                drain,
+                lifecycle_guard,
+                operation_id,
+                pending_completion_in_task,
+            ))
+            .catch_unwind()
+            .await;
+            match outcome {
+                Ok(result) => result,
+                Err(_panic) => {
+                    tracing::error!(%player_id, "Owned spectator detach transaction panicked");
+                    compensation_service
+                        .complete_interrupted_detach(player_id, pending_completion)
+                        .await;
+                    false
+                }
+            }
         })
         .await
         .unwrap_or_else(|error| {
             warn!(%player_id, %error, "Owned spectator detach transaction failed");
             false
         })
+    }
+
+    /// Finish a spectator detach that panicked after its durable removal
+    /// committed. The marker is the exact analogue of the join transaction's
+    /// `pending_rollback`: it records whether this transaction's
+    /// delivery-generation advance already ran, so the compensation never
+    /// advances twice — and it is consumed (None) when the transaction
+    /// completed its local transition, making a late panic a no-op.
+    async fn complete_interrupted_detach(
+        &self,
+        player_id: PlayerId,
+        pending_completion: Arc<std::sync::Mutex<Option<(RoomId, bool)>>>,
+    ) {
+        let Some((room_id, generation_advanced)) = pending_completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        else {
+            return;
+        };
+        // Serialize the completion with the room's event lane (same
+        // discipline as the maintenance retry sweep) so it cannot interleave
+        // with a concurrent spectator mutation for this room. No lifecycle
+        // guard is held here — unlike the join compensation, which must
+        // rewind durable state — because this only completes local state for
+        // the room the phantom role still names: a concurrent same-connection
+        // join is rejected while the phantom role exists (the revalidation
+        // below), and a different-room join fails it.
+        let room_event_guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        if self.spectator_room(&player_id) == Some(room_id) {
+            if !generation_advanced {
+                self.connection_manager
+                    .advance_delivery_generation(&player_id)
+                    .await;
+            }
+            self.spectator_rooms.remove(&player_id);
+            warn!(%player_id, %room_id, "Completed a spectator detach interrupted by a panic");
+        }
+        drop(room_event_guard);
     }
 
     async fn detach_owned(
@@ -927,6 +1031,7 @@ impl SpectatorService {
         drain: watch::Receiver<bool>,
         _lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        pending_completion: Arc<std::sync::Mutex<Option<(RoomId, bool)>>>,
     ) -> bool {
         let player_id = &player_id;
         let Some(room_id) = self
@@ -1024,10 +1129,34 @@ impl SpectatorService {
                 return false;
             }
         }
+        // The durable removal committed: from here a panic must be completed,
+        // not rolled back (storage is already clean; the live connection must
+        // not keep a phantom local role that wedges it out of re-spectating).
+        *pending_completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((room_id, false));
+        #[cfg(test)]
+        self.trigger_spectator_detach_panic_for_test(
+            SpectatorDetachPanicPoint::DetachAfterDurableRemove,
+        );
         self.connection_manager
             .advance_delivery_generation(player_id)
             .await;
+        if let Some(entry) = pending_completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+        {
+            *entry = (room_id, true);
+        }
         self.spectator_rooms.remove(player_id);
+        *pending_completion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        #[cfg(test)]
+        self.trigger_spectator_detach_panic_for_test(
+            SpectatorDetachPanicPoint::DetachAfterLocalCompletion,
+        );
 
         // The acknowledgement and full-roster broadcast are one owned lane
         // job. Once the DB/map transition above commits, dropping the caller
@@ -1736,6 +1865,136 @@ mod tests {
                 .delivery_generation_for_test(&spectator_id),
             Some(generation_before),
             "a post-advance panic must roll the delivery generation back to the pre-join state"
+        );
+    }
+
+    /// A detach panic after the durable removal committed must be COMPLETED,
+    /// not left wedged: storage is already clean, so the compensation only
+    /// finishes the local transition (delivery-generation advance + local
+    /// role removal). Without it the live connection keeps a phantom local
+    /// role and is refused re-spectating until it retries or disconnects.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn panicked_detach_after_durable_remove_completes_the_local_transition() {
+        let (service, room, _creator_id, _coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_031).await;
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Panicking Watcher".to_string(),
+            )
+            .await
+            .expect("spectator join succeeds");
+        let generation_before_leave = service
+            .connection_manager
+            .delivery_generation_for_test(&spectator_id)
+            .expect("connected client has delivery state");
+
+        service
+            .panic_spectator_detach_for_test(SpectatorDetachPanicPoint::DetachAfterDurableRemove);
+
+        let outcome = service.leave(&spectator_id).await;
+        assert!(
+            outcome.is_err(),
+            "a panicked detach must surface a terminal failure"
+        );
+
+        let stored = database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("fetch spectators after panicked detach");
+        assert!(
+            !stored.iter().any(|info| info.id == spectator_id),
+            "the durable removal committed before the panic, got: {stored:?}"
+        );
+        assert!(
+            !service.is_spectating(&spectator_id),
+            "the compensation must remove the phantom local role"
+        );
+        let generation_after = service
+            .connection_manager
+            .delivery_generation_for_test(&spectator_id)
+            .expect("connected client has delivery state");
+        assert_ne!(
+            generation_after.0, generation_before_leave.0,
+            "the compensation advances the delivery generation the transaction never ran"
+        );
+        assert_eq!(
+            generation_after.1,
+            Some(generation_before_leave.0),
+            "the advance ran exactly once: the prior generation is the pre-leave one"
+        );
+
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Recovered Watcher".to_string(),
+            )
+            .await
+            .expect("the connection must be able to re-spectate after the completed detach");
+    }
+
+    /// A detach panic after the local completion is a no-op for the
+    /// compensation: the marker was consumed, so nothing may advance the
+    /// delivery generation twice or resurrect a removed role.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn panicked_detach_after_local_completion_needs_no_compensation() {
+        let (service, room, _creator_id, _coordinator, database) = setup_service().await;
+        let spectator_id = PlayerId::new_v4();
+        connect_spectator(&service, spectator_id, 35_037).await;
+        service
+            .join(
+                &spectator_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Late Panic Watcher".to_string(),
+            )
+            .await
+            .expect("spectator join succeeds");
+        let generation_before_leave = service
+            .connection_manager
+            .delivery_generation_for_test(&spectator_id)
+            .expect("connected client has delivery state");
+
+        service
+            .panic_spectator_detach_for_test(SpectatorDetachPanicPoint::DetachAfterLocalCompletion);
+
+        let outcome = service.leave(&spectator_id).await;
+        assert!(
+            outcome.is_err(),
+            "a panicked detach must surface a terminal failure"
+        );
+
+        assert!(
+            !service.is_spectating(&spectator_id),
+            "the transaction completed its local transition before the panic"
+        );
+        let generation_after = service
+            .connection_manager
+            .delivery_generation_for_test(&spectator_id)
+            .expect("connected client has delivery state");
+        assert_ne!(
+            generation_after.0, generation_before_leave.0,
+            "the transaction's own advance must survive the late panic"
+        );
+        assert_eq!(
+            generation_after.1,
+            Some(generation_before_leave.0),
+            "the compensation must not advance a generation the transaction already advanced"
+        );
+        let stored = database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("fetch spectators after the late-panic detach");
+        assert!(
+            !stored.iter().any(|info| info.id == spectator_id),
+            "the durable roster must stay clean, got: {stored:?}"
         );
     }
 

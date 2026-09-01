@@ -559,6 +559,57 @@ mod tests {
         assert!(matches!(parsed, ClientMessage::Ping));
     }
 
+    /// A signed-but-untypeable message consumes its sequence number while the
+    /// connection stays alive: the proof is verified (the frontier advances)
+    /// before the typed deserialization fails with the survivable
+    /// `InvalidJson` violation. The next frame must use the following
+    /// sequence, and the consumed one can never be replayed.
+    #[test]
+    fn verified_but_untypeable_message_consumes_the_sequence_and_survives() {
+        let secret: Arc<[u8]> = Arc::from(b"0123456789abcdef".to_vec().into_boxed_slice());
+        let handshake = handshake_with_secret(secret.clone(), false, None);
+
+        let untypeable_value = json!({"type": "NotARealClientMessageType"});
+        let canonical = canonical_json(&untypeable_value).expect("canonicalize untypeable value");
+        let signed = json!({
+            "type": "NotARealClientMessageType",
+            "token_binding": proof(
+                secret.as_ref(),
+                TOKEN_BINDING_JSON_DOMAIN,
+                &canonical,
+                1,
+                None,
+            ),
+        });
+        let violation = parse_client_message(&signed.to_string(), Some(&handshake))
+            .expect_err("an unknown type cannot deserialize");
+        assert!(
+            matches!(violation, TokenBindingViolation::InvalidJson(_)),
+            "the proof verified, so the failure is survivable InvalidJson, got {violation:?}"
+        );
+        assert!(
+            !violation.should_disconnect(),
+            "InvalidJson is the documented survivable violation"
+        );
+
+        let followup = signed_client_message(secret.as_ref(), &ClientMessage::Ping, 2, None);
+        assert!(
+            parse_client_message(&followup, Some(&handshake)).is_ok(),
+            "the verified-but-untypeable message consumed sequence 1"
+        );
+
+        let replay = signed_client_message(secret.as_ref(), &ClientMessage::Ping, 1, None);
+        assert!(matches!(
+            parse_client_message(&replay, Some(&handshake)),
+            Err(TokenBindingViolation::Verification(
+                TokenBindingError::InvalidSequence {
+                    expected: 3,
+                    received: 1
+                }
+            ))
+        ));
+    }
+
     #[test]
     fn token_binding_rfc8785_safe_integer_goldens_are_feature_independent() {
         for (input, expected) in [

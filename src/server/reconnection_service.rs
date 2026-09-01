@@ -1232,6 +1232,29 @@ impl EnhancedGameServer {
                     )
                     .await;
             }
+            crate::server::connection_manager::ReassignmentOutcome::RefusedTargetOccupied => {
+                // The connection map still holds a live entry under the
+                // restored id, so the swap refused before any mutation. The
+                // transient connection is untouched and the record is
+                // released unspent for a retry. Unreachable while the claim
+                // lifecycle holds; refused loudly rather than stomping a
+                // live entry if it ever regresses.
+                tracing::error!(
+                    %current_player_id,
+                    %reconnect_player_id,
+                    "Reconnect refused: a live connection already occupies the restored identity"
+                );
+                return self
+                    .reject_claimed_reconnect(
+                        current_player_id,
+                        claim_guard,
+                        &restore,
+                        "Identity is already connected; reconnect from a fresh connection",
+                        ErrorCode::ReconnectionFailed,
+                        operation_id,
+                    )
+                    .await;
+            }
         };
         if let Some(effective_player_id) = &effective_player_id {
             *effective_player_id.write().await = *reconnect_player_id;

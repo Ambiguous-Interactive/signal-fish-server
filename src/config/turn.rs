@@ -27,6 +27,18 @@ const fn default_credential_ttl_secs() -> u64 {
     3600
 }
 
+/// Upper bound for [`TurnConfig::credential_ttl_secs`] (24 hours).
+///
+/// The whole credential scheme is "short-lived, per-player, individually
+/// expiring" (`docs/deployment-turn.md`): coturn rejects a pair once the
+/// embedded expiry passes, which is what bounds the blast radius of a leaked
+/// credential. The mint saturates at `i64::MAX` on overflow rather than
+/// wrapping into the past, so an unbounded TTL (a typo like `u64::MAX`) would
+/// mint credentials that never expire — the exact property the scheme exists
+/// to prevent. 24 hours is 24x the default and comfortably above any game
+/// session, while keeping the lifetime genuinely bounded.
+pub const MAX_CREDENTIAL_TTL_SECS: u64 = 24 * 60 * 60;
+
 /// ICE / TURN configuration (`[turn]` in `docs/configuration.md`).
 ///
 /// Self-hosted only: when [`enabled`](Self::enabled), the server mints coturn
@@ -49,7 +61,8 @@ pub struct TurnConfig {
     /// Public STUN URLs advertised regardless of [`enabled`](Self::enabled).
     #[serde(default = "default_stun_urls")]
     pub stun_urls: Vec<String>,
-    /// Lifetime (seconds) of a minted TURN credential. Must be `> 0` when enabled.
+    /// Lifetime (seconds) of a minted TURN credential. Must be `> 0` and at
+    /// most [`MAX_CREDENTIAL_TTL_SECS`] (24 hours) when enabled.
     #[serde(default = "default_credential_ttl_secs")]
     pub credential_ttl_secs: u64,
 }
@@ -83,7 +96,10 @@ impl TurnConfig {
     ///
     /// When [`enabled`](Self::enabled):
     /// - [`credential_ttl_secs`](Self::credential_ttl_secs) must be `> 0` (a
-    ///   zero-lifetime credential is dead on arrival);
+    ///   zero-lifetime credential is dead on arrival) and at most
+    ///   [`MAX_CREDENTIAL_TTL_SECS`] (24 hours — the mint's overflow
+    ///   saturation would otherwise turn a pathological TTL into effectively
+    ///   never-expiring credentials);
     /// - a non-blank [`static_auth_secret`](Self::static_auth_secret) **and** at
     ///   least one [`urls`](Self::urls) entry are required (a self-hosted TURN
     ///   deployment needs both — the secret to mint credentials, the URL to reach
@@ -123,6 +139,14 @@ impl TurnConfig {
 
         if self.credential_ttl_secs == 0 {
             anyhow::bail!("turn.credential_ttl_secs must be greater than 0 when turn is enabled");
+        }
+        if self.credential_ttl_secs > MAX_CREDENTIAL_TTL_SECS {
+            anyhow::bail!(
+                "turn.credential_ttl_secs must be at most {MAX_CREDENTIAL_TTL_SECS} (24 hours) \
+                 when turn is enabled: TURN credentials are short-lived by design, and an \
+                 effectively never-expiring credential defeats the bounded-lifetime property \
+                 the mint relies on"
+            );
         }
 
         if self.static_auth_secret.trim().is_empty() {
@@ -273,6 +297,48 @@ mod tests {
         let cfg = TurnConfig {
             enabled: false,
             credential_ttl_secs: 0,
+            ..TurnConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// The mint saturates a pathological TTL at `i64::MAX` instead of wrapping
+    /// into the past, so without a ceiling a typo like `u64::MAX` would mint
+    /// effectively never-expiring credentials — the exact property the
+    /// short-lived-credential scheme exists to prevent.
+    #[test]
+    fn enabled_ttl_is_bounded_to_keep_credentials_short_lived() {
+        let cases = [
+            (MAX_CREDENTIAL_TTL_SECS, true, "ceiling is accepted"),
+            (
+                MAX_CREDENTIAL_TTL_SECS + 1,
+                false,
+                "ceiling + 1 is rejected",
+            ),
+            (u64::MAX, false, "saturating ttl is rejected"),
+        ];
+        for (ttl, should_pass, description) in cases {
+            let cfg = TurnConfig {
+                credential_ttl_secs: ttl,
+                ..enabled_static()
+            };
+            let outcome = cfg.validate();
+            assert_eq!(
+                outcome.is_ok(),
+                should_pass,
+                "{description}: ttl={ttl}, outcome={outcome:?}"
+            );
+            if let Err(err) = outcome {
+                assert!(
+                    err.to_string().contains("credential_ttl_secs"),
+                    "{description}: error names the field: {err}"
+                );
+            }
+        }
+        // A disabled block stays inert: the ceiling only guards live mints.
+        let cfg = TurnConfig {
+            enabled: false,
+            credential_ttl_secs: u64::MAX,
             ..TurnConfig::default()
         };
         assert!(cfg.validate().is_ok());

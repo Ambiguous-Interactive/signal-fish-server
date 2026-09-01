@@ -92,7 +92,8 @@ Operationally this means:
 - **Each player gets their own credential.** The username embeds the player's id,
   so credentials are per-player and individually expiring. Members finalized
   together share one expiry timestamp.
-- **TTL is `credential_ttl_secs`** (default 3600 = 1 hour). coturn rejects the
+- **TTL is `credential_ttl_secs`** (default 3600 = 1 hour, capped at 86400 =
+  24 hours). coturn rejects the
   pair once the embedded expiry passes, so a leaked credential has a bounded
   lifetime. Size the TTL to comfortably exceed your longest expected session,
   because mid-session ICE restarts need a still-valid credential; late joiners

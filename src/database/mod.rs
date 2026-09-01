@@ -977,11 +977,15 @@ impl GameDatabase for InMemoryDatabase {
         let mut players = HashMap::new();
         players.insert(creator_id, creator_info);
 
-        // Lock ordering: rooms first, then room_codes (consistent with delete_room, cleanup_*)
-        // Both locks are held simultaneously to ensure atomicity of the room creation:
-        // no other task can observe a partial state where room_codes has an entry but rooms does not.
+        // Lock ordering: rooms first, then room_codes, then liveness
+        // (consistent with delete_room, cleanup_*). All three locks are held
+        // simultaneously to ensure atomicity of the room creation: no other
+        // task can observe a partial state where room_codes has an entry but
+        // rooms does not, and the commit cannot be torn from the monotonic
+        // liveness stamp by a dropped future.
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
 
         // Check room code uniqueness under the write lock (no TOCTOU gap)
         let game_room_key = (game_name.clone(), room_code.clone());
@@ -1034,13 +1038,12 @@ impl GameDatabase for InMemoryDatabase {
             max_spectators: None,
         };
 
-        // Insert into both maps atomically while holding both locks
+        // Insert into all three maps under one set of guards, so a dropped
+        // future can never commit the room without its monotonic GC stamp
+        // (which would silently degrade the room to the wall-clock fallback).
         rooms.insert(room_id, room.clone());
         room_codes.insert(game_room_key, room_id);
-        self.room_liveness_monotonic
-            .write()
-            .await
-            .insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+        liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
         Ok(room)
     }
@@ -1099,6 +1102,7 @@ impl GameDatabase for InMemoryDatabase {
             self.release_add_player.notified().await;
         }
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if room.players.len() < room.max_players as usize {
                 // `authority_player` is the single source of truth for the room
@@ -1133,13 +1137,8 @@ impl GameDatabase for InMemoryDatabase {
                 room.players.insert(player.id, player);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
-                // Wall clock (durable record), paired with the monotonic
-                // liveness stamp below.
                 room.last_activity = chrono::Utc::now();
-                self.room_liveness_monotonic
-                    .write()
-                    .await
-                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
                 Ok(true)
             } else {
                 Ok(false) // Room is full
@@ -1163,6 +1162,7 @@ impl GameDatabase for InMemoryDatabase {
         }
 
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             let removed_player = room.players.remove(player_id);
 
@@ -1174,13 +1174,8 @@ impl GameDatabase for InMemoryDatabase {
             // on an ACTUAL removal — a no-op remove (player already gone) is not
             // activity and must not keep an otherwise-stale room alive.
             if removed_player.is_some() {
-                // Wall clock (durable record), paired with the monotonic
-                // liveness stamp below.
                 room.last_activity = chrono::Utc::now();
-                self.room_liveness_monotonic
-                    .write()
-                    .await
-                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
             }
 
             // Prune the departed player's ready entry so it cannot linger in
@@ -1453,26 +1448,26 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn update_room_activity(&self, room_id: &RoomId) -> Result<()> {
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            // Wall clock (durable record), paired with the monotonic
-            // liveness stamp below.
             room.last_activity = chrono::Utc::now();
-            self.room_liveness_monotonic
-                .write()
-                .await
-                .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+            liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         }
         Ok(())
     }
 
     async fn delete_room(&self, room_id: &RoomId) -> Result<bool> {
+        // All three guards are acquired before any mutation: a dropped future
+        // can only cancel while waiting for a lock, never between the primary
+        // commit and the liveness stamp (see the dropped-delete-room test).
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
 
         if let Some(room) = rooms.remove(room_id) {
             let game_room_key = (room.game_name.clone(), room.code);
             room_codes.remove(&game_room_key);
-            self.room_liveness_monotonic.write().await.remove(room_id);
+            liveness.remove(room_id);
             Ok(true)
         } else {
             Ok(false)
@@ -1676,16 +1671,14 @@ impl GameDatabase for InMemoryDatabase {
         spectator: SpectatorInfo,
     ) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             let admitted = room.add_spectator(spectator);
             if admitted {
                 // A spectator join is activity: `Room::add_spectator` already
                 // refreshed the wall-clock record, so the monotonic GC stamp
                 // must move in lockstep.
-                self.room_liveness_monotonic
-                    .write()
-                    .await
-                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
             }
             Ok(admitted)
         } else {
@@ -1707,15 +1700,13 @@ impl GameDatabase for InMemoryDatabase {
         }
 
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             let removed = room.remove_spectator(spectator_id);
             if removed.is_some() {
                 // A real departure is activity and starts the empty-room clock:
                 // refresh the monotonic stamp alongside the wall-clock record.
-                self.room_liveness_monotonic
-                    .write()
-                    .await
-                    .insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
             }
             Ok(removed)
         } else {
@@ -1933,6 +1924,72 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// A `delete_room` future dropped while parked on a contended lock must
+    /// not tear the primary commit from the liveness-stamp removal: every
+    /// guard is acquired before any mutation, so a dropped future leaves the
+    /// room and its stamp exactly as they were. An orphaned liveness entry
+    /// keyed by a deleted room has no sweep and would otherwise live forever.
+    #[tokio::test]
+    async fn dropped_delete_room_cannot_tear_the_primary_commit_from_the_liveness_stamp() {
+        let db = Arc::new(InMemoryDatabase::new());
+        let room = create_test_room(&db, "torn_delete", "DROP01")
+            .await
+            .expect("room created");
+        let room_id = room.id;
+
+        let gate = db.room_liveness_monotonic.write().await;
+        let task_db = Arc::clone(&db);
+        let task = tokio::spawn(async move { task_db.delete_room(&room_id).await });
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        drop(gate);
+
+        assert!(
+            db.rooms.read().await.contains_key(&room_id),
+            "a dropped delete_room must not commit the rooms removal"
+        );
+        assert!(
+            db.room_liveness_monotonic
+                .read()
+                .await
+                .contains_key(&room_id),
+            "a dropped delete_room must not remove the liveness stamp"
+        );
+    }
+
+    /// A `create_room` future dropped while parked on a contended lock must
+    /// not commit a room whose monotonic GC stamp was never written: that
+    /// torn state silently degrades the room to the wall-clock GC fallback.
+    #[tokio::test]
+    async fn dropped_create_room_cannot_commit_a_room_without_its_liveness_stamp() {
+        let db = Arc::new(InMemoryDatabase::new());
+
+        let gate = db.room_liveness_monotonic.write().await;
+        let task_db = Arc::clone(&db);
+        let task =
+            tokio::spawn(async move { create_test_room(&task_db, "torn_create", "DROP02").await });
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        drop(gate);
+
+        assert!(
+            db.rooms.read().await.is_empty(),
+            "a dropped create_room must not commit the room row"
+        );
+        assert!(
+            db.room_codes.read().await.is_empty(),
+            "a dropped create_room must not commit the room code"
+        );
+        assert!(
+            db.room_liveness_monotonic.read().await.is_empty(),
+            "a dropped create_room must not leave the stamp unwritten behind a committed room"
+        );
     }
 
     /// The cleanup-claim dedupe runs entirely on monotonic tokio time: a

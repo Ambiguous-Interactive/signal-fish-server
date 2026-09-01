@@ -230,6 +230,15 @@ pub(crate) enum ReassignmentOutcome {
     /// the swap (drain must close restored connections; a room pin reflects
     /// the room the claim just verified).
     RefusedTransientClose(crate::coordination::CloseReason),
+    /// A live entry already existed under the reconnection target id when the
+    /// swap was attempted. The swap was refused
+    /// before any map mutation: the transient connection keeps its identity
+    /// and the reconnection record stays spendable for a retry. Unreachable
+    /// while the reconnection claim lifecycle holds (the target is free
+    /// before any claim can spend); a guard against that lifecycle ever
+    /// regressing into a silent stomp, matching the rollback sibling's
+    /// `contains_key` check.
+    RefusedTargetOccupied,
 }
 
 /// Per-socket close reasons that must not cross a reconnect identity swap.
@@ -909,6 +918,16 @@ impl ConnectionManager {
         room_id: RoomId,
         game_data_epoch: u32,
     ) -> ReassignmentOutcome {
+        // Collision refusal mirrors the rollback sibling
+        // (`restore_reassigned_connection`): a live entry under the target id
+        // must never be silently stomped by the blind insert below. Today's
+        // reconnection lifecycle makes the target free before any claim can
+        // spend, so this is defense-in-depth against a claim-lifecycle
+        // regression — the transient entry is left untouched and the record
+        // stays spendable for a retry.
+        if self.clients.contains_key(reconnect_player_id) {
+            return ReassignmentOutcome::RefusedTargetOccupied;
+        }
         // Atomically remove the old entry (no separate get-then-remove race).
         // The removal is the refusal fence: once it lands, no reaper-style
         // map lookup can pin the transient entry anymore, so the close-reason
@@ -1833,6 +1852,45 @@ mod tests {
 
     /// D18: Reassignment does not leak IP slots.
     ///
+    /// The swap refuses when a live entry already occupies the target id
+    /// instead of silently stomping it, and both entries stay untouched — the
+    /// same defense the rollback sibling (`restore_reassigned_connection`)
+    /// applies with its `contains_key` check.
+    #[tokio::test]
+    async fn reassign_connection_refuses_an_occupied_target_instead_of_stomping_it() {
+        let manager = make_manager(8);
+        let occupant_id = Uuid::new_v4();
+        let (tx, _rx) = channel();
+        manager
+            .connect_test_client(occupant_id, tx, "10.0.0.64:9000".parse().unwrap())
+            .await;
+
+        let (transient_tx, _transient_rx) = channel();
+        let transient_id = manager
+            .register_client(
+                transient_tx,
+                ConnectionCloseSignal::detached(),
+                "10.0.0.65:9000".parse().unwrap(),
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("transient registration succeeds");
+
+        let outcome = manager.reassign_connection(&transient_id, &occupant_id, RoomId::new_v4(), 1);
+        assert!(
+            matches!(outcome, ReassignmentOutcome::RefusedTargetOccupied),
+            "an occupied target must be refused, got {outcome:?}"
+        );
+        assert!(
+            manager.has_client(&occupant_id),
+            "the occupant entry must survive the refused swap"
+        );
+        assert!(
+            manager.has_client(&transient_id),
+            "the transient entry must survive the refused swap"
+        );
+    }
+
     /// Register a client, reassign to a new player_id.
     /// IP count should still be 1 (not 0 or 2).
     /// Verify by filling up to the per-IP limit, then remove the reassigned
