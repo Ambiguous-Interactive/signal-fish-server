@@ -20,21 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Local::now()` read in server code is classified at the site (durable record / embedder
   convenience) or converted, and `tests/clock_source_scan.rs` now fails any new unallowlisted
   production chrono clock read or clock-hiding chrono import (issues #498, #495).
-
-### Changed
-
-- In-memory database cleanup-claim dedupe keys off a uniform monotonic re-claim window (5 minutes
-  from the claim, inclusive expiry) instead of a wall-clock bucket id, and the retention prune
-  runs on monotonic elapsed time: an NTP step can no longer shorten, extend, or revive a dedupe
-  window. Re-claim now becomes possible exactly 5 minutes after a claim (previously anywhere from
-  0 to 5 minutes depending on where the claim landed in its wall-clock bucket) (issue #498).
-- Dashboard metrics staleness is decided from the snapshot's monotonic capture instant instead of
-  the wall clock, so a wall-clock step cannot flag a fresh cache stale or keep a dead one fresh;
-  the reported `fetched_at` wall stamp is unchanged (issue #498).
-- Devcontainer: `opencode.json` now forwards `GITHUB_PERSONAL_ACCESS_TOKEN` into the pinned GitHub
-  MCP server's environment, so opencode-harness sessions start authenticated instead of falling
-  back to the interactive OAuth device-authorization flow every session (issue #496). The
-  `signal_fish_game_data_messages_total` counts admission-time acceptance (no values changed).
 - Deterministic-time convention: `.llm/context-testing.md` codifies the two sanctioned patterns
   (tokio paused clocks for async logic, `*_at` timestamp injection for sync logic), pinned by a new
   `tests/clock_source_scan.rs` hygiene guard that fails any new std clock import or qualified std
@@ -68,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- In-memory database cleanup-claim dedupe keys off a uniform monotonic re-claim window (5 minutes
+  from the claim, inclusive expiry) instead of a wall-clock bucket id, and the retention prune
+  runs on monotonic elapsed time: an NTP step can no longer shorten, extend, or revive a dedupe
+  window. Re-claim now becomes possible exactly 5 minutes after a claim (previously anywhere from
+  0 to 5 minutes depending on where the claim landed in its wall-clock bucket) (issue #498).
+- Dashboard metrics staleness is decided from the snapshot's monotonic capture instant instead of
+  the wall clock, so a wall-clock step cannot flag a fresh cache stale or keep a dead one fresh;
+  the reported `fetched_at` wall stamp is unchanged (issue #498).
 - Devcontainer: `opencode.json` now forwards `GITHUB_PERSONAL_ACCESS_TOKEN` into the pinned GitHub
   MCP server's environment, so opencode-harness sessions start authenticated instead of falling
   back to the interactive OAuth device-authorization flow every session (issue #496). The
