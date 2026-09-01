@@ -158,13 +158,13 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_websocket_messages_dropped_total",
-        "Server messages that could not be delivered: abandoned together with a slow-consumer or already-closing connection, or replaced by an error frame because a binary payload could not be converted for the recipient",
+        "Server messages that could not be delivered: abandoned together with a slow-consumer or already-closing connection, abandoned when their backpressured delivery wait was cancelled (for example by shutdown drain; the recipient is not at fault), or replaced by an error frame because a binary payload could not be converted for the recipient",
         snapshot.connections.websocket_messages_dropped,
     );
     counter(
         &mut buf,
         "signal_fish_websocket_backpressure_events_total",
-        "Times a full outbound queue forced delivery to wait for capacity (message still delivered)",
+        "Times a full outbound queue forced delivery to wait for capacity; the wait may still end in delivery or in a loss accounted by signal_fish_websocket_messages_dropped_total or signal_fish_websocket_deliveries_channel_closed_total",
         snapshot.connections.websocket_backpressure_events,
     );
     counter(
@@ -622,6 +622,37 @@ mod tests {
             .expect("rendered metric must exist")
             .parse()
             .expect("rendered metric must be an exact u64")
+    }
+
+    /// The HELP lines are the operator-facing contract for alerting on these
+    /// counters. Pin them exactly: the backpressure counter must not claim the
+    /// parked message was still delivered (a parked wait can also resolve as a
+    /// channel-closed, fail-closed, or cancelled loss), and the drop counter
+    /// must enumerate every cause, including cancelled backpressured waits.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn delivery_loss_help_lines_match_their_accounted_semantics() {
+        let rendered = render_prometheus_metrics(&ServerMetrics::new().snapshot().await);
+        for (name, help) in [
+            (
+                "signal_fish_websocket_messages_dropped_total",
+                "Server messages that could not be delivered: abandoned together with a slow-consumer or already-closing connection, abandoned when their backpressured delivery wait was cancelled (for example by shutdown drain; the recipient is not at fault), or replaced by an error frame because a binary payload could not be converted for the recipient",
+            ),
+            (
+                "signal_fish_websocket_backpressure_events_total",
+                "Times a full outbound queue forced delivery to wait for capacity; the wait may still end in delivery or in a loss accounted by signal_fish_websocket_messages_dropped_total or signal_fish_websocket_deliveries_channel_closed_total",
+            ),
+        ] {
+            let expected_line = format!("# HELP {name} {help}");
+            assert!(
+                rendered.contains(&expected_line),
+                "HELP contract drifted for {name}:\nexpected: {expected_line}"
+            );
+        }
+        assert!(
+            !rendered.contains("message still delivered"),
+            "the backpressure HELP must not promise delivery: parked waits can resolve as accounted losses"
+        );
     }
 
     #[tokio::test]

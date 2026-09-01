@@ -90,9 +90,12 @@ pub struct ServerMetrics {
     pub websocket_upgrades_rejected_token_binding_offer: AtomicU64,
     pub websocket_upgrades_rejected_token_binding_negotiation: AtomicU64,
     pub websocket_messages_dropped: AtomicU64,
-    /// Times a full outbound queue forced delivery to wait for capacity
-    /// (the send eventually succeeded; nothing was lost). A rising rate means
-    /// clients are close to the slow-consumer limit.
+    /// Times a full outbound queue forced delivery to wait for capacity. The
+    /// wait may still end in delivery — or in a loss accounted by
+    /// `websocket_messages_dropped` (fail-closed or cancelled wait) or
+    /// `websocket_deliveries_channel_closed` (recipient disconnected while
+    /// parked). A rising rate means clients are close to the slow-consumer
+    /// limit.
     pub websocket_backpressure_events: AtomicU64,
     /// Connections force-closed because their outbound queue stayed full past
     /// `websocket.slow_consumer_timeout_ms`.

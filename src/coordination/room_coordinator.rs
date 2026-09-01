@@ -201,7 +201,10 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
     /// The live ready state is tracked by the coordinator (not persisted to the
     /// room record until finalize), so `RoomJoined` / `Reconnected` must read it
     /// from here to report an accurate ready set to a player joining a lobby that
-    /// already has ready members. Returns an empty vec for an unknown room.
+    /// already has ready members. Rooms without a live entry resolve to the
+    /// durable record: a finalized room reports its persisted ready set (the
+    /// start transaction drops the entry when it commits), and an open room —
+    /// where the entry's absence only means nobody toggled yet — reports empty.
     async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId>;
 
     /// Clear ready players for a room
@@ -606,6 +609,15 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             };
             let current_ids: HashSet<PlayerId> = room_players.iter().map(|p| p.id).collect();
 
+            // Membership gates the toggle: a caller whose membership row just
+            // vanished (teardown racing the toggle between the caller's room
+            // lookup and the membership read above) is refused exactly like any
+            // other unknown membership. Toggling anyway would mint an empty
+            // ready entry for a live room and publish a stale lobby snapshot.
+            if !current_ids.contains(player_id) {
+                return Err(PlayerReadyError::RoomNotFound);
+            }
+
             // Toggle player ready state in ready_players map
             let mut ready_map = self.ready_players.write().await;
             let room_ready_players = ready_map.entry(*room_id).or_insert_with(HashSet::new);
@@ -886,13 +898,34 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
     }
 
     async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId> {
-        // Snapshot the set without holding the lock across the DB await.
-        let set: HashSet<PlayerId> = {
+        // Snapshot the set without holding the lock across either DB await
+        // below: the guard scope closes before any await, so a snapshot can
+        // never block a concurrent toggle, clear, forget, or finalize
+        // entry-drop for the duration of a database read.
+        let live_entry: Option<HashSet<PlayerId>> = {
             let ready_map = self.ready_players.read().await;
-            match ready_map.get(room_id) {
-                Some(s) => s.clone(),
-                None => return Vec::new(),
-            }
+            ready_map.get(room_id).cloned()
+        };
+        let Some(set) = live_entry else {
+            // No live entry: either nobody has toggled yet, or the room
+            // finalized and the start transaction dropped the entry. Prefer
+            // the durable record so a snapshot that straddles finalization
+            // reports the finalized ready set instead of an all-unready game;
+            // an open room falls through to empty (nobody ready yet).
+            return match self.database.get_room_by_id(room_id).await {
+                Ok(Some(room)) if room.lobby_state == crate::protocol::LobbyState::Finalized => {
+                    room.ready_players
+                }
+                Ok(_) => Vec::new(),
+                Err(error) => {
+                    tracing::warn!(
+                        %room_id,
+                        error = %error,
+                        "Failed to load the finalized room for the readiness snapshot; failing closed to an empty set"
+                    );
+                    Vec::new()
+                }
+            };
         };
         // Filter to present members so an id that departed without a toggle is
         // never reported as ready. A failed membership read fails closed to an
@@ -2231,12 +2264,11 @@ mod tests {
                     .await
                     .expect("room lookup succeeds")
                     .is_some_and(|room| room.lobby_state == crate::protocol::LobbyState::Finalized);
-                if finalized
-                    && ready_coordinator
-                        .current_ready_players(&room.id)
-                        .await
-                        .is_empty()
-                {
+                let entry_dropped = !ready_coordinator
+                    .ready_player_room_ids()
+                    .await
+                    .contains(&room.id);
+                if finalized && entry_dropped {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -2276,6 +2308,132 @@ mod tests {
         ));
         assert!(coordinator.current_ready_players(&room.id).await.is_empty());
         assert!(messages.broadcasts().await.is_empty());
+    }
+
+    /// A ready toggle from a non-member must be refused without mutating the
+    /// ready map or broadcasting: a toggle whose membership row just vanished
+    /// (teardown racing the toggle between the caller's room lookup and the
+    /// coordinator's membership read) previously minted an empty ready entry
+    /// for a live room and published a stale `LobbyStateChanged` snapshot.
+    #[tokio::test]
+    async fn ready_toggle_from_non_member_is_refused_without_minting_an_entry() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let coordinator =
+            InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
+        let member = PlayerId::from_u128(0x9105);
+        let outsider = PlayerId::from_u128(0x9106);
+        let room = database
+            .create_room(
+                "ready-non-member".to_string(),
+                Some("RNMBR1".to_string()),
+                2,
+                false,
+                member,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+
+        assert!(
+            matches!(
+                coordinator
+                    .handle_player_ready(&room.id, &outsider, None)
+                    .await,
+                Err(PlayerReadyError::RoomNotFound)
+            ),
+            "a non-member toggle must be refused as RoomNotFound"
+        );
+        assert!(
+            !coordinator.ready_player_room_ids().await.contains(&room.id),
+            "a refused toggle must not mint a ready entry for the room"
+        );
+        assert!(
+            messages.broadcasts().await.is_empty(),
+            "a refused toggle must not publish a lobby snapshot"
+        );
+    }
+
+    /// A readiness snapshot for a room that finalized between the caller's
+    /// room load and the coordinator read must report the durable finalized
+    /// ready set: finalization drops the live coordinator entry, so an
+    /// entry-only read reported an all-unready game to a `RoomJoined` /
+    /// `Reconnected` / `SpectatorJoined` straddler.
+    #[tokio::test]
+    async fn ready_snapshot_reports_durable_set_after_finalization_drops_the_entry() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            database.clone(),
+            None,
+        ));
+        let authority = PlayerId::from_u128(0x9107);
+        let peer = PlayerId::from_u128(0x9108);
+        let room = database
+            .create_room(
+                "ready-finalized-straddle".to_string(),
+                Some("RSTRDL".to_string()),
+                2,
+                false,
+                authority,
+                "matchbox".to_string(),
+                "test-region".to_string(),
+                None,
+            )
+            .await
+            .expect("room creation succeeds");
+        assert!(database
+            .add_player_to_room(&room.id, player_fixture(peer, "Peer", false, None),)
+            .await
+            .expect("adding peer succeeds"));
+        database
+            .transition_room_to_lobby(&room.id)
+            .await
+            .expect("lobby transition succeeds");
+
+        for player in [authority, peer] {
+            let (sender, _receiver) = mpsc::channel(4);
+            messages
+                .register_local_client(
+                    player,
+                    Some(room.id),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .expect("every member must route for the start publication");
+        }
+        coordinator
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([authority, peer]));
+
+        match coordinator
+            .handle_start_game(&room.id, &authority)
+            .await
+            .expect("all-ready start must succeed")
+        {
+            StartGameOutcome::Started(_) => {}
+            other => panic!("expected Started, got {other:?}"),
+        }
+        // The start transaction dropped the live entry; the durable record is
+        // now the only readiness source.
+        assert!(
+            !coordinator.ready_player_room_ids().await.contains(&room.id),
+            "finalization must drop the live ready entry"
+        );
+
+        let mut durable = coordinator.current_ready_players(&room.id).await;
+        durable.sort_unstable();
+        let mut expected = vec![authority, peer];
+        expected.sort_unstable();
+        assert_eq!(
+            durable, expected,
+            "a finalized room must report its durable ready set"
+        );
     }
 
     /// When membership cannot be loaded, the readiness snapshot must fail
@@ -2537,7 +2695,15 @@ mod tests {
 
         assert!(matches!(outcome, StartGameOutcome::Started(_)));
         assert_eq!(state_callbacks.load(Ordering::Acquire), 1);
-        assert!(coordinator.current_ready_players(&room.id).await.is_empty());
+        assert!(
+            !coordinator.ready_player_room_ids().await.contains(&room.id),
+            "the degraded start must still drop the live ready entry"
+        );
+        // The durable record is now the readiness source: every member is
+        // recorded as ready by the finalizing transition.
+        let mut durable = coordinator.current_ready_players(&room.id).await;
+        durable.sort_unstable();
+        assert_eq!(durable, vec![player]);
         assert_eq!(
             database
                 .get_room_by_id(&room.id)
