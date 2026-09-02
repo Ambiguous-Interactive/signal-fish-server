@@ -24,9 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   application-wide ceiling and a per-source (IP) share of half that budget
   (at least one). A single source can no longer continuously exhaust an
   application's handshake budget and lock out legitimate handshakes;
-  rejected handshakes still consume no application-wide budget (issue #502).
-  `auth::AppIdAllowlist::resolve_app_id` now takes the connection's source
-  `IpAddr`.
+  rejected handshakes consume no budget in either window (issue #502).
+  Public Rust API (breaking): `auth::AppIdAllowlist::resolve_app_id` now
+  takes the connection's source `IpAddr`, and
+  `server::RegisterClientError` gained the `CapacityExceeded` variant.
 
 ## [0.8.0] - 2026-09-01
 

@@ -475,7 +475,14 @@ impl ConnectionManager {
 
         self.increment_ip_slot_unbounded(client_addr.ip());
         self.increment_global_slot_unbounded();
-        self.clients.insert(player_id, connection);
+        // A same-id replacement is legitimate in test harnesses; the
+        // displaced entry leaves the map here without its own unregistration,
+        // so its per-IP and global slots are released to keep the counters
+        // exactly paired with live entries.
+        if let Some(displaced) = self.clients.insert(player_id, connection) {
+            self.release_ip_slot(displaced.client_addr.ip());
+            self.release_global_slot();
+        }
         self.metrics.increment_connections();
         if self.track_delivery_stats {
             self.metrics.register_connection_delivery_stats(player_id);
@@ -1705,6 +1712,29 @@ mod tests {
             .register_client(tx3, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("counter must be fully released after mixed entries drain");
+    }
+
+    /// A same-id test registration replaces the prior entry; the displaced
+    /// entry's slots are released in place so the counters stay paired with
+    /// live entries (a stomp must not permanently wedge the ceiling).
+    #[tokio::test]
+    async fn same_id_test_replacement_releases_the_displaced_slots() {
+        let manager = make_limited_manager(1, 8);
+        let addr: SocketAddr = "127.0.0.1:6006".parse().unwrap();
+        let reused_id = Uuid::new_v4();
+
+        let (tx1, _rx1) = channel();
+        manager.connect_test_client(reused_id, tx1, addr).await;
+        let (tx2, _rx2) = channel();
+        manager.connect_test_client(reused_id, tx2, addr).await;
+
+        manager.remove_client(&reused_id);
+
+        let (tx3, _rx3) = channel();
+        manager
+            .register_client(tx3, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("the one slot must be free after the replaced entry drains");
     }
 
     #[tokio::test]

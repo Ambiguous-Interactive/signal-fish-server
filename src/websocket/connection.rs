@@ -1263,23 +1263,17 @@ pub(super) async fn handle_socket(
             tracing::info!(%player_id, client_addr = %addr, "WebSocket connection established");
             player_id
         }
-        Err(RegisterClientError::IpLimitExceeded { current, limit }) => {
+        Err(
+            err @ (RegisterClientError::IpLimitExceeded { .. }
+            | RegisterClientError::CapacityExceeded { .. }),
+        ) => {
+            // The error's Display is the single source of the client-facing
+            // refusal text for both admission refusals.
             refuse_websocket_registration(
                 &mut sender,
                 token_binding.as_ref(),
                 addr,
-                format!("Too many connections from your IP ({current}/{limit})"),
-                server.config().max_outbound_message_size,
-            )
-            .await;
-            return;
-        }
-        Err(RegisterClientError::CapacityExceeded { current, limit }) => {
-            refuse_websocket_registration(
-                &mut sender,
-                token_binding.as_ref(),
-                addr,
-                format!("Server is at capacity ({current}/{limit} connections)"),
+                err.to_string(),
                 server.config().max_outbound_message_size,
             )
             .await;

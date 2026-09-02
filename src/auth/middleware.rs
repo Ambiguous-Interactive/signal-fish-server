@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Per-application rate limit information returned to clients.
@@ -78,10 +78,17 @@ pub const MAX_APP_ID_LENGTH: usize = 256;
 /// application-wide window to its limit alone — at least half the budget
 /// stays reachable to every other source. A botnet spanning many sources is
 /// bounded by the application-wide ceiling itself, the same documented way
-/// `security.max_connections_per_ip` bounds (but cannot eliminate)
+/// `security.max_connections_per_ip` bounds (but does not eliminate)
 /// distributed connection abuse. An application limited to 1 handshake per
 /// minute keeps a share of 1: that budget is trivially exhausted by any
 /// single admitted handshake, abuser or not.
+///
+/// Memory bound of the per-source windows: a source only reaches the limiter
+/// through an admitted WebSocket connection, so distinct pair keys are
+/// bounded by the server's own recent connection churn (one window per
+/// source address seen, swept by the limiter cleanup task once expired) —
+/// the same order as the connection table itself, not attacker-multiplied
+/// beyond it.
 #[must_use]
 pub fn source_rate_limit(app_limit: u32) -> u32 {
     (app_limit / 2).max(1)
@@ -271,21 +278,31 @@ impl AppIdAllowlist {
 
     /// Enforce the configured per-minute budget as two sliding windows.
     ///
-    /// The per-source share commits first and the application-wide ceiling
-    /// commits last. Each window stamps only on its own admission success, so
-    /// a request the app ceiling rejects leaves that ceiling untouched —
-    /// repeated rejected handshakes can never consume the application-wide
-    /// budget. The mirror case (source share admitted, app ceiling rejected
-    /// under concurrency) leaves at most one stamp in the offending source's
-    /// own window: it can only tighten that source's own future budget and
-    /// cannot affect any other source.
+    /// Both windows are probed before either commits, so a request either
+    /// window would reject is stamped nowhere — rejections stay free, exactly
+    /// as in the pre-split single-window contract (and an app-ceiling
+    /// rejection can no longer burn the source's own share). The commits then
+    /// run source share first and application-wide ceiling last: under a
+    /// probe/commit race the worst case is at most one self-tightening stamp
+    /// in the offending source's own window, never a cross-source effect.
     fn enforce_rate_limits(
         &self,
         app_id: &str,
         source: IpAddr,
         limit: u32,
     ) -> Result<(), AuthError> {
-        self.check_rate_limit(&source_window_key(app_id, source), source_rate_limit(limit))?;
+        let pair_key = source_window_key(app_id, source);
+        let share = source_rate_limit(limit);
+        let now = Instant::now();
+        if !self.rate_limiter.would_admit_at(&pair_key, share, now)
+            || !self.rate_limiter.would_admit_at(app_id, limit, now)
+        {
+            if let Some(metrics) = &self.metrics {
+                metrics.record_rate_limit_rejection(crate::metrics::RateLimitRejection::Auth);
+            }
+            return Err(AuthError::RateLimitExceeded);
+        }
+        self.check_rate_limit(&pair_key, share)?;
         self.check_rate_limit(app_id, limit)
     }
 
@@ -560,6 +577,33 @@ mod tests {
                     Err(AuthError::RateLimitExceeded)
                 ),
                 "limit {limit}: the app ceiling must reject once {limit} admissions are spent"
+            );
+
+            // The rejected handshake consumed nothing in either window: the
+            // overflow source's share window was never even created, and the
+            // abuser's repeated retries add no stamps while the app window is
+            // full (rejections are free — the pre-split single-window
+            // contract, now held across both dimensions).
+            assert_eq!(
+                mw.rate_limiter
+                    .window_len(&source_window_key("limited", overflow)),
+                0,
+                "limit {limit}: an app-rejected handshake must not create the source window"
+            );
+            let abuser_stamps_before = mw
+                .rate_limiter
+                .window_len(&source_window_key("limited", source_for(0)));
+            for _ in 0..3 {
+                assert!(matches!(
+                    mw.resolve_app_id("limited", source_for(0)).await,
+                    Err(AuthError::RateLimitExceeded)
+                ));
+            }
+            assert_eq!(
+                mw.rate_limiter
+                    .window_len(&source_window_key("limited", source_for(0))),
+                abuser_stamps_before,
+                "limit {limit}: rejected retries must not stamp the source window"
             );
         }
     }
