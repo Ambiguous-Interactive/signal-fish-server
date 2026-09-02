@@ -1286,8 +1286,8 @@ impl ConnectionManager {
     /// Count a test-only registration without admission checks (mirrors
     /// [`Self::increment_ip_slot_unbounded`]): the counter must stay balanced
     /// with the map, so every entry shape counts and every removal releases.
-    /// Wrapping keeps the reported count total even at the theoretical
-    /// usize::MAX live-connection point (release then saturates below).
+    /// The returned value wraps at the theoretical usize::MAX live-connection
+    /// point; a release then refuses (loud log) rather than underflowing.
     fn increment_global_slot_unbounded(&self) -> usize {
         self.live_connections
             .fetch_add(1, Ordering::AcqRel)
@@ -1724,26 +1724,41 @@ mod tests {
     }
 
     /// A same-id test registration replaces the prior entry; the displaced
-    /// entry's slots are released in place so the counters stay paired with
-    /// live entries (a stomp must not permanently wedge the ceiling).
+    /// entry's slots (per-IP AND global) are released in place so the
+    /// counters stay paired with live entries. The replacement arrives from
+    /// a different address with a per-IP ceiling of 1, so the per-IP release
+    /// is observed directly: without it, the displaced address's count would
+    /// stay at 1 and refuse further registrations from that address.
     #[tokio::test]
     async fn same_id_test_replacement_releases_the_displaced_slots() {
-        let manager = make_limited_manager(1, 8);
-        let addr: SocketAddr = "127.0.0.1:6006".parse().unwrap();
+        let manager = make_limited_manager(8, 1);
+        let displaced_addr: SocketAddr = "127.0.0.1:6006".parse().unwrap();
+        let replacement_addr: SocketAddr = "198.51.100.9:6007".parse().unwrap();
         let reused_id = Uuid::new_v4();
 
         let (tx1, _rx1) = channel();
-        manager.connect_test_client(reused_id, tx1, addr).await;
+        manager
+            .connect_test_client(reused_id, tx1, displaced_addr)
+            .await;
         let (tx2, _rx2) = channel();
-        manager.connect_test_client(reused_id, tx2, addr).await;
+        manager
+            .connect_test_client(reused_id, tx2, replacement_addr)
+            .await;
 
         manager.remove_client(&reused_id);
 
-        let (tx3, _rx3) = channel();
-        manager
-            .register_client(tx3, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
-            .await
-            .expect("the one slot must be free after the replaced entry drains");
+        for (label, addr) in [
+            ("displaced", displaced_addr),
+            ("replacement", replacement_addr),
+        ] {
+            let (tx, _rx) = channel();
+            manager
+                .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("the {label} address must be fully released after the stomp: {err:?}")
+                });
+        }
     }
 
     #[tokio::test]

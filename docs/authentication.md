@@ -120,7 +120,8 @@ does must not treat an open-mode application UUID as unspoofable.
   one source that knows a configured `app_id` can never continuously exhaust
   the app's budget and lock out legitimate handshakes (issue #502). Rejected
   handshakes consume no budget in either window. Note a single source can
-  therefore admit at most half of the advertised `per_minute` figure; clients
+  therefore admit at most half of the advertised `per_minute` figure (for an
+  entry limited to 1 per minute, the share is that single handshake); clients
   sharing one NAT egress share that source budget. A botnet spanning many
   sources is bounded by the application-wide ceiling itself.
 

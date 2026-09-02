@@ -377,11 +377,21 @@ async fn test_websocket_connection_limit_enforced() {
             let server_msg: ServerMessage =
                 serde_json::from_str(&text).expect("valid ServerMessage");
             match server_msg {
-                ServerMessage::Error { error_code, .. } => {
+                ServerMessage::Error {
+                    message,
+                    error_code,
+                } => {
                     assert_eq!(
                         error_code,
                         Some(ErrorCode::TooManyConnections),
                         "second connection should be rejected"
+                    );
+                    // Pins the client-facing refusal text: it is the
+                    // registration error's Display, shared verbatim by both
+                    // admission refusals (per-IP and the server-wide ceiling).
+                    assert_eq!(
+                        message, "Too many connections from your IP (1/1)",
+                        "refusal text must be the IpLimitExceeded Display"
                     );
                 }
                 other => panic!("expected error message, got {other:?}"),

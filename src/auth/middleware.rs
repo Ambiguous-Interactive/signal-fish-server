@@ -295,9 +295,11 @@ impl AppIdAllowlist {
     /// window would reject is stamped nowhere — rejections stay free, exactly
     /// as in the pre-split single-window contract (and an app-ceiling
     /// rejection can no longer burn the source's own share). The commits then
-    /// run source share first and application-wide ceiling last: under a
-    /// probe/commit race the worst case is at most one self-tightening stamp
-    /// in the offending source's own window, never a cross-source effect.
+    /// run source share first and application-wide ceiling last: the worst
+    /// case is at most one self-tightening stamp in the offending source's
+    /// own window, reachable under a probe/commit race or an out-of-order
+    /// injected timestamp (the `resolve_app_id_at` seam does not sort the
+    /// deque), never a cross-source effect.
     fn enforce_rate_limits_at(
         &self,
         app_id: &str,
@@ -594,9 +596,10 @@ mod tests {
 
             // The rejected handshake consumed nothing in either window: the
             // overflow source's share window was never even created, and the
-            // abuser's repeated retries add no stamps while the app window is
-            // full (rejections are free — the pre-split single-window
-            // contract, now held across both dimensions).
+            // abuser's repeated retries add no stamps (they are refused by
+            // the source probe — its share is spent — before the app probe
+            // is even consulted; rejections are free, the pre-split
+            // single-window contract, now held across both dimensions).
             assert_eq!(
                 mw.rate_limiter
                     .window_len(&source_window_key("limited", overflow)),
