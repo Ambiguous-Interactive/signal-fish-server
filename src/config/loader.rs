@@ -749,7 +749,7 @@ mod tests {
                 ))
                 .to_string();
             assert!(
-                err.contains("unknown field") && err.contains(typo),
+                err.contains("unknown field") && err.contains(&format!("`{typo}`")),
                 "error for unknown security key {typo:?} must name it as an unknown \
                  field: {err}"
             );
@@ -776,13 +776,17 @@ mod tests {
             .expect_err("an unknown security env override must be a hard error")
             .to_string();
         assert!(
-            err.contains("unknown field") && err.contains("enable"),
-            "error must name the unknown env-injected key: {err}"
+            err.contains("unknown field") && err.contains("`enable`"),
+            "error must name the unknown env-injected key (backticked, so it cannot \
+             be satisfied by the known `enabled` in the expected-fields list): {err}"
         );
     }
 
     /// The happy path is unchanged: every documented key — including the
-    /// deprecated aliases inside the security subtree — still deserializes.
+    /// deprecated aliases inside the security subtree, renamed by the
+    /// intake's legacy normalization — still deserializes through the
+    /// production pipeline. (Alias handling at the raw serde layer is
+    /// pinned in `security.rs`'s tests.)
     #[test]
     fn fully_known_security_config_still_deserializes() {
         let defaults = serde_json::to_value(Config::default()).expect("default config serializes");

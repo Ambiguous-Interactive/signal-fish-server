@@ -42,7 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same merged document and are rejected the same way. Deprecated aliases
   (`require_websocket_auth`, `authorized_apps`) and the loader's legacy-key
   normalization are unaffected; non-security sections keep the tolerant
-  parse.
+  parse. **Breaking (Rust API):** library embedders who deserialize
+  `Config`/`SecurityConfig` directly with serde (bypassing the loader's
+  normalization) now get an unknown-field error for stray keys in these
+  structs instead of silent tolerance.
 - Config admission no longer silently rewrites contradictory policy
   (issue #396): `logging.rotation` values other than the documented
   `daily`/`hourly`/`never` (case-insensitive) are rejected at startup instead
