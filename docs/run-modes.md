@@ -41,10 +41,13 @@ Per-feature JSON snippets (with env equivalents and "when to use") live in the
 
 ### Dev (relay v2, open app IDs)
 
-The fastest way to run the server. Defaults already serve `/v2/ws` and
-`/v3/ws`; the example config disables app-ID allowlisting and file logging for local use:
+The fastest way to run the server. The compiled defaults fail closed:
+app-ID allowlisting is enabled with an empty allowlist, so a bare
+`cargo run` refuses to start until apps are configured. The example config
+disables app-ID allowlisting and file logging for local use:
 
 ```bash
+cp config.example.json config.json
 cargo run
 ```
 
