@@ -16,7 +16,7 @@
 //! also ends the projection: the recorder can no longer know the physical
 //! queue state, so instead of evaluating guards against a provably wrong
 //! projection (cascading imprecise labels onto innocent subsequent events),
-//! it records every later observation verbatim — one precise divergence
+//! it records later observations verbatim — one precise divergence
 //! label followed by an honest raw tail — with correlation retained so
 //! physically enqueued items stay attributable. Post-divergence attribution
 //! is best-effort: a delivery abandoned without any recorded outcome leaves
@@ -747,6 +747,19 @@ mod tests {
             if !dequeue_observed_first {
                 recorder.record(DeliveryTraceAction::SendFast, Some(filling), None);
             }
+            // The race label ends the projection: a tail outcome that would
+            // trip a projected-boundary guard (capacity at a full projection,
+            // or the exact-full guard below it) passes through verbatim
+            // instead of stacking a second guard label onto the raw tail.
+            let tail = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let tail_delivery = recorder.begin_delivery(&tail);
+            let tail_action = if dequeue_observed_first {
+                recorder.record(DeliveryTraceAction::SendFull, Some(tail_delivery), None);
+                "SendFull"
+            } else {
+                recorder.record(DeliveryTraceAction::SendFast, Some(tail_delivery), None);
+                "SendFast"
+            };
 
             let mut bytes = Vec::new();
             recorder
@@ -758,9 +771,24 @@ mod tests {
                 "{trace_id}: unlabeled SendFull divergence: {output}"
             );
             assert_eq!(
+                output.matches("\"action\":\"Unsupported\"").count(),
+                1,
+                "{trace_id}: exactly one divergence label; the tail must pass through \
+                 unprojected: {output}"
+            );
+            // The only verbatim SendFull allowed is the post-divergence tail
+            // of the dequeue-first branch; the raced Full itself must never
+            // appear outside the projected full boundary.
+            assert_eq!(
                 output.matches("\"action\":\"SendFull\"").count(),
-                0,
-                "{trace_id}: SendFull must not be emitted outside the projected full boundary"
+                usize::from(dequeue_observed_first),
+                "{trace_id}: unexpected verbatim SendFull: {output}"
+            );
+            assert!(
+                output.contains(&format!(
+                    "\"action\":\"{tail_action}\",\"delivery_id\":{tail_delivery}}}"
+                )),
+                "{trace_id}: the tail outcome must be recorded verbatim: {output}"
             );
         }
     }
