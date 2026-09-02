@@ -311,7 +311,7 @@ pub fn default_token_binding_subprotocol() -> String {
 
 /// Hard memory bound on the dashboard metrics history: at most this many
 /// samples are retained regardless of the configured history window.
-pub const DASHBOARD_CACHE_HISTORY_MAX_SAMPLES: u64 = 720;
+pub const DASHBOARD_CACHE_HISTORY_MAX_SAMPLES: usize = 720;
 
 pub const fn default_dashboard_cache_refresh_interval_secs() -> u64 {
     5

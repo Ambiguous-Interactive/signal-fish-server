@@ -484,8 +484,9 @@ fn validate_metrics_cache_policy(metrics: &super::MetricsConfig) -> anyhow::Resu
             metrics.dashboard_cache_ttl_secs
         );
     }
-    let representable_window_secs =
-        refresh_secs.saturating_mul(super::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES);
+    let representable_window_secs = refresh_secs.saturating_mul(
+        u64::try_from(super::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES).unwrap_or(u64::MAX),
+    );
     if metrics.dashboard_cache_history_window_secs > representable_window_secs {
         tracing::warn!(
             requested_window_secs = metrics.dashboard_cache_history_window_secs,

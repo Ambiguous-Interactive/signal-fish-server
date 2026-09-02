@@ -129,14 +129,8 @@ impl DashboardHistoryEntry {
     }
 }
 
-const DASHBOARD_CACHE_HISTORY_MAX_CAPACITY: usize = 720;
-
-// Single source of truth: the config validator reasons about the same bound in
-// seconds (u64); usize → u64 is lossless on every supported target.
-const _: () = assert!(
-    DASHBOARD_CACHE_HISTORY_MAX_CAPACITY as u64
-        == crate::config::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES
-);
+const DASHBOARD_CACHE_HISTORY_MAX_CAPACITY: usize =
+    crate::config::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES;
 
 impl DashboardMetricsCache {
     pub(super) fn new(
