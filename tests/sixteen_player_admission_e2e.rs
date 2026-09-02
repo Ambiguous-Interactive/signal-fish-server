@@ -14,6 +14,13 @@
 //! without an explicit `max_players` refuses the 9th join. Sixteen players in
 //! one room therefore requires the creator to raise `max_players` at join —
 //! which is exactly what the admission case does.
+//!
+//! A third case (issue #502 item 2) pins the server-wide connection ceiling:
+//! with every per-IP budget individually below its cap, connections from
+//! distinct addresses still exhaust `security.max_connections` — refused with
+//! `CapacityExceeded` through the server registration surface. (The wire
+//! refusal frame itself is shared with the per-IP refusal and pinned by the
+//! `test_websocket_connection_limit_enforced` e2e.)
 
 mod test_helpers;
 mod websocket_test_helpers;
@@ -152,4 +159,43 @@ async fn ninth_join_fails_at_default_room_cap() {
         "overflow join must be refused as RoomFull"
     );
     running_server.shutdown().await;
+}
+
+/// Issue #502 item 2: the server-wide ceiling refuses admission when every
+/// per-IP budget still has room — connections from three distinct addresses
+/// at `max_connections = max_connections_per_ip = 2` exhaust the global
+/// budget, and the third registration is refused as `CapacityExceeded`.
+/// Distinct addresses are simulated at the registration surface (the wire
+/// always originates from loopback in-process).
+#[tokio::test]
+async fn server_capacity_refusal_binds_when_every_ip_budget_has_room() {
+    let mut config = test_server_config();
+    config.max_connections = 2;
+    config.max_connections_per_ip = 2;
+
+    let server = create_test_server_with_config(config, admission_protocol_config()).await;
+
+    let addrs = [
+        "198.51.100.1:7001".parse().unwrap(),
+        "198.51.100.2:7002".parse().unwrap(),
+        "198.51.100.3:7003".parse().unwrap(),
+    ];
+    for (i, addr) in addrs.iter().take(2).enumerate() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        server
+            .register_client(tx, *addr)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("registration {i} under the ceiling must succeed: {err:?}")
+            });
+    }
+
+    let (tx3, _rx3) = tokio::sync::mpsc::channel(8);
+    match server.register_client(tx3, addrs[2]).await {
+        Err(signal_fish_server::server::RegisterClientError::CapacityExceeded {
+            current,
+            limit,
+        }) => assert_eq!((current, limit), (2, 2)),
+        other => panic!("expected CapacityExceeded from the server-wide ceiling, got {other:?}"),
+    }
 }

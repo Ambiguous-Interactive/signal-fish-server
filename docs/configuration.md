@@ -157,7 +157,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE` | `security.max_message_size` | `65536` | Max inbound WebSocket message size in bytes (must keep 256 bytes of relay envelope headroom below `max_outbound_message_size`) |
 | `SIGNAL_FISH__SECURITY__MAX_OUTBOUND_MESSAGE_SIZE` | `security.max_outbound_message_size` | `8388608` | Max aggregate encoded server WebSocket application payload in bytes (`1..=67108864`, at least `max_message_size + 256` so the fixed relay envelope fits); oversized messages close the affected connection with code `1009` |
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES` | `security.max_signal_bytes` | `16384` | Max serialized size in bytes of a v3 `Signal` payload (must be > 0 and ≤ `max_message_size`) |
-| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `24` | Max concurrent connections from one IP (covers a 16-player NAT/LAN session plus spectators and reconnect churn; must be > 0 — a zero cap rejects every registration) |
+| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `24` | Max concurrent connections from one IP (covers a 16-player NAT/LAN session plus spectators and reconnect churn; must be > 0 — a zero cap rejects every registration; must not exceed `max_connections`) |
+| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS` | `security.max_connections` | `10000` | Max concurrent connections server-wide, regardless of how many distinct IPs are in use (must be > 0 — a zero cap rejects every registration) |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED` | `security.transport.tls.enabled` | `false` | Enable built-in TLS listener |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH` | `security.transport.tls.certificate_path` | `null` | Path to PEM certificate chain |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__PRIVATE_KEY_PATH` | `security.transport.tls.private_key_path` | `null` | Path to PEM private key |
@@ -255,7 +256,8 @@ and the authenticated WebSocket relay floor remains available independently.
   "security": {
     "cors_origins": "https://yourgame.com",
     "enforce_app_id_allowlist": true,
-    "max_connections_per_ip": 24
+    "max_connections_per_ip": 24,
+    "max_connections": 10000
   }
 }
 

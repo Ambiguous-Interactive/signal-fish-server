@@ -26,6 +26,7 @@ struct RuntimeServerValidation<'a> {
     max_outbound_message_size: usize,
     max_signal_bytes: usize,
     max_connections_per_ip: usize,
+    max_connections: usize,
     reconnection_window: Duration,
     event_buffer_size: usize,
     heartbeat_throttle: Duration,
@@ -48,6 +49,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_outbound_message_size: config.security.max_outbound_message_size,
             max_signal_bytes: config.security.max_signal_bytes,
             max_connections_per_ip: config.security.max_connections_per_ip,
+            max_connections: config.security.max_connections,
             reconnection_window: Duration::from_secs(config.server.reconnection_window),
             event_buffer_size: config.server.event_buffer_size,
             heartbeat_throttle: Duration::from_secs(config.server.heartbeat_throttle_secs),
@@ -70,6 +72,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_outbound_message_size: config.max_outbound_message_size,
             max_signal_bytes: config.max_signal_bytes,
             max_connections_per_ip: config.max_connections_per_ip,
+            max_connections: config.max_connections,
             reconnection_window: config.reconnection_window,
             event_buffer_size: config.event_buffer_size,
             heartbeat_throttle: config.heartbeat_throttle,
@@ -164,6 +167,21 @@ impl<'a> RuntimeServerValidation<'a> {
             anyhow::bail!(
                 "security.max_connections_per_ip must be greater than 0: a zero cap rejects every \
                  WebSocket registration with IpLimitExceeded"
+            );
+        }
+        if self.max_connections == 0 {
+            anyhow::bail!(
+                "security.max_connections must be greater than 0: a zero cap rejects every \
+                 WebSocket registration with CapacityExceeded"
+            );
+        }
+        if self.max_connections_per_ip > self.max_connections {
+            anyhow::bail!(
+                "security.max_connections_per_ip ({}) must not exceed security.max_connections ({}): \
+                 the server-wide ceiling bounds every registration, so a per-IP cap above it could \
+                 never take effect",
+                self.max_connections_per_ip,
+                self.max_connections
             );
         }
         if self.max_rooms_per_game == 0 {
@@ -1238,6 +1256,9 @@ mod tests {
                 "IpLimitExceeded",
                 |config| config.security.max_connections_per_ip = 0,
             ),
+            ("security.max_connections", "CapacityExceeded", |config| {
+                config.security.max_connections = 0
+            }),
             (
                 "rate_limit.max_room_creations",
                 "per-game room cap",

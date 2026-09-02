@@ -342,7 +342,8 @@ mod tests {
 
     /// Deterministic distinct source addresses (TEST-NET-2), index 0 = .1.
     fn source_for(index: usize) -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(198, 51, 100, (index as u8) + 1))
+        let octet = u8::try_from(index + 1).expect("test source index fits u8");
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, octet))
     }
 
     fn distinct_sources(n: usize) -> Vec<IpAddr> {

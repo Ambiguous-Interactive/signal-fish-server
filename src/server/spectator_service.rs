@@ -1594,6 +1594,7 @@ mod tests {
 
         let coordinator = Arc::new(RecordingCoordinator::new(database.clone()));
         let connection_manager = Arc::new(ConnectionManager::new(
+            usize::MAX,
             100,
             Arc::new(crate::metrics::ServerMetrics::new()),
             coordinator.clone(),

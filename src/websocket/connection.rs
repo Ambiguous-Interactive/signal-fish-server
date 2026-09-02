@@ -53,6 +53,64 @@ async fn handle_immediate_send_error(
     }
 }
 
+/// Refuse a WebSocket registration that failed admission (per-IP cap or the
+/// server-wide ceiling): best-effort token-binding challenge, one `Error`
+/// frame, then a bounded close. Shared by both admission-refusal variants so
+/// their wire behavior stays identical.
+async fn refuse_websocket_registration(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    token_binding: Option<&TokenBindingHandshake>,
+    addr: SocketAddr,
+    refusal_message: String,
+    max_outbound_message_size: usize,
+) {
+    if !send_token_binding_challenge(sender, token_binding, addr, max_outbound_message_size).await {
+        return;
+    }
+    let error_message = ServerMessage::Error {
+        message: refusal_message,
+        error_code: Some(ErrorCode::TooManyConnections),
+    };
+    match tokio::time::timeout(
+        CLOSE_WRITE_TIMEOUT,
+        send_immediate_server_message(sender, &error_message, max_outbound_message_size),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            handle_immediate_send_error(sender, &err).await;
+            tracing::debug!(
+                client_addr = %addr,
+                error = %err,
+                "Failed to send connection-limit error frame"
+            );
+        }
+        Err(_elapsed) => {
+            tracing::debug!(
+                client_addr = %addr,
+                "Timed out sending connection-limit error frame"
+            );
+        }
+    }
+    match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::debug!(
+                client_addr = %addr,
+                error = %err,
+                "Failed to close connection-limited WebSocket registration"
+            );
+        }
+        Err(_elapsed) => {
+            tracing::debug!(
+                client_addr = %addr,
+                "Timed out closing connection-limited WebSocket registration"
+            );
+        }
+    }
+}
+
 /// Convert a relative duration into an absolute deadline without changing an
 /// overflow into an already-expired instant.
 fn checked_deadline(start: Instant, duration: Duration) -> Instant {
@@ -1206,62 +1264,25 @@ pub(super) async fn handle_socket(
             player_id
         }
         Err(RegisterClientError::IpLimitExceeded { current, limit }) => {
-            if !send_token_binding_challenge(
+            refuse_websocket_registration(
                 &mut sender,
                 token_binding.as_ref(),
                 addr,
+                format!("Too many connections from your IP ({current}/{limit})"),
                 server.config().max_outbound_message_size,
             )
-            .await
-            {
-                return;
-            }
-            let error_message = ServerMessage::Error {
-                message: format!("Too many connections from your IP ({current}/{limit})"),
-                error_code: Some(ErrorCode::TooManyConnections),
-            };
-            match tokio::time::timeout(
-                CLOSE_WRITE_TIMEOUT,
-                send_immediate_server_message(
-                    &mut sender,
-                    &error_message,
-                    server.config().max_outbound_message_size,
-                ),
+            .await;
+            return;
+        }
+        Err(RegisterClientError::CapacityExceeded { current, limit }) => {
+            refuse_websocket_registration(
+                &mut sender,
+                token_binding.as_ref(),
+                addr,
+                format!("Server is at capacity ({current}/{limit} connections)"),
+                server.config().max_outbound_message_size,
             )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    handle_immediate_send_error(&mut sender, &err).await;
-                    tracing::debug!(
-                        client_addr = %addr,
-                        error = %err,
-                        "Failed to send IP limit error frame"
-                    );
-                }
-                Err(_elapsed) => {
-                    tracing::debug!(
-                        client_addr = %addr,
-                        "Timed out sending IP limit error frame"
-                    );
-                }
-            }
-            match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.close()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::debug!(
-                        client_addr = %addr,
-                        error = %err,
-                        "Failed to close IP-limited WebSocket registration"
-                    );
-                }
-                Err(_elapsed) => {
-                    tracing::debug!(
-                        client_addr = %addr,
-                        "Timed out closing IP-limited WebSocket registration"
-                    );
-                }
-            }
+            .await;
             return;
         }
         Err(RegisterClientError::ServerDraining) => {

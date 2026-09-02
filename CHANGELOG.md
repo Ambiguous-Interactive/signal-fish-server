@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `security.max_connections` (default `10000`): a server-wide concurrent-connection
+  ceiling refusing registration with the new `RegisterClientError::CapacityExceeded`
+  and the same `TOO_MANY_CONNECTIONS` wire error as the per-IP cap. The per-IP cap
+  bounds one source, but total ownership was that cap multiplied by the number of
+  distinct source IPs; the ceiling bounds the whole server regardless of source
+  spread (issue #502). Startup validation rejects a zero ceiling and a per-IP cap
+  above the ceiling (dead config the ceiling would always preempt).
+
+### Changed
+
+- Auth rate limiting for allowlist entries with an explicit
+  `rate_limit_per_minute` now enforces two sliding windows: the
+  application-wide ceiling and a per-source (IP) share of half that budget
+  (at least one). A single source can no longer continuously exhaust an
+  application's handshake budget and lock out legitimate handshakes;
+  rejected handshakes still consume no application-wide budget (issue #502).
+  `auth::AppIdAllowlist::resolve_app_id` now takes the connection's source
+  `IpAddr`.
+
 ## [0.8.0] - 2026-09-01
 
 ### Added

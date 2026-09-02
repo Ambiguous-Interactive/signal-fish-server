@@ -946,6 +946,7 @@ async fn test_custom_rate_limiting() {
         max_outbound_message_size: 8 * 1024 * 1024,
         max_signal_bytes: 16384,
         max_connections_per_ip: 100,
+        max_connections: 10_000,
         require_metrics_auth: false,
         metrics_auth_token: None,
         reconnection_window: Duration::from_secs(300), // 5 minutes

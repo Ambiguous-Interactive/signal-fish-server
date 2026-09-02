@@ -20,8 +20,9 @@ const SOCKET_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Default resolution source for tests not exercising the per-source
 /// dimension; distinct sources are spelled out where it matters.
-fn source(index: u8) -> std::net::IpAddr {
-    std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, index + 1))
+fn source(index: u32) -> std::net::IpAddr {
+    let octet = u8::try_from(index + 1).expect("test source index fits u8");
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, octet))
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +186,7 @@ async fn test_rate_limiting_enforced() {
 
     // Distinct sources exhaust the application-wide ceiling of 5.
     for i in 0..limit {
-        let result = mw.resolve_app_id("rate-limited-app", source(i as u8)).await;
+        let result = mw.resolve_app_id("rate-limited-app", source(i)).await;
         assert!(
             result.is_ok(),
             "request {i} of {limit} should succeed, got: {result:?}"
@@ -194,7 +195,7 @@ async fn test_rate_limiting_enforced() {
 
     // The next source is rejected by the app ceiling.
     let err = mw
-        .resolve_app_id("rate-limited-app", source(limit as u8))
+        .resolve_app_id("rate-limited-app", source(limit))
         .await
         .expect_err("should be rate limited after exceeding per-minute cap");
 
@@ -235,7 +236,7 @@ async fn test_rate_limiting_bounds_one_source_to_its_share() {
     // sources can still spend the untouched remainder (5 - 2 = 3).
     for i in 0..(limit - share) {
         assert!(
-            mw.resolve_app_id("rate-limited-app", source(i as u8 + 1))
+            mw.resolve_app_id("rate-limited-app", source(i + 1))
                 .await
                 .is_ok(),
             "distinct source {i} should be admitted despite the exhausted abuser"
@@ -270,7 +271,7 @@ async fn test_rate_limits_are_per_app() {
     // Exhaust rate limit for first app (2 admissions across distinct sources;
     // a third source tips the app window).
     for i in 0..2 {
-        mw.resolve_app_id("rate-limited-app", source(i as u8))
+        mw.resolve_app_id("rate-limited-app", source(i))
             .await
             .unwrap();
     }
