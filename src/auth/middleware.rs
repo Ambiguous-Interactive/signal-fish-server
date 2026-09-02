@@ -238,7 +238,7 @@ impl AppIdAllowlist {
     /// When the matched application configures an explicit
     /// `rate_limit_per_minute`, admission spends the per-source (IP) share
     /// first and the application-wide ceiling last, so a rejection can never
-    /// consume the application-wide budget (see [`Self::enforce_rate_limits`]).
+    /// consume the application-wide budget (see `enforce_rate_limits`).
     ///
     /// This method is `async` for interface compatibility so that future
     /// implementations (e.g., database-backed auth) can perform I/O without

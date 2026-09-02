@@ -1280,9 +1280,26 @@ impl ConnectionManager {
 
     /// Release one server-wide slot at unregistration. Paired exactly with
     /// one successful reservation (or unbounded test increment) per entry.
+    /// The release saturates at zero instead of panicking: an underflow would
+    /// mean an unpaired release (an invariant bug), which is logged loudly —
+    /// the crate keeps panic-prone macros out of production paths.
     fn release_global_slot(&self) {
-        let prior = self.live_connections.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(prior > 0, "global connection counter underflowed");
+        let mut current = self.live_connections.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                tracing::error!("global connection counter underflowed; ignoring unpaired release");
+                return;
+            }
+            match self.live_connections.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 
