@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes the connection's source `IpAddr`, and
   `server::RegisterClientError` gained the `CapacityExceeded` variant.
 
+### Fixed
+
+- The delivery-contract trace recorder (feature `trace-validation`) no longer
+  emits a verbatim `SendFull` outside the projected full boundary. When
+  another producer's `Full` observation (or a subsequent dequeue observation)
+  lands before the physically-filling enqueue's success record, the event is
+  now labeled `Unsupported("full-observation-order-race")` like every other
+  observation-order race, so trace replay reports a labeled scheduler-timing
+  artifact instead of a false queue-occupancy divergence (issue #396).
+
 ## [0.8.0] - 2026-09-01
 
 ### Added

@@ -10,7 +10,9 @@
 //! dequeue overlaps the producer's post-send observation, the trace is marked
 //! `Unsupported` instead of pretending that observation order was queue order.
 //! The same fail-closed rule applies when a producer outcome overlaps the
-//! finalizer's `QueueClose` observation.
+//! finalizer's `QueueClose` observation, or when a `SendFull` outcome is
+//! observed outside the projected full boundary (the filling enqueue's success
+//! unprojected, or a later dequeue projected first).
 
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -230,6 +232,27 @@ impl DeliveryTraceRecorder {
                 DeliveryTraceAction::Unsupported,
                 delivery_id,
                 Some("enqueue-completed-before-dequeue-observed"),
+            );
+            if let Some(delivery_id) = delivery_id {
+                remove_attempt(&mut state, delivery_id);
+            }
+            return;
+        }
+        // The inverse enqueue overlap: another producer's Full observation (or
+        // a subsequent dequeue observation) can land before the physically
+        // filling enqueue's success record does, leaving the projected queue
+        // below capacity. Emitting SendFull would fail the model's
+        // exact-full guard and read as an implementation occupancy bug
+        // instead of an observation-order race, so label it like the
+        // sibling overlaps above.
+        if action == DeliveryTraceAction::SendFull
+            && state.recorded_queue.len() < self.queue_capacity
+        {
+            push_event(
+                &mut state,
+                DeliveryTraceAction::Unsupported,
+                delivery_id,
+                Some("full-observation-order-race"),
             );
             if let Some(delivery_id) = delivery_id {
                 remove_attempt(&mut state, delivery_id);
@@ -608,6 +631,49 @@ mod tests {
     }
 
     #[test]
+    fn recorder_labels_full_observed_outside_the_projected_full_boundary() {
+        // The inverse enqueue overlap: the physically-filling enqueue's
+        // success record lands after another producer's Full observation, or
+        // after a subsequent dequeue observation. The projected queue is
+        // below capacity when the Full is recorded, so emitting SendFull
+        // would fail the model's exact-full guard and read as an
+        // implementation occupancy bug instead of an observation-order race.
+        for (trace_id, dequeue_observed_first) in [
+            ("late-full-before-enqueue", false),
+            ("late-full-after-dequeue", true),
+        ] {
+            let recorder = DeliveryTraceRecorder::new(trace_id, 1).expect("valid recorder");
+            let first = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let filling = recorder.begin_delivery(&first);
+            let second = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let full = recorder.begin_delivery(&second);
+            if dequeue_observed_first {
+                recorder.record(DeliveryTraceAction::SendFast, Some(filling), None);
+                assert_eq!(recorder.start_write(&first, false), Some(filling));
+            }
+            recorder.record(DeliveryTraceAction::SendFull, Some(full), None);
+            if !dequeue_observed_first {
+                recorder.record(DeliveryTraceAction::SendFast, Some(filling), None);
+            }
+
+            let mut bytes = Vec::new();
+            recorder
+                .write_jsonl_to(&mut bytes)
+                .expect("serialize trace");
+            let output = String::from_utf8(bytes).expect("UTF-8 trace");
+            assert!(
+                output.contains("full-observation-order-race"),
+                "{trace_id}: unlabeled SendFull divergence: {output}"
+            );
+            assert_eq!(
+                output.matches("\"action\":\"SendFull\"").count(),
+                0,
+                "{trace_id}: SendFull must not be emitted outside the projected full boundary"
+            );
+        }
+    }
+
+    #[test]
     fn recorder_rejects_open_queue_outcomes_observed_after_queue_close() {
         for action in [
             DeliveryTraceAction::SendFast,
@@ -616,13 +682,17 @@ mod tests {
             DeliveryTraceAction::GraceExpired,
         ] {
             let recorder =
-                DeliveryTraceRecorder::new("late-open-outcome", 2).expect("valid recorder");
+                DeliveryTraceRecorder::new("late-open-outcome", 1).expect("valid recorder");
             let message = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let filler = recorder.begin_delivery(&message);
+            recorder.record(DeliveryTraceAction::SendFast, Some(filler), None);
             let delivery = recorder.begin_delivery(&message);
             if matches!(
                 action,
                 DeliveryTraceAction::ParkedEnqueue | DeliveryTraceAction::GraceExpired
             ) {
+                // Stage the parked sender at the projected full boundary so
+                // the parking SendFull itself stays replayable.
                 recorder.record(DeliveryTraceAction::SendFull, Some(delivery), None);
             }
             recorder.record(DeliveryTraceAction::LifecycleClose, None, None);
@@ -647,10 +717,14 @@ mod tests {
             DeliveryTraceAction::ParkedChannelClosed,
         ] {
             let recorder =
-                DeliveryTraceRecorder::new("early-closed-outcome", 2).expect("valid recorder");
+                DeliveryTraceRecorder::new("early-closed-outcome", 1).expect("valid recorder");
             let message = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let filler = recorder.begin_delivery(&message);
+            recorder.record(DeliveryTraceAction::SendFast, Some(filler), None);
             let delivery = recorder.begin_delivery(&message);
             if action == DeliveryTraceAction::ParkedChannelClosed {
+                // Stage the parked sender at the projected full boundary so
+                // the parking SendFull itself stays replayable.
                 recorder.record(DeliveryTraceAction::SendFull, Some(delivery), None);
             }
             recorder.record(action, Some(delivery), None);

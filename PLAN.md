@@ -58,16 +58,13 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
-- #318 — complete pending issue closure: Linux baseline recorded and the
-  worktree-discovery serialization fixed (PR #406 lineage), and the 2026-09-02
-  hosted macOS/Windows/Ubuntu baselines (Hook Baselines workflow, PR #506)
-  pass the 1000 ms budget on every path (worst warm median ~1.5× margin on
-  ubuntu, ~2.8× windows, ~4.6× macos; the slowest recorded single warm run,
-  787 ms, also holds); the budget-level decision (keep 1000 ms) is recorded
-  on the issue and in docs/git-hooks-guide.md. Residual click-throughs the
-  session token could not perform (org OAuth app restrictions on state
-  mutations): close #318, close #495 (fully resolved since sessions
-  199–201), and merge green PR #506 (mergeable_state clean, 57/57 checks).
+- #396 — standing correctness/perf sweep. Session 207 fixed the last
+  never-audited seam (`trace_validation.rs`): an unlabeled `SendFull`
+  observation-order window now records `Unsupported` with its own detail
+  instead of poisoning replays as a false occupancy divergence. Remaining
+  frontier: continue seam sweeps; the parked-state (`senderState`) producers
+  are same-thread program-ordered behind their `SendFull` record (verified,
+  no race window).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
