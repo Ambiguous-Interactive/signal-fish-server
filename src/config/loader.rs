@@ -695,6 +695,140 @@ mod tests {
         }
     }
 
+    /// Unknown keys in the security subtree are a hard error, not silent
+    /// defaults (#510): a typo'd security knob must never let the server
+    /// start with that knob's default standing in for the operator's intent.
+    /// The canonical example is `security.transport.tls.enable` (typo of
+    /// `enabled`): without rejection the server starts plaintext while the
+    /// operator believes TLS is on, and the plaintext warning fires only for
+    /// `turn.enabled` deployments, so a pure-TLS deployment gets no signal at
+    /// all. Outside the security subtree the tolerant parse is deliberate
+    /// (removed `auth` env keys, legacy `turn.mode` keys).
+    #[test]
+    fn security_subtree_unknown_keys_are_a_hard_error_naming_the_knob() {
+        // (config source JSON, the typo'd key the error must name)
+        let cases = [
+            (
+                r#"{"security":{"transport":{"tls":{"enable":true}}}}"#,
+                "enable",
+            ),
+            (
+                r#"{"security":{"transport":{"tls":{"clint_auth":"require"}}}}"#,
+                "clint_auth",
+            ),
+            (
+                r#"{"security":{"transport":{"tokin_binding":{"enabled":true}}}}"#,
+                "tokin_binding",
+            ),
+            (
+                r#"{"security":{"requrie_metrics_auth":true}}"#,
+                "requrie_metrics_auth",
+            ),
+            (
+                // A typo'd per-app cap must not silently widen to "unlimited".
+                r#"{"security":{"allowed_apps":[
+                    {"app_id":"game","app_name":"Game","max_roms":5}
+                ]}}"#,
+                "max_roms",
+            ),
+        ];
+
+        for (source, typo) in cases {
+            let defaults =
+                serde_json::to_value(Config::default()).expect("default config serializes");
+            let mut merged = defaults;
+            let parsed = parse_json_document(source, "file config.json")
+                .expect("source parses as JSON")
+                .expect("parsed source is present");
+            merge_values(&mut merged, parsed);
+
+            let err = deserialize_merged_config(merged)
+                .expect_err(&format!(
+                    "unknown security key {typo:?} must be rejected instead of \
+                     silently substituting the knob's default: {source}"
+                ))
+                .to_string();
+            assert!(
+                err.contains("unknown field") && err.contains(typo),
+                "error for unknown security key {typo:?} must name it as an unknown \
+                 field: {err}"
+            );
+            assert!(
+                err.contains("security"),
+                "error must attribute the unknown key to the security subtree: {err}"
+            );
+        }
+    }
+
+    /// Environment-injected typos travel the same merged document, so they
+    /// hit the same admission wall: `SIGNAL_FISH__SECURITY__...` with an
+    /// unknown leaf must hard-error, not silently no-op.
+    #[test]
+    fn unknown_security_env_override_is_a_hard_error() {
+        let defaults = serde_json::to_value(Config::default()).expect("default config serializes");
+        let mut merged = defaults;
+        apply_env_overrides_from_iter(
+            &mut merged,
+            [("SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLE", "true")],
+        );
+
+        let err = deserialize_merged_config(merged)
+            .expect_err("an unknown security env override must be a hard error")
+            .to_string();
+        assert!(
+            err.contains("unknown field") && err.contains("enable"),
+            "error must name the unknown env-injected key: {err}"
+        );
+    }
+
+    /// The happy path is unchanged: every documented key — including the
+    /// deprecated aliases inside the security subtree — still deserializes.
+    #[test]
+    fn fully_known_security_config_still_deserializes() {
+        let defaults = serde_json::to_value(Config::default()).expect("default config serializes");
+        let mut merged = defaults;
+        let parsed = parse_json_document(
+            r#"{
+                "security": {
+                    "require_websocket_auth": true,
+                    "authorized_apps": [{
+                        "app_id": "game",
+                        "app_name": "Game",
+                        "max_rooms": 3,
+                        "max_players_per_room": 8,
+                        "rate_limit_per_minute": 100
+                    }],
+                    "transport": {
+                        "tls": {
+                            "enabled": true,
+                            "certificate_path": "/certs/fullchain.pem",
+                            "private_key_path": "/certs/privkey.pem",
+                            "client_ca_cert_path": "/certs/ca.pem",
+                            "client_auth": "require"
+                        },
+                        "token_binding": {
+                            "enabled": true,
+                            "required": true,
+                            "require_client_fingerprint": true,
+                            "subprotocol": "signalfish.tokenbinding.v2",
+                            "scheme": "server_nonce_hkdf_sha256"
+                        }
+                    }
+                }
+            }"#,
+            "file config.json",
+        )
+        .expect("known-keys source parses")
+        .expect("parsed source is present");
+        merge_values(&mut merged, parsed);
+
+        let config = deserialize_merged_config(merged).expect("known keys deserialize");
+        assert!(config.security.enforce_app_id_allowlist);
+        assert!(config.security.transport.tls.enabled);
+        assert!(config.security.transport.token_binding.required);
+        assert_eq!(config.security.allowed_apps[0].max_rooms, Some(3));
+    }
+
     /// The happy-path counterpart: a valid override over a distinctive file
     /// value deserializes with BOTH applied — proving the hard error above
     /// is about invalid values, not about environment overrides in general.
