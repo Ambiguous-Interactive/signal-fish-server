@@ -1,7 +1,7 @@
 //! Configuration validation functions.
 
 use super::security::ClientAuthMode;
-use super::Config;
+use super::{Config, RelayTypeConfig};
 use std::path::Path;
 use std::time::Duration;
 
@@ -286,6 +286,40 @@ impl<'a> RuntimeServerValidation<'a> {
     }
 }
 
+/// Reject relay labels that are blank, control-bearing, or oversized before
+/// they are echoed verbatim into room/peer protocol metadata.
+fn validate_relay_labels(relay: &RelayTypeConfig) -> anyhow::Result<()> {
+    let validate_label = |field: &str, label: &str| -> anyhow::Result<()> {
+        if label.trim().is_empty() {
+            anyhow::bail!("relay.{field} must not be blank");
+        }
+        if !crate::auth::app_id_is_log_safe(label) {
+            anyhow::bail!(
+                "relay.{field} contains control characters or exceeds the {}-byte limit: it is \
+                 echoed verbatim into room-state metadata and could push every room-state payload \
+                 past max_outbound_message_size, disconnecting recipients",
+                crate::auth::MAX_APP_ID_LENGTH
+            );
+        }
+        Ok(())
+    };
+
+    validate_label("default_relay_type", &relay.default_relay_type)?;
+    for (game, label) in &relay.game_relay_mappings {
+        // Match app-ID admission: the key is never echoed into an error, so a
+        // control-bearing game name cannot inject into startup diagnostics.
+        if !crate::auth::app_id_is_log_safe(game) {
+            anyhow::bail!(
+                "relay.game_relay_mappings contains a game key with control characters or \
+                 exceeding the {}-byte limit",
+                crate::auth::MAX_APP_ID_LENGTH
+            );
+        }
+        validate_label(&format!("game_relay_mappings[{game}]"), label)?;
+    }
+    Ok(())
+}
+
 fn validate_app_registrations(apps: &[super::AppRegistrationEntry]) -> anyhow::Result<()> {
     let mut app_ids = std::collections::HashSet::new();
     for (index, app) in apps.iter().enumerate() {
@@ -545,7 +579,17 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
 
         if let Some(token) = &config.security.metrics_auth_token {
-            let token = token.trim();
+            // The endpoint compares the raw configured string, while presence
+            // and strength below are judged on the trimmed token; a padded
+            // token would be admitted and then strand every metrics request
+            // behind 401, so reject the mismatch at admission instead.
+            if token.trim() != token {
+                anyhow::bail!(
+                    "security.metrics_auth_token must not carry leading or trailing whitespace: \
+                     no Bearer header can ever match it, so every metrics request would be \
+                     rejected"
+                );
+            }
             if token.len() < 16 {
                 eprintln!(
                     "\nWARNING: Metrics auth token is very short ({} chars).\n\
@@ -578,6 +622,32 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
             );
         }
         let tls = &config.security.transport.tls;
+        // The TLS loader reads each configured path verbatim, so admission
+        // must check the exact file the server would load, not its trimmed
+        // view; a padded path would pass the existence check below and then
+        // fail startup (or load a different file) with no diagnostic link.
+        for (field, raw) in [
+            (
+                "security.transport.tls.certificate_path",
+                tls.certificate_path.as_deref(),
+            ),
+            (
+                "security.transport.tls.private_key_path",
+                tls.private_key_path.as_deref(),
+            ),
+            (
+                "security.transport.tls.client_ca_cert_path",
+                tls.client_ca_cert_path.as_deref(),
+            ),
+        ] {
+            if raw.is_some_and(|path| path.trim() != path) {
+                anyhow::bail!(
+                    "{field} must not carry leading or trailing whitespace: the configured path \
+                     is read verbatim, so the trimmed path validation checks is not the file the \
+                     server would load"
+                );
+            }
+        }
         let cert_path = tls
             .certificate_path
             .as_deref()
@@ -606,10 +676,20 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
             anyhow::bail!("TLS private key file not found at {key_path}");
         }
 
-        if matches!(
-            tls.client_auth,
-            ClientAuthMode::Optional | ClientAuthMode::Require
-        ) {
+        if matches!(tls.client_auth, ClientAuthMode::None) {
+            // client_auth none never loads the CA bundle; a configured path is
+            // dead security config that falsely suggests a pinned trust anchor.
+            if tls
+                .client_ca_cert_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+            {
+                anyhow::bail!(
+                    "security.transport.tls.client_ca_cert_path is configured but client_auth is \
+                     none: the CA bundle would never be loaded"
+                );
+            }
+        } else {
             let ca_path = tls
                 .client_ca_cert_path
                 .as_deref()
@@ -617,7 +697,8 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
                 .filter(|p| !p.is_empty())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "security.transport.tls.client_ca_cert_path must be set when client_auth is {:?}",
+                        "security.transport.tls.client_ca_cert_path must be set when client_auth \
+                         is {}",
                         tls.client_auth
                     )
                 })?;
@@ -642,6 +723,12 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         built_in_tls_active(config, cfg!(feature = "tls")),
         &config.metrics,
     )?;
+
+    // Legacy relay labels are echoed verbatim into room/peer protocol
+    // metadata; bound them by the app-ID log-safe grammar so an absurd label
+    // cannot inflate every room-state payload past the outbound frame cap and
+    // disconnect recipients.
+    validate_relay_labels(&config.relay_types)?;
     validate_logging_policy(&config.logging)
 }
 
@@ -731,7 +818,8 @@ pub fn is_production_mode() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppRegistrationEntry;
+    use crate::config::{AppRegistrationEntry, RelayTypeConfig};
+    use std::collections::HashMap;
 
     /// Truth table for the TURN-without-TLS startup warning: it fires exactly
     /// when the server brokers WebRTC (`turn.enabled`) without an effective
@@ -991,6 +1079,199 @@ mod tests {
         let error = validate_config_security(&config)
             .expect_err("fingerprint binding has no effect while token binding is disabled");
         assert!(error.to_string().contains("token_binding.enabled=true"));
+    }
+
+    #[test]
+    fn padded_metrics_auth_token_is_rejected_instead_of_admitted_but_unusable() {
+        // Admission decides presence and strength on the trimmed token while
+        // the metrics endpoint compares the raw string; a padded token would
+        // be admitted and then strand every metrics request behind 401.
+        let mut config = Config::default();
+        config.security.require_metrics_auth = true;
+        config.security.metrics_auth_token =
+            Some("  abcdef0123456789abcdef0123456789  ".to_string());
+
+        let error = validate_config_security(&config).expect_err(
+            "no Bearer header can ever match a padded token, so admission would strand every \
+             metrics request behind 401",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("must not carry leading or trailing whitespace"),
+            "unexpected error: {error}"
+        );
+
+        config.security.metrics_auth_token = Some("abcdef0123456789abcdef0123456789".to_string());
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "the unpadded token is the real credential and must be admitted"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    fn base_tls_config() -> Config {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.transport.tls.enabled = true;
+        config.security.transport.tls.certificate_path =
+            Some("tests/fixtures/tls/cert.pem".to_string());
+        config.security.transport.tls.private_key_path =
+            Some("tests/fixtures/tls/key.pem".to_string());
+        config
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn padded_tls_paths_are_rejected_so_admission_checks_the_loaded_file() {
+        // Validation checked the trimmed path while the TLS loader reads the
+        // configured path verbatim; a padded path would pass admission and
+        // then fail startup against a file admission never verified.
+        let mut config = base_tls_config();
+        config.security.transport.tls.certificate_path =
+            Some(" tests/fixtures/tls/cert.pem ".to_string());
+        let error = validate_config_security(&config)
+            .expect_err("a padded certificate path would dodge the existence check");
+        assert!(
+            error
+                .to_string()
+                .contains("must not carry leading or trailing whitespace"),
+            "unexpected error: {error}"
+        );
+
+        let mut config = base_tls_config();
+        config.security.transport.tls.private_key_path =
+            Some(" tests/fixtures/tls/key.pem ".to_string());
+        let error = validate_config_security(&config)
+            .expect_err("a padded private-key path would dodge the existence check");
+        assert!(
+            error
+                .to_string()
+                .contains("must not carry leading or trailing whitespace"),
+            "unexpected error: {error}"
+        );
+
+        let mut config = base_tls_config();
+        config.security.transport.tls.client_auth = ClientAuthMode::Optional;
+        config.security.transport.tls.client_ca_cert_path =
+            Some(" tests/fixtures/tls/cert.pem ".to_string());
+        let error = validate_config_security(&config)
+            .expect_err("a padded CA path would dodge the existence check");
+        assert!(
+            error
+                .to_string()
+                .contains("must not carry leading or trailing whitespace"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn client_ca_bundle_is_rejected_when_client_auth_is_none() {
+        // client_auth none never loads the CA bundle, so a configured path is
+        // dead security config: the operator believes a trust anchor is pinned.
+        let mut config = base_tls_config();
+        config.security.transport.tls.client_ca_cert_path =
+            Some("tests/fixtures/tls/cert.pem".to_string());
+
+        let error = validate_config_security(&config)
+            .expect_err("a CA bundle under client_auth none would never be loaded or enforced");
+        assert!(
+            error
+                .to_string()
+                .contains("client_ca_cert_path is configured but client_auth is none"),
+            "unexpected error: {error}"
+        );
+
+        config.security.transport.tls.client_ca_cert_path = None;
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "client_auth none without a CA path stays valid"
+        );
+    }
+
+    #[test]
+    fn relay_labels_must_stay_blank_free_log_safe_and_bounded() {
+        // Relay labels are echoed verbatim into room/peer protocol metadata;
+        // an absurd label could push every room-state payload past the
+        // outbound frame cap and disconnect recipients, so they are admitted
+        // under the same log-safe grammar as app IDs.
+        let oversized = "a".repeat(crate::auth::MAX_APP_ID_LENGTH + 1);
+        let cases: &[(&str, RelayTypeConfig, &str)] = &[
+            (
+                "blank default label",
+                RelayTypeConfig {
+                    default_relay_type: "   ".to_string(),
+                    ..RelayTypeConfig::default()
+                },
+                "must not be blank",
+            ),
+            (
+                "control-character default label",
+                RelayTypeConfig {
+                    default_relay_type: "matchbox\n".to_string(),
+                    ..RelayTypeConfig::default()
+                },
+                "control characters or exceeds",
+            ),
+            (
+                "oversized default label",
+                RelayTypeConfig {
+                    default_relay_type: oversized.clone(),
+                    ..RelayTypeConfig::default()
+                },
+                "control characters or exceeds",
+            ),
+            (
+                "control-character mapping label",
+                RelayTypeConfig {
+                    game_relay_mappings: HashMap::from([(
+                        "Chess".to_string(),
+                        "unity\nnetcode".to_string(),
+                    )]),
+                    ..RelayTypeConfig::default()
+                },
+                "control characters or exceeds",
+            ),
+            (
+                "control-character game key",
+                RelayTypeConfig {
+                    game_relay_mappings: HashMap::from([(
+                        "Chess\n".to_string(),
+                        "unity_netcode".to_string(),
+                    )]),
+                    ..RelayTypeConfig::default()
+                },
+                "game key with control characters or exceeding",
+            ),
+        ];
+        for (description, relay, expected_fragment) in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.relay_types = relay.clone();
+
+            let Err(error) = validate_config_security(&config) else {
+                panic!("{description}: must be rejected at admission");
+            };
+            assert!(
+                error.to_string().contains(expected_fragment),
+                "{description}: expected {expected_fragment:?}, got {error}"
+            );
+        }
+
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.relay_types = RelayTypeConfig {
+            default_relay_type: "matchbox".to_string(),
+            game_relay_mappings: HashMap::from([(
+                "Chess".to_string(),
+                "unity_netcode".to_string(),
+            )]),
+        };
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "log-safe relay labels must be admitted"
+        );
     }
 
     #[test]

@@ -40,13 +40,14 @@ use tokio_rustls::server::TlsStream;
 #[cfg(feature = "tls")]
 use tower::Layer;
 
-/// Header names an embedding layer may map to a fingerprint only after it has
-/// authenticated and stripped client-supplied forwarding headers. The built-in
-/// listener deliberately does not consume these headers.
+/// Header names an embedding layer may map to a SHA-256 certificate
+/// fingerprint only after it has authenticated and stripped client-supplied
+/// forwarding headers. Every entry must carry the lowercase hex digest itself,
+/// never an encoded certificate. The built-in listener deliberately does not
+/// consume these headers.
 pub const CLIENT_FINGERPRINT_HEADER_CANDIDATES: &[&str] = &[
     "x-signalfish-client-cert-sha256",
     "x-forwarded-client-cert-sha256",
-    "x-amzn-mtls-clientcert",
 ];
 
 /// Verified client certificate fingerprint metadata propagated through request extensions.
@@ -203,7 +204,7 @@ fn build_client_verifier(
 
     let ca_path = tls.client_ca_cert_path.as_ref().ok_or_else(|| {
         anyhow!(
-            "security.transport.tls.client_ca_cert_path must be set when client_auth is {:?}",
+            "security.transport.tls.client_ca_cert_path must be set when client_auth is {}",
             tls.client_auth
         )
     })?;
