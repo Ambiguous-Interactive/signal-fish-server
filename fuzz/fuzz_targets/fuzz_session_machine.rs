@@ -135,7 +135,11 @@ fn game_name(game: u8) -> String {
 async fn build_server() -> Arc<EnhancedGameServer> {
     let server_config = ServerConfig {
         default_max_players: 4,
+        // Both ceilings at usize::MAX: session-machine fuzzing must never be
+        // refused on admission caps, and the cross-field validation requires
+        // the per-IP cap to stay at or below the server-wide ceiling.
         max_connections_per_ip: usize::MAX,
+        max_connections: usize::MAX,
         // A 1ms slow-consumer grace keeps full-queue backpressure paths fast
         // enough to fuzz while still exercising the loud-disconnect contract.
         websocket_config: signal_fish_server::config::WebSocketConfig {
