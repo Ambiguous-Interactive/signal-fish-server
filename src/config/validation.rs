@@ -306,8 +306,12 @@ fn validate_relay_labels(relay: &RelayTypeConfig) -> anyhow::Result<()> {
 
     validate_label("default_relay_type", &relay.default_relay_type)?;
     for (game, label) in &relay.game_relay_mappings {
-        // Match app-ID admission: the log-safety check runs first and never
-        // echoes the key, so the error below cannot carry an injection payload.
+        // Match app-ID admission: the key must be non-blank, and the
+        // log-safety check runs before any echo so the label error below
+        // cannot carry an injection payload.
+        if game.trim().is_empty() {
+            anyhow::bail!("relay.game_relay_mappings contains a blank game key");
+        }
         if !crate::auth::app_id_is_log_safe(game) {
             anyhow::bail!(
                 "relay.game_relay_mappings contains a game key with control characters or \
@@ -1245,6 +1249,17 @@ mod tests {
                     ..RelayTypeConfig::default()
                 },
                 "game key with control characters or exceeding",
+            ),
+            (
+                "blank game key",
+                RelayTypeConfig {
+                    game_relay_mappings: HashMap::from([(
+                        "   ".to_string(),
+                        "unity_netcode".to_string(),
+                    )]),
+                    ..RelayTypeConfig::default()
+                },
+                "blank game key",
             ),
         ];
         for (description, relay, expected_fragment) in cases {
