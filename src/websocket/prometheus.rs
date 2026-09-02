@@ -1155,7 +1155,7 @@ mod tests {
             ),
             (
                 "signal_fish_transport_ice_pregather_emitted_total",
-                "RoomJoined/Reconnected payloads that carried a non-empty ICE pre-gather list (one per carrying payload)",
+                "RoomJoined/Reconnected payloads that carried a non-empty ICE pre-gather list (one per carrying payload, counted when the list is composed into the baseline before its delivery outcome is known; a baseline later rolled back as undeliverable remains counted — see messages_dropped/rollback warnings for delivery failures)",
                 6,
             ),
             (
