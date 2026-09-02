@@ -155,7 +155,9 @@ jobs:
             "| Staged (real staged change) | $coldS ms | $warmS ms | $medianS ms |",
             "",
             "Command shape: SIGNAL_FISH_HOOK_PROFILE=1 env var, then",
-            "`pwsh -NoLogo -NoProfile -File <pre-commit hook script> [-Worktree]`"
+            # Single-quoted: the backticks are literal markdown, and a double-
+            # quoted trailing backtick would escape the string terminator.
+            '`pwsh -NoLogo -NoProfile -File <pre-commit hook script> [-Worktree]`'
           )
           # Pipeline input only (never -InputObject together with a pipeline:
           # PowerShell cannot bind both and the write silently no-ops).
