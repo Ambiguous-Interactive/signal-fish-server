@@ -48,6 +48,9 @@ extend-exclude = [
 ]
 
 [default.extend-words]
+# Deliberate misspelling used as test data for the strict security-config
+# admission fixtures (#510): a typo'd knob that must be rejected at startup.
+requrie = "requrie"
 # === Rust Crates: Core Dependencies ===
 # Web framework and async runtime
 anyhow = "anyhow"
