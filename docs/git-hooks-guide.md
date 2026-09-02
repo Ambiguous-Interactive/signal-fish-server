@@ -157,17 +157,19 @@ the runner hardware generation, not developer-machine guarantees; record them
 alongside the runner image version for provenance.
 
 2026-09-02 hosted baselines (warm median of the 4 warm runs after one cold
-run, per path — the lower of the middle two for an even count; see the
-workflow's run summaries for per-run numbers and image versions):
+run, per path — the lower of the middle two for an even count; per-run
+numbers and runner image versions are in the `Hook Baselines` workflow run
+summaries and its pull-request evidence comments):
 
 | Runner | Staged path (warm median) | Worktree preflight (warm median) |
 | --- | --- | --- |
-| ubuntu-latest | pending first recording | pending first recording |
-| macos-latest | pending first recording | pending first recording |
-| windows-latest | pending first recording | pending first recording |
+| ubuntu-latest (20260823.283.1) | 672 ms | 657 ms |
+| macos-latest (20260728.0273.1) | 217 ms | 205 ms |
+| windows-latest (20260824.214.3) | 356 ms | 317 ms |
 
-Record baselines with the same command and table shape before revisiting the
-budget.
+Every recorded path passes the 1,000 ms budget with at least ~1.9× margin;
+the budget is confirmed rather than replaced. Record fresh baselines with
+the same command and table shape before revisiting it.
 
 ## Markdownlint
 
