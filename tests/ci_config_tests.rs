@@ -25505,6 +25505,55 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
     );
 }
 
+/// The production image must not encode server configuration in `ENV`
+/// directives (issue #515). Environment variables have final precedence over
+/// every config source (`src/config/loader.rs`), so an image-level
+/// `SIGNAL_FISH__SECURITY__...` default silently inverts the compiled
+/// fail-closed default for any deployment that does not know to override it —
+/// exactly the fail-open-by-default shape #515 filed. Configuration belongs
+/// to the compiled defaults, a mounted config file, or runtime-provided
+/// environment; the image ships none of it. Sweeping every `SIGNAL_FISH__*`
+/// key (not just the security subtree) keeps benign-looking defaults like a
+/// port from re-entering by the same silent-shadowing door.
+#[test]
+fn test_dockerfile_ships_no_signal_fish_config_env_overrides() {
+    let root = repo_root();
+    let dockerfile = root.join("Dockerfile");
+
+    if !dockerfile.exists() {
+        return;
+    }
+
+    let content = read_live_file(&dockerfile);
+
+    let offenders: Vec<String> = content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim();
+            let rest = trimmed.strip_prefix("ENV ")?;
+            let name = rest
+                .split_once('=')
+                .map(|(name, _)| name.trim())
+                .unwrap_or_else(|| rest.split_whitespace().next().unwrap_or(""));
+            name.starts_with("SIGNAL_FISH__")
+                .then(|| format!("  Dockerfile line {}: {}", idx + 1, trimmed))
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "the production image must not set server configuration via ENV (issue #515): \
+         image-level SIGNAL_FISH__* variables have final precedence over every config \
+         source and silently invert compiled fail-closed defaults for deployments that \
+         do not override them.\n\n\
+         Offending directives:\n{}\n\n\
+         Fix: delete the ENV directive and let the compiled default stand; operators \
+         who need a different value set it at runtime (env or mounted config).",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn test_audit_job_installs_and_verifies_pinned_cargo_audit() {
     // Keep the advisory scanner reproducible and fail closed if the installer

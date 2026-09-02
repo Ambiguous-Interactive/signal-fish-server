@@ -104,6 +104,16 @@ async fn main() -> anyhow::Result<()> {
                 );
                 let _ = writeln!(
                     summary,
+                    "  App-ID allowlist enforced: {}",
+                    cfg.security.enforce_app_id_allowlist
+                );
+                let _ = writeln!(
+                    summary,
+                    "  Registered applications: {}",
+                    cfg.security.allowed_apps.len()
+                );
+                let _ = writeln!(
+                    summary,
                     "  Reconnection enabled: {}",
                     cfg.server.enable_reconnection
                 );
@@ -168,10 +178,25 @@ async fn main() -> anyhow::Result<()> {
     if config::should_warn_all_liveness_disabled(&cfg) {
         tracing::warn!(
             "All liveness mechanisms are disabled (server.ping_timeout=0, \
-             websocket.idle_timeout_secs=0, websocket.server_ping_interval_secs=0): a \
-             silently-dead client keeps its connection, per-IP slot, and room seat \
-             indefinitely with no reaping signal."
+              websocket.idle_timeout_secs=0, websocket.server_ping_interval_secs=0): a \
+              silently-dead client keeps its connection, per-IP slot, and room seat \
+              indefinitely with no reaping signal."
         );
+    }
+
+    // Effective security posture (issue #515): one info line always, so the
+    // mode a deployment actually runs under is visible in `docker logs`, plus
+    // a warn line per disabled gate. The shipped image used to hard-code both
+    // gates off via ENV; with that gone the remaining fail-open risk is an
+    // operator config that disables them unknowingly, so say it out loud.
+    tracing::info!(
+        app_id_allowlist_enforced = cfg.security.enforce_app_id_allowlist,
+        allowed_apps = cfg.security.allowed_apps.len(),
+        metrics_auth_required = cfg.security.require_metrics_auth,
+        "Effective security mode"
+    );
+    for warning in config::security_posture_warnings(&cfg) {
+        tracing::warn!("{warning}");
     }
 
     let port: u16 = cfg.port;
@@ -340,12 +365,14 @@ async fn main() -> anyhow::Result<()> {
             websocket::websocket_route_v3_with_origin_policy(origin_policy.clone()),
         ) // v3 alias, shared handler
         .route("/v3/client-config", websocket::client_config_route())
-        // The conventional top-level probe path: without this route a prober
-        // hitting `/health` would get the 200-OK fallback banner regardless of
-        // backend state instead of the real health verdict.
+        // The conventional top-level probe paths: without these routes a
+        // prober hitting `/health` would get the 200-OK fallback banner
+        // regardless of backend state, and `/readyz` gives orchestrators the
+        // drain-aware readiness verdict (/health is liveness-only, #521).
         .route("/health", websocket::health_route())
+        .route("/readyz", websocket::readyz_route())
         .fallback(|| async {
-            "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v2/client-config (or /v3/client-config) for client limits, /v1/metrics for metrics, /metrics/prom for Prometheus."
+            "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v2/client-config (or /v3/client-config) for client limits, /v1/metrics for metrics, /metrics/prom for Prometheus, /readyz for readiness."
         })
         // Cloned, not moved: the original handle stays available for the
         // post-serve shutdown join, which must observe the drain state.

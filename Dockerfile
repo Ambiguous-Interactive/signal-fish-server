@@ -1,4 +1,3 @@
-# check=skip=SecretsUsedInArgOrEnv
 # Multi-stage, multi-architecture Dockerfile for Signal Fish Server
 # Optimized with cargo-chef for dependency caching.
 # Zero external runtime dependencies (no database, no cloud services).
@@ -139,13 +138,14 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 # Use non-root
 USER appuser
 
-# Default environment (can be overridden at runtime)
+# Runtime environment. The image deliberately ships NO server configuration
+# via ENV (issue #515): env overrides have final precedence over every config
+# source, so an image-level security default silently inverts the compiled
+# fail-closed default for deployments that do not override it. Operators who
+# need different values set them at runtime (env vars or a mounted
+# config.json); compiled defaults are the secure posture (app-ID allowlist
+# enforcement and metrics auth both on).
 ENV RUST_LOG=info
-# Disable metrics authentication and app-ID allowlisting by default so the
-# container starts without a config file. Production deployments should mount
-# a config.json or set the corresponding security environment variables.
-ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
-ENV SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false
 
 # Run the server
 CMD ["./signal-fish-server"]

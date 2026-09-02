@@ -1,7 +1,7 @@
 //! Configuration loading and environment parsing.
 
 use super::validation::validate_config_security;
-use super::Config;
+use super::{AppRegistrationEntry, Config};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -90,7 +90,19 @@ pub fn load() -> anyhow::Result<Config> {
     // Environment overrides with prefix SIGNAL_FISH__ and nested separator __
     apply_env_overrides(&mut merged);
 
-    let config = deserialize_merged_config(merged)?;
+    finalize_config(merged)
+}
+
+/// Post-merge pipeline shared by the production loader and tests: deserialize
+/// the merged document, fold in the external app-registry file when
+/// configured (issue #516), then run the warn-only security validation pass.
+///
+/// Kept free of process-global inputs (env vars, cwd) so tests can drive the
+/// full production admission path — including the filesystem-backed registry
+/// — from a plain JSON document.
+fn finalize_config(merged: Value) -> anyhow::Result<Config> {
+    let mut config = deserialize_merged_config(merged)?;
+    apply_app_auth_file(&mut config)?;
 
     // Security validation for sensitive fields — intentional warn-only behavior;
     // main.rs calls validate_config_security() again and propagates errors properly.
@@ -99,6 +111,83 @@ pub fn load() -> anyhow::Result<Config> {
     }
 
     Ok(config)
+}
+
+/// Fold the configured app-registry file (issue #516) into
+/// `security.allowed_apps`.
+///
+/// Admission is fail-closed: a configured path that is missing, unreadable,
+/// empty, or invalid is a hard error. Silently loading zero entries would
+/// revert the effective registry to the config-file subset exactly when the
+/// external provisioner failed — for an enforcing deployment that means
+/// rejecting every handshake while the process appears healthy, the same
+/// present-but-invalid shape the main config sources already reject.
+///
+/// Duplicate `app_id` values (config-vs-file or within one list) are rejected
+/// downstream by [`validate_config_security`]/constructor validation with an
+/// indexed `allowed_apps[N].app_id` error, so the ambiguity never reaches the
+/// allowlist.
+fn apply_app_auth_file(config: &mut Config) -> anyhow::Result<()> {
+    let Some(raw_path) = config.security.app_auth_path.as_deref() else {
+        return Ok(());
+    };
+    let path = Path::new(raw_path);
+    if path.as_os_str().is_empty() {
+        anyhow::bail!(
+            "security.app_auth_path is configured but empty: set a file path or remove \
+             the knob (an empty path cannot name a registry file)"
+        );
+    }
+
+    let contents = fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!(
+            "Failed to read app registry file {}: {error}. \
+             security.app_auth_path is fail-closed: a missing or unreadable registry \
+             is a startup error, not an empty allowlist",
+            path.display()
+        )
+    })?;
+    let mut entries = parse_app_auth_file(&contents).map_err(|error| {
+        anyhow::anyhow!("Invalid app registry file {}: {error}", path.display())
+    })?;
+    config.security.allowed_apps.append(&mut entries);
+    Ok(())
+}
+
+/// The external app-registry file contract (issue #516): the same
+/// `AppRegistrationEntry` shape as `security.allowed_apps`, under a required
+/// top-level `apps` key. Strict admission (`deny_unknown_fields` on the
+/// wrapper and on every entry) so a typo'd cap or a stray `app_secret` fails
+/// loudly instead of being ignored: the registry file must never carry
+/// credential material, and a silently-dropped entry would shrink the
+/// registry invisibly. There are no legacy aliases here — the file is a new
+/// contract, not a second copy of the main config syntax.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppAuthFile {
+    apps: Vec<AppRegistrationEntry>,
+}
+
+fn parse_app_auth_file(contents: &str) -> anyhow::Result<Vec<AppRegistrationEntry>> {
+    if contents.trim().is_empty() {
+        anyhow::bail!("app registry file is empty: expected {{\"apps\": [...]}}");
+    }
+
+    let file: AppAuthFile =
+        serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_str(contents))
+            .map_err(|error| {
+                let path = error.path().to_string();
+                anyhow::anyhow!(
+                    "app registry file does not match the contract: {}{error} (expected \
+             {{\"apps\": [<same entry shape as security.allowed_apps>]}})",
+                    if path.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{path}: ")
+                    }
+                )
+            })?;
+    Ok(file.apps)
 }
 
 fn deserialize_merged_config(merged: Value) -> anyhow::Result<Config> {
@@ -396,6 +485,224 @@ mod tests {
             serde_json::to_value(Config::default()).expect("default config serializes");
         apply_env_overrides_from_iter(&mut merged, vars.iter().copied());
         deserialize_merged_config(merged).expect("env overrides deserialize as Config")
+    }
+
+    /// Drive the full post-merge production pipeline (`finalize_config`:
+    /// deserialize → app-registry file admission → warn-only validation) from
+    /// a security-subtree JSON document over compiled defaults. No process
+    /// globals are touched, so the tests are parallel-safe.
+    fn finalize_with_security_doc(security_json: &str) -> anyhow::Result<Config> {
+        let defaults = serde_json::to_value(Config::default()).expect("defaults serialize");
+        let parsed = parse_json_document(security_json, "test source")
+            .expect("source parses as JSON")
+            .expect("parsed source is present");
+        let mut merged = defaults;
+        merge_values(&mut merged, parsed);
+        finalize_config(merged)
+    }
+
+    /// Write one app-registry file with the given contents in a unique
+    /// temporary directory. The returned `TempDir` keeps the file alive for
+    /// the test; the file is always `app-auth.json` inside it.
+    fn write_registry_file(contents: &str) -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .prefix("sf-app-auth-test")
+            .tempdir()
+            .expect("temporary registry directory is created");
+        std::fs::write(dir.path().join("app-auth.json"), contents)
+            .expect("registry file is written");
+        dir
+    }
+
+    /// A JSON-safe form of the temp file path (Windows backslashes would be
+    /// invalid JSON string escapes in the embedded document).
+    fn registry_path_json(dir: &tempfile::TempDir) -> String {
+        dir.path()
+            .join("app-auth.json")
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    /// The app-registry file's entries append to the config's own
+    /// `allowed_apps` with their per-app caps intact (issue #516): the main
+    /// config keeps the static bootstrap apps while an external provisioner
+    /// owns the live registry.
+    #[test]
+    fn app_auth_file_entries_merge_into_allowed_apps() {
+        let dir = write_registry_file(
+            r#"{"apps":[{"app_id":"cloud-app","app_name":"Cloud App","max_rooms":5}]}"#,
+        );
+        let config = finalize_with_security_doc(&format!(
+            r#"{{"security":{{"app_auth_path":"{}","allowed_apps":[
+                {{"app_id":"static","app_name":"Static"}}]}}}}"#,
+            registry_path_json(&dir)
+        ))
+        .expect("registry entries merge into the allowlist");
+
+        let ids: Vec<_> = config
+            .security
+            .allowed_apps
+            .iter()
+            .map(|app| app.app_id.as_str())
+            .collect();
+        assert_eq!(ids, ["static", "cloud-app"], "file entries append in order");
+        assert_eq!(config.security.allowed_apps[1].max_rooms, Some(5));
+    }
+
+    /// The shape the control plane writes for a freshly-provisioned host —
+    /// `{"apps": []}` — is valid and loads no entries.
+    #[test]
+    fn empty_apps_registry_file_is_valid_and_loads_no_entries() {
+        let dir = write_registry_file(r#"{"apps":[]}"#);
+        let config = finalize_with_security_doc(&format!(
+            r#"{{"security":{{"app_auth_path":"{}"}}}}"#,
+            registry_path_json(&dir)
+        ))
+        .expect("an empty registry is a valid registry");
+        assert!(config.security.allowed_apps.is_empty());
+    }
+
+    /// Admission is fail-closed in BOTH enforcement modes: a configured
+    /// registry path that does not resolve is a startup error naming the
+    /// path, never a silent fall-back to the config-file subset (an
+    /// enforcing deployment would otherwise reject every handshake while
+    /// appearing healthy after a lost mount).
+    #[test]
+    fn missing_app_auth_file_is_a_hard_error_naming_the_path() {
+        let dir = tempfile::Builder::new()
+            .prefix("sf-app-auth-test")
+            .tempdir()
+            .expect("temporary directory is created");
+        let missing = dir.path().join("absent").join("app-auth.json");
+
+        for enforce in [true, false] {
+            let result = finalize_with_security_doc(&format!(
+                r#"{{"security":{{"app_auth_path":"{}","enforce_app_id_allowlist":{enforce}}}}}"#,
+                missing.to_string_lossy().replace('\\', "/")
+            ));
+            let err = result
+                .expect_err("a missing registry file must fail startup")
+                .to_string();
+            assert!(
+                err.contains("app-auth.json"),
+                "error must name the configured path: {err}"
+            );
+            assert!(
+                err.contains("fail-closed"),
+                "error must state the fail-closed contract: {err}"
+            );
+        }
+    }
+
+    /// A registry file that is present but unreadable-as-a-contract
+    /// (malformed JSON, empty bytes) is a hard error naming the file.
+    #[test]
+    fn malformed_app_auth_file_is_a_hard_error_naming_the_path() {
+        for contents in ["{not json", ""] {
+            let dir = write_registry_file(contents);
+            let result = finalize_with_security_doc(&format!(
+                r#"{{"security":{{"app_auth_path":"{}"}}}}"#,
+                registry_path_json(&dir)
+            ));
+            let err = result
+                .expect_err("a malformed registry file must fail startup")
+                .to_string();
+            assert!(
+                err.contains("app-auth.json"),
+                "error for {contents:?} must name the configured file: {err}"
+            );
+        }
+    }
+
+    /// The registry file is strict-admission: unknown top-level keys, unknown
+    /// or typo'd entry keys, and credential material (`app_secret`) are all
+    /// hard errors. A silently-ignored entry would shrink the live registry
+    /// invisibly; a silently-ignored secret would look accepted.
+    #[test]
+    fn app_auth_file_rejects_unknown_keys_and_secret_material() {
+        // (registry contents, the offending key the error must name)
+        let cases = [
+            (
+                r#"{"apps":[{"app_id":"x","app_name":"X","app_secret":"must-fail"}]}"#,
+                "app_secret",
+            ),
+            (
+                r#"{"apps":[{"app_id":"x","app_name":"X","max_roms":5}]}"#,
+                "max_roms",
+            ),
+            (r#"{"apps":[],"extra":true}"#, "extra"),
+            ("{}", "apps"),
+        ];
+        for (contents, offending_key) in cases {
+            let dir = write_registry_file(contents);
+            let err = finalize_with_security_doc(&format!(
+                r#"{{"security":{{"app_auth_path":"{}"}}}}"#,
+                registry_path_json(&dir)
+            ))
+            .expect_err(&format!(
+                "registry file with offending key {offending_key:?} must be rejected: \
+                 {contents}"
+            ))
+            .to_string();
+            assert!(
+                err.contains(offending_key),
+                "error must name the offending key {offending_key:?}: {err}"
+            );
+            assert!(
+                err.contains("app-auth.json"),
+                "error must attribute the rejection to the registry file: {err}"
+            );
+        }
+    }
+
+    /// A configured-but-empty `app_auth_path` value is a misconfiguration,
+    /// not an unset knob: it fails startup naming the knob.
+    #[test]
+    fn empty_app_auth_path_value_is_a_hard_error() {
+        let err = finalize_with_security_doc(r#"{"security":{"app_auth_path":""}}"#)
+            .expect_err("an empty registry path must fail startup")
+            .to_string();
+        assert!(
+            err.contains("app_auth_path"),
+            "error must name the knob: {err}"
+        );
+    }
+
+    /// Duplicates between the config's own apps and the registry file (or
+    /// within one list) never reach the allowlist: startup validation rejects
+    /// the merged list with the indexed error.
+    #[test]
+    fn duplicate_app_ids_across_config_and_file_fail_security_validation() {
+        let dir = write_registry_file(r#"{"apps":[{"app_id":"dupe","app_name":"Dupe"}]}"#);
+        let config = finalize_with_security_doc(&format!(
+            r#"{{"security":{{"app_auth_path":"{}","metrics_auth_token":"test-token",
+                "allowed_apps":[{{"app_id":"dupe","app_name":"Dupe"}}]}}}}"#,
+            registry_path_json(&dir)
+        ))
+        .expect("merging succeeds; duplicates are a validation-stage rejection");
+
+        let err = crate::config::validate_config_security(&config)
+            .expect_err("duplicate app ids must fail startup validation")
+            .to_string();
+        assert!(
+            err.contains("allowed_apps[1].app_id"),
+            "validation error must name the duplicate entry: {err}"
+        );
+    }
+
+    /// The registry path is reachable through the standard environment
+    /// override machinery, so orchestrators can point the server at a
+    /// provisioned file without a config document.
+    #[test]
+    fn app_auth_path_env_override_deserializes() {
+        let config = config_with_env(&[(
+            "SIGNAL_FISH__SECURITY__APP_AUTH_PATH",
+            "/etc/signal-fish/app-auth.json",
+        )]);
+        assert_eq!(
+            config.security.app_auth_path.as_deref(),
+            Some("/etc/signal-fish/app-auth.json")
+        );
     }
 
     #[test]

@@ -125,6 +125,59 @@ does must not treat an open-mode application UUID as unspoofable.
   sharing one NAT egress share that source budget. A botnet spanning many
   sources is bounded by the application-wide ceiling itself.
 
+## External app-registry file (`security.app_auth_path`)
+
+For deployments where a control plane owns the live app registry (onboarding,
+suspension, per-app caps), the registry can live outside the main config
+document. Set `security.app_auth_path` to a JSON file of the shape
+`{"apps": [...]}` where each entry has exactly the same fields as an
+`allowed_apps` entry:
+
+```json
+{
+  "apps": [
+    {
+      "app_id": "my-game",
+      "app_name": "My Game",
+      "max_rooms": 100,
+      "max_players_per_room": 16,
+      "rate_limit_per_minute": 60
+    }
+  ]
+}
+```
+
+The file's entries are appended to `security.allowed_apps` at config load
+time, before any enforcement or `--validate-config` checks, so the two lists
+form one registry. Semantics:
+
+- **Fail-closed admission.** When the knob is set, a missing, unreadable,
+  malformed, or contract-violating file is a startup error naming the file —
+  never a silent fall-back to the config-file subset. A deployment whose
+  registry mount disappears must fail loudly, not quietly start rejecting
+  every handshake (or accounting for none).
+- **Strict keys.** Unknown keys — at the top level, or inside any entry — are
+  rejected, so a typo'd cap fails loudly instead of silently widening.
+  `app_secret` is rejected outright: the registry is a public-label list and
+  must never carry credential material (there is no client-credential mode).
+- **No duplicates.** `app_id` collisions between the two lists (or within one
+  list) are startup validation errors naming the duplicate entry
+  (`allowed_apps[N].app_id`).
+- **Empty is valid.** `{"apps": []}` loads no entries — the shape a control
+  plane writes for a freshly provisioned host.
+
+The path can also be supplied without a config document via the environment:
+
+```bash
+SIGNAL_FISH__SECURITY__APP_AUTH_PATH=/etc/signal-fish/app-auth.json
+```
+
+This is the intended contract for the cloud deployment's read-only-mounted
+`/etc/signal-fish/app-auth.json` file: the provisioner regenerates the file on
+its own schedule and the server picks it up at the next (re)start. The file is
+read once at startup; changing the live registry still requires a restart (see
+issue #522 for a reload path).
+
 ## Legacy configuration
 
 Existing configuration remains loadable:

@@ -94,6 +94,18 @@ pub struct SecurityConfig {
     #[serde(default)]
     #[serde(alias = "authorized_apps")]
     pub allowed_apps: Vec<AppRegistrationEntry>,
+    /// Optional path to an external app-registry JSON file of the shape
+    /// `{"apps": [<same entry shape as allowed_apps>]}` (issue #516).
+    ///
+    /// The file's entries are appended to [`Self::allowed_apps`] at config
+    /// load time, so a deployment can keep the static bootstrap apps in the
+    /// main config while an external provisioner (e.g. a control plane
+    /// regenerating a read-only-mounted file) owns the live registry.
+    /// Admission is fail-closed: when set, a missing, unreadable, or invalid
+    /// file is a startup error — never a silent no-op. Duplicate `app_id`
+    /// values between the two lists are rejected by startup validation.
+    #[serde(default)]
+    pub app_auth_path: Option<String>,
 }
 
 impl Default for SecurityConfig {
@@ -110,6 +122,7 @@ impl Default for SecurityConfig {
             max_connections: default_max_connections(),
             transport: TransportSecurityConfig::default(),
             allowed_apps: Vec::new(),
+            app_auth_path: None,
         }
     }
 }
