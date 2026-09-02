@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Configuration admission for the `security` subtree is now strict: unknown
+  keys in `security`, `security.transport`, `security.transport.tls`,
+  `security.transport.token_binding`, and `security.allowed_apps` entries are
+  a startup error instead of being silently ignored (issue #510). A typo'd
+  security knob — e.g. `tls.enable` instead of `tls.enabled` — previously
+  started the server with that knob's default (potentially plaintext while
+  the operator believed TLS was on); it is now rejected with the unknown
+  field named. `SIGNAL_FISH__SECURITY__*` environment overrides travel the
+  same merged document and are rejected the same way. Deprecated aliases
+  (`require_websocket_auth`, `authorized_apps`) and the loader's legacy-key
+  normalization are unaffected; non-security sections keep the tolerant
+  parse.
 - Config admission no longer silently rewrites contradictory policy
   (issue #396): `logging.rotation` values other than the documented
   `daily`/`hourly`/`never` (case-insensitive) are rejected at startup instead

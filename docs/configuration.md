@@ -554,6 +554,19 @@ cargo run -- --print-config
 
 ```
 
+### Strict keys in the `security` subtree
+
+Keys under `security` (including `security.transport`,
+`security.transport.tls`, `security.transport.token_binding`, and
+`security.allowed_apps` entries) are strictly validated: an unknown key is a
+startup error, not a silently ignored typo. A typo'd security knob would
+otherwise start the server with that knob's default — for example
+`tls.enable` instead of `tls.enabled` starts the server plaintext while the
+operator believes TLS is on. Other config sections tolerate unknown keys for
+forward compatibility, and removed legacy keys
+(`security.require_websocket_auth`, `security.authorized_apps`,
+`turn.mode`) are normalized or ignored by the loader.
+
 ## Next Steps
 
 - [Application identification](authentication.md) - Configure the public app-ID allowlist

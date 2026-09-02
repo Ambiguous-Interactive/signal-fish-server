@@ -881,12 +881,17 @@ fn test_config_security_canonical_app_id_allowlist_round_trip() {
     );
 }
 
+/// The security subtree is strict-admission (#510): unknown keys — including
+/// the legacy `app_secret` — are a hard error at the serde layer. The
+/// legacy-secret discard contract lives one layer up in the loader intake,
+/// which strips `app_secret` before deserialization (pinned in
+/// `src/config/loader.rs`).
 #[test]
-fn test_config_security_legacy_app_allowlist_input_discards_unused_secret() {
+fn test_config_security_app_entries_reject_unknown_keys() {
     let json = r#"{
         "security": {
-            "require_websocket_auth": true,
-            "authorized_apps": [{
+            "enforce_app_id_allowlist": true,
+            "allowed_apps": [{
                 "app_id": "legacy-game",
                 "app_secret": "must-not-be-retained",
                 "app_name": "Legacy Game"
@@ -894,16 +899,13 @@ fn test_config_security_legacy_app_allowlist_input_discards_unused_secret() {
         }
     }"#;
 
-    let config: Config = serde_json::from_str(json).expect("legacy config should remain accepted");
-    assert!(config.security.enforce_app_id_allowlist);
-    assert_eq!(config.security.allowed_apps[0].app_id, "legacy-game");
-
-    let serialized = serde_json::to_string(&config).expect("config serializes");
-    assert!(!serialized.contains("must-not-be-retained"));
-    assert!(!serialized.contains("app_secret"));
-    let debug = format!("{config:?}");
-    assert!(!debug.contains("must-not-be-retained"));
-    assert!(!debug.contains("app_secret"));
+    let error = serde_json::from_str::<Config>(json)
+        .expect_err("unknown keys in a security app entry must be rejected");
+    let error = error.to_string();
+    assert!(
+        error.contains("unknown field") && error.contains("app_secret"),
+        "error must name the unknown key instead of silently dropping it: {error}"
+    );
 }
 
 #[test]

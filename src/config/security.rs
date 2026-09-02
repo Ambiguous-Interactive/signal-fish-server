@@ -10,7 +10,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Security configuration.
+///
+/// Strict admission: unknown keys are rejected at startup
+/// (`deny_unknown_fields`), so a typo'd security knob fails loudly instead of
+/// silently substituting the default (issue #510).
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Allowed HTTP CORS and browser WebSocket origins (comma-separated, or
     /// "*" for any). Origin-less native WebSocket clients remain compatible.
@@ -111,6 +116,7 @@ impl Default for SecurityConfig {
 
 /// Transport-level security configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TransportSecurityConfig {
     #[serde(default)]
     pub tls: TlsServerConfig,
@@ -120,6 +126,7 @@ pub struct TransportSecurityConfig {
 
 /// TLS server configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct TlsServerConfig {
     /// Enable HTTPS/TLS termination for the HTTP + WebSocket listener.
     #[serde(default)]
@@ -152,6 +159,7 @@ impl Default for TlsServerConfig {
 
 /// Optional token binding / zero-trust enforcement for WebSocket clients.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct TokenBindingConfig {
     /// Enables support for token binding subprotocol negotiation.
     #[serde(default)]
@@ -239,6 +247,7 @@ impl fmt::Display for ClientAuthMode {
 /// allowed to connect when `enforce_app_id_allowlist` is enabled. It contains
 /// no client credential and does not establish hostile-client identity.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct AppRegistrationEntry {
     /// Unique identifier clients send in the `Authenticate` message.
     pub app_id: String,
@@ -264,4 +273,49 @@ pub struct AppRegistrationEntry {
     /// legitimate handshakes (issue #502).
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    /// Structural pin for #510: every config struct in this file carries
+    /// `#[serde(deny_unknown_fields)]`. The security subtree is
+    /// strict-admission — an unknown key here is a typo'd security knob and
+    /// must fail startup loudly instead of silently substituting that knob's
+    /// default (a `tls.enable` typo must not start the server plaintext).
+    /// A security struct added without the attribute fails this scan.
+    #[test]
+    fn every_security_config_struct_denies_unknown_fields() {
+        let source = include_str!("security.rs");
+        let parsed = syn::parse_file(source).expect("security.rs parses as Rust");
+
+        let mut structs_without_deny = Vec::new();
+        let mut struct_count = 0;
+        for item in &parsed.items {
+            let syn::Item::Struct(item_struct) = item else {
+                continue;
+            };
+            struct_count += 1;
+            let denies_unknown = item_struct.attrs.iter().any(|attr| {
+                let syn::Meta::List(list) = &attr.meta else {
+                    return false;
+                };
+                attr.path().is_ident("serde")
+                    && list.tokens.to_string().contains("deny_unknown_fields")
+            });
+            if !denies_unknown {
+                structs_without_deny.push(item_struct.ident.to_string());
+            }
+        }
+
+        assert!(
+            struct_count >= 5,
+            "the scan must see the security structs (found {struct_count}); \
+             if the module was restructured, update this pin deliberately"
+        );
+        assert!(
+            structs_without_deny.is_empty(),
+            "every security config struct must carry #[serde(deny_unknown_fields)] \
+             (issue #510): missing on {structs_without_deny:?}"
+        );
+    }
 }
