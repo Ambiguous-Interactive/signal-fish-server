@@ -1149,6 +1149,7 @@ async fn terminal_unroute_captures_every_stamp_allocated_before_player_left() {
         Arc::clone(&metrics),
     ));
     let connection_manager = Arc::new(ConnectionManager::new(
+        usize::MAX,
         8,
         metrics,
         coordinator.clone(),

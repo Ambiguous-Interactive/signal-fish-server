@@ -199,6 +199,7 @@ pub fn test_server_config() -> ServerConfig {
         max_outbound_message_size: 8 * 1024 * 1024,
         max_signal_bytes: 16384,     // 16KB default
         max_connections_per_ip: 100, // Generous for tests
+        max_connections: 10_000,     // Generous server-wide ceiling for tests
         require_metrics_auth: false, // No auth for tests
         metrics_auth_token: None,
         reconnection_window: Duration::from_secs(300), // 5 minutes for tests

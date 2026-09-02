@@ -285,6 +285,18 @@ pub const fn default_max_connections_per_ip() -> usize {
     24
 }
 
+/// Default server-wide concurrent-connection ceiling (10,000).
+///
+/// The per-IP cap bounds one source; total ownership is still multiplied by
+/// the number of distinct source IPs (a botnet or a large NAT pool can
+/// multiply it, issue #502 item 2). 10,000 concurrent connections is
+/// generous headroom above any demonstrated single-node session while
+/// bounding worst-case per-connection queue memory; operators serving more
+/// should raise it deliberately with capacity evidence.
+pub const fn default_max_connections() -> usize {
+    10_000
+}
+
 pub const fn default_client_auth_mode() -> ClientAuthMode {
     ClientAuthMode::None
 }

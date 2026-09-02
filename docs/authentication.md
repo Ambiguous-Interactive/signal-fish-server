@@ -115,6 +115,15 @@ does must not treat an open-mode application UUID as unspoofable.
   an explicit value; omitting it is the "unlimited" configuration — the
   `Authenticated.rate_limits` numbers are then projections only, and unknown-ID
   rejections never consume any budget.
+  Enforcement is split into two sliding windows: the application-wide ceiling
+  above, plus a per-source (IP) share of half that budget (at least one) — so
+  one source that knows a configured `app_id` can never continuously exhaust
+  the app's budget and lock out legitimate handshakes (issue #502). Rejected
+  handshakes consume no budget in either window. Note a single source can
+  therefore admit at most half of the advertised `per_minute` figure (for an
+  entry limited to 1 per minute, the share is that single handshake); clients
+  sharing one NAT egress share that source budget. A botnet spanning many
+  sources is bounded by the application-wide ceiling itself.
 
 ## Legacy configuration
 

@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         max_message_size: cfg.security.max_message_size,
         max_outbound_message_size: cfg.security.max_outbound_message_size,
         max_connections_per_ip: cfg.security.max_connections_per_ip,
+        max_connections: cfg.security.max_connections,
         require_metrics_auth: cfg.security.require_metrics_auth,
         metrics_auth_token: cfg.security.metrics_auth_token.clone(),
         reconnection_window: Duration::from_secs(cfg.server.reconnection_window),

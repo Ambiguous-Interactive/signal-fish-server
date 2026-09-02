@@ -465,6 +465,8 @@ impl ReconnectTeardownTestGate {
 pub enum RegisterClientError {
     #[error("Too many connections from your IP ({current}/{limit})")]
     IpLimitExceeded { current: usize, limit: usize },
+    #[error("Server is at capacity ({current}/{limit} connections)")]
+    CapacityExceeded { current: usize, limit: usize },
     #[error("Server is draining for shutdown")]
     ServerDraining,
 }
@@ -510,6 +512,10 @@ pub struct ServerConfig {
     /// `signal` JSON value). Mirrors `security.max_signal_bytes`.
     pub max_signal_bytes: usize,
     pub max_connections_per_ip: usize,
+    /// Server-wide concurrent-connection ceiling. Mirrors validated
+    /// `security.max_connections` and must be greater than 0 for direct
+    /// library construction (a zero cap rejects every registration).
+    pub max_connections: usize,
     pub require_metrics_auth: bool,
     pub metrics_auth_token: Option<String>,
     pub reconnection_window: Duration,
@@ -542,6 +548,7 @@ impl Default for ServerConfig {
             max_outbound_message_size: 8 * 1024 * 1024, // 8 MiB
             max_signal_bytes: 16384,                    // 16KB
             max_connections_per_ip: 24,
+            max_connections: crate::config::defaults::default_max_connections(),
             require_metrics_auth: true,
             metrics_auth_token: None,
             reconnection_window: Duration::from_secs(300), // 5 minutes
@@ -632,6 +639,7 @@ impl EnhancedGameServer {
         ));
 
         let connection_manager = Arc::new(ConnectionManager::new(
+            config.max_connections,
             config.max_connections_per_ip,
             metrics.clone(),
             message_coordinator.clone(),
@@ -1005,7 +1013,19 @@ impl EnhancedGameServer {
             .prefers_encoding(player_id, encoding)
     }
 
-    /// Connect a client with a specific player ID (used for testing)
+    /// Connect a client with a specific player ID — a test-fixture primitive,
+    /// deliberately NOT the embedder admission path.
+    ///
+    /// Unlike the wire path (`register_classified_client_with_close`), this
+    /// registration bypasses every admission gate: the per-IP connection cap,
+    /// the server-wide ceiling, and the shutdown-drain refusal. It also
+    /// inserts an attacker-chosen map key, so it can replace an existing
+    /// entry — impossible on the wire, where registration always mints a
+    /// fresh UUID. Kept public (hidden from docs) for in-crate and integration
+    /// test harnesses that hydrate server state; embedders must not use it to
+    /// fabricate identity collisions or to bypass admission, and production
+    /// connections must arrive through the WebSocket route.
+    #[doc(hidden)]
     pub async fn connect_client(
         &self,
         player_id: PlayerId,
@@ -4454,12 +4474,18 @@ mod relay_projection_cache_tests {
 
         assert!(server
             .app_id_allowlist
-            .resolve_app_id("limited")
+            .resolve_app_id(
+                "limited",
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            )
             .await
             .is_ok());
         assert!(server
             .app_id_allowlist
-            .resolve_app_id("limited")
+            .resolve_app_id(
+                "limited",
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            )
             .await
             .is_err());
 

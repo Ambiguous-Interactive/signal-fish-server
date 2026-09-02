@@ -308,6 +308,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("24"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__MAX_CONNECTIONS",
+        path: "security.max_connections",
+        default: Some("10000"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED",
         path: "security.transport.tls.enabled",
         default: Some("false"),

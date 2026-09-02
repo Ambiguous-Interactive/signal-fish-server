@@ -142,7 +142,8 @@ self-hosted only.
     "allowed_apps": [{"app_id": "my-game", "app_name": "My Game"}],
     "max_message_size": 65536,
     "max_outbound_message_size": 8388608,
-    "max_connections_per_ip": 24
+    "max_connections_per_ip": 24,
+    "max_connections": 10000
   },
   "websocket": {
     "enable_batching": true,

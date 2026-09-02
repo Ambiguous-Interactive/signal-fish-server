@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // `tokio::time::Instant` (not `std::time::Instant`) so the activity reaper
@@ -266,6 +267,18 @@ pub(crate) struct ConnectionManager {
     connections_per_ip: DashMap<IpAddr, usize>,
     metrics: Arc<ServerMetrics>,
     message_coordinator: Arc<dyn MessageCoordinator>,
+    /// Server-wide concurrent-connection ceiling (`security.max_connections`).
+    /// Bounds total memory/ownership independently of how many distinct
+    /// source IPs are in play (per-IP caps alone are multiplied by IP count —
+    /// a botnet or a large NAT pool; issue #502 item 2).
+    max_connections: usize,
+    /// Authoritative count of live connection entries. Reserved under the
+    /// ceiling by production registration, transferred untouched by a
+    /// reconnect identity swap, and released exactly once per entry at
+    /// unregistration. Test-only registration counts through the same
+    /// counter (unbounded, like its per-IP sibling) so release stays
+    /// balanced for every entry shape.
+    live_connections: AtomicUsize,
     max_connections_per_ip: usize,
     /// Whether per-connection delivery statistics (the v3 `RelayStats`
     /// ledger) are registered with the metrics sink for each connection.
@@ -304,6 +317,7 @@ impl ConnectionManager {
     }
 
     pub fn new(
+        max_connections: usize,
         max_connections_per_ip: usize,
         metrics: Arc<ServerMetrics>,
         message_coordinator: Arc<dyn MessageCoordinator>,
@@ -314,6 +328,8 @@ impl ConnectionManager {
             connections_per_ip: DashMap::new(),
             metrics,
             message_coordinator,
+            max_connections,
+            live_connections: AtomicUsize::new(0),
             max_connections_per_ip,
             track_delivery_stats,
         }
@@ -359,6 +375,20 @@ impl ConnectionManager {
             return Err(RegisterClientError::IpLimitExceeded {
                 current,
                 limit: self.max_connections_per_ip,
+            });
+        }
+        // Global ceiling second: if it refuses, the just-taken per-IP slot is
+        // released so the two budgets stay independently consistent.
+        if let Err(current) = self.try_reserve_global_slot() {
+            self.release_ip_slot(ip);
+            warn!(
+                current,
+                max = self.max_connections,
+                "Server connection limit exceeded"
+            );
+            return Err(RegisterClientError::CapacityExceeded {
+                current,
+                limit: self.max_connections,
             });
         }
 
@@ -408,6 +438,13 @@ impl ConnectionManager {
     /// [`crate::server::EnhancedGameServer::connect_client`] wraps it for
     /// in-crate test harnesses; embedders must not use it to fabricate
     /// collisions.
+    ///
+    /// This path bypasses both admission budgets (per-IP and the server-wide
+    /// ceiling) exactly as it bypasses the drain gate, but still counts
+    /// through the shared live-connection counter (unbounded increment) so
+    /// every unregistration releases exactly one slot (issue #502 item 3:
+    /// accepted-as-is test-first shape; production admission semantics live
+    /// only on the wire registration path).
     pub async fn connect_test_client(
         &self,
         player_id: PlayerId,
@@ -437,7 +474,15 @@ impl ConnectionManager {
         };
 
         self.increment_ip_slot_unbounded(client_addr.ip());
-        self.clients.insert(player_id, connection);
+        self.increment_global_slot_unbounded();
+        // A same-id replacement is legitimate in test harnesses; the
+        // displaced entry leaves the map here without its own unregistration,
+        // so its per-IP and global slots are released to keep the counters
+        // exactly paired with live entries.
+        if let Some(displaced) = self.clients.insert(player_id, connection) {
+            self.release_ip_slot(displaced.client_addr.ip());
+            self.release_global_slot();
+        }
         self.metrics.increment_connections();
         if self.track_delivery_stats {
             self.metrics.register_connection_delivery_stats(player_id);
@@ -1099,6 +1144,7 @@ impl ConnectionManager {
         }
         self.clients.remove(player_id).map(|(_, connection)| {
             self.release_ip_slot(connection.client_addr.ip());
+            self.release_global_slot();
             self.metrics.unregister_connection_delivery_stats(player_id);
             // Every unregistration positively tears down the socket tasks:
             // without this, a connection unregistered by the activity reaper
@@ -1206,6 +1252,68 @@ impl ConnectionManager {
                 *count = count.saturating_sub(1);
             } else {
                 entry.remove();
+            }
+        }
+    }
+
+    /// Reserve one server-wide connection slot, refusing at
+    /// [`Self::max_connections`]. The compare-exchange loop makes check and
+    /// spend atomic, so concurrent registrations can neither overshoot the
+    /// ceiling nor lose an increment. Checked arithmetic keeps every step
+    /// total (the crate denies unchecked arithmetic in production paths).
+    fn try_reserve_global_slot(&self) -> Result<usize, usize> {
+        let mut current = self.live_connections.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(1) else {
+                // usize::MAX live connections: the counter is exhausted.
+                return Err(current);
+            };
+            if next > self.max_connections {
+                return Err(current);
+            }
+            match self.live_connections.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(next),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Count a test-only registration without admission checks (mirrors
+    /// [`Self::increment_ip_slot_unbounded`]): the counter must stay balanced
+    /// with the map, so every entry shape counts and every removal releases.
+    /// The returned value wraps at the theoretical usize::MAX live-connection
+    /// point; a release then refuses (loud log) rather than underflowing.
+    fn increment_global_slot_unbounded(&self) -> usize {
+        self.live_connections
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    /// Release one server-wide slot at unregistration. Paired exactly with
+    /// one successful reservation (or unbounded test increment) per entry.
+    /// The release saturates at zero instead of panicking: an underflow would
+    /// mean an unpaired release (an invariant bug), which is logged loudly —
+    /// the crate keeps panic-prone macros out of production paths.
+    fn release_global_slot(&self) {
+        let mut current = self.live_connections.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_sub(1) else {
+                tracing::error!("global connection counter underflowed; ignoring unpaired release");
+                return;
+            };
+            match self.live_connections.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
             }
         }
     }
@@ -1404,9 +1512,22 @@ mod tests {
     }
 
     fn make_manager(max_connections_per_ip: usize) -> ConnectionManager {
+        make_limited_manager(usize::MAX, max_connections_per_ip)
+    }
+
+    fn make_limited_manager(
+        max_connections: usize,
+        max_connections_per_ip: usize,
+    ) -> ConnectionManager {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
-        ConnectionManager::new(max_connections_per_ip, metrics, coordinator, false)
+        ConnectionManager::new(
+            max_connections,
+            max_connections_per_ip,
+            metrics,
+            coordinator,
+            false,
+        )
     }
 
     fn channel() -> (
@@ -1458,6 +1579,9 @@ mod tests {
                 assert_eq!(current, 1);
                 assert_eq!(limit, 1);
             }
+            RegisterClientError::CapacityExceeded { .. } => {
+                panic!("per-IP refusal must win when both caps bind at one IP")
+            }
             RegisterClientError::ServerDraining => {
                 panic!("connection manager does not own shutdown drain admission")
             }
@@ -1470,6 +1594,171 @@ mod tests {
             .register_client(tx3, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
             .await
             .expect("registrations resume after slot release");
+    }
+
+    /// Issue #502 item 2: the server-wide ceiling refuses admission no matter
+    /// how many distinct source IPs are involved (per-IP caps alone are
+    /// multiplied by IP count), and releases the slot at unregistration so
+    /// admission resumes. Also pins the slot conservation invariant: exactly
+    /// `limit` admissions are possible again after every live entry is removed.
+    #[tokio::test]
+    async fn global_connection_ceiling_refuses_across_ips_and_releases_on_remove() {
+        let manager = make_limited_manager(2, 8);
+        let addrs: Vec<SocketAddr> = ["127.0.0.1:6001", "198.51.100.1:6002", "198.51.100.2:6003"]
+            .iter()
+            .map(|raw| raw.parse().unwrap())
+            .collect();
+
+        let mut ids = Vec::new();
+        for (i, addr) in addrs.iter().take(2).enumerate() {
+            let (tx, _rx) = channel();
+            ids.push(
+                manager
+                    .register_client(tx, ConnectionCloseSignal::detached(), *addr, Uuid::new_v4())
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("registration {i} under the global ceiling must succeed: {err:?}")
+                    }),
+            );
+        }
+
+        let (tx3, _rx3) = channel();
+        match manager
+            .register_client(
+                tx3,
+                ConnectionCloseSignal::detached(),
+                addrs[2],
+                Uuid::new_v4(),
+            )
+            .await
+        {
+            Err(RegisterClientError::CapacityExceeded { current, limit }) => {
+                assert_eq!((current, limit), (2, 2));
+            }
+            other => panic!("expected CapacityExceeded, got {other:?}"),
+        }
+
+        manager.remove_client(&ids[0]);
+
+        let (tx4, _rx4) = channel();
+        let fourth_id = manager
+            .register_client(
+                tx4,
+                ConnectionCloseSignal::detached(),
+                addrs[2],
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("registration resumes after a global slot is released");
+
+        // Slot conservation: draining every entry frees the full ceiling.
+        manager.remove_client(&ids[1]);
+        manager.remove_client(&fourth_id);
+        for i in 0..2 {
+            let (tx, _rx) = channel();
+            manager
+                .register_client(
+                    tx,
+                    ConnectionCloseSignal::detached(),
+                    addrs[2],
+                    Uuid::new_v4(),
+                )
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("re-admission {i} after full drain must succeed: {err:?}")
+                });
+        }
+    }
+
+    /// When both caps bind at once, the per-IP refusal wins (the connection
+    /// manager checks the per-IP budget first), keeping the pre-existing
+    /// error precedence stable.
+    #[tokio::test]
+    async fn per_ip_refusal_wins_when_both_caps_bind() {
+        let manager = make_limited_manager(1, 1);
+        let addr: SocketAddr = "127.0.0.1:6004".parse().unwrap();
+        let (tx1, _rx1) = channel();
+        manager
+            .register_client(tx1, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("first registration succeeds");
+
+        let (tx2, _rx2) = channel();
+        let err = manager
+            .register_client(tx2, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect_err("second registration hits both caps");
+        assert!(
+            matches!(err, RegisterClientError::IpLimitExceeded { .. }),
+            "per-IP refusal must take precedence, got {err:?}"
+        );
+    }
+
+    /// The test-only registration path bypasses admission (like its per-IP
+    /// sibling) but still counts through the global counter so that
+    /// unregistration releases stay balanced: mixed live entries must not
+    /// wedge the counter above the ceiling or below zero.
+    #[tokio::test]
+    async fn test_only_registrations_count_but_bypass_the_global_ceiling() {
+        let manager = make_limited_manager(1, 8);
+        let addr: SocketAddr = "127.0.0.1:6005".parse().unwrap();
+
+        let (tx1, _rx1) = channel();
+        let production_id = manager
+            .register_client(tx1, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("production registration consumes the one slot");
+
+        let (tx2, _rx2) = channel();
+        let test_id = Uuid::new_v4();
+        manager.connect_test_client(test_id, tx2, addr).await;
+
+        manager.remove_client(&production_id);
+        manager.remove_client(&test_id);
+
+        let (tx3, _rx3) = channel();
+        manager
+            .register_client(tx3, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+            .await
+            .expect("counter must be fully released after mixed entries drain");
+    }
+
+    /// A same-id test registration replaces the prior entry; the displaced
+    /// entry's slots (per-IP AND global) are released in place so the
+    /// counters stay paired with live entries. The replacement arrives from
+    /// a different address with a per-IP ceiling of 1, so the per-IP release
+    /// is observed directly: without it, the displaced address's count would
+    /// stay at 1 and refuse further registrations from that address.
+    #[tokio::test]
+    async fn same_id_test_replacement_releases_the_displaced_slots() {
+        let manager = make_limited_manager(8, 1);
+        let displaced_addr: SocketAddr = "127.0.0.1:6006".parse().unwrap();
+        let replacement_addr: SocketAddr = "198.51.100.9:6007".parse().unwrap();
+        let reused_id = Uuid::new_v4();
+
+        let (tx1, _rx1) = channel();
+        manager
+            .connect_test_client(reused_id, tx1, displaced_addr)
+            .await;
+        let (tx2, _rx2) = channel();
+        manager
+            .connect_test_client(reused_id, tx2, replacement_addr)
+            .await;
+
+        manager.remove_client(&reused_id);
+
+        for (label, addr) in [
+            ("displaced", displaced_addr),
+            ("replacement", replacement_addr),
+        ] {
+            let (tx, _rx) = channel();
+            manager
+                .register_client(tx, ConnectionCloseSignal::detached(), addr, Uuid::new_v4())
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("the {label} address must be fully released after the stomp: {err:?}")
+                });
+        }
     }
 
     #[tokio::test]
@@ -1715,6 +2004,7 @@ mod tests {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator = Arc::new(TestCoordinator::default());
         let manager = ConnectionManager::new(
+            usize::MAX,
             4,
             metrics.clone(),
             coordinator.clone() as Arc<dyn MessageCoordinator>,

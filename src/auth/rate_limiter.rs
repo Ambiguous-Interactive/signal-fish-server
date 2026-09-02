@@ -75,6 +75,32 @@ impl InMemoryRateLimiter {
         Ok(())
     }
 
+    /// Non-mutating admission probe: would [`Self::check_rate_limit_at`]
+    /// admit `key` right now? Unlike the check-and-stamp variant this never
+    /// creates the window entry and never records a timestamp, so callers can
+    /// gate a multi-window decision on every dimension before committing any
+    /// of them (rejected requests stay free). Not a reservation: a concurrent
+    /// commit can still fill the window between probe and commit.
+    pub(crate) fn would_admit_at(&self, key: &str, limit_per_minute: u32, now: Instant) -> bool {
+        self.windows
+            .get(key)
+            .map(|timestamps| {
+                let window = self.window_duration;
+                timestamps
+                    .iter()
+                    .filter(|stamp| now.duration_since(**stamp) < window)
+                    .count()
+                    < limit_per_minute as usize
+            })
+            .unwrap_or(true)
+    }
+
+    /// Current live stamp count for one window (test observation only).
+    #[cfg(test)]
+    pub(crate) fn window_len(&self, key: &str) -> usize {
+        self.windows.get(key).map(|entry| entry.len()).unwrap_or(0)
+    }
+
     /// Spawn a background task that periodically removes stale entries from
     /// the rate-limit map so memory usage stays bounded.
     ///

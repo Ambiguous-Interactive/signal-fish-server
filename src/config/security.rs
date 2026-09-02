@@ -1,9 +1,9 @@
 //! Security and application-identification configuration types.
 
 use super::defaults::{
-    default_client_auth_mode, default_cors_origins, default_max_connections_per_ip,
-    default_max_message_size, default_max_outbound_message_size, default_max_signal_bytes,
-    default_require_auth, default_token_binding_subprotocol,
+    default_client_auth_mode, default_cors_origins, default_max_connections,
+    default_max_connections_per_ip, default_max_message_size, default_max_outbound_message_size,
+    default_max_signal_bytes, default_require_auth, default_token_binding_subprotocol,
 };
 use crate::security::token_binding::TokenBindingScheme;
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,16 @@ pub struct SecurityConfig {
     /// shutting the listener down), and startup validation rejects it.
     #[serde(default = "default_max_connections_per_ip")]
     pub max_connections_per_ip: usize,
+    /// Maximum concurrent connections server-wide.
+    ///
+    /// The per-IP cap bounds one source, but total ownership is that cap
+    /// multiplied by the number of distinct source IPs. This ceiling bounds
+    /// the whole server regardless of source spread. Must be `> 0`: a zero
+    /// cap rejects every registration with `CapacityExceeded` (there is no
+    /// "unlimited" convention; deliberate lockdown is expressed by shutting
+    /// the listener down), and startup validation rejects it.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
     /// Transport-level security configuration (TLS, mTLS, token binding scaffolding)
     #[serde(default)]
     pub transport: TransportSecurityConfig,
@@ -92,6 +102,7 @@ impl Default for SecurityConfig {
             max_outbound_message_size: default_max_outbound_message_size(),
             max_signal_bytes: default_max_signal_bytes(),
             max_connections_per_ip: default_max_connections_per_ip(),
+            max_connections: default_max_connections(),
             transport: TransportSecurityConfig::default(),
             allowed_apps: Vec::new(),
         }
@@ -246,6 +257,11 @@ pub struct AppRegistrationEntry {
     /// Optional per-minute request rate limit for this application. Must be
     /// `> 0` when set: a zero budget rejects every `Authenticate` for this
     /// app (startup validation rejects it).
+    ///
+    /// Enforced as two sliding windows: the application-wide ceiling, plus a
+    /// per-source (IP) share of half the ceiling (at least one) so a single
+    /// source cannot continuously exhaust the app's budget and lock out
+    /// legitimate handshakes (issue #502).
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
 }
