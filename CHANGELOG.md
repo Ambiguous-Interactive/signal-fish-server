@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recent samples). Session config silently-dead combinations —
   `enable_ice_pregather` without `enable_webrtc`, a static `turn:`/`turns:`
   entry without both a username and a credential, and
-  `game_topology_mappings` keys differing only by ASCII case (at most one can
+  `game_topology_mappings` keys differing only by case (at most one can
   ever match; lookups are case-sensitive) — now warn at startup.
 - Auth rate limiting for allowlist entries with an explicit
   `rate_limit_per_minute` now enforces two sliding windows: the

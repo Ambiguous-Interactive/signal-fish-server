@@ -152,9 +152,11 @@ impl SessionConfig {
             }
         }
 
-        // Mapping keys are exact-match (case-sensitive), so keys differing only
-        // by ASCII case can never both match a real game: at most one wins and
-        // the rest are dead config. Warn so the operator can drop or merge them.
+        // Mapping keys are exact-match (case-sensitive), so keys differing
+        // only by case can never both match a real game: at most one wins and
+        // the rest are dead config. Warn so the operator can drop or merge
+        // them (the grouping below uses Unicode lowercasing — an
+        // over-approximation that only widens the warning).
         let mut by_lowercase: HashMap<String, Vec<&str>> = HashMap::new();
         for key in self.game_topology_mappings.keys() {
             by_lowercase

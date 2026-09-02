@@ -167,9 +167,11 @@ summaries and its pull-request evidence comments):
 | macos-latest (20260728.0273.1) | 217 ms | 205 ms |
 | windows-latest (20260824.214.3) | 356 ms | 317 ms |
 
-Every recorded path passes the 1,000 ms budget with at least ~1.9× margin;
-the budget is confirmed rather than replaced. Record fresh baselines with
-the same command and table shape before revisiting it.
+Every recorded path passes the 1,000 ms budget (worst warm median ~1.5×
+margin on the ubuntu runner, ~2.8× windows, ~4.6× macos; even the slowest
+recorded single warm run, 787 ms, holds the budget); the budget is
+confirmed rather than replaced. Record fresh baselines with the same
+command and table shape before revisiting it.
 
 ## Markdownlint
 

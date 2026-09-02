@@ -434,7 +434,9 @@ failure — kept out of the client-fault lane so a server regression cannot
 masquerade as a client attack). An accepted upgrade whose socket handover fails
 after the 101 response (the transport died mid-handover) additionally logs a
 warning with the same request ID and counts
-`signal_fish_websocket_upgrades_failed_after_accept_total`. The server logs the
+`signal_fish_websocket_upgrades_failed_after_accept_total` (reported beside
+the outcome lanes, not part of them: the attempts/outcomes conservation sum
+is unaffected). The server logs the
 same fields with the transport peer IP and status. Behind a reverse proxy,
 `peer_ip` is normally the proxy's address; Signal Fish does not infer an
 end-client address from untrusted forwarding headers. Missing headers mean the

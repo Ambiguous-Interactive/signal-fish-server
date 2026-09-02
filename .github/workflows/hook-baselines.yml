@@ -154,8 +154,8 @@ jobs:
             "| Worktree preflight (`-Worktree`) | $coldW ms | $warmW ms | $medianW ms |",
             "| Staged (real staged change) | $coldS ms | $warmS ms | $medianS ms |",
             "",
-            "Command shape: SIGNAL_FISH_HOOK_PROFILE=1 env var, then pwsh -NoLogo",
-            "-NoProfile -File <pre-commit hook script> [-Worktree]"
+            "Command shape: SIGNAL_FISH_HOOK_PROFILE=1 env var, then",
+            "`pwsh -NoLogo -NoProfile -File <pre-commit hook script> [-Worktree]`"
           )
           # Pipeline input only (never -InputObject together with a pipeline:
           # PowerShell cannot bind both and the write silently no-ops).
@@ -167,6 +167,9 @@ jobs:
             $table | Out-File -FilePath baseline-summary.md
             & gh pr comment $Env:SUMMARY_MARKDOWN --body-file baseline-summary.md
             if ($LASTEXITCODE -ne 0) {
+              # GITHUB_STEP_SUMMARY evidence already exists; a failed comment
+              # (transient API error, rate limit) must not fail the baseline.
               Write-Host "::warning::could not post the baseline summary comment (exit $LASTEXITCODE)"
             }
           }
+          exit 0
