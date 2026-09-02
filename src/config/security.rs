@@ -277,45 +277,85 @@ pub struct AppRegistrationEntry {
 
 #[cfg(test)]
 mod tests {
+    use super::SecurityConfig;
+    use syn::visit::Visit;
+    use syn::ItemStruct;
+
     /// Structural pin for #510: every config struct in this file carries
     /// `#[serde(deny_unknown_fields)]`. The security subtree is
     /// strict-admission — an unknown key here is a typo'd security knob and
     /// must fail startup loudly instead of silently substituting that knob's
     /// default (a `tls.enable` typo must not start the server plaintext).
-    /// A security struct added without the attribute fails this scan.
+    /// A security struct added without the attribute fails this scan. The
+    /// walk descends into nested non-test modules, so a struct cannot escape
+    /// the pin by hiding inside one.
     #[test]
     fn every_security_config_struct_denies_unknown_fields() {
-        let source = include_str!("security.rs");
-        let parsed = syn::parse_file(source).expect("security.rs parses as Rust");
+        struct StructCollector {
+            structs: Vec<ItemStruct>,
+        }
+        impl<'ast> Visit<'ast> for StructCollector {
+            fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+                if item.ident == "tests" {
+                    return; // test-helper structs must not join the contract
+                }
+                syn::visit::visit_item_mod(self, item);
+            }
 
-        let mut structs_without_deny = Vec::new();
-        let mut struct_count = 0;
-        for item in &parsed.items {
-            let syn::Item::Struct(item_struct) = item else {
-                continue;
-            };
-            struct_count += 1;
-            let denies_unknown = item_struct.attrs.iter().any(|attr| {
-                let syn::Meta::List(list) = &attr.meta else {
-                    return false;
-                };
-                attr.path().is_ident("serde")
-                    && list.tokens.to_string().contains("deny_unknown_fields")
-            });
-            if !denies_unknown {
-                structs_without_deny.push(item_struct.ident.to_string());
+            fn visit_item_struct(&mut self, item: &'ast ItemStruct) {
+                self.structs.push(item.clone());
+                syn::visit::visit_item_struct(self, item);
             }
         }
 
+        let source = include_str!("security.rs");
+        let parsed = syn::parse_file(source).expect("security.rs parses as Rust");
+        let mut collector = StructCollector {
+            structs: Vec::new(),
+        };
+        collector.visit_file(&parsed);
+
         assert!(
-            struct_count >= 5,
-            "the scan must see the security structs (found {struct_count}); \
-             if the module was restructured, update this pin deliberately"
+            collector.structs.len() >= 5,
+            "the scan must see the security structs (found {}); \
+             if the module was restructured, update this pin deliberately",
+            collector.structs.len()
         );
+        let structs_without_deny: Vec<String> = collector
+            .structs
+            .iter()
+            .filter(|item_struct| {
+                !item_struct.attrs.iter().any(|attr| {
+                    let syn::Meta::List(list) = &attr.meta else {
+                        return false;
+                    };
+                    attr.path().is_ident("serde")
+                        && list.tokens.to_string().contains("deny_unknown_fields")
+                })
+            })
+            .map(|item_struct| item_struct.ident.to_string())
+            .collect();
         assert!(
             structs_without_deny.is_empty(),
             "every security config struct must carry #[serde(deny_unknown_fields)] \
              (issue #510): missing on {structs_without_deny:?}"
         );
+    }
+
+    /// `deny_unknown_fields` coexists with the deprecated serde aliases:
+    /// a raw deserialization (bypassing the loader's legacy normalization,
+    /// which renames them pre-parse) accepts the alias names alone. The
+    /// loader-intake path is pinned separately in `loader.rs`.
+    #[test]
+    fn serde_aliases_still_deserialize_under_strict_admission() {
+        let config: SecurityConfig = serde_json::from_str(
+            r#"{
+                "require_websocket_auth": true,
+                "authorized_apps": [{"app_id": "game", "app_name": "Game"}]
+            }"#,
+        )
+        .expect("deprecated aliases are known names under deny_unknown_fields");
+        assert!(config.enforce_app_id_allowlist);
+        assert_eq!(config.allowed_apps[0].app_id, "game");
     }
 }
