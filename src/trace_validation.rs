@@ -17,8 +17,12 @@
 //! queue state, so instead of evaluating guards against a provably wrong
 //! projection (cascading imprecise labels onto innocent subsequent events),
 //! it records every later observation verbatim — one precise divergence
-//! label followed by an honest raw tail, with correlation retained so
-//! physically enqueued items stay attributable.
+//! label followed by an honest raw tail — with correlation retained so
+//! physically enqueued items stay attributable. Post-divergence attribution
+//! is best-effort: a delivery abandoned without any recorded outcome leaves
+//! a stale pointer key that a reused allocation can misattribute, so
+//! raw-tail ids are informative context for an already-rejected trace,
+//! never proof.
 
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -309,7 +313,9 @@ impl DeliveryTraceRecorder {
     }
 
     /// Record the dequeue of a projected delivery and return its correlation
-    /// id. Untraced socket-internal/control traffic is intentionally ignored.
+    /// id. Untraced queue occupancy is rejected as hidden
+    /// `untraced-v2-queue-item` state; socket-internal traffic that never
+    /// enters the queue is simply never observed here.
     pub(crate) fn start_write(
         &self,
         message: &crate::protocol::ServerMessage,
@@ -653,6 +659,12 @@ mod tests {
         let delivery = recorder.begin_delivery(&message);
         assert_eq!(recorder.start_write(&message, false), None);
         recorder.record(DeliveryTraceAction::SendFast, Some(delivery), None);
+        // The overlapping label ends the projection: a tail enqueue observed
+        // at the projected capacity boundary passes through verbatim instead
+        // of stacking a second guard label onto the raw tail.
+        let tail = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let tail_delivery = recorder.begin_delivery(&tail);
+        recorder.record(DeliveryTraceAction::SendFast, Some(tail_delivery), None);
 
         let mut bytes = Vec::new();
         recorder
@@ -661,6 +673,17 @@ mod tests {
         let output = String::from_utf8(bytes).expect("UTF-8 trace");
         assert!(output.contains("overlapping-enqueue-dequeue"));
         assert!(!output.contains("WriterStart"));
+        assert_eq!(
+            output.matches("\"action\":\"Unsupported\"").count(),
+            1,
+            "exactly one divergence label; the tail must pass through unprojected: {output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "\"action\":\"SendFast\",\"delivery_id\":{tail_delivery}}}"
+            )),
+            "the tail outcome must be recorded verbatim: {output}"
+        );
     }
 
     #[test]
@@ -835,9 +858,8 @@ mod tests {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        assert_eq!(
-            state.recorded_queue.front().copied(),
-            Some(first_delivery),
+        assert!(
+            !state.recorded_queue.contains(&late_delivery),
             "the diverged projection must not claim the late enqueue's occupancy"
         );
         let unsupported = state
@@ -881,18 +903,44 @@ mod tests {
             recorder.record(DeliveryTraceAction::LifecycleClose, None, None);
             recorder.queue_closed();
             recorder.record(action, Some(delivery), None);
+            // The race label ends the projection: a tail enqueue passes
+            // through verbatim instead of stacking a second guard label.
+            let tail = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let tail_delivery = recorder.begin_delivery(&tail);
+            recorder.record(DeliveryTraceAction::SendFast, Some(tail_delivery), None);
 
             let state = recorder
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let last = state.events.last().expect("race marker");
-            assert_eq!(last.action, DeliveryTraceAction::Unsupported);
-            assert_eq!(last.detail, Some("queue-close-observation-order-race"));
-            // The race label ends the projection and retains correlation, so
-            // the diverged raw tail can still attribute the attempt's write
-            // instead of mislabeling it untraced.
+            let race = state
+                .events
+                .iter()
+                .find(|event| event.action == DeliveryTraceAction::Unsupported)
+                .expect("race marker");
+            assert_eq!(race.detail, Some("queue-close-observation-order-race"));
+            // The race label retains correlation, so the diverged raw tail
+            // can still attribute the attempt's write instead of mislabeling
+            // it untraced.
             assert!(state.attempt_messages.contains_key(&delivery));
+            let mut bytes = Vec::new();
+            drop(state);
+            recorder
+                .write_jsonl_to(&mut bytes)
+                .expect("serialize trace");
+            let output = String::from_utf8(bytes).expect("UTF-8 trace");
+            assert_eq!(
+                output.matches("\"action\":\"Unsupported\"").count(),
+                1,
+                "{action:?}: exactly one divergence label; the tail must pass through \
+                 unprojected: {output}"
+            );
+            assert!(
+                output.contains(&format!(
+                    "\"action\":\"SendFast\",\"delivery_id\":{tail_delivery}}}"
+                )),
+                "{action:?}: the tail outcome must be recorded verbatim: {output}"
+            );
         }
     }
 
@@ -914,16 +962,42 @@ mod tests {
                 recorder.record(DeliveryTraceAction::SendFull, Some(delivery), None);
             }
             recorder.record(action, Some(delivery), None);
+            // The race label ends the projection: a tail enqueue passes
+            // through verbatim instead of stacking a second guard label.
+            let tail = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+            let tail_delivery = recorder.begin_delivery(&tail);
+            recorder.record(DeliveryTraceAction::SendFast, Some(tail_delivery), None);
 
             let state = recorder
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let last = state.events.last().expect("race marker");
-            assert_eq!(last.action, DeliveryTraceAction::Unsupported);
-            assert_eq!(last.detail, Some("queue-close-observation-order-race"));
+            let race = state
+                .events
+                .iter()
+                .find(|event| event.action == DeliveryTraceAction::Unsupported)
+                .expect("race marker");
+            assert_eq!(race.detail, Some("queue-close-observation-order-race"));
             // Race labels retain correlation for the diverged raw tail.
             assert!(state.attempt_messages.contains_key(&delivery));
+            let mut bytes = Vec::new();
+            drop(state);
+            recorder
+                .write_jsonl_to(&mut bytes)
+                .expect("serialize trace");
+            let output = String::from_utf8(bytes).expect("UTF-8 trace");
+            assert_eq!(
+                output.matches("\"action\":\"Unsupported\"").count(),
+                1,
+                "{action:?}: exactly one divergence label; the tail must pass through \
+                 unprojected: {output}"
+            );
+            assert!(
+                output.contains(&format!(
+                    "\"action\":\"SendFast\",\"delivery_id\":{tail_delivery}}}"
+                )),
+                "{action:?}: the tail outcome must be recorded verbatim: {output}"
+            );
         }
     }
 
@@ -1010,6 +1084,12 @@ mod tests {
         let recorder = DeliveryTraceRecorder::new("hidden", 2).expect("valid recorder");
         let untraced = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
         assert_eq!(recorder.start_write(&untraced, false), None);
+        // The untraced label ends the projection: a tail Full observed below
+        // the projected boundary passes through verbatim instead of stacking
+        // a second guard label onto the raw tail.
+        let tail = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let tail_delivery = recorder.begin_delivery(&tail);
+        recorder.record(DeliveryTraceAction::SendFull, Some(tail_delivery), None);
 
         let mut bytes = Vec::new();
         recorder
@@ -1017,6 +1097,57 @@ mod tests {
             .expect("serialize trace");
         let output = String::from_utf8(bytes).expect("UTF-8 trace");
         assert!(output.contains("untraced-v2-queue-item"));
+        assert_eq!(
+            output.matches("\"action\":\"Unsupported\"").count(),
+            1,
+            "exactly one divergence label; the tail must pass through unprojected: {output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "\"action\":\"SendFull\",\"delivery_id\":{tail_delivery}}}"
+            )),
+            "the tail outcome must be recorded verbatim: {output}"
+        );
+    }
+
+    #[test]
+    fn recorder_ends_projection_at_the_fifo_divergence_label() {
+        // Writing a message that is not the projected queue head diverges the
+        // record order from the physical FIFO order. The projection ends at
+        // the label, and a tail enqueue that would trip the projected
+        // capacity guard passes through verbatim instead of stacking a
+        // second label.
+        let recorder = DeliveryTraceRecorder::new("fifo-divergence", 2).expect("valid recorder");
+        let first = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let first_delivery = recorder.begin_delivery(&first);
+        recorder.record(DeliveryTraceAction::SendFast, Some(first_delivery), None);
+        let second = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let second_delivery = recorder.begin_delivery(&second);
+        recorder.record(DeliveryTraceAction::SendFast, Some(second_delivery), None);
+
+        assert_eq!(recorder.start_write(&second, false), None);
+
+        let tail = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let tail_delivery = recorder.begin_delivery(&tail);
+        recorder.record(DeliveryTraceAction::SendFast, Some(tail_delivery), None);
+
+        let mut bytes = Vec::new();
+        recorder
+            .write_jsonl_to(&mut bytes)
+            .expect("serialize trace");
+        let output = String::from_utf8(bytes).expect("UTF-8 trace");
+        assert!(output.contains("enqueue-observation-order-diverged-from-fifo"));
+        assert_eq!(
+            output.matches("\"action\":\"Unsupported\"").count(),
+            1,
+            "exactly one divergence label; the tail must pass through unprojected: {output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "\"action\":\"SendFast\",\"delivery_id\":{tail_delivery}}}"
+            )),
+            "the tail outcome must be recorded verbatim: {output}"
+        );
     }
 
     #[test]

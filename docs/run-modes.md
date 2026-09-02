@@ -42,9 +42,10 @@ Per-feature JSON snippets (with env equivalents and "when to use") live in the
 ### Dev (relay v2, open app IDs)
 
 The fastest way to run the server. The compiled defaults fail closed:
-app-ID allowlisting is enabled with an empty allowlist, so a bare
-`cargo run` refuses to start until apps are configured. The example config
-disables app-ID allowlisting and file logging for local use:
+metrics authentication is enabled with no token, so a bare `cargo run`
+refuses to start. The example config disables metrics auth and app-ID
+allowlisting for local use (file logging stays on; disable it with
+`logging.enable_file_logging=false` if unwanted):
 
 ```bash
 cp config.example.json config.json

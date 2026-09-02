@@ -306,8 +306,8 @@ fn validate_relay_labels(relay: &RelayTypeConfig) -> anyhow::Result<()> {
 
     validate_label("default_relay_type", &relay.default_relay_type)?;
     for (game, label) in &relay.game_relay_mappings {
-        // Match app-ID admission: the key is never echoed into an error, so a
-        // control-bearing game name cannot inject into startup diagnostics.
+        // Match app-ID admission: the log-safety check runs first and never
+        // echoes the key, so the error below cannot carry an injection payload.
         if !crate::auth::app_id_is_log_safe(game) {
             anyhow::bail!(
                 "relay.game_relay_mappings contains a game key with control characters or \
@@ -456,6 +456,7 @@ pub(crate) fn validate_constructor_inputs(
     turn: &super::TurnConfig,
     transport: &super::TransportSecurityConfig,
     allowed_apps: &[super::AppRegistrationEntry],
+    relay_types: &RelayTypeConfig,
     metrics: &super::MetricsConfig,
 ) -> anyhow::Result<()> {
     validate_runtime_inputs(
@@ -468,6 +469,7 @@ pub(crate) fn validate_constructor_inputs(
         server.room_code_prefix.as_deref(),
         false,
         transport.tls.enabled && cfg!(feature = "tls"),
+        relay_types,
         metrics,
     )
 }
@@ -483,6 +485,7 @@ fn validate_runtime_inputs(
     room_code_prefix: Option<&str>,
     reject_zero_rate_budgets: bool,
     built_in_tls_active: bool,
+    relay_types: &RelayTypeConfig,
     metrics: &super::MetricsConfig,
 ) -> anyhow::Result<()> {
     server.validate(protocol, reject_zero_rate_budgets)?;
@@ -492,6 +495,10 @@ fn validate_runtime_inputs(
     session.validate()?;
     turn.validate()?;
     validate_metrics_cache_policy(metrics)?;
+    // Relay labels are echoed verbatim into room/peer protocol metadata; the
+    // same log-safe bounds apply on both the loaded-config and constructor
+    // paths so an embedder cannot bypass them.
+    validate_relay_labels(relay_types)?;
     Ok(())
 }
 
@@ -580,14 +587,14 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
 
         if let Some(token) = &config.security.metrics_auth_token {
             // The endpoint compares the raw configured string, while presence
-            // and strength below are judged on the trimmed token; a padded
-            // token would be admitted and then strand every metrics request
-            // behind 401, so reject the mismatch at admission instead.
+            // and strength below are judged on the trimmed token; Bearer
+            // header parsing strips padding, so a padded token would be
+            // admitted and then strand every metrics request behind 401.
             if token.trim() != token {
                 anyhow::bail!(
                     "security.metrics_auth_token must not carry leading or trailing whitespace: \
-                     no Bearer header can ever match it, so every metrics request would be \
-                     rejected"
+                     the endpoint compares the raw configured string, which Bearer clients \
+                     cannot reliably present, so every metrics request would be rejected"
                 );
             }
             if token.len() < 16 {
@@ -721,14 +728,9 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         config.server.room_code_prefix.as_deref(),
         true,
         built_in_tls_active(config, cfg!(feature = "tls")),
+        &config.relay_types,
         &config.metrics,
     )?;
-
-    // Legacy relay labels are echoed verbatim into room/peer protocol
-    // metadata; bound them by the app-ID log-safe grammar so an absurd label
-    // cannot inflate every room-state payload past the outbound frame cap and
-    // disconnect recipients.
-    validate_relay_labels(&config.relay_types)?;
     validate_logging_policy(&config.logging)
 }
 
@@ -1092,8 +1094,8 @@ mod tests {
             Some("  abcdef0123456789abcdef0123456789  ".to_string());
 
         let error = validate_config_security(&config).expect_err(
-            "no Bearer header can ever match a padded token, so admission would strand every \
-             metrics request behind 401",
+            "Bearer clients cannot reliably present a padded token, so admission would strand \
+             every metrics request behind 401",
         );
         assert!(
             error

@@ -54,6 +54,7 @@ mod constructor_validation_tests {
         turn: TurnConfig,
         transport: TransportSecurityConfig,
         allowed_apps: Vec<AppRegistrationEntry>,
+        relay_types: RelayTypeConfig,
     }
 
     struct InvalidConstructorCase {
@@ -241,6 +242,19 @@ mod constructor_validation_tests {
                 },
                 expected: "allowed_apps[0].app_id contains control characters or exceeds",
             },
+            InvalidConstructorCase {
+                name: "control-character relay label",
+                mutate: |inputs| inputs.relay_types.default_relay_type = "matchbox\n".to_string(),
+                expected: "relay.default_relay_type contains control characters",
+            },
+            InvalidConstructorCase {
+                name: "oversized relay label",
+                mutate: |inputs| {
+                    inputs.relay_types.default_relay_type =
+                        "a".repeat(crate::auth::MAX_APP_ID_LENGTH + 1);
+                },
+                expected: "relay.default_relay_type contains control characters or exceeds",
+            },
         ];
 
         for case in cases {
@@ -249,7 +263,7 @@ mod constructor_validation_tests {
             let result = EnhancedGameServer::new(
                 inputs.server,
                 inputs.protocol,
-                RelayTypeConfig::default(),
+                inputs.relay_types,
                 inputs.session,
                 inputs.turn,
                 DatabaseConfig::InMemory,
@@ -604,6 +618,7 @@ impl EnhancedGameServer {
             &turn_config,
             &transport_security,
             &allowed_apps,
+            &relay_type_config,
             &metrics_config,
         )?;
 

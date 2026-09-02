@@ -77,11 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config admission no longer accepts credentials and file paths it cannot
   honor (issue #396): a `security.metrics_auth_token` with leading or
   trailing whitespace is rejected at startup instead of being admitted (the
-  endpoint compares the raw string, so no Bearer header could ever match) and
-  a `security.transport.tls` path (`certificate_path`, `private_key_path`,
-  `client_ca_cert_path`) with surrounding whitespace is rejected instead of
-  passing the existence check on its trimmed view while the loader reads the
-  configured path verbatim.
+  endpoint compares the raw string, which Bearer clients cannot reliably
+  present) and a `security.transport.tls` path (`certificate_path`,
+  `private_key_path`, `client_ca_cert_path`) with surrounding whitespace is
+  rejected instead of passing the existence check on its trimmed view while
+  the loader reads the configured path verbatim.
 - Config admission rejects two more silently-dead security settings
   (issue #396): `security.transport.tls.client_ca_cert_path` configured while
   `client_auth` is `none` (the CA bundle would never be loaded, falsely
