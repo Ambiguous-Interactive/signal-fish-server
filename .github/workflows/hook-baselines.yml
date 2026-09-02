@@ -44,6 +44,9 @@ jobs:
     name: Pre-commit Baselines (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -127,6 +130,9 @@ jobs:
       - name: Report baseline summary
         if: always()
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY_MARKDOWN: ${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}
         run: |
           $imageVersion = $Env:ImageVersion
           if (-not $imageVersion) { $imageVersion = 'unknown' }
@@ -140,9 +146,7 @@ jobs:
           $warmW = ($partsW | Select-Object -Skip 1) -join ", "
           $coldS = $partsS[0]
           $warmS = ($partsS | Select-Object -Skip 1) -join ", "
-          # Pipeline input only (never -InputObject together with a pipeline:
-          # PowerShell cannot bind both and the write silently no-ops).
-          @(
+          $table = @(
             "### Pre-commit hook baselines — $Env:MATRIX_OS (runner image $imageVersion)",
             "",
             "| Path | Run 1 (cold) | Runs 2-$Env:REPETITIONS (warm) | Warm median |",
@@ -151,5 +155,18 @@ jobs:
             "| Staged (real staged change) | $coldS ms | $warmS ms | $medianS ms |",
             "",
             "Command shape: SIGNAL_FISH_HOOK_PROFILE=1 env var, then pwsh -NoLogo",
-            "-NoProfile -NonInteractive -File <pre-commit hook script> [-Worktree]"
-          ) | Out-File -Append -FilePath $Env:GITHUB_STEP_SUMMARY
+            "-NoProfile -File <pre-commit hook script> [-Worktree]"
+          )
+          # Pipeline input only (never -InputObject together with a pipeline:
+          # PowerShell cannot bind both and the write silently no-ops).
+          $table | Out-File -Append -FilePath $Env:GITHUB_STEP_SUMMARY
+          # On pull requests, publish the same table as a PR comment so the
+          # recording survives outside the run UI (issue #318's evidence
+          # trail). Best-effort: a failed comment must not fail the baseline.
+          if ($Env:SUMMARY_MARKDOWN -ne "") {
+            $table | Out-File -FilePath baseline-summary.md
+            & gh pr comment $Env:SUMMARY_MARKDOWN --body-file baseline-summary.md
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::could not post the baseline summary comment (exit $LASTEXITCODE)"
+            }
+          }
