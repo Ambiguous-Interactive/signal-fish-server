@@ -12,7 +12,13 @@
 //! The same fail-closed rule applies when a producer outcome overlaps the
 //! finalizer's `QueueClose` observation, or when a `SendFull` outcome is
 //! observed outside the projected full boundary (the filling enqueue's success
-//! unprojected, or a later dequeue projected first).
+//! unprojected, or a later dequeue projected first). Any divergence label
+//! also ends the projection: the recorder can no longer know the physical
+//! queue state, so instead of evaluating guards against a provably wrong
+//! projection (cascading imprecise labels onto innocent subsequent events),
+//! it records every later observation verbatim — one precise divergence
+//! label followed by an honest raw tail, with correlation retained so
+//! physically enqueued items stay attributable.
 
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -92,6 +98,7 @@ struct RecorderState {
     queue_closed: bool,
     projection_closed: bool,
     projection_stopped: bool,
+    projection_diverged: bool,
 }
 
 static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
@@ -184,6 +191,13 @@ impl DeliveryTraceRecorder {
         if state.projection_closed && action == DeliveryTraceAction::LifecycleClose {
             return;
         }
+        // After the first divergence label the projection is provably wrong,
+        // so guard decisions would only cascade imprecise labels onto
+        // innocent events. Record the raw observation verbatim instead.
+        if state.projection_diverged {
+            push_event(&mut state, action, delivery_id, detail);
+            return;
+        }
         // The receiver closes the physical channel before the socket task can
         // record QueueClose. Concurrent producers can therefore observe either
         // side of that boundary in the opposite order from this mutex's event
@@ -210,9 +224,9 @@ impl DeliveryTraceRecorder {
                 delivery_id,
                 Some("queue-close-observation-order-race"),
             );
-            if let Some(delivery_id) = delivery_id {
-                remove_attempt(&mut state, delivery_id);
-            }
+            // Retain correlation: the raced attempt's item may still be
+            // physically written, and the diverged raw tail attributes it.
+            state.projection_diverged = true;
             return;
         }
         // Tokio frees channel capacity in the receiver poll before the socket
@@ -233,9 +247,9 @@ impl DeliveryTraceRecorder {
                 delivery_id,
                 Some("enqueue-completed-before-dequeue-observed"),
             );
-            if let Some(delivery_id) = delivery_id {
-                remove_attempt(&mut state, delivery_id);
-            }
+            // The item is physically in the queue; retain its correlation so
+            // the diverged raw tail keeps its write attributed.
+            state.projection_diverged = true;
             return;
         }
         // The inverse enqueue overlap: another producer's Full observation (or
@@ -254,9 +268,10 @@ impl DeliveryTraceRecorder {
                 delivery_id,
                 Some("full-observation-order-race"),
             );
-            if let Some(delivery_id) = delivery_id {
-                remove_attempt(&mut state, delivery_id);
-            }
+            // The parked producer retries with the same delivery id; retaining
+            // correlation keeps that retry's write attributed on the diverged
+            // raw tail instead of reading as untraced occupancy.
+            state.projection_diverged = true;
             return;
         }
         push_event(&mut state, action, delivery_id, detail);
@@ -305,6 +320,36 @@ impl DeliveryTraceRecorder {
         if state.projection_stopped {
             return None;
         }
+        if state.projection_diverged {
+            // Raw-log tail: attribute the physical write by message identity
+            // when the correlation survives, but evaluate no guards and
+            // mutate no queue-membership state.
+            let delivery_id = state
+                .message_attempts
+                .get_mut(&key)
+                .and_then(VecDeque::pop_front);
+            if let Some(delivery_id) = delivery_id {
+                if state
+                    .message_attempts
+                    .get(&key)
+                    .is_some_and(VecDeque::is_empty)
+                {
+                    state.message_attempts.remove(&key);
+                }
+                state.attempt_messages.remove(&delivery_id);
+            }
+            push_event(
+                &mut state,
+                if close_flush {
+                    DeliveryTraceAction::CloseFlushStart
+                } else {
+                    DeliveryTraceAction::WriterStart
+                },
+                delivery_id,
+                None,
+            );
+            return delivery_id;
+        }
         let Some(delivery_id) = state
             .message_attempts
             .get_mut(&key)
@@ -316,6 +361,9 @@ impl DeliveryTraceRecorder {
                 None,
                 Some("untraced-v2-queue-item"),
             );
+            // A physical queue item the projection never knew: subsequent
+            // FIFO and fullness guards would misfire against it.
+            state.projection_diverged = true;
             return None;
         };
         if state
@@ -337,6 +385,9 @@ impl DeliveryTraceRecorder {
                 Some(delivery_id),
                 Some("overlapping-enqueue-dequeue"),
             );
+            // The item's projected occupancy is now wrong in an unknown
+            // direction; stop projecting instead of cascading.
+            state.projection_diverged = true;
             return None;
         }
         if state.recorded_queue.front().copied() != Some(delivery_id) {
@@ -346,6 +397,7 @@ impl DeliveryTraceRecorder {
                 Some(delivery_id),
                 Some("enqueue-observation-order-diverged-from-fifo"),
             );
+            state.projection_diverged = true;
             return None;
         }
         state.recorded_queue.pop_front();
@@ -384,6 +436,19 @@ impl DeliveryTraceRecorder {
         if state.projection_stopped {
             return;
         }
+        if state.projection_diverged {
+            push_event(
+                &mut state,
+                if close_flush {
+                    DeliveryTraceAction::CloseFlushDrain
+                } else {
+                    DeliveryTraceAction::WriterDrain
+                },
+                Some(delivery_id),
+                None,
+            );
+            return;
+        }
         if state.in_flight_write != Some((delivery_id, close_flush)) {
             push_event(
                 &mut state,
@@ -409,6 +474,10 @@ impl DeliveryTraceRecorder {
     pub(crate) fn queue_closed(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.projection_stopped {
+            return;
+        }
+        if state.projection_diverged {
+            push_event(&mut state, DeliveryTraceAction::QueueClose, None, None);
             return;
         }
         if !state.close_requested {
@@ -674,6 +743,120 @@ mod tests {
     }
 
     #[test]
+    fn divergence_label_ends_projection_instead_of_cascading_ghost_labels() {
+        // The parked producer's retry after a full-observation-order-race:
+        // stripping the raced attempt's correlation used to let the verbatim
+        // ParkedEnqueue push an uncorrelated ghost into the projected queue,
+        // so the writer's dequeue of it was mislabeled untraced and the next
+        // innocent write cascaded a FIFO-divergence label. One precise label
+        // plus a verbatim attributed tail is the diagnostic contract.
+        let recorder = DeliveryTraceRecorder::new("diverged-full-race", 1).expect("valid recorder");
+        let first = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let filling = recorder.begin_delivery(&first);
+        recorder.record(DeliveryTraceAction::SendFast, Some(filling), None);
+        assert_eq!(recorder.start_write(&first, false), Some(filling));
+        recorder.finish_write(filling, false);
+
+        let parked = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let parked_delivery = recorder.begin_delivery(&parked);
+        recorder.record(DeliveryTraceAction::SendFull, Some(parked_delivery), None);
+        recorder.record(
+            DeliveryTraceAction::ParkedEnqueue,
+            Some(parked_delivery),
+            None,
+        );
+        assert_eq!(recorder.start_write(&parked, false), Some(parked_delivery));
+        recorder.finish_write(parked_delivery, false);
+
+        let third = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let third_delivery = recorder.begin_delivery(&third);
+        recorder.record(DeliveryTraceAction::SendFast, Some(third_delivery), None);
+        assert_eq!(recorder.start_write(&third, false), Some(third_delivery));
+        recorder.finish_write(third_delivery, false);
+
+        let mut bytes = Vec::new();
+        recorder
+            .write_jsonl_to(&mut bytes)
+            .expect("serialize trace");
+        let output = String::from_utf8(bytes).expect("UTF-8 trace");
+        assert!(
+            output.contains("full-observation-order-race"),
+            "the race must keep its precise label: {output}"
+        );
+        assert_eq!(
+            output.matches("\"action\":\"Unsupported\"").count(),
+            1,
+            "exactly one divergence label; no cascading imprecise labels: {output}"
+        );
+        assert_eq!(
+            output.matches("\"action\":\"ParkedEnqueue\"").count(),
+            1,
+            "the parked retry stays visible verbatim: {output}"
+        );
+        for ghost_detail in [
+            "untraced-v2-queue-item",
+            "enqueue-observation-order-diverged-from-fifo",
+            "enqueue-completed-before-dequeue-observed",
+        ] {
+            assert!(
+                !output.contains(ghost_detail),
+                "{ghost_detail} must not cascade onto the post-divergence tail: {output}"
+            );
+        }
+        assert_eq!(
+            output.matches("\"action\":\"WriterStart\"").count(),
+            3,
+            "every physical write stays attributed after divergence: {output}"
+        );
+    }
+
+    #[test]
+    fn late_enqueue_survives_divergence_with_correlation_intact() {
+        // The enqueue-completed-before-dequeue-observed window: stripping the
+        // physically-enqueued item's correlation used to make its writer
+        // dequeue read as untraced hidden occupancy. Retaining correlation
+        // keeps the write attributed on the diverged raw tail.
+        let recorder =
+            DeliveryTraceRecorder::new("diverged-late-enqueue", 1).expect("valid recorder");
+        let first = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let first_delivery = recorder.begin_delivery(&first);
+        recorder.record(DeliveryTraceAction::SendFast, Some(first_delivery), None);
+
+        let late = std::sync::Arc::new(crate::protocol::ServerMessage::Pong);
+        let late_delivery = recorder.begin_delivery(&late);
+        recorder.record(DeliveryTraceAction::SendFast, Some(late_delivery), None);
+
+        assert_eq!(recorder.start_write(&first, false), Some(first_delivery));
+        recorder.finish_write(first_delivery, false);
+        assert_eq!(recorder.start_write(&late, false), Some(late_delivery));
+        recorder.finish_write(late_delivery, false);
+
+        let state = recorder
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            state.recorded_queue.front().copied(),
+            Some(first_delivery),
+            "the diverged projection must not claim the late enqueue's occupancy"
+        );
+        let unsupported = state
+            .events
+            .iter()
+            .filter(|event| event.action == DeliveryTraceAction::Unsupported)
+            .count();
+        assert_eq!(unsupported, 1, "exactly one divergence label");
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|event| event.action == DeliveryTraceAction::WriterStart
+                    && event.delivery_id == Some(late_delivery)),
+            "the late enqueue's physical write must stay attributed"
+        );
+    }
+
+    #[test]
     fn recorder_rejects_open_queue_outcomes_observed_after_queue_close() {
         for action in [
             DeliveryTraceAction::SendFast,
@@ -706,7 +889,10 @@ mod tests {
             let last = state.events.last().expect("race marker");
             assert_eq!(last.action, DeliveryTraceAction::Unsupported);
             assert_eq!(last.detail, Some("queue-close-observation-order-race"));
-            assert!(!state.attempt_messages.contains_key(&delivery));
+            // The race label ends the projection and retains correlation, so
+            // the diverged raw tail can still attribute the attempt's write
+            // instead of mislabeling it untraced.
+            assert!(state.attempt_messages.contains_key(&delivery));
         }
     }
 
@@ -736,7 +922,8 @@ mod tests {
             let last = state.events.last().expect("race marker");
             assert_eq!(last.action, DeliveryTraceAction::Unsupported);
             assert_eq!(last.detail, Some("queue-close-observation-order-race"));
-            assert!(!state.attempt_messages.contains_key(&delivery));
+            // Race labels retain correlation for the diverged raw tail.
+            assert!(state.attempt_messages.contains_key(&delivery));
         }
     }
 
