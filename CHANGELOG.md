@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- WebSocket upgrade outcomes distinguish server faults from client faults: a
+  refused negotiation whose HTTP response is a 5xx now lands in the new
+  `rejected_server_fault` outcome lane (response header
+  `x-signal-fish-upgrade-outcome: rejected_server_fault`, snapshot field
+  `rejected_server_fault`, Prometheus outcome label) instead of the
+  client-fault `rejected_token_binding_negotiation` lane, so a server-side
+  regression cannot inflate the client-attack signal that shapes per-peer
+  rejection windows. Accepted upgrades whose socket handover fails after the
+  101 response now log a warning with the request ID and count the new
+  `signal_fish_websocket_upgrades_failed_after_accept_total` counter
+  (snapshot field `failed_after_accept`, excluded from the attempts
+  conservation sum) instead of being unobservable (issue #396).
 - `security.max_connections` (default `10000`): a server-wide concurrent-connection
   ceiling refusing registration with the new `RegisterClientError::CapacityExceeded`
   and the same `TOO_MANY_CONNECTIONS` wire error as the per-IP cap. The per-IP cap
@@ -19,6 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Config admission no longer silently rewrites contradictory policy
+  (issue #396): `logging.rotation` values other than the documented
+  `daily`/`hourly`/`never` (case-insensitive) are rejected at startup instead
+  of silently falling back to daily rotation, and
+  `metrics.dashboard_cache_ttl_secs` below
+  `metrics.dashboard_cache_refresh_interval_secs` is rejected instead of
+  being silently raised to the refresh interval (inverting the operator's
+  freshness policy). A dashboard history window wider than the bounded
+  720-sample capacity now warns at startup (it always kept only the most
+  recent samples). Session config silently-dead combinations —
+  `enable_ice_pregather` without `enable_webrtc`, a static `turn:`/`turns:`
+  entry without both a username and a credential, and
+  `game_topology_mappings` keys differing only by case (at most one can
+  ever match; lookups are case-sensitive) — now warn at startup.
 - Auth rate limiting for allowlist entries with an explicit
   `rate_limit_per_minute` now enforces two sliding windows: the
   application-wide ceiling and a per-source (IP) share of half that budget

@@ -1456,7 +1456,10 @@ impl EnhancedGameServer {
     /// Metrics: counts one `ice_pregather_emitted` per **non-empty** list (an
     /// eligible joiner with nothing configured emits no field and is not
     /// counted) and adds the minted TURN credentials to the
-    /// `turn_credentials_issued` total-issuance counter.
+    /// `turn_credentials_issued` total-issuance counter. Counting happens when
+    /// the list is composed into the baseline, before that baseline's delivery
+    /// outcome is known: a baseline later rolled back as undeliverable remains
+    /// counted here (the credential mints are real and discarded with it).
     pub(crate) fn pregather_ice_servers(
         &self,
         room: &Room,

@@ -129,7 +129,8 @@ impl DashboardHistoryEntry {
     }
 }
 
-const DASHBOARD_CACHE_HISTORY_MAX_CAPACITY: usize = 720;
+const DASHBOARD_CACHE_HISTORY_MAX_CAPACITY: usize =
+    crate::config::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES;
 
 impl DashboardMetricsCache {
     pub(super) fn new(

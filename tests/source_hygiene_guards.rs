@@ -98,6 +98,34 @@ fn integration_tests_do_not_hardcode_ws_endpoints() {
     );
 }
 
+/// The accepted-upgrade lane must stay wired to the failed-handover callback:
+/// `on_upgrade` without `on_failed_upgrade` leaves an accepted upgrade that
+/// never became a socket completely unobservable (no log, no
+/// `failed_after_accept` counter). The handover failure itself has no
+/// public-API reproduction (hyper fails the `OnUpgrade` future only when the
+/// real transport dies mid-handover), so the wiring is pinned at the source
+/// level. If handler.rs ever gains a second upgrade site, teach this guard
+/// about the new shape instead of weakening it.
+#[test]
+fn websocket_upgrade_chains_the_failed_handover_callback() {
+    let path = repo_root().join("src/websocket/handler.rs");
+    let source = read_file(&path);
+    let failed_hook = source.find(".on_failed_upgrade(").expect(
+        "handler.rs must chain .on_failed_upgrade onto the accepted upgrade: an \
+                 accepted upgrade whose socket handover fails after the 101 response \
+                 would otherwise be unobservable",
+    );
+    let upgrade_hook = source
+        .find(".on_upgrade(")
+        .expect("handler.rs must call .on_upgrade");
+    assert!(
+        failed_hook < upgrade_hook,
+        ".on_upgrade must not execute before the .on_failed_upgrade builder is chained in \
+         handler.rs: the callback only survives if on_failed_upgrade is applied first and \
+         on_upgrade consumes the upgrade last"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Guard 2 — in-process Axum servers must use the scoped fixture
 // ---------------------------------------------------------------------------

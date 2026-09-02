@@ -4694,6 +4694,20 @@ fn desired_topology_prefers_per_game_mapping_over_default() {
     assert_eq!(desired_topology_for("unmapped-game", &cfg), Topology::Mesh);
 }
 
+/// Pins the exact-match (case-sensitive) mapping lookup: a key differing only
+/// by ASCII case must NOT match the game name. A future "friendly"
+/// case-insensitive lookup would silently change which games receive
+/// peer-to-peer upgrades.
+#[test]
+fn topology_mapping_lookup_is_case_sensitive() {
+    let mut cfg = pregather_session_config();
+    cfg.game_topology_mappings
+        .insert("FastFPS".to_string(), Topology::Host);
+    assert_eq!(desired_topology_for("fastfps", &cfg), Topology::Mesh);
+    assert_eq!(desired_topology_for("FASTFPS", &cfg), Topology::Mesh);
+    assert_eq!(desired_topology_for("FastFPS", &cfg), Topology::Host);
+}
+
 #[test]
 fn ice_pregather_eligibility_flips_every_conjunct_independently() {
     let cfg = pregather_session_config();

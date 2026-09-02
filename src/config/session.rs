@@ -124,6 +124,60 @@ impl SessionConfig {
             }
         }
 
+        if self.enable_ice_pregather && !self.enable_webrtc {
+            tracing::warn!(
+                "session.enable_ice_pregather is true but session.enable_webrtc is false; \
+                 the pre-gather gate requires the WebRTC transport, so no RoomJoined/\
+                 Reconnected payload will ever carry an ICE list (dead config)"
+            );
+        }
+
+        // A static `turn:`/`turns:` entry without credentials is legal config
+        // (long-term-credential servers reject the anonymous handshake), but
+        // typical coturn deployments will always reject it, so warn rather than
+        // let clients discover the dead entry at gather time. The dynamic
+        // `[turn]`-derived entry enforces its own secret at startup.
+        for (index, server) in self.ice_servers.iter().enumerate() {
+            let is_turn = server
+                .urls
+                .iter()
+                .any(|url| ice_url::check_url_scheme(url, ice_url::TURN_SCHEMES).is_ok());
+            if is_turn && (server.username.is_none() || server.credential.is_none()) {
+                tracing::warn!(
+                    server_index = index,
+                    "session.ice_servers[{index}] carries a turn:/turns: URL without both a \
+                     username and a credential; most TURN servers reject the resulting \
+                     anonymous long-term-credential handshake"
+                );
+            }
+        }
+
+        // Mapping keys are exact-match (case-sensitive), so keys differing
+        // only by case can never both match a real game: at most one wins and
+        // the rest are dead config. Warn so the operator can drop or merge
+        // them (the grouping below uses Unicode lowercasing — an
+        // over-approximation that only widens the warning).
+        let mut by_lowercase: HashMap<String, Vec<&str>> = HashMap::new();
+        for key in self.game_topology_mappings.keys() {
+            by_lowercase
+                .entry(key.to_lowercase())
+                .or_default()
+                .push(key.as_str());
+        }
+        let mut colliding: Vec<Vec<&str>> = by_lowercase
+            .into_values()
+            .filter(|keys| keys.len() > 1)
+            .collect();
+        colliding.sort_unstable();
+        if !colliding.is_empty() {
+            tracing::warn!(
+                ?colliding,
+                "session.game_topology_mappings contains keys differing only by case; \
+                 lookups are case-sensitive, so at most one of each collision group \
+                 can ever match a game (the others are dead config)"
+            );
+        }
+
         Ok(())
     }
 }
@@ -311,6 +365,64 @@ mod tests {
             game_topology_mappings: HashMap::new(),
             enable_webrtc: false,
             enable_direct: false,
+            ..SessionConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_warns_but_succeeds_when_ice_pregather_is_dead_without_webrtc() {
+        // The pre-gather gate requires the WebRTC transport, so this
+        // combination can never emit an ICE list. Warn-only: the ladder still
+        // degrades safely (relay floor).
+        let cfg = SessionConfig {
+            enable_webrtc: false,
+            enable_ice_pregather: true,
+            ..SessionConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_warns_but_succeeds_on_credential_less_static_turn_entry() {
+        // Legal config (a TURN server may be reachable through some other
+        // provisioning), but typical coturn deployments always reject the
+        // anonymous handshake, so validation warns instead of failing startup.
+        let server = stun("turn:turn.example.com:3478?transport=udp");
+        assert!(server.username.is_none() && server.credential.is_none());
+        let cfg = SessionConfig {
+            ice_servers: vec![server],
+            ..SessionConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+
+        // Both credential halves present: no warning condition.
+        let mut credentialed = stun("turn:turn.example.com:3478?transport=udp");
+        credentialed.username = Some("user".to_string());
+        credentialed.credential = Some("secret".to_string());
+        let cfg = SessionConfig {
+            ice_servers: vec![credentialed],
+            ..SessionConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+
+        // STUN entries never need credentials.
+        let cfg = SessionConfig {
+            ice_servers: vec![stun("stun:stun.example.com:19302")],
+            ..SessionConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_warns_but_succeeds_on_case_colliding_topology_mapping_keys() {
+        // Lookups are exact-match (case-sensitive), so at most one of these
+        // keys can ever match a game; the other is dead config.
+        let mut mappings = HashMap::new();
+        mappings.insert("FastFPS".to_string(), Topology::Mesh);
+        mappings.insert("fastfps".to_string(), Topology::Host);
+        let cfg = SessionConfig {
+            game_topology_mappings: mappings,
             ..SessionConfig::default()
         };
         assert!(cfg.validate().is_ok());

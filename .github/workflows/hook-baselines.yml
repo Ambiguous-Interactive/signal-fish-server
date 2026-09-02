@@ -1,0 +1,177 @@
+# Hosted Git Hook Baselines
+#
+# Records the profiled pre-commit hook runtime baselines on hosted runners
+# with the exact command/table shape issue #318 requires (issue #318's
+# remaining acceptance: representative macOS and Windows measurements).
+#
+# Zero standing allocation: this workflow has NO schedule trigger. It runs
+# manually (workflow_dispatch) and on pull requests that touch this file only,
+# so a baseline refresh costs one short, three-OS job set per deliberate run.
+# The measured wall-clock numbers are evidence for docs/issue records — never
+# a hosted pass/fail threshold (per the no-flaky doctrine, wall-clock totals
+# must not gate correctness).
+#
+# Each job runs the profiled hook five times per path; run 1 pays the one-time
+# Git index refresh (cold) and the remaining runs approximate warm-start.
+# Every run must still PASS all hook checks: a baseline from a failing hook is
+# not a baseline.
+#
+# pwsh note: steps below deliberately avoid bash-flavored syntax (`${...}`,
+# `$(...)`, `2>&1`) so the Windows-job shell-safety check stays clean while
+# every step declares `shell: pwsh`.
+
+name: Hook Baselines
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/hook-baselines.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REPETITIONS: 5
+
+jobs:
+  baseline:
+    name: Pre-commit Baselines (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      MATRIX_OS: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Record runner provenance
+        shell: pwsh
+        run: |
+          $imageVersion = $Env:ImageVersion
+          if (-not $imageVersion) { $imageVersion = 'unknown' }
+          Write-Host "runner-os=$Env:RUNNER_OS matrix-os=$Env:MATRIX_OS image-version=$imageVersion"
+          git --version
+          pwsh --version
+
+      - name: Worktree preflight baselines (-Worktree)
+        shell: pwsh
+        run: |
+          $env:SIGNAL_FISH_HOOK_PROFILE = "1"
+          $totals = [System.Collections.Generic.List[long]]::new()
+          for ($i = 1; $i -le $Env:REPETITIONS; $i++) {
+            $label = if ($i -eq 1) { "cold (index refresh)" } else { "warm" }
+            Write-Host "=== pre-commit -Worktree run $i of $Env:REPETITIONS ($label) ==="
+            $output = & pwsh -NoLogo -NoProfile -File scripts/hooks/pre-commit.ps1 -Worktree
+            $output | ForEach-Object { Write-Host "$_" }
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::pre-commit -Worktree run $i failed (exit $LASTEXITCODE)"
+              exit $LASTEXITCODE
+            }
+            $completed = $output | Select-String 'Completed in (\d+)ms'
+            if (-not $completed) {
+              Write-Host "::error::run $i produced no 'Completed in Nms' line"
+              exit 1
+            }
+            $totals.Add([long]$completed.Matches[0].Groups[1].Value)
+          }
+          $warm = @($totals | Select-Object -Skip 1)
+          $sorted = $warm | Sort-Object
+          $idx = [int][math]::Floor(($warm.Count - 1) / 2)
+          $median = $sorted[$idx]
+          "worktree_totals=" + ($totals -join ",") | Out-File -Append $Env:GITHUB_ENV
+          "worktree_median_warm=$median" | Out-File -Append $Env:GITHUB_ENV
+
+      - name: Staged-commit baselines (real staged change)
+        shell: pwsh
+        run: |
+          $env:SIGNAL_FISH_HOOK_PROFILE = "1"
+          Add-Content -Path src/lib.rs -Value "// hook-baseline measurement marker (reverted below, never pushed)"
+          git add src/lib.rs
+          $totals = [System.Collections.Generic.List[long]]::new()
+          for ($i = 1; $i -le $Env:REPETITIONS; $i++) {
+            $label = if ($i -eq 1) { "cold (index refresh)" } else { "warm" }
+            Write-Host "=== pre-commit (staged) run $i of $Env:REPETITIONS ($label) ==="
+            $output = & pwsh -NoLogo -NoProfile -File scripts/hooks/pre-commit.ps1
+            $output | ForEach-Object { Write-Host "$_" }
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::pre-commit staged run $i failed (exit $LASTEXITCODE)"
+              git checkout HEAD -- src/lib.rs
+              exit $LASTEXITCODE
+            }
+            $completed = $output | Select-String 'Completed in (\d+)ms'
+            if (-not $completed) {
+              Write-Host "::error::run $i produced no 'Completed in Nms' line"
+              git checkout HEAD -- src/lib.rs
+              exit 1
+            }
+            $totals.Add([long]$completed.Matches[0].Groups[1].Value)
+          }
+          git checkout HEAD -- src/lib.rs
+          $warm = @($totals | Select-Object -Skip 1)
+          $sorted = $warm | Sort-Object
+          $idx = [int][math]::Floor(($warm.Count - 1) / 2)
+          $median = $sorted[$idx]
+          "staged_totals=" + ($totals -join ",") | Out-File -Append $Env:GITHUB_ENV
+          "staged_median_warm=$median" | Out-File -Append $Env:GITHUB_ENV
+
+      - name: Report baseline summary
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY_MARKDOWN: ${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}
+        run: |
+          $imageVersion = $Env:ImageVersion
+          if (-not $imageVersion) { $imageVersion = 'unknown' }
+          $totalsW = if ($Env:worktree_totals) { $Env:worktree_totals } else { 'not captured' }
+          $medianW = if ($Env:worktree_median_warm) { $Env:worktree_median_warm } else { 'n/a' }
+          $totalsS = if ($Env:staged_totals) { $Env:staged_totals } else { 'not captured' }
+          $medianS = if ($Env:staged_median_warm) { $Env:staged_median_warm } else { 'n/a' }
+          $partsW = $totalsW -split ","
+          $partsS = $totalsS -split ","
+          $coldW = $partsW[0]
+          $warmW = ($partsW | Select-Object -Skip 1) -join ", "
+          $coldS = $partsS[0]
+          $warmS = ($partsS | Select-Object -Skip 1) -join ", "
+          $table = @(
+            "### Pre-commit hook baselines — $Env:MATRIX_OS (runner image $imageVersion)",
+            "",
+            "| Path | Run 1 (cold) | Runs 2-$Env:REPETITIONS (warm) | Warm median |",
+            "| --- | --- | --- | --- |",
+            "| Worktree preflight (`-Worktree`) | $coldW ms | $warmW ms | $medianW ms |",
+            "| Staged (real staged change) | $coldS ms | $warmS ms | $medianS ms |",
+            "",
+            "Command shape: SIGNAL_FISH_HOOK_PROFILE=1 env var, then",
+            # Single-quoted: the backticks are literal markdown, and a double-
+            # quoted trailing backtick would escape the string terminator.
+            '`pwsh -NoLogo -NoProfile -File <pre-commit hook script> [-Worktree]`'
+          )
+          # Pipeline input only (never -InputObject together with a pipeline:
+          # PowerShell cannot bind both and the write silently no-ops).
+          $table | Out-File -Append -FilePath $Env:GITHUB_STEP_SUMMARY
+          # On pull requests, publish the same table as a PR comment so the
+          # recording survives outside the run UI (issue #318's evidence
+          # trail). Best-effort: a failed comment must not fail the baseline.
+          if ($Env:SUMMARY_MARKDOWN -ne "") {
+            $table | Out-File -FilePath baseline-summary.md
+            & gh pr comment $Env:SUMMARY_MARKDOWN --body-file baseline-summary.md
+            if ($LASTEXITCODE -ne 0) {
+              # GITHUB_STEP_SUMMARY evidence already exists; a failed comment
+              # (transient API error, rate limit) must not fail the baseline.
+              Write-Host "::warning::could not post the baseline summary comment (exit $LASTEXITCODE)"
+            }
+          }
+          exit 0

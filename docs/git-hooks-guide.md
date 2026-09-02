@@ -147,8 +147,31 @@ count. Measured dead ends on that volume: `core.untrackedCache` made status
 25-45% slower, and the fsmonitor daemon is unsuitable for ephemeral containers.
 Do not reintroduce either without new evidence.
 
-macOS and Windows baselines are pending; record them with the same command and
-table shape before revisiting the budget.
+macOS and Windows baselines are recorded by the scheduled-on-demand
+`Hook Baselines` workflow (`.github/workflows/hook-baselines.yml`), which runs
+the same profiled command on hosted runners and publishes the per-OS table to
+its run summary. The workflow has no schedule trigger (zero standing
+allocation); trigger it from the Actions UI or refresh baselines whenever hook
+discovery code changes. Hosted-runner numbers are representative samples of
+the runner hardware generation, not developer-machine guarantees; record them
+alongside the runner image version for provenance.
+
+2026-09-02 hosted baselines (warm median of the 4 warm runs after one cold
+run, per path — the lower of the middle two for an even count; per-run
+numbers and runner image versions are in the `Hook Baselines` workflow run
+summaries and its pull-request evidence comments):
+
+| Runner | Staged path (warm median) | Worktree preflight (warm median) |
+| --- | --- | --- |
+| ubuntu-latest (20260823.283.1) | 672 ms | 657 ms |
+| macos-latest (20260728.0273.1) | 217 ms | 205 ms |
+| windows-latest (20260824.214.3) | 356 ms | 317 ms |
+
+Every recorded path passes the 1,000 ms budget (worst warm median ~1.5×
+margin on the ubuntu runner, ~2.8× windows, ~4.6× macos; even the slowest
+recorded single warm run, 787 ms, holds the budget); the budget is
+confirmed rather than replaced. Record fresh baselines with the same
+command and table shape before revisiting it.
 
 ## Markdownlint
 

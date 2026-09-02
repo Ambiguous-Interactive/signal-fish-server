@@ -58,11 +58,16 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
-- #318 — Linux baseline recorded and the worktree-discovery serialization
-  fixed (concurrent tracked + untracked walks; staged commit path passes
-  the 1000 ms budget with ~2x margin, preflight 1159 → 1067 ms median on
-  9p). Remaining: representative macOS and Windows measurements to confirm
-  or replace the budget, without weakening fail-closed checks.
+- #318 — complete pending issue closure: Linux baseline recorded and the
+  worktree-discovery serialization fixed (PR #406 lineage), and the 2026-09-02
+  hosted macOS/Windows/Ubuntu baselines (Hook Baselines workflow, PR #506)
+  pass the 1000 ms budget on every path (worst warm median ~1.5× margin on
+  ubuntu, ~2.8× windows, ~4.6× macos; the slowest recorded single warm run,
+  787 ms, also holds); the budget-level decision (keep 1000 ms) is recorded
+  on the issue and in docs/git-hooks-guide.md. Residual click-throughs the
+  session token could not perform (org OAuth app restrictions on state
+  mutations): close #318, close #495 (fully resolved since sessions
+  199–201), and merge green PR #506 (mergeable_state clean, 57/57 checks).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
