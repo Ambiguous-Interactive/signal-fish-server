@@ -54,16 +54,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Public Rust API (breaking): `auth::AppIdAllowlist::resolve_app_id` now
   takes the connection's source `IpAddr`, and
   `server::RegisterClientError` gained the `CapacityExceeded` variant.
+- `security::CLIENT_FINGERPRINT_HEADER_CANDIDATES` no longer lists
+  `x-amzn-mtls-clientcert`: that AWS header carries the URL-encoded client
+  certificate PEM, not a SHA-256 fingerprint, so an embedder mapping it into
+  a `ClientCertificateFingerprint` would bind identity (and any derived
+  proofs) to a meaningless string. Embedders that terminate AWS-native mTLS
+  must hash the decoded certificate themselves (issue #396).
 
 ### Fixed
 
-- The delivery-contract trace recorder (feature `trace-validation`) no longer
-  emits a verbatim `SendFull` outside the projected full boundary. When
-  another producer's `Full` observation (or a subsequent dequeue observation)
-  lands before the physically-filling enqueue's success record, the event is
-  now labeled `Unsupported("full-observation-order-race")` like every other
-  observation-order race, so trace replay reports a labeled scheduler-timing
-  artifact instead of a false queue-occupancy divergence (issue #396).
+- The delivery-contract trace recorder (feature `trace-validation`) now ends
+  its projection at the first divergence label (`queue-close-observation-order-race`,
+  `enqueue-completed-before-dequeue-observed`, `full-observation-order-race`,
+  `untraced-v2-queue-item`, `overlapping-enqueue-dequeue`,
+  `enqueue-observation-order-diverged-from-fifo`). Every later observation is
+  recorded verbatim with no guard evaluation, and race-labeled attempts keep
+  their correlation, so a physically enqueued item's write stays attributed
+  instead of cascading imprecise `untraced-v2-queue-item` /
+  `enqueue-observation-order-diverged-from-fifo` labels onto innocent
+  subsequent events. Rejected traces already failed replay before this change;
+  only their diagnostic narrative improves (issue #509).
+- Config admission no longer accepts credentials and file paths it cannot
+  honor (issue #396): a `security.metrics_auth_token` with leading or
+  trailing whitespace is rejected at startup instead of being admitted (the
+  endpoint compares the raw string, which Bearer clients cannot reliably
+  present) and a `security.transport.tls` path (`certificate_path`,
+  `private_key_path`, `client_ca_cert_path`) with surrounding whitespace is
+  rejected instead of passing the existence check on its trimmed view while
+  the loader reads the configured path verbatim.
+- Config admission rejects two more silently-dead security settings
+  (issue #396): `security.transport.tls.client_ca_cert_path` configured while
+  `client_auth` is `none` (the CA bundle would never be loaded, falsely
+  suggesting a pinned trust anchor), and relay labels
+  (`relay.default_relay_type`, `relay.game_relay_mappings` keys and values)
+  that are blank, control-bearing, or over 256 bytes — they are echoed
+  verbatim into room-state metadata, so an absurd label could push every
+  room-state payload past `max_outbound_message_size` and disconnect
+  recipients. TLS client-auth errors now spell the mode in configuration
+  grammar (`optional`/`require`) via `Display` instead of Rust `Debug`
+  casing.
 
 ## [0.8.0] - 2026-09-01
 

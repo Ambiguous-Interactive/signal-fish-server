@@ -58,12 +58,16 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
-- #396 — standing correctness/perf sweep. Session 207 fixed the last
-  never-audited seam (`trace_validation.rs`): an unlabeled `SendFull`
-  observation-order window now records `Unsupported` with its own detail
-  instead of poisoning replays as a false occupancy divergence. Remaining
-  frontier: continue seam sweeps; the parked-state (`senderState`) producers
-  are same-thread program-ordered behind their `SendFull` record (verified,
+- #396 — standing correctness/perf sweep. Session 208 closed the
+  admission-vs-consumption divergence class: a padded metrics auth token and
+  padded TLS paths (admission checked the trimmed view while the runtime
+  compared/loaded the raw value), a dead `client_ca_cert_path` under
+  `client_auth=none`, and unbounded relay labels echoed into room-state
+  metadata are now rejected at admission; `trace_validation.rs` ends its
+  projection at the first divergence label so rejected traces carry one
+  precise label plus an attributed raw tail (#509). Remaining frontier:
+  continue seam sweeps; the parked-state (`senderState`) producers are
+  same-thread program-ordered behind their `SendFull` record (verified,
   no race window).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
