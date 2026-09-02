@@ -2129,8 +2129,13 @@ pub(super) async fn handle_socket(
                                 continue;
                             }
 
-                            // Validate App ID
-                            match server_clone.app_id_allowlist.resolve_app_id(&app_id).await {
+                            // Validate App ID (the connection's source keys the
+                            // per-source share of the app rate budget)
+                            match server_clone
+                                .app_id_allowlist
+                                .resolve_app_id(&app_id, addr.ip())
+                                .await
+                            {
                                 Ok(info) => {
                                     let compatibility = match server_clone
                                         .protocol_config()

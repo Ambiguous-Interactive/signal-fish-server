@@ -69,7 +69,7 @@ async fn connect_as(
         .expect("register test client");
     let app_context = server
         .app_id_allowlist
-        .resolve_app_id(app_id)
+        .resolve_app_id(app_id, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .await
         .expect("test application is configured");
     server.set_client_app_context(&player_id, app_context);
@@ -141,7 +141,7 @@ async fn generated_code_retry_preserves_application_ownership_and_quota() {
     .await;
     let app_b = server
         .app_id_allowlist
-        .resolve_app_id(APP_B)
+        .resolve_app_id(APP_B, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .await
         .expect("app B is configured");
     let occupied = server

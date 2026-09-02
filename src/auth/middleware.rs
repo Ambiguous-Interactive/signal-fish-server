@@ -4,20 +4,30 @@
 //! startup. This module does not authenticate a client or validate a client
 //! secret: any client can replay a known app ID. When enforcement is disabled,
 //! every app ID receives a default [`AppContext`].
+//!
+//! A configured per-minute limit is enforced as two sliding windows: the
+//! application-wide ceiling and a per-source (IP) share (see
+//! [`source_rate_limit`]), so one source that knows a configured app ID cannot
+//! continuously exhaust that app's handshake budget and lock out legitimate
+//! handshakes (issue #502).
 
 use super::error::AuthError;
 use super::rate_limiter::InMemoryRateLimiter;
 use crate::config::AppRegistrationEntry;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
 /// Per-application rate limit information returned to clients.
 ///
-/// With allowlist enforcement on, `per_minute` limits handshake resolution
-/// only for allowlist entries that configure an explicit
+/// With allowlist enforcement on, `per_minute` is the application-wide
+/// handshake ceiling per 60-second window; enforcement additionally bounds
+/// each source (IP) to half that budget (at least one — see
+/// [`source_rate_limit`]) so one source cannot lock out the app (issue #502).
+/// Limits apply only to allowlist entries that configure an explicit
 /// `rate_limit_per_minute`; an entry without one advertises the default
 /// projections and enforces nothing — omitting the field is the "unlimited"
 /// configuration. The `per_hour` and `per_day` fields are advisory
@@ -59,6 +69,34 @@ const DEFAULT_RATE_LIMIT_PER_DAY: u32 = 100_000;
 /// handshake from amplifying log volume while leaving room for realistic IDs.
 pub const MAX_APP_ID_LENGTH: usize = 256;
 
+/// The per-source (IP) share of an application's configured per-minute
+/// handshake budget: half the app ceiling, at least one.
+///
+/// Splitting the budget this way closes the lockout amplification of issue
+/// #502: a single source can spend at most its own share per 60-second
+/// window, so one abuser that knows a configured `app_id` can never push the
+/// application-wide window to its limit alone — at least half the budget
+/// stays reachable to every other source. A botnet spanning many sources is
+/// bounded by the application-wide ceiling itself, the same documented way
+/// `security.max_connections_per_ip` bounds (but cannot eliminate)
+/// distributed connection abuse. An application limited to 1 handshake per
+/// minute keeps a share of 1: that budget is trivially exhausted by any
+/// single admitted handshake, abuser or not.
+#[must_use]
+pub fn source_rate_limit(app_limit: u32) -> u32 {
+    (app_limit / 2).max(1)
+}
+
+/// Sliding-window key for one source's share of `app_id`'s budget.
+///
+/// NUL can never appear in an app ID (the log-safety gate rejects control
+/// characters before any limiter path), so this pair encoding is
+/// collision-free: an app key can never alias a (app, source) key of another
+/// app, and distinct sources of the same app never alias each other.
+fn source_window_key(app_id: &str, source: IpAddr) -> String {
+    format!("{app_id}\0{source}")
+}
+
 /// Whether an app ID can be accepted and logged safely.
 ///
 /// Rejects control characters (newlines, ANSI escapes, C1 controls) — the
@@ -98,7 +136,8 @@ fn deterministic_uuid(key: &str) -> Uuid {
 pub struct AppIdAllowlist {
     /// Map of public app ID to its accounting and quota context.
     apps: HashMap<String, AppContext>,
-    /// Per-app sliding-window rate limiter.
+    /// Sliding-window rate limiter holding both the application-wide windows
+    /// and the per-(app, source) share windows (see [`source_rate_limit`]).
     rate_limiter: Arc<InMemoryRateLimiter>,
     /// Whether allowlist enforcement is enabled.
     enforce: bool,
@@ -192,14 +231,23 @@ impl AppIdAllowlist {
         }
     }
 
-    /// Resolve a public app ID. This is the method called by the WebSocket
-    /// `Authenticate` handshake; the legacy wire name does not imply proof of
-    /// client identity.
+    /// Resolve a public app ID from the connection's source address. This is
+    /// the method called by the WebSocket `Authenticate` handshake; the legacy
+    /// wire name does not imply proof of client identity.
+    ///
+    /// When the matched application configures an explicit
+    /// `rate_limit_per_minute`, admission spends the per-source (IP) share
+    /// first and the application-wide ceiling last, so a rejection can never
+    /// consume the application-wide budget (see [`Self::enforce_rate_limits`]).
     ///
     /// This method is `async` for interface compatibility so that future
     /// implementations (e.g., database-backed auth) can perform I/O without
     /// changing the call-site.
-    pub async fn resolve_app_id(&self, app_id: &str) -> Result<AppContext, AuthError> {
+    pub async fn resolve_app_id(
+        &self,
+        app_id: &str,
+        source: IpAddr,
+    ) -> Result<AppContext, AuthError> {
         // Vet before any policy path (including the open-policy early return):
         // both modes feed the ID into logs and derived keys, so neither may
         // admit a string that forges log lines or unboundedly bloats them.
@@ -213,12 +261,32 @@ impl AppIdAllowlist {
 
         let info = self.apps.get(app_id).ok_or(AuthError::InvalidAppId)?;
 
-        // Enforce per-app rate limit if configured.
+        // Enforce per-app + per-source rate limits if configured.
         if let Some(limit) = info.rate_limit_per_minute {
-            self.check_rate_limit(app_id, limit)?;
+            self.enforce_rate_limits(app_id, source, limit)?;
         }
 
         Ok(info.clone())
+    }
+
+    /// Enforce the configured per-minute budget as two sliding windows.
+    ///
+    /// The per-source share commits first and the application-wide ceiling
+    /// commits last. Each window stamps only on its own admission success, so
+    /// a request the app ceiling rejects leaves that ceiling untouched —
+    /// repeated rejected handshakes can never consume the application-wide
+    /// budget. The mirror case (source share admitted, app ceiling rejected
+    /// under concurrency) leaves at most one stamp in the offending source's
+    /// own window: it can only tighten that source's own future budget and
+    /// cannot affect any other source.
+    fn enforce_rate_limits(
+        &self,
+        app_id: &str,
+        source: IpAddr,
+        limit: u32,
+    ) -> Result<(), AuthError> {
+        self.check_rate_limit(&source_window_key(app_id, source), source_rate_limit(limit))?;
+        self.check_rate_limit(app_id, limit)
     }
 
     fn check_rate_limit(&self, app_id: &str, limit: u32) -> Result<(), AuthError> {
@@ -263,6 +331,23 @@ impl AppIdAllowlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// Default resolution source for tests not exercising the per-source
+    /// dimension; distinct sources are spelled out where it matters.
+    const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    /// A second fixed source distinct from every [`source_for`] index.
+    const OTHER: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+
+    /// Deterministic distinct source addresses (TEST-NET-2), index 0 = .1.
+    fn source_for(index: usize) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, (index as u8) + 1))
+    }
+
+    fn distinct_sources(n: usize) -> Vec<IpAddr> {
+        (0..n).map(source_for).collect()
+    }
 
     fn sample_entries() -> Vec<AppRegistrationEntry> {
         vec![
@@ -286,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_middleware_always_succeeds() {
         let mw = AppIdAllowlist::disabled();
-        let result = mw.resolve_app_id("anything").await;
+        let result = mw.resolve_app_id("anything", LOCALHOST).await;
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.name, "default");
@@ -311,7 +396,7 @@ mod tests {
             let open = AppIdAllowlist::disabled();
             assert!(
                 matches!(
-                    open.resolve_app_id(app_id).await,
+                    open.resolve_app_id(app_id, LOCALHOST).await,
                     Err(AuthError::InvalidAppId)
                 ),
                 "open policy must reject {app_id:?}"
@@ -335,7 +420,7 @@ mod tests {
         for app_id in accepted {
             let open = AppIdAllowlist::disabled();
             assert!(
-                open.resolve_app_id(app_id).await.is_ok(),
+                open.resolve_app_id(app_id, LOCALHOST).await.is_ok(),
                 "open policy must accept {app_id:?}"
             );
         }
@@ -367,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn valid_app_id_returns_info() {
         let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
-        let result = mw.resolve_app_id("game-1").await;
+        let result = mw.resolve_app_id("game-1", LOCALHOST).await;
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.name, "Test Game");
@@ -379,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_app_id_returns_error() {
         let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
-        let result = mw.resolve_app_id("nonexistent").await;
+        let result = mw.resolve_app_id("nonexistent", LOCALHOST).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AuthError::InvalidAppId));
     }
@@ -387,8 +472,8 @@ mod tests {
     #[tokio::test]
     async fn public_app_id_is_replayable_and_resolves_the_same_context() {
         let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
-        let first = mw.resolve_app_id("game-1").await.unwrap();
-        let replay = mw.resolve_app_id("game-1").await.unwrap();
+        let first = mw.resolve_app_id("game-1", LOCALHOST).await.unwrap();
+        let replay = mw.resolve_app_id("game-1", LOCALHOST).await.unwrap();
         assert_eq!(first.id, replay.id);
         assert_eq!(first.name, replay.name);
     }
@@ -404,13 +489,122 @@ mod tests {
         }];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
-        // First 3 should succeed
-        for _ in 0..3 {
-            assert!(mw.resolve_app_id("limited").await.is_ok());
+        // Three distinct sources exhaust the application-wide ceiling of 3
+        // (each spends 1 of its own 3/2→1-per-source share).
+        for source in distinct_sources(3) {
+            assert!(mw.resolve_app_id("limited", source).await.is_ok());
         }
-        // 4th should fail
-        let result = mw.resolve_app_id("limited").await;
+        // The 4th source is rejected by the app ceiling.
+        let result = mw.resolve_app_id("limited", OTHER).await;
         assert!(matches!(result.unwrap_err(), AuthError::RateLimitExceeded));
+    }
+
+    /// The split-budget contract (issue #502), data-driven over configured
+    /// app ceilings: each source may spend at most its share (half the app
+    /// budget, min 1) per window, total admissions never exceed the app
+    /// ceiling, and — the lockout-amplification fix — rejected requests
+    /// consume no application-wide budget, so one source can never lock the
+    /// app out alone. The window boundary itself is pinned at the limiter
+    /// layer (`window_admits_up_to_limit_then_expires_at_the_inclusive_boundary`).
+    #[tokio::test]
+    async fn per_source_share_caps_one_source_while_the_app_ceiling_conserves_the_budget() {
+        // (configured app limit, [source indices]: one designated abuser "a",
+        // then enough distinct sources to potentially fill the app window)
+        for limit in [2u32, 3, 4, 5, 9, 60] {
+            let entries = vec![AppRegistrationEntry {
+                app_id: "limited".to_string(),
+                app_name: "Limited App".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: Some(limit),
+            }];
+            let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
+            let abuser = source_for(0);
+            let share = source_rate_limit(limit);
+
+            // The abuser spends exactly its share, then is rejected.
+            for i in 0..share {
+                assert!(
+                    mw.resolve_app_id("limited", abuser).await.is_ok(),
+                    "limit {limit}: abuser request {i}/{share} must be admitted"
+                );
+            }
+            assert!(
+                matches!(
+                    mw.resolve_app_id("limited", abuser).await,
+                    Err(AuthError::RateLimitExceeded)
+                ),
+                "limit {limit}: abuser past its share of {share} must be rejected"
+            );
+
+            // Every abuser rejection consumed no application-wide budget: the
+            // remaining distinct sources can still spend the untouched rest.
+            let remaining = limit - share;
+            for i in 0..remaining {
+                let source = source_for(i as usize + 1);
+                assert!(
+                    mw.resolve_app_id("limited", source).await.is_ok(),
+                    "limit {limit}: source {i} of the remaining {remaining} must be admitted \
+                     despite the exhausted abuser"
+                );
+            }
+
+            // Budget conservation: total admissions across ALL sources equal
+            // exactly the configured ceiling, and any further source is
+            // rejected by the app window.
+            let overflow = source_for(remaining as usize + 1);
+            assert!(
+                matches!(
+                    mw.resolve_app_id("limited", overflow).await,
+                    Err(AuthError::RateLimitExceeded)
+                ),
+                "limit {limit}: the app ceiling must reject once {limit} admissions are spent"
+            );
+        }
+    }
+
+    /// Sources and apps key independent windows: one source exhausting its
+    /// share for one app leaves every other source AND every other app's
+    /// window untouched, and a pair key can never alias an app key (NUL is
+    /// unreachable inside an app ID — the log-safety gate rejects it).
+    #[tokio::test]
+    async fn source_and_app_windows_are_independent_and_alias_free() {
+        let entries = vec![
+            AppRegistrationEntry {
+                app_id: "limited".to_string(),
+                app_name: "Limited App".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: Some(4),
+            },
+            AppRegistrationEntry {
+                app_id: "other".to_string(),
+                app_name: "Other App".to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: Some(2),
+            },
+        ];
+        let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
+
+        // One source exhausts its share (4/2 → 2) for `limited`.
+        assert!(mw.resolve_app_id("limited", LOCALHOST).await.is_ok());
+        assert!(mw.resolve_app_id("limited", LOCALHOST).await.is_ok());
+        assert!(matches!(
+            mw.resolve_app_id("limited", LOCALHOST).await,
+            Err(AuthError::RateLimitExceeded)
+        ));
+
+        // A different source of the same app is unaffected (app ceiling 4 has
+        // room for it).
+        assert!(mw.resolve_app_id("limited", OTHER).await.is_ok());
+        // The same exhausted source on a DIFFERENT app is unaffected.
+        assert!(mw.resolve_app_id("other", LOCALHOST).await.is_ok());
+        // IPv6 sources key their own windows too (app still has headroom).
+        assert!(mw
+            .resolve_app_id("limited", IpAddr::V6(Ipv6Addr::LOCALHOST))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -425,9 +619,9 @@ mod tests {
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
         let mw = AppIdAllowlist::with_metrics(entries, metrics.clone()).expect("unique app IDs");
 
-        assert!(mw.resolve_app_id("limited").await.is_ok());
+        assert!(mw.resolve_app_id("limited", LOCALHOST).await.is_ok());
         assert!(matches!(
-            mw.resolve_app_id("limited").await,
+            mw.resolve_app_id("limited", LOCALHOST).await,
             Err(AuthError::RateLimitExceeded)
         ));
 
@@ -454,7 +648,7 @@ mod tests {
         }];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
-        let info = mw.resolve_app_id("unlimited").await.unwrap();
+        let info = mw.resolve_app_id("unlimited", LOCALHOST).await.unwrap();
         assert_eq!(info.rate_limits.per_minute, DEFAULT_RATE_LIMIT_PER_MINUTE);
         assert_eq!(
             info.rate_limits.per_hour,
@@ -471,22 +665,22 @@ mod tests {
 
         // More resolves than the advertised budget: none are limited.
         for _ in 0..(DEFAULT_RATE_LIMIT_PER_MINUTE + 4) {
-            assert!(mw.resolve_app_id("unlimited").await.is_ok());
+            assert!(mw.resolve_app_id("unlimited", LOCALHOST).await.is_ok());
         }
     }
 
     #[tokio::test]
     async fn deterministic_uuid_for_same_app_id() {
         let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
-        let info1 = mw.resolve_app_id("game-1").await.unwrap();
-        let info2 = mw.resolve_app_id("game-1").await.unwrap();
+        let info1 = mw.resolve_app_id("game-1", LOCALHOST).await.unwrap();
+        let info2 = mw.resolve_app_id("game-1", LOCALHOST).await.unwrap();
         assert_eq!(info1.id, info2.id);
     }
 
     #[tokio::test]
     async fn default_rate_limits_for_app_without_explicit_limit() {
         let mw = AppIdAllowlist::new(sample_entries()).expect("unique app IDs");
-        let info = mw.resolve_app_id("game-2").await.unwrap();
+        let info = mw.resolve_app_id("game-2", LOCALHOST).await.unwrap();
         assert_eq!(info.rate_limits.per_minute, DEFAULT_RATE_LIMIT_PER_MINUTE);
     }
 
@@ -499,15 +693,15 @@ mod tests {
     async fn disabled_app_id_parsed_as_uuid_when_valid() {
         let mw = AppIdAllowlist::disabled();
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let info = mw.resolve_app_id(uuid_str).await.unwrap();
+        let info = mw.resolve_app_id(uuid_str, LOCALHOST).await.unwrap();
         assert_eq!(info.id.to_string(), uuid_str);
     }
 
     #[tokio::test]
     async fn disabled_non_uuid_app_id_gets_deterministic_id() {
         let mw = AppIdAllowlist::disabled();
-        let info1 = mw.resolve_app_id("my-game").await.unwrap();
-        let info2 = mw.resolve_app_id("my-game").await.unwrap();
+        let info1 = mw.resolve_app_id("my-game", LOCALHOST).await.unwrap();
+        let info2 = mw.resolve_app_id("my-game", LOCALHOST).await.unwrap();
         assert_eq!(info1.id, info2.id);
     }
 }

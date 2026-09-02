@@ -18,6 +18,12 @@ use websocket_test_helpers::{next_server_message_within, WsStream};
 
 const SOCKET_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Default resolution source for tests not exercising the per-source
+/// dimension; distinct sources are spelled out where it matters.
+fn source(index: u8) -> std::net::IpAddr {
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, index + 1))
+}
+
 // ---------------------------------------------------------------------------
 // Helper factories
 // ---------------------------------------------------------------------------
@@ -100,7 +106,7 @@ async fn test_registered_app_id_resolves_its_context() {
         .expect("unique app IDs");
 
     let info = mw
-        .resolve_app_id("test-game-1")
+        .resolve_app_id("test-game-1", source(0))
         .await
         .expect("allowed app ID should resolve");
 
@@ -116,7 +122,7 @@ async fn test_secondary_registered_app_id_resolves_its_context() {
         .expect("unique app IDs");
 
     let info = mw
-        .resolve_app_id("test-game-2")
+        .resolve_app_id("test-game-2", source(0))
         .await
         .expect("secondary allowed app ID should resolve");
 
@@ -131,8 +137,8 @@ async fn test_public_app_id_can_be_replayed() {
     let mw = AppIdAllowlist::new(vec![sample_app_entry()]).expect("unique app IDs");
 
     let (first, replay) = tokio::join!(
-        mw.resolve_app_id("test-game-1"),
-        mw.resolve_app_id("test-game-1")
+        mw.resolve_app_id("test-game-1", source(0)),
+        mw.resolve_app_id("test-game-1", source(0))
     );
     let first = first.expect("first public-ID use resolves");
     let replay = replay.expect("concurrent public-ID replay resolves");
@@ -146,7 +152,7 @@ async fn test_reject_unknown_app_id() {
     let mw = AppIdAllowlist::new(vec![sample_app_entry()]).expect("unique app IDs");
 
     let err = mw
-        .resolve_app_id("nonexistent-app")
+        .resolve_app_id("nonexistent-app", source(0))
         .await
         .expect_err("unknown app_id should fail");
 
@@ -161,7 +167,7 @@ async fn test_resolve_app_id_only() {
     let mw = AppIdAllowlist::new(vec![sample_app_entry()]).expect("unique app IDs");
 
     let info = mw
-        .resolve_app_id("test-game-1")
+        .resolve_app_id("test-game-1", source(0))
         .await
         .expect("valid app_id should succeed");
 
@@ -177,18 +183,18 @@ async fn test_rate_limiting_enforced() {
     let limit = 5u32;
     let mw = AppIdAllowlist::new(vec![rate_limited_app_entry(limit)]).expect("unique app IDs");
 
-    // Requests up to the limit should succeed
+    // Distinct sources exhaust the application-wide ceiling of 5.
     for i in 0..limit {
-        let result = mw.resolve_app_id("rate-limited-app").await;
+        let result = mw.resolve_app_id("rate-limited-app", source(i as u8)).await;
         assert!(
             result.is_ok(),
             "request {i} of {limit} should succeed, got: {result:?}"
         );
     }
 
-    // The next request should be rejected
+    // The next source is rejected by the app ceiling.
     let err = mw
-        .resolve_app_id("rate-limited-app")
+        .resolve_app_id("rate-limited-app", source(limit as u8))
         .await
         .expect_err("should be rate limited after exceeding per-minute cap");
 
@@ -198,24 +204,43 @@ async fn test_rate_limiting_enforced() {
     );
 }
 
+/// Pins the per-source share at the public API level (issue #502): one source
+/// is bounded to half the configured app budget (min 1), and its rejections
+/// leave the rest of the app budget available to other sources.
 #[tokio::test]
-async fn test_rate_limiting_enforced_on_app_id_only() {
-    let limit = 3u32;
+async fn test_rate_limiting_bounds_one_source_to_its_share() {
+    let limit = 5u32;
+    let share = (limit / 2).max(1);
     let mw = AppIdAllowlist::new(vec![rate_limited_app_entry(limit)]).expect("unique app IDs");
 
-    for _ in 0..limit {
-        assert!(mw.resolve_app_id("rate-limited-app").await.is_ok());
+    // One source spends exactly its share, then is rejected.
+    for i in 0..share {
+        assert!(
+            mw.resolve_app_id("rate-limited-app", source(0))
+                .await
+                .is_ok(),
+            "same-source request {i} of {share} should succeed"
+        );
     }
-
     let err = mw
-        .resolve_app_id("rate-limited-app")
+        .resolve_app_id("rate-limited-app", source(0))
         .await
-        .expect_err("should be rate limited after exceeding per-minute cap via app_id");
-
+        .expect_err("one source must not exceed its share of the app budget");
     assert!(
         matches!(err, AuthError::RateLimitExceeded),
         "expected RateLimitExceeded, got: {err:?}"
     );
+
+    // The rejected attempts consumed no application-wide budget: other
+    // sources can still spend the untouched remainder (5 - 2 = 3).
+    for i in 0..(limit - share) {
+        assert!(
+            mw.resolve_app_id("rate-limited-app", source(i as u8 + 1))
+                .await
+                .is_ok(),
+            "distinct source {i} should be admitted despite the exhausted abuser"
+        );
+    }
 }
 
 #[tokio::test]
@@ -224,7 +249,7 @@ async fn test_no_rate_limiting_when_not_configured() {
 
     // Should succeed many times without hitting a limit
     for _ in 0..200 {
-        assert!(mw.resolve_app_id("test-game-2").await.is_ok());
+        assert!(mw.resolve_app_id("test-game-2", source(0)).await.is_ok());
     }
 }
 
@@ -242,14 +267,23 @@ async fn test_rate_limits_are_per_app() {
     ];
     let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
-    // Exhaust rate limit for first app
-    for _ in 0..2 {
-        mw.resolve_app_id("rate-limited-app").await.unwrap();
+    // Exhaust rate limit for first app (2 admissions across distinct sources;
+    // a third source tips the app window).
+    for i in 0..2 {
+        mw.resolve_app_id("rate-limited-app", source(i as u8))
+            .await
+            .unwrap();
     }
-    assert!(mw.resolve_app_id("rate-limited-app").await.is_err());
+    assert!(mw
+        .resolve_app_id("rate-limited-app", source(9))
+        .await
+        .is_err());
 
     // Second app should still be fine
-    assert!(mw.resolve_app_id("other-limited-app").await.is_ok());
+    assert!(mw
+        .resolve_app_id("other-limited-app", source(0))
+        .await
+        .is_ok());
 }
 
 // ===========================================================================
@@ -261,7 +295,7 @@ async fn test_open_policy_accepts_any_app_id() {
     let mw = AppIdAllowlist::disabled();
 
     let info = mw
-        .resolve_app_id("anything")
+        .resolve_app_id("anything", source(0))
         .await
         .expect("open policy should accept any app ID");
 
@@ -272,7 +306,7 @@ async fn test_open_policy_accepts_any_app_id() {
 async fn test_open_policy_returns_legacy_default_rate_limits() {
     let mw = AppIdAllowlist::disabled();
 
-    let info = mw.resolve_app_id("x").await.unwrap();
+    let info = mw.resolve_app_id("x", source(0)).await.unwrap();
 
     assert_eq!(info.rate_limits.per_minute, 1000);
     assert_eq!(info.rate_limits.per_hour, 10000);
@@ -294,7 +328,10 @@ async fn test_app_context_rate_limits_are_computed_correctly() {
     };
     let mw = AppIdAllowlist::new(vec![entry]).expect("unique app IDs");
 
-    let info = mw.resolve_app_id("computed-limits").await.unwrap();
+    let info = mw
+        .resolve_app_id("computed-limits", source(0))
+        .await
+        .unwrap();
 
     assert_eq!(info.rate_limits.per_minute, 10);
     assert_eq!(info.rate_limits.per_hour, 600); // 10 * 60
@@ -305,8 +342,8 @@ async fn test_app_context_rate_limits_are_computed_correctly() {
 async fn test_deterministic_uuid_for_same_app_id() {
     let mw = AppIdAllowlist::new(vec![sample_app_entry()]).expect("unique app IDs");
 
-    let info1 = mw.resolve_app_id("test-game-1").await.unwrap();
-    let info2 = mw.resolve_app_id("test-game-1").await.unwrap();
+    let info1 = mw.resolve_app_id("test-game-1", source(0)).await.unwrap();
+    let info2 = mw.resolve_app_id("test-game-1", source(0)).await.unwrap();
 
     assert_eq!(
         info1.id, info2.id,

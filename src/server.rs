@@ -4454,12 +4454,18 @@ mod relay_projection_cache_tests {
 
         assert!(server
             .app_id_allowlist
-            .resolve_app_id("limited")
+            .resolve_app_id(
+                "limited",
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            )
             .await
             .is_ok());
         assert!(server
             .app_id_allowlist
-            .resolve_app_id("limited")
+            .resolve_app_id(
+                "limited",
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            )
             .await
             .is_err());
 

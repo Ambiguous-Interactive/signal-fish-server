@@ -246,6 +246,11 @@ pub struct AppRegistrationEntry {
     /// Optional per-minute request rate limit for this application. Must be
     /// `> 0` when set: a zero budget rejects every `Authenticate` for this
     /// app (startup validation rejects it).
+    ///
+    /// Enforced as two sliding windows: the application-wide ceiling, plus a
+    /// per-source (IP) share of half the ceiling (at least one) so a single
+    /// source cannot continuously exhaust the app's budget and lock out
+    /// legitimate handshakes (issue #502).
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
 }
