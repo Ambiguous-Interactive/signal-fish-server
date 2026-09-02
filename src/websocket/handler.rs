@@ -41,6 +41,12 @@ enum UpgradeOutcome {
     RejectedDraining,
     RejectedTokenBindingOffer,
     RejectedTokenBindingNegotiation,
+    /// Server-fault rejection (HTTP 5xx): the upgrade was refused because of a
+    /// server-side condition, not client input. Kept distinct from the
+    /// client-fault negotiation lane so a config regression or CSPRNG failure
+    /// cannot masquerade as (or inflate) a client-attack signal in per-peer
+    /// rejection windows and dashboards.
+    RejectedServerFault,
 }
 
 impl UpgradeOutcome {
@@ -51,6 +57,7 @@ impl UpgradeOutcome {
             Self::RejectedDraining => "rejected_draining",
             Self::RejectedTokenBindingOffer => "rejected_token_binding_offer",
             Self::RejectedTokenBindingNegotiation => "rejected_token_binding_negotiation",
+            Self::RejectedServerFault => "rejected_server_fault",
         }
     }
 
@@ -64,6 +71,9 @@ impl UpgradeOutcome {
             }
             Self::RejectedTokenBindingNegotiation => {
                 crate::metrics::WebSocketUpgradeOutcome::RejectedTokenBindingNegotiation
+            }
+            Self::RejectedServerFault => {
+                crate::metrics::WebSocketUpgradeOutcome::RejectedServerFault
             }
         }
     }
@@ -238,13 +248,8 @@ async fn websocket_handler_with_default(
     ) {
         Ok(session) => session,
         Err(response) => {
-            return finish_upgrade_response(
-                &server,
-                addr,
-                &request_id,
-                UpgradeOutcome::RejectedTokenBindingNegotiation,
-                response,
-            );
+            let outcome = negotiation_outcome_for(response.status());
+            return finish_upgrade_response(&server, addr, &request_id, outcome, response);
         }
     };
 
@@ -269,15 +274,34 @@ async fn websocket_handler_with_default(
     };
 
     let socket_server = Arc::clone(&server);
-    let response = upgrade.on_upgrade(move |socket| {
-        handle_socket(
-            socket,
-            socket_server,
-            addr,
-            binding_session,
-            default_protocol_version,
-        )
-    });
+    let failure_server = Arc::clone(&server);
+    let failure_request_id = request_id.clone();
+    let response = upgrade
+        .on_failed_upgrade(move |error| {
+            // The 101 + correlation headers were already sent, but the socket
+            // handover failed (transport died before hyper yielded the upgraded
+            // stream). Without this signal the accepted lane claims a
+            // connection that never existed.
+            failure_server
+                .metrics()
+                .increment_websocket_upgrades_failed_after_accept();
+            tracing::warn!(
+                request_id = %failure_request_id,
+                peer_ip = %addr.ip(),
+                %error,
+                "WebSocket upgrade failed after the 101 response; the accepted \
+                 upgrade never became a socket"
+            );
+        })
+        .on_upgrade(move |socket| {
+            handle_socket(
+                socket,
+                socket_server,
+                addr,
+                binding_session,
+                default_protocol_version,
+            )
+        });
     finish_upgrade_response(
         &server,
         addr,
@@ -285,6 +309,19 @@ async fn websocket_handler_with_default(
         UpgradeOutcome::Accepted,
         response,
     )
+}
+
+/// Classify a refused token-binding negotiation by fault owner: 5xx responses
+/// are server-fault conditions (an invalid config that bypassed process
+/// validation, a CSPRNG failure), everything else accuses the client's offer.
+/// Misattributing a server fault to the client-fault lane would shape
+/// per-peer rejection windows as if the clients were attacking.
+fn negotiation_outcome_for(status: StatusCode) -> UpgradeOutcome {
+    if status.is_server_error() {
+        UpgradeOutcome::RejectedServerFault
+    } else {
+        UpgradeOutcome::RejectedTokenBindingNegotiation
+    }
 }
 
 fn finish_upgrade_response(
@@ -347,6 +384,86 @@ fn rejects_unsupported_token_binding_offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn negotiation_failures_split_by_fault_owner() {
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert_eq!(
+                negotiation_outcome_for(status),
+                UpgradeOutcome::RejectedServerFault,
+                "{status} is a server fault, not a client-fault negotiation rejection"
+            );
+        }
+        for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED] {
+            assert_eq!(
+                negotiation_outcome_for(status),
+                UpgradeOutcome::RejectedTokenBindingNegotiation,
+                "{status} accuses the client's offer"
+            );
+        }
+    }
+
+    /// A server-fault rejection must land in its own outcome lane (header +
+    /// counter), never in the client-fault negotiation lane: per-peer
+    /// rejection windows treat that lane as an attack signal.
+    #[tokio::test]
+    async fn server_fault_rejections_land_in_their_own_outcome_lane() {
+        let server = EnhancedGameServer::new(
+            crate::server::ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct server-fault lane test server");
+
+        let response = finish_upgrade_response(
+            &server,
+            "127.0.0.1:3536".parse().expect("test address parses"),
+            "00000000-0000-4000-8000-000000000003",
+            UpgradeOutcome::RejectedServerFault,
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid token binding configuration",
+            )
+                .into_response(),
+        );
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response
+                .headers()
+                .get(WEBSOCKET_UPGRADE_OUTCOME_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("rejected_server_fault")
+        );
+
+        let upgrades = server
+            .metrics()
+            .snapshot()
+            .await
+            .connections
+            .websocket_upgrades;
+        // `attempts` stays 0 here: only the handler entry point increments it;
+        // this test drives `finish_upgrade_response` directly.
+        assert_eq!(
+            upgrades,
+            crate::metrics::WebSocketUpgradeMetrics {
+                rejected_server_fault: 1,
+                ..Default::default()
+            }
+        );
+    }
 
     #[tokio::test]
     async fn every_handled_upgrade_response_advertises_the_configured_outbound_limit() {

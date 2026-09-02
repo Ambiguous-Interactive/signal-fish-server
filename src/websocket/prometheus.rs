@@ -149,12 +149,28 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
                 .websocket_upgrades
                 .rejected_token_binding_negotiation,
         ),
+        (
+            "rejected_server_fault",
+            snapshot
+                .connections
+                .websocket_upgrades
+                .rejected_server_fault,
+        ),
     ] {
         let _ = writeln!(
             buf,
             "signal_fish_websocket_upgrade_outcomes_total{{outcome=\"{outcome}\"}} {value}"
         );
     }
+    counter(
+        &mut buf,
+        "signal_fish_websocket_upgrades_failed_after_accept_total",
+        "Accepted upgrades whose socket handover failed after the 101 response; the client saw a successful upgrade but no connection existed (excluded from the outcome-sum conservation boundary)",
+        snapshot
+            .connections
+            .websocket_upgrades
+            .failed_after_accept,
+    );
     counter(
         &mut buf,
         "signal_fish_websocket_messages_dropped_total",
@@ -562,7 +578,7 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     counter(
         &mut buf,
         "signal_fish_transport_ice_pregather_emitted_total",
-        "RoomJoined/Reconnected payloads that carried a non-empty ICE pre-gather list (one per carrying payload)",
+        "RoomJoined/Reconnected payloads that carried a non-empty ICE pre-gather list (one per carrying payload, counted when the list is composed into the baseline before its delivery outcome is known; a baseline later rolled back as undeliverable remains counted — see messages_dropped/rollback warnings for delivery failures)",
         snapshot.transport.ice_pregather_emitted,
     );
     counter(
@@ -765,6 +781,7 @@ mod tests {
             "rejected_draining",
             "rejected_token_binding_offer",
             "rejected_token_binding_negotiation",
+            "rejected_server_fault",
         ] {
             assert!(
                 rendered.contains(&format!(
@@ -773,6 +790,10 @@ mod tests {
                 "expected zero websocket upgrade outcome for {outcome}"
             );
         }
+        assert!(
+            rendered.contains("signal_fish_websocket_upgrades_failed_after_accept_total 0"),
+            "expected zero failed-after-accept upgrade counter line"
+        );
 
         metrics
             .total_connections

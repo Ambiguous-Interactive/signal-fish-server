@@ -89,6 +89,12 @@ pub struct ServerMetrics {
     pub websocket_upgrades_rejected_draining: AtomicU64,
     pub websocket_upgrades_rejected_token_binding_offer: AtomicU64,
     pub websocket_upgrades_rejected_token_binding_negotiation: AtomicU64,
+    pub websocket_upgrades_rejected_server_fault: AtomicU64,
+    /// Accepted upgrades whose socket handover failed after the 101 response
+    /// was sent. Not an outcome lane: attempts still equal the sum of the
+    /// outcome lanes, and this counter records the accepted upgrade that never
+    /// became a socket.
+    pub websocket_upgrades_failed_after_accept: AtomicU64,
     pub websocket_messages_dropped: AtomicU64,
     /// Times a full outbound queue forced delivery to wait for capacity. The
     /// wait may still end in delivery — or in a loss accounted by
@@ -369,6 +375,11 @@ pub struct WebSocketUpgradeMetrics {
     pub rejected_draining: u64,
     pub rejected_token_binding_offer: u64,
     pub rejected_token_binding_negotiation: u64,
+    pub rejected_server_fault: u64,
+    /// Accepted upgrades whose socket handover failed after the 101 (never
+    /// became a socket). Reported beside the outcome lanes but excluded from
+    /// the attempts conservation sum.
+    pub failed_after_accept: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +389,10 @@ pub(crate) enum WebSocketUpgradeOutcome {
     RejectedDraining,
     RejectedTokenBindingOffer,
     RejectedTokenBindingNegotiation,
+    /// Server-fault (HTTP 5xx) rejection, kept distinct from client-fault
+    /// negotiation rejections so dashboards and per-peer windows cannot
+    /// misattribute a server-side failure to the client.
+    RejectedServerFault,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -553,6 +568,8 @@ impl ServerMetrics {
             websocket_upgrades_rejected_draining: AtomicU64::new(0),
             websocket_upgrades_rejected_token_binding_offer: AtomicU64::new(0),
             websocket_upgrades_rejected_token_binding_negotiation: AtomicU64::new(0),
+            websocket_upgrades_rejected_server_fault: AtomicU64::new(0),
+            websocket_upgrades_failed_after_accept: AtomicU64::new(0),
             websocket_messages_dropped: AtomicU64::new(0),
             websocket_backpressure_events: AtomicU64::new(0),
             websocket_slow_consumer_disconnects: AtomicU64::new(0),
@@ -668,8 +685,18 @@ impl ServerMetrics {
             WebSocketUpgradeOutcome::RejectedTokenBindingNegotiation => {
                 &self.websocket_upgrades_rejected_token_binding_negotiation
             }
+            WebSocketUpgradeOutcome::RejectedServerFault => {
+                &self.websocket_upgrades_rejected_server_fault
+            }
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count an accepted upgrade whose socket handover failed after the 101
+    /// response was already sent (see `on_failed_upgrade` wiring).
+    pub fn increment_websocket_upgrades_failed_after_accept(&self) {
+        self.websocket_upgrades_failed_after_accept
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn increment_websocket_messages_dropped(&self) {
@@ -1275,6 +1302,12 @@ impl ServerMetrics {
                     rejected_token_binding_negotiation: self
                         .websocket_upgrades_rejected_token_binding_negotiation
                         .load(Ordering::Relaxed),
+                    rejected_server_fault: self
+                        .websocket_upgrades_rejected_server_fault
+                        .load(Ordering::Relaxed),
+                    failed_after_accept: self
+                        .websocket_upgrades_failed_after_accept
+                        .load(Ordering::Relaxed),
                 },
                 websocket_messages_dropped: self.websocket_messages_dropped.load(Ordering::Relaxed),
                 websocket_backpressure_events: self
@@ -1799,6 +1832,7 @@ mod tests {
             (WebSocketUpgradeOutcome::RejectedDraining, 3),
             (WebSocketUpgradeOutcome::RejectedTokenBindingOffer, 4),
             (WebSocketUpgradeOutcome::RejectedTokenBindingNegotiation, 5),
+            (WebSocketUpgradeOutcome::RejectedServerFault, 6),
         ] {
             for _ in 0..count {
                 metrics.increment_websocket_upgrade_attempts();
@@ -1810,12 +1844,14 @@ mod tests {
         assert_eq!(
             upgrades,
             WebSocketUpgradeMetrics {
-                attempts: 15,
+                attempts: 21,
                 accepted: 1,
                 rejected_origin: 2,
                 rejected_draining: 3,
                 rejected_token_binding_offer: 4,
                 rejected_token_binding_negotiation: 5,
+                rejected_server_fault: 6,
+                failed_after_accept: 0,
             }
         );
         assert_eq!(
@@ -1825,7 +1861,25 @@ mod tests {
                 + upgrades.rejected_draining
                 + upgrades.rejected_token_binding_offer
                 + upgrades.rejected_token_binding_negotiation
+                + upgrades.rejected_server_fault
         );
+    }
+
+    /// A failed socket handover after a 101 is reported beside the outcome
+    /// lanes but excluded from the attempts conservation sum: the upgrade was
+    /// accepted, yet no socket existed to account a connection for.
+    #[tokio::test]
+    async fn failed_after_accept_is_tracked_outside_the_outcome_conservation_sum() {
+        let metrics = ServerMetrics::new();
+        metrics.increment_websocket_upgrade_attempts();
+        metrics.record_websocket_upgrade_outcome(WebSocketUpgradeOutcome::Accepted);
+        metrics.increment_websocket_upgrades_failed_after_accept();
+
+        let upgrades = metrics.snapshot().await.connections.websocket_upgrades;
+        assert_eq!(upgrades.attempts, 1);
+        assert_eq!(upgrades.accepted, 1);
+        assert_eq!(upgrades.failed_after_accept, 1);
+        assert_eq!(upgrades.attempts, upgrades.accepted);
     }
 
     /// Retry-success rates must read `null` (never a fabricated `1.0`) while

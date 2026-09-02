@@ -161,6 +161,14 @@ pub trait GameDatabase: Send + Sync {
 
     /// Create a new room with atomic room code generation
     /// Returns the created room or error if room code collision
+    ///
+    /// `room_code: None` asks the implementation to mint one. Production room
+    /// creation always mints a configured-length code itself and passes
+    /// `Some` (`protocol.room_code_length`); the built-in fallback for `None`
+    /// mints a `ProtocolConfig::default()`-length (6-character) clean code that
+    /// is NOT lengthened to a non-default `room_code_length`, so a joiner
+    /// validating against a non-default configured length would refuse it.
+    /// Pass an explicit code when a non-default length is configured.
     #[allow(clippy::too_many_arguments)]
     async fn create_room(
         &self,

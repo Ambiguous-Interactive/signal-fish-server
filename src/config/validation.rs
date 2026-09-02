@@ -422,6 +422,7 @@ pub(crate) fn validate_constructor_inputs(
     turn: &super::TurnConfig,
     transport: &super::TransportSecurityConfig,
     allowed_apps: &[super::AppRegistrationEntry],
+    metrics: &super::MetricsConfig,
 ) -> anyhow::Result<()> {
     validate_runtime_inputs(
         &RuntimeServerValidation::from_runtime(server),
@@ -433,6 +434,7 @@ pub(crate) fn validate_constructor_inputs(
         server.room_code_prefix.as_deref(),
         false,
         transport.tls.enabled && cfg!(feature = "tls"),
+        metrics,
     )
 }
 
@@ -447,6 +449,7 @@ fn validate_runtime_inputs(
     room_code_prefix: Option<&str>,
     reject_zero_rate_budgets: bool,
     built_in_tls_active: bool,
+    metrics: &super::MetricsConfig,
 ) -> anyhow::Result<()> {
     server.validate(protocol, reject_zero_rate_budgets)?;
     validate_app_registrations(allowed_apps)?;
@@ -454,7 +457,62 @@ fn validate_runtime_inputs(
     protocol.validate_room_code_generation(room_code_prefix)?;
     session.validate()?;
     turn.validate()?;
+    validate_metrics_cache_policy(metrics)?;
     Ok(())
+}
+
+/// Validate the dashboard-cache policy the runtime would otherwise silently
+/// rewrite.
+///
+/// `DashboardMetricsCache::new` floors `stale_after` at the refresh interval,
+/// so a TTL below the refresh interval would silently invert the operator's
+/// staleness policy (dashboard data kept "fresh" for a whole refresh period —
+/// the opposite of what a tighter TTL asks for). That contradiction is rejected
+/// here instead of being repaired in secret. The history window has a hard
+/// memory bound of [`super::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES`]
+/// samples; a window wider than that bound is honored for its most recent
+/// samples only, which is warned about rather than silently truncated.
+fn validate_metrics_cache_policy(metrics: &super::MetricsConfig) -> anyhow::Result<()> {
+    let refresh_secs = metrics.dashboard_cache_refresh_interval_secs.max(1);
+    if metrics.dashboard_cache_ttl_secs < refresh_secs {
+        anyhow::bail!(
+            "metrics.dashboard_cache_ttl_secs ({}) must be >= \
+             metrics.dashboard_cache_refresh_interval_secs ({refresh_secs}): the cache is \
+             only as fresh as its refresh interval, so a tighter TTL would be silently \
+             raised to the refresh interval at runtime; raise the TTL or lower the refresh \
+             interval instead",
+            metrics.dashboard_cache_ttl_secs
+        );
+    }
+    let representable_window_secs =
+        refresh_secs.saturating_mul(super::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES);
+    if metrics.dashboard_cache_history_window_secs > representable_window_secs {
+        tracing::warn!(
+            requested_window_secs = metrics.dashboard_cache_history_window_secs,
+            representable_window_secs,
+            max_samples = super::defaults::DASHBOARD_CACHE_HISTORY_MAX_SAMPLES,
+            "metrics.dashboard_cache_history_window_secs exceeds the cache's bounded \
+             history capacity; only the most recent representable window is retained"
+        );
+    }
+    Ok(())
+}
+
+/// Validate the log-file rotation policy.
+///
+/// The runtime maps any `rotation` value other than the documented
+/// `daily` / `hourly` / `never` (case-insensitively) to `DAILY`, so a typo such
+/// as `"hourly "` or `"wekkly"` silently rotates on the daily schedule instead
+/// of the intended one. Reject unknown values at startup rather than silently
+/// repairing them.
+fn validate_logging_policy(logging: &super::LoggingConfig) -> anyhow::Result<()> {
+    match logging.rotation.to_lowercase().as_str() {
+        "daily" | "hourly" | "never" => Ok(()),
+        other => anyhow::bail!(
+            "logging.rotation ({other:?}) must be one of \"daily\", \"hourly\", or \"never\" \
+             (case-insensitive); any other value would silently fall back to daily rotation"
+        ),
+    }
 }
 
 /// Validate configuration security and warn about potential credential leaks
@@ -581,7 +639,9 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         config.server.room_code_prefix.as_deref(),
         true,
         built_in_tls_active(config, cfg!(feature = "tls")),
-    )
+        &config.metrics,
+    )?;
+    validate_logging_policy(&config.logging)
 }
 
 /// Whether startup should warn that signaling is not TLS-terminated while the

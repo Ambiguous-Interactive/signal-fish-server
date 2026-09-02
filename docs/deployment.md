@@ -427,14 +427,21 @@ Every application-handled response carries a unique
 `x-signal-fish-request-id` and a machine-readable
 `x-signal-fish-upgrade-outcome`. Accepted upgrades use `accepted`; deliberate
 HTTP rejections identify `rejected_origin`, `rejected_draining`,
-`rejected_token_binding_offer`, or `rejected_token_binding_negotiation`. The
-server logs the same fields with the transport peer IP and status. Behind a
-reverse proxy, `peer_ip` is normally the proxy's address; Signal Fish does not
-infer an end-client address from untrusted forwarding headers. Missing headers
-mean the probe cannot confirm that the handler completed; possible causes
-include DNS, TLS, listener or reverse-proxy failure, framework rejection, and
-an intermediary stripping response headers. Correlate the printed probe
-attempt ID and nginx request ID before assigning the boundary.
+`rejected_token_binding_offer`, `rejected_token_binding_negotiation` (a
+client-fault 4xx), or `rejected_server_fault` (a server-fault 5xx — an invalid
+token-binding configuration that bypassed process validation, or a CSPRNG
+failure — kept out of the client-fault lane so a server regression cannot
+masquerade as a client attack). An accepted upgrade whose socket handover fails
+after the 101 response (the transport died mid-handover) additionally logs a
+warning with the same request ID and counts
+`signal_fish_websocket_upgrades_failed_after_accept_total`. The server logs the
+same fields with the transport peer IP and status. Behind a reverse proxy,
+`peer_ip` is normally the proxy's address; Signal Fish does not infer an
+end-client address from untrusted forwarding headers. Missing headers mean the
+probe cannot confirm that the handler completed; possible causes include DNS,
+TLS, listener or reverse-proxy failure, framework rejection, and an
+intermediary stripping response headers. Correlate the printed probe attempt ID
+and nginx request ID before assigning the boundary.
 
 The JSON snapshot exposes the same conservation boundary at
 `metricsSnapshot.connections.websocket_upgrades`. Prometheus exports

@@ -146,7 +146,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__PROTOCOL__PLAYER_NAME_VALIDATION__ADDITIONAL_ALLOWED_CHARACTERS` | `protocol.player_name_validation.additional_allowed_characters` | `null` | Optional extra player-name characters |
 | `SIGNAL_FISH__LOGGING__DIR` | `logging.dir` | `logs` | Directory for rolling log files |
 | `SIGNAL_FISH__LOGGING__FILENAME` | `logging.filename` | `server.log` | Rolling log filename |
-| `SIGNAL_FISH__LOGGING__ROTATION` | `logging.rotation` | `daily` | File rotation policy (`daily`, `hourly`, `never`) |
+| `SIGNAL_FISH__LOGGING__ROTATION` | `logging.rotation` | `daily` | File rotation policy (`daily`, `hourly`, `never`; any other value is rejected at startup instead of silently falling back to daily) |
 | `SIGNAL_FISH__LOGGING__LEVEL` | `logging.level` | `null` | Log level override (`trace`, `debug`, `info`, `warn`, `error`) |
 | `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING` | `logging.enable_file_logging` | `true` | Enable rolling file logs |
 | `SIGNAL_FISH__LOGGING__FORMAT` | `logging.format` | `json` | Log output format (`json` or `text`) |
@@ -171,9 +171,9 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TOKEN_BINDING__SCHEME` | `security.transport.token_binding.scheme` | `server_nonce_hkdf_sha256` | Server-fresh token-binding signing scheme |
 | `SIGNAL_FISH__SECURITY__ALLOWED_APPS` | `security.allowed_apps` | `[]` | JSON array of public app-ID registrations and accounting limits (`max_rooms`, `max_players_per_room`, and `rate_limit_per_minute` must be > 0 when set) |
 | `SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS` | `coordination.membership_snapshot_interval_secs` | `30` | Reserved membership-snapshot seam; the shipped coordinator is process-local |
-| `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_REFRESH_INTERVAL_SECS` | `metrics.dashboard_cache_refresh_interval_secs` | `5` | Dashboard metrics refresh interval |
-| `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_TTL_SECS` | `metrics.dashboard_cache_ttl_secs` | `30` | Dashboard metrics cache TTL |
-| `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_WINDOW_SECS` | `metrics.dashboard_cache_history_window_secs` | `300` | Dashboard history window |
+| `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_REFRESH_INTERVAL_SECS` | `metrics.dashboard_cache_refresh_interval_secs` | `5` | Dashboard metrics refresh interval (TTL must be >= this; zero is normalized to 1) |
+| `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_TTL_SECS` | `metrics.dashboard_cache_ttl_secs` | `30` | Dashboard metrics cache TTL (must be >= refresh interval; startup rejects a tighter TTL instead of silently raising it) |
+| `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_WINDOW_SECS` | `metrics.dashboard_cache_history_window_secs` | `300` | Dashboard history window (windows wider than the bounded 720-sample capacity keep only the most recent samples; startup warns) |
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_FIELDS` | `metrics.dashboard_cache_history_fields` | `["active_rooms","rooms_by_game","player_percentiles","game_percentiles"]` | Dashboard history fields |
 | `SIGNAL_FISH__RELAY_TYPES__DEFAULT_RELAY_TYPE` | `relay_types.default_relay_type` | `matchbox` | Default relay integration label |
 | `SIGNAL_FISH__RELAY_TYPES__GAME_RELAY_MAPPINGS` | `relay_types.game_relay_mappings` | `{}` | JSON object mapping game names to relay labels |

@@ -2153,6 +2153,50 @@ async fn token_binding_negotiation_rejection_is_correlatable_and_accounted() {
     running.shutdown().await;
 }
 
+/// Pins the combined token-binding admissibility table: every contradictory
+/// combination is rejected at startup, so the runtime negotiation's HTTP 5xx
+/// arms stay unreachable through validated configs (their remaining
+/// server-fault trigger is a CSPRNG failure; invalid configs constructed
+/// directly by library embedders bypass this validator by design and are
+/// classified into `rejected_server_fault` at the handler, see the
+/// `handler.rs` unit pins). Notably `enabled=false, require_client_fingerprint=true`
+/// had no dedicated pin before this table.
+#[tokio::test]
+async fn contradictory_disabled_token_binding_is_rejected_before_any_upgrade() {
+    // Directly-constructed library configs bypass `validate_config_security`
+    // only for listener-owned checks; `EnhancedGameServer::new` runs the same
+    // shared token-binding rule, so exercising the config-level validator
+    // covers both construction paths.
+    for (enabled, required, fingerprint, expected_ok) in [
+        (true, false, false, true),
+        (false, false, false, true),
+        // require_client_fingerprint needs required=true (and that in turn
+        // needs enabled=true plus active TLS).
+        (true, false, true, false),
+        // required needs enabled=true.
+        (false, true, false, false),
+        // A disabled binding tolerates no required/fingerprint demand: these
+        // were only implicitly rejected before this table.
+        (false, false, true, false),
+        (false, true, true, false),
+    ] {
+        let mut config = open_metrics_config();
+        let binding = &mut config.security.transport.token_binding;
+        binding.enabled = enabled;
+        binding.required = required;
+        binding.require_client_fingerprint = fingerprint;
+
+        let result = validate_config_security(&config);
+        assert_eq!(
+            result.is_ok(),
+            expected_ok,
+            "enabled={enabled}, required={required}, fingerprint={fingerprint}: \
+             expected {}, got {result:?}",
+            if expected_ok { "Ok" } else { "Err" },
+        );
+    }
+}
+
 #[tokio::test]
 async fn wildcard_origin_policy_preserves_development_websocket_access() {
     let running = start_origin_policy_test_server("*").await;
@@ -2571,6 +2615,79 @@ fn test_validate_config_security_tls_validation() {
             result,
         );
     }
+}
+
+fn open_metrics_config() -> Config {
+    let mut config = Config::default();
+    config.security.require_metrics_auth = false;
+    config
+}
+
+/// Data-driven validation of the log-file rotation policy: only the three
+/// documented values (case-insensitively) are accepted. The runtime maps any
+/// other value to daily rotation, so a typo such as `"hourly "` or `"wekkly"`
+/// would silently rotate on the daily schedule instead of the intended one.
+#[test]
+fn logging_rotation_policy_is_validated_at_startup() {
+    for (rotation, expected_ok) in [
+        ("daily", true),
+        ("hourly", true),
+        ("never", true),
+        ("DAILY", true),
+        ("Hourly", true),
+        ("NEVER", true),
+        ("wekkly", false),
+        ("hourly ", false),
+        (" hourly", false),
+        ("", false),
+    ] {
+        let mut config = open_metrics_config();
+        config.logging.rotation = rotation.to_string();
+
+        let result = validate_config_security(&config);
+        assert_eq!(
+            result.is_ok(),
+            expected_ok,
+            "rotation {rotation:?}: expected {}, got {result:?}",
+            if expected_ok { "Ok" } else { "Err" },
+        );
+    }
+}
+
+/// The dashboard cache used to silently rewrite contradictory staleness policy
+/// at runtime (`DashboardMetricsCache::new` raises a TTL below the refresh
+/// interval to the refresh interval, inverting the operator's freshness
+/// request); startup validation now rejects the contradiction instead. The
+/// history window beyond the bounded capacity stays warn-only: it is honored
+/// for its most recent representable samples.
+#[test]
+fn dashboard_cache_policy_is_validated_at_startup() {
+    for (ttl, refresh, expected_ok) in [
+        (30, 5, true),
+        (5, 5, true),
+        (3600, 3600, true),
+        (1, 3600, false),
+        (0, 1, false),
+    ] {
+        let mut config = open_metrics_config();
+        config.metrics.dashboard_cache_ttl_secs = ttl;
+        config.metrics.dashboard_cache_refresh_interval_secs = refresh;
+
+        let result = validate_config_security(&config);
+        assert_eq!(
+            result.is_ok(),
+            expected_ok,
+            "ttl={ttl}, refresh={refresh}: expected {}, got {result:?}",
+            if expected_ok { "Ok" } else { "Err" },
+        );
+    }
+
+    let mut config = open_metrics_config();
+    config.metrics.dashboard_cache_history_window_secs = u64::MAX;
+    assert!(
+        validate_config_security(&config).is_ok(),
+        "a history window wider than the bounded capacity warns but must not fail startup"
+    );
 }
 
 #[cfg(not(feature = "tls"))]

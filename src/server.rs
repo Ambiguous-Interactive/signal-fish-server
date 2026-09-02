@@ -580,8 +580,10 @@ impl EnhancedGameServer {
     /// `max_signal_errors` budget likewise selects generic errors immediately.
     /// Metrics auth with no token is also fail-closed at the route (every scrape
     /// is unauthorized); the binary validator reports it as an operator error.
-    /// Zero metrics-cache intervals are normalized to one second, coordination
-    /// settings are reserved, and relay/region strings are informational.
+    /// Zero metrics-cache intervals are normalized to one second, a TTL below
+    /// the refresh interval is rejected (the runtime would silently raise it),
+    /// coordination settings are reserved, and relay/region strings are
+    /// informational.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub async fn new(
         config: ServerConfig,
@@ -602,6 +604,7 @@ impl EnhancedGameServer {
             &turn_config,
             &transport_security,
             &allowed_apps,
+            &metrics_config,
         )?;
 
         let database: Arc<dyn GameDatabase> =
