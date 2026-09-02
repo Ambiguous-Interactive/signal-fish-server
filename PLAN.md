@@ -71,6 +71,9 @@ correctness evidence appears.
   no race window).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
+- #513 — move macOS Lint/Nextest out of the per-PR/per-push CI cohort into
+  the daily cron (10x billing lever, ~2/3 of CI billed cost); requires the
+  atomic branch-protection migration checklist in the issue before landing.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
