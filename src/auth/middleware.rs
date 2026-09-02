@@ -245,7 +245,7 @@ impl AppIdAllowlist {
     /// When the matched application configures an explicit
     /// `rate_limit_per_minute`, admission spends the per-source (IP) share
     /// first and the application-wide ceiling last, so a rejection can never
-    /// consume the application-wide budget (see `enforce_rate_limits`).
+    /// consume the application-wide budget (see `enforce_rate_limits_at`).
     ///
     /// This method is `async` for interface compatibility so that future
     /// implementations (e.g., database-backed auth) can perform I/O without
@@ -254,6 +254,19 @@ impl AppIdAllowlist {
         &self,
         app_id: &str,
         source: IpAddr,
+    ) -> Result<AppContext, AuthError> {
+        self.resolve_app_id_at(app_id, source, Instant::now()).await
+    }
+
+    /// Injected-time variant of [`Self::resolve_app_id`]: the caller supplies
+    /// the current monotonic timestamp so window admission is deterministic
+    /// (the same convention as
+    /// [`InMemoryRateLimiter::check_rate_limit_at`]).
+    pub async fn resolve_app_id_at(
+        &self,
+        app_id: &str,
+        source: IpAddr,
+        now: Instant,
     ) -> Result<AppContext, AuthError> {
         // Vet before any policy path (including the open-policy early return):
         // both modes feed the ID into logs and derived keys, so neither may
@@ -270,7 +283,7 @@ impl AppIdAllowlist {
 
         // Enforce per-app + per-source rate limits if configured.
         if let Some(limit) = info.rate_limit_per_minute {
-            self.enforce_rate_limits(app_id, source, limit)?;
+            self.enforce_rate_limits_at(app_id, source, limit, now)?;
         }
 
         Ok(info.clone())
@@ -285,15 +298,15 @@ impl AppIdAllowlist {
     /// run source share first and application-wide ceiling last: under a
     /// probe/commit race the worst case is at most one self-tightening stamp
     /// in the offending source's own window, never a cross-source effect.
-    fn enforce_rate_limits(
+    fn enforce_rate_limits_at(
         &self,
         app_id: &str,
         source: IpAddr,
         limit: u32,
+        now: Instant,
     ) -> Result<(), AuthError> {
         let pair_key = source_window_key(app_id, source);
         let share = source_rate_limit(limit);
-        let now = Instant::now();
         if !self.rate_limiter.would_admit_at(&pair_key, share, now)
             || !self.rate_limiter.would_admit_at(app_id, limit, now)
         {
@@ -302,13 +315,13 @@ impl AppIdAllowlist {
             }
             return Err(AuthError::RateLimitExceeded);
         }
-        self.check_rate_limit(&pair_key, share)?;
-        self.check_rate_limit(app_id, limit)
+        self.check_rate_limit_at(&pair_key, share, now)?;
+        self.check_rate_limit_at(app_id, limit, now)
     }
 
-    fn check_rate_limit(&self, app_id: &str, limit: u32) -> Result<(), AuthError> {
+    fn check_rate_limit_at(&self, key: &str, limit: u32, now: Instant) -> Result<(), AuthError> {
         self.rate_limiter
-            .check_rate_limit(app_id, limit)
+            .check_rate_limit_at(key, limit, now)
             .inspect_err(|_| {
                 if let Some(metrics) = &self.metrics {
                     metrics.record_rate_limit_rejection(crate::metrics::RateLimitRejection::Auth);

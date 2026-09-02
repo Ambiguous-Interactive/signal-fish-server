@@ -1259,20 +1259,25 @@ impl ConnectionManager {
     /// Reserve one server-wide connection slot, refusing at
     /// [`Self::max_connections`]. The compare-exchange loop makes check and
     /// spend atomic, so concurrent registrations can neither overshoot the
-    /// ceiling nor lose an increment.
+    /// ceiling nor lose an increment. Checked arithmetic keeps every step
+    /// total (the crate denies unchecked arithmetic in production paths).
     fn try_reserve_global_slot(&self) -> Result<usize, usize> {
         let mut current = self.live_connections.load(Ordering::Acquire);
         loop {
-            if current >= self.max_connections {
+            let Some(next) = current.checked_add(1) else {
+                // usize::MAX live connections: the counter is exhausted.
+                return Err(current);
+            };
+            if next > self.max_connections {
                 return Err(current);
             }
             match self.live_connections.compare_exchange_weak(
                 current,
-                current + 1,
+                next,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(current + 1),
+                Ok(_) => return Ok(next),
                 Err(observed) => current = observed,
             }
         }
@@ -1281,8 +1286,12 @@ impl ConnectionManager {
     /// Count a test-only registration without admission checks (mirrors
     /// [`Self::increment_ip_slot_unbounded`]): the counter must stay balanced
     /// with the map, so every entry shape counts and every removal releases.
+    /// Wrapping keeps the reported count total even at the theoretical
+    /// usize::MAX live-connection point (release then saturates below).
     fn increment_global_slot_unbounded(&self) -> usize {
-        self.live_connections.fetch_add(1, Ordering::AcqRel) + 1
+        self.live_connections
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
     }
 
     /// Release one server-wide slot at unregistration. Paired exactly with
@@ -1293,13 +1302,13 @@ impl ConnectionManager {
     fn release_global_slot(&self) {
         let mut current = self.live_connections.load(Ordering::Acquire);
         loop {
-            if current == 0 {
+            let Some(next) = current.checked_sub(1) else {
                 tracing::error!("global connection counter underflowed; ignoring unpaired release");
                 return;
-            }
+            };
             match self.live_connections.compare_exchange_weak(
                 current,
-                current - 1,
+                next,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {

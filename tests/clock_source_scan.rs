@@ -70,6 +70,14 @@ fn std_time_allowlist() -> BTreeMap<&'static str, Exemption> {
             },
         ),
         (
+            "src/auth/middleware.rs",
+            Exemption {
+                reason: "clock read confined to the thin resolve_app_id wrapper over \
+                         the resolve_app_id_at injection seam",
+                test_module_only: false,
+            },
+        ),
+        (
             "src/websocket/upgrade_rejection_log.rs",
             Exemption {
                 reason: "clock read confined to the thin record() wrapper over record_at",
