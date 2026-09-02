@@ -344,7 +344,8 @@ mod tests {
 
     /// `deny_unknown_fields` coexists with the deprecated serde aliases:
     /// a raw deserialization (bypassing the loader's legacy normalization,
-    /// which renames them pre-parse) accepts the alias names alone. The
+    /// which renames them pre-parse) accepts the alias names alone, while an
+    /// unknown key in the same document is still rejected. The
     /// loader-intake path is pinned separately in `loader.rs`.
     #[test]
     fn serde_aliases_still_deserialize_under_strict_admission() {
@@ -357,5 +358,17 @@ mod tests {
         .expect("deprecated aliases are known names under deny_unknown_fields");
         assert!(config.enforce_app_id_allowlist);
         assert_eq!(config.allowed_apps[0].app_id, "game");
+
+        let err = serde_json::from_str::<SecurityConfig>(
+            r#"{
+                "require_websocket_auth": true,
+                "requrie_metrics_auth": true
+            }"#,
+        )
+        .expect_err("an unknown key beside the aliases is still rejected");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "error must name the unknown key: {err}"
+        );
     }
 }
