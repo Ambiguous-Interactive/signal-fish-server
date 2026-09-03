@@ -83,9 +83,10 @@ cargo run -- --print-config
   above inbound — `max_message_size + 256 ≤ max_outbound_message_size`,
   startup rejects tighter pairings because relayed frames grow by the sender
   id and delivery stamps; outbound must be no more than 67108864 bytes; the
-  metadata cap plus per-member envelope overhead, times
-  `protocol.max_players_limit`, must not exceed outbound, so a full roster's
-  entries always fit one broadcast).
+  metadata cap times `protocol.max_players_limit` must not exceed outbound,
+  so the roster's entry payloads alone fit one broadcast — keep additional
+  headroom for per-member envelope fields, and the write-time outbound
+  check stays the backstop).
 
 ## TURN secret shared and rotated
 

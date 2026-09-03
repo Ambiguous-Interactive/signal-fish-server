@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `1009 outbound_message_too_large` — a one-shot peer-eviction primitive
   (issue #524). Startup validation also rejects the dead shape (cap above
   `max_message_size`) and the roster-busting shape
-  (`(cap + per-member envelope overhead) × protocol.max_players_limit` above
+  (its product with `protocol.max_players_limit` above
   `security.max_outbound_message_size`). Configurable via
   `SIGNAL_FISH__SECURITY__MAX_CONNECTION_INFO_BYTES`.
 - `rate_limit.max_relay_bytes` (default `268435456`, 256 MiB per window):

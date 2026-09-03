@@ -4344,8 +4344,11 @@ mod tests {
             max_message_size: 64,
             max_signal_bytes: 64,
             // Pairing-legal: the relay envelope headroom above the inbound
-            // cap; the 512-byte blob overflows it either way.
+            // cap; the 512-byte blob overflows it either way. The metadata
+            // cap is sized to the frame cap and the roster aggregate stays
+            // under the outbound cap (issue #524 guards).
             max_outbound_message_size: 64 + crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
+            max_connection_info_bytes: 3,
             ..ServerConfig::default()
         })
         .await;

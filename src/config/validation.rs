@@ -161,29 +161,28 @@ impl<'a> RuntimeServerValidation<'a> {
                 self.max_message_size
             );
         }
-        // The aggregate bound must cover the whole entry, not just the
-        // self-declared payload: every member also contributes the fixed
-        // per-entry envelope plus its name and relay label, whose maxima are
-        // themselves config knobs (#524).
-        let per_entry_bound = self
+        // Necessary bound, not sufficient: it covers the self-declared entry
+        // payloads alone and not the per-member envelope fields (ids, names,
+        // relay labels, timestamps), so an operator at the exact boundary
+        // should keep additional headroom. The write-time outbound check
+        // remains the backstop for anything that slips past (#524).
+        if self
             .max_connection_info_bytes
-            .saturating_add(crate::config::defaults::ROSTER_ENTRY_ENVELOPE_BYTES)
-            .saturating_add(protocol.max_player_name_length)
-            .saturating_add(crate::auth::MAX_APP_ID_LENGTH);
-        if per_entry_bound.saturating_mul(usize::from(protocol.max_players_limit))
+            .saturating_mul(usize::from(protocol.max_players_limit))
             > self.max_outbound_message_size
         {
             anyhow::bail!(
                 "security.max_connection_info_bytes ({}) combined with \
                  protocol.max_players_limit ({}) can produce a roster payload of {} bytes \
-                 (entry cap + per-member envelope overhead), exceeding \
-                 security.max_outbound_message_size ({}): every member's metadata entry is \
-                 broadcast to every other member in `GameStarting.peer_connections` and room \
-                 snapshots, and an aggregate payload past the outbound cap would close every \
-                 recipient with `1009 outbound_message_too_large` (issue #524)",
+                 (the entry payloads alone), exceeding security.max_outbound_message_size \
+                 ({}): every member's metadata entry is broadcast to every other member in \
+                 `GameStarting.peer_connections` and room snapshots, and an aggregate payload \
+                 past the outbound cap would close every recipient with \
+                 `1009 outbound_message_too_large` (issue #524)",
                 self.max_connection_info_bytes,
                 protocol.max_players_limit,
-                per_entry_bound.saturating_mul(usize::from(protocol.max_players_limit)),
+                self.max_connection_info_bytes
+                    .saturating_mul(usize::from(protocol.max_players_limit)),
                 self.max_outbound_message_size
             );
         }
@@ -1514,7 +1513,7 @@ mod tests {
         );
         assert!(
             err.to_string()
-                .contains("can produce a roster payload of 6608000 bytes"),
+                .contains("can produce a roster payload of 6553600 bytes"),
             "error must state the aggregate it rejects: {err}"
         );
     }
