@@ -151,11 +151,13 @@ async fn outbound_message_over_configured_limit_closes_with_1009() {
     let mut config = base_config();
     // Pairing-legal small caps: the handshake and join frames fit the inbound
     // cap, while the aggregate roster snapshot grows past the outbound cap
-    // after a few members join.
+    // after a few members join. The metadata cap is lowered to keep its
+    // roster aggregate under the outbound cap (issue #524 constructor guard).
     config.max_message_size = 200;
     config.max_signal_bytes = 200;
     config.max_outbound_message_size = config.max_message_size
         + 4 * signal_fish_server::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES;
+    config.max_connection_info_bytes = 8;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let running_server = start_server(server).await;
     let addr = running_server.addr();

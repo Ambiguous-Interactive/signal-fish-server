@@ -27,6 +27,12 @@ pub struct RateLimitConfig {
     /// Detailed rejected-signal responses per fixed time window before
     /// generic rate-limit errors.
     pub max_signal_errors: u32,
+    /// Per-sender game-data relay byte budget per fixed time window. The
+    /// sender-controlled app payload (binary payload length; canonical JSON
+    /// length for text lanes) is charged per accepted relay. `0` is a valid
+    /// explicit total-rejection policy for direct library construction (the
+    /// production config path rejects it).
+    pub max_relay_bytes: u64,
 }
 
 impl Default for RateLimitConfig {
@@ -37,6 +43,7 @@ impl Default for RateLimitConfig {
             max_join_attempts: 20, // per fixed 60-second window
             max_signals: 600,      // generous for trickle-ICE (~10/sec over the 60s window)
             max_signal_errors: 60, // detailed rejection responses before generic errors
+            max_relay_bytes: crate::config::defaults::default_max_relay_bytes(),
         }
     }
 }
@@ -52,6 +59,8 @@ struct RateLimitEntry {
     signals: u32,
     /// Number of detailed rejected-signal responses in the current window.
     signal_errors: u32,
+    /// Game-data relay bytes charged in the current window.
+    relay_bytes: u64,
     /// Window start time
     window_start: Instant,
 }
@@ -69,6 +78,7 @@ impl RateLimitEntry {
             join_attempts: 0,
             signals: 0,
             signal_errors: 0,
+            relay_bytes: 0,
             window_start: Instant::now(),
         }
     }
@@ -84,6 +94,7 @@ impl RateLimitEntry {
             self.join_attempts = 0;
             self.signals = 0;
             self.signal_errors = 0;
+            self.relay_bytes = 0;
             self.window_start = Instant::now();
         }
     }
@@ -129,6 +140,24 @@ impl RateLimitEntry {
     fn signal_available(&mut self, config: &RateLimitConfig) -> bool {
         self.maybe_reset_window(config);
         self.signals < config.max_signals
+    }
+
+    /// Charge `bytes` against the sender's relay budget.
+    ///
+    /// The charge is all-or-nothing: an over-budget frame neither partially
+    /// consumes the window's remaining bytes nor advances the counter past
+    /// the cap, so observability reflects exactly what was admitted. An
+    /// arithmetic overflow of the counter (only reachable with a `u64::MAX`
+    /// budget) rejects rather than wrapping.
+    fn try_relay_bytes(&mut self, config: &RateLimitConfig, bytes: u64) -> bool {
+        self.maybe_reset_window(config);
+        match self.relay_bytes.checked_add(bytes) {
+            Some(total) if total <= config.max_relay_bytes => {
+                self.relay_bytes = total;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Reserve one detailed rejected-signal response.
@@ -305,6 +334,33 @@ impl RoomRateLimiter {
         }
     }
 
+    /// Charge `bytes` of game-data relay payload against the player's window
+    /// budget.
+    ///
+    /// Called once per accepted relayed frame with the sender-controlled
+    /// payload size, before the fan-out is dispatched. A rejection means the
+    /// frame is not relayed at all; the caller owns the wire error.
+    pub async fn check_relay_bytes(
+        &self,
+        player_id: &Uuid,
+        bytes: u64,
+    ) -> Result<(), RateLimitError> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
+
+        if entry.try_relay_bytes(&self.config, bytes) {
+            Ok(())
+        } else {
+            let reset_time = entry.time_until_reset(&self.config);
+            self.record_rejection(crate::metrics::RateLimitRejection::RelayBandwidth);
+            Err(RateLimitError::RelayLimitExceeded {
+                retry_after: reset_time,
+            })
+        }
+    }
+
     /// Clean up old entries to prevent memory leaks
     pub async fn cleanup_old_entries(&self) {
         let mut entries = self.entries.write().await;
@@ -355,6 +411,7 @@ impl RoomRateLimiter {
                     join_attempts: 0,
                     signals: 0,
                     signal_errors: 0,
+                    relay_bytes: 0,
                     time_until_reset: Duration::ZERO,
                 }
             } else {
@@ -363,6 +420,7 @@ impl RoomRateLimiter {
                     join_attempts: entry.join_attempts,
                     signals: entry.signals,
                     signal_errors: entry.signal_errors,
+                    relay_bytes: entry.relay_bytes,
                     time_until_reset: entry.time_until_reset(&self.config),
                 }
             }
@@ -377,6 +435,7 @@ pub enum RateLimitError {
     JoinLimitExceeded { retry_after: Duration },
     SignalLimitExceeded { retry_after: Duration },
     SignalErrorLimitExceeded { retry_after: Duration },
+    RelayLimitExceeded { retry_after: Duration },
 }
 
 impl std::fmt::Display for RateLimitError {
@@ -418,6 +477,13 @@ impl std::fmt::Display for RateLimitError {
                     retry_after_secs(retry_after)
                 )
             }
+            Self::RelayLimitExceeded { retry_after } => {
+                write!(
+                    f,
+                    "Game data relay bandwidth limit exceeded. Try again in {} seconds.",
+                    retry_after_secs(retry_after)
+                )
+            }
         }
     }
 }
@@ -431,6 +497,7 @@ pub struct PlayerRateStats {
     pub join_attempts: u32,
     pub signals: u32,
     pub signal_errors: u32,
+    pub relay_bytes: u64,
     pub time_until_reset: Duration,
 }
 
@@ -445,6 +512,7 @@ mod tests {
             max_join_attempts: 3,
             max_signals: 2,
             max_signal_errors: 2,
+            max_relay_bytes: 1000,
         }
     }
 
@@ -586,6 +654,107 @@ mod tests {
         assert!(limiter.check_signal(&player_id).await.is_ok());
         assert!(limiter.check_signal(&player_id).await.is_ok());
         assert!(limiter.check_signal(&player_id).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_byte_budget_rejects_only_over_budget_frames() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let limiter = RoomRateLimiter::with_metrics(create_test_config(), Arc::clone(&metrics));
+        let player_id = Uuid::new_v4();
+
+        // Fill the 1000-byte window to exactly the cap.
+        assert!(limiter.check_relay_bytes(&player_id, 600).await.is_ok());
+        assert!(limiter.check_relay_bytes(&player_id, 400).await.is_ok());
+
+        // One more byte is rejected without consuming anything.
+        assert!(matches!(
+            limiter.check_relay_bytes(&player_id, 1).await,
+            Err(RateLimitError::RelayLimitExceeded { .. })
+        ));
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("stats entry exists")
+                .relay_bytes,
+            1000,
+            "a rejected charge must be all-or-nothing"
+        );
+
+        // The window reset restores the full budget.
+        tokio::time::advance(Duration::from_millis(150)).await;
+        assert!(limiter.check_relay_bytes(&player_id, 1000).await.is_ok());
+        assert_eq!(
+            metrics
+                .snapshot()
+                .await
+                .rate_limiting
+                .relay_bandwidth_rejections,
+            1,
+            "only the over-budget frame is attributed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_byte_budget_is_independent_per_player_and_of_other_budgets() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let sender = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        assert!(limiter.check_relay_bytes(&sender, 1000).await.is_ok());
+        assert!(limiter.check_relay_bytes(&sender, 1).await.is_err());
+
+        // Another sender's budget is untouched, and neither counting budget
+        // moved for either player.
+        assert!(limiter.check_relay_bytes(&other, 1).await.is_ok());
+        assert!(limiter.check_signal(&sender).await.is_ok());
+        let stats = limiter
+            .get_player_stats(&other)
+            .await
+            .expect("stats entry exists");
+        assert_eq!((stats.signals, stats.relay_bytes), (0, 1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_byte_budget_zero_is_an_explicit_total_rejection_policy() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_relay_bytes: 0,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+
+        assert!(matches!(
+            limiter.check_relay_bytes(&player_id, 1).await,
+            Err(RateLimitError::RelayLimitExceeded { .. })
+        ));
+        assert!(!RateLimitError::RelayLimitExceeded {
+            retry_after: Duration::from_secs(1)
+        }
+        .to_string()
+        .is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_byte_budget_saturates_without_overflow() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_relay_bytes: u64::MAX,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+
+        assert!(limiter
+            .check_relay_bytes(&player_id, u64::MAX)
+            .await
+            .is_ok());
+        assert!(limiter.check_relay_bytes(&player_id, 1).await.is_err());
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("stats entry exists")
+                .relay_bytes,
+            u64::MAX
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -751,6 +920,7 @@ mod tests {
             max_join_attempts: 1,
             max_signals: 1,
             max_signal_errors: 1,
+            ..create_test_config()
         };
         let limiter = RoomRateLimiter::new(config);
         let player_id = Uuid::new_v4();

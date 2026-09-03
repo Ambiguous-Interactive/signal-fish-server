@@ -192,15 +192,17 @@ pub fn test_server_config() -> ServerConfig {
             max_join_attempts: 20,
             max_signals: 600,
             max_signal_errors: 60,
+            max_relay_bytes: 256 * 1024 * 1024,
         },
         empty_room_timeout: Duration::from_secs(5), // Fast timeout for tests
         inactive_room_timeout: Duration::from_secs(10),
         max_message_size: 65536, // 64KB default
         max_outbound_message_size: 8 * 1024 * 1024,
-        max_signal_bytes: 16384,     // 16KB default
-        max_connections_per_ip: 100, // Generous for tests
-        max_connections: 10_000,     // Generous server-wide ceiling for tests
-        require_metrics_auth: false, // No auth for tests
+        max_signal_bytes: 16384,         // 16KB default
+        max_connection_info_bytes: 8192, // 8KB default
+        max_connections_per_ip: 100,     // Generous for tests
+        max_connections: 10_000,         // Generous server-wide ceiling for tests
+        require_metrics_auth: false,     // No auth for tests
         metrics_auth_token: None,
         reconnection_window: Duration::from_secs(300), // 5 minutes for tests
         event_buffer_size: 100,                        // Buffer 100 events

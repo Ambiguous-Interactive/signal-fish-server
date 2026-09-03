@@ -88,6 +88,25 @@ mod constructor_validation_tests {
                 expected: "max_signal_bytes must be greater than 0",
             },
             InvalidConstructorCase {
+                name: "zero connection-info cap",
+                mutate: |inputs| inputs.server.max_connection_info_bytes = 0,
+                expected: "max_connection_info_bytes must be greater than 0",
+            },
+            InvalidConstructorCase {
+                name: "connection-info cap above the frame cap is dead config",
+                mutate: |inputs| inputs.server.max_connection_info_bytes = 65_537,
+                expected:
+                    "max_connection_info_bytes (65537) must not exceed security.max_message_size",
+            },
+            InvalidConstructorCase {
+                name: "connection-info cap times the roster ceiling busts the outbound cap",
+                mutate: |inputs| {
+                    inputs.server.max_connection_info_bytes = 65_536;
+                    inputs.protocol.max_players_limit = 200;
+                },
+                expected: "can produce a roster payload of",
+            },
+            InvalidConstructorCase {
                 name: "zero cleanup interval",
                 mutate: |inputs| inputs.server.room_cleanup_interval = Duration::ZERO,
                 expected: "room_cleanup_interval must be greater than 0 seconds",
@@ -525,6 +544,12 @@ pub struct ServerConfig {
     /// Maximum serialized size in bytes of a v3 `Signal` payload (the opaque
     /// `signal` JSON value). Mirrors `security.max_signal_bytes`.
     pub max_signal_bytes: usize,
+    /// Maximum serialized size in bytes of one self-declared peer-metadata
+    /// entry (`ProvideConnectionInfo`, canonical JSON). Mirrors
+    /// `security.max_connection_info_bytes` and is validated against
+    /// `max_message_size` and the roster aggregate for direct library
+    /// construction too.
+    pub max_connection_info_bytes: usize,
     pub max_connections_per_ip: usize,
     /// Server-wide concurrent-connection ceiling. Mirrors validated
     /// `security.max_connections` and must be greater than 0 for direct
@@ -561,6 +586,7 @@ impl Default for ServerConfig {
             max_message_size: 65536,                    // 64KB
             max_outbound_message_size: 8 * 1024 * 1024, // 8 MiB
             max_signal_bytes: 16384,                    // 16KB
+            max_connection_info_bytes: 8192,            // 8KB
             max_connections_per_ip: 24,
             max_connections: crate::config::defaults::default_max_connections(),
             require_metrics_auth: true,
@@ -4465,6 +4491,7 @@ mod relay_projection_cache_tests {
                 max_signals: 0,
                 max_signal_errors: 0,
                 time_window: Duration::from_secs(60),
+                max_relay_bytes: 0,
             },
             ..super::ServerConfig::default()
         };

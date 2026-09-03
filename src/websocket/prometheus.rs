@@ -345,6 +345,18 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "Rejected signaling attempts whose detailed error was replaced by a rate-limit error",
         snapshot.rate_limiting.signal_error_rejections,
     );
+    counter(
+        &mut buf,
+        "signal_fish_rate_limit_relay_bandwidth_rejections_total",
+        "Game-data frames rejected because the sender's relay byte budget was exhausted",
+        snapshot.rate_limiting.relay_bandwidth_rejections,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_relay_bytes_total",
+        "Sender-side game-data payload bytes admitted onto the relay path",
+        snapshot.players.relay_bytes_total,
+    );
 
     counter(
         &mut buf,

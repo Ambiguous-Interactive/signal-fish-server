@@ -91,6 +91,20 @@ pub const fn default_max_signal_errors() -> u32 {
     60
 }
 
+/// Default per-sender game-data relay byte budget per `rate_limit.time_window`
+/// (256 MiB per 60-second window, about 4.5 MB/s sustained).
+///
+/// The relayed game-data fan-out previously had no sender-side budget at all
+/// (issue #519): one player could stream 64 KiB frames to a full roster at
+/// line rate on the operator's egress bill. The default sits comfortably
+/// above demonstrated real sessions (a full roster relaying 64 KiB at 30 Hz
+/// submits ~2 MB/s inbound) while bounding a flooding sender to a fixed,
+/// metered share. Fixed-window accounting shares the documented 2x
+/// boundary-burst trade-off of the other budgets.
+pub const fn default_max_relay_bytes() -> u64 {
+    256 * 1024 * 1024 // 256 MiB per window
+}
+
 // =============================================================================
 // Protocol Defaults
 // =============================================================================
@@ -272,6 +286,21 @@ pub const RELAY_ENVELOPE_HEADROOM_BYTES: usize = 256;
 /// `max_message_size` frame cap.
 pub const fn default_max_signal_bytes() -> usize {
     16384 // 16KB
+}
+
+/// Default cap on the serialized size of one self-declared peer-metadata
+/// entry (`ProvideConnectionInfo`, 8 KiB).
+///
+/// The entry is stored and broadcast verbatim to every room member (in
+/// `GameStarting.peer_connections` and room snapshots), so an unbounded entry
+/// is a peer-eviction primitive: a full roster of oversized entries can push
+/// the aggregate payload past `security.max_outbound_message_size`, closing
+/// every recipient with `1009 outbound_message_too_large` (issue #524). The
+/// default keeps the worst-case aggregate at default ceilings tiny:
+/// 8 KiB x `protocol.max_players_limit` (100) = 800 KiB, a fraction of the
+/// 8 MiB outbound cap.
+pub const fn default_max_connection_info_bytes() -> usize {
+    8192 // 8KB
 }
 
 /// Default cap on concurrent connections from one IP.

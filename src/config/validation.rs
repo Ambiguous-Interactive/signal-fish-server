@@ -25,11 +25,13 @@ struct RuntimeServerValidation<'a> {
     max_message_size: usize,
     max_outbound_message_size: usize,
     max_signal_bytes: usize,
+    max_connection_info_bytes: usize,
     max_connections_per_ip: usize,
     max_connections: usize,
     reconnection_window: Duration,
     event_buffer_size: usize,
     heartbeat_throttle: Duration,
+    max_relay_bytes: u64,
     websocket: &'a super::WebSocketConfig,
 }
 
@@ -48,11 +50,13 @@ impl<'a> RuntimeServerValidation<'a> {
             max_message_size: config.security.max_message_size,
             max_outbound_message_size: config.security.max_outbound_message_size,
             max_signal_bytes: config.security.max_signal_bytes,
+            max_connection_info_bytes: config.security.max_connection_info_bytes,
             max_connections_per_ip: config.security.max_connections_per_ip,
             max_connections: config.security.max_connections,
             reconnection_window: Duration::from_secs(config.server.reconnection_window),
             event_buffer_size: config.server.event_buffer_size,
             heartbeat_throttle: Duration::from_secs(config.server.heartbeat_throttle_secs),
+            max_relay_bytes: config.rate_limit.max_relay_bytes,
             websocket: &config.websocket,
         }
     }
@@ -71,11 +75,13 @@ impl<'a> RuntimeServerValidation<'a> {
             max_message_size: config.max_message_size,
             max_outbound_message_size: config.max_outbound_message_size,
             max_signal_bytes: config.max_signal_bytes,
+            max_connection_info_bytes: config.max_connection_info_bytes,
             max_connections_per_ip: config.max_connections_per_ip,
             max_connections: config.max_connections,
             reconnection_window: config.reconnection_window,
             event_buffer_size: config.event_buffer_size,
             heartbeat_throttle: config.heartbeat_throttle,
+            max_relay_bytes: config.rate_limit_config.max_relay_bytes,
             websocket: &config.websocket_config,
         }
     }
@@ -137,6 +143,47 @@ impl<'a> RuntimeServerValidation<'a> {
                  so the configured signal cap could never take effect",
                 self.max_signal_bytes,
                 self.max_message_size
+            );
+        }
+        if self.max_connection_info_bytes == 0 {
+            anyhow::bail!(
+                "security.max_connection_info_bytes must be greater than 0: a zero cap rejects \
+                 every ProvideConnectionInfo, so peers could never exchange legacy handoff \
+                 metadata"
+            );
+        }
+        if self.max_connection_info_bytes > self.max_message_size {
+            anyhow::bail!(
+                "security.max_connection_info_bytes ({}) must not exceed \
+                 security.max_message_size ({}): a metadata frame that large would be rejected \
+                 by the message size cap first, so the configured cap could never take effect",
+                self.max_connection_info_bytes,
+                self.max_message_size
+            );
+        }
+        // Necessary bound, not sufficient: it covers the self-declared entry
+        // payloads alone and not the per-member envelope fields (ids, names,
+        // relay labels, timestamps), so an operator at the exact boundary
+        // should keep additional headroom. The write-time outbound check
+        // remains the backstop for anything that slips past (#524).
+        if self
+            .max_connection_info_bytes
+            .saturating_mul(usize::from(protocol.max_players_limit))
+            > self.max_outbound_message_size
+        {
+            anyhow::bail!(
+                "security.max_connection_info_bytes ({}) combined with \
+                 protocol.max_players_limit ({}) can produce a roster payload of {} bytes \
+                 (the entry payloads alone), exceeding security.max_outbound_message_size \
+                 ({}): every member's metadata entry is broadcast to every other member in \
+                 `GameStarting.peer_connections` and room snapshots, and an aggregate payload \
+                 past the outbound cap would close every recipient with \
+                 `1009 outbound_message_too_large` (issue #524)",
+                self.max_connection_info_bytes,
+                protocol.max_players_limit,
+                self.max_connection_info_bytes
+                    .saturating_mul(usize::from(protocol.max_players_limit)),
+                self.max_outbound_message_size
             );
         }
 
@@ -210,6 +257,12 @@ impl<'a> RuntimeServerValidation<'a> {
                 anyhow::bail!(
                     "rate_limit.max_signals must be greater than 0: a zero budget rejects every \
                      WebRTC Signal message, so peers can never exchange connection candidates"
+                );
+            }
+            if self.max_relay_bytes == 0 {
+                anyhow::bail!(
+                    "rate_limit.max_relay_bytes must be greater than 0: a zero budget rejects \
+                     every relayed game-data frame, so peers can never exchange gameplay traffic"
                 );
             }
         }
@@ -1422,6 +1475,63 @@ mod tests {
             err.to_string()
                 .contains("security.max_message_size must be greater than 0"),
             "error must name security.max_message_size directly: {err}"
+        );
+    }
+
+    /// The peer-metadata cap shares the Signal cap's admission shape (#524):
+    /// dead-config and roster-aggregate rejections must fire at startup with
+    /// diagnostics that name the contradictory pairing.
+    #[test]
+    fn connection_info_cap_rejects_dead_and_roster_busting_configurations() {
+        // Dead config: a cap the inbound frame limit rejects first.
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.max_message_size = 4096;
+        config.security.max_signal_bytes = 4096;
+        config.security.max_connection_info_bytes = 4097;
+        let err = validate_config_security(&config)
+            .expect_err("a connection-info cap above the frame cap can never take effect");
+        assert!(
+            err.to_string().contains(
+                "security.max_connection_info_bytes (4097) must not exceed \
+                 security.max_message_size",
+            ),
+            "error must name the dead cap: {err}"
+        );
+
+        // Roster-aggregate config: a full roster of cap-sized entries would
+        // produce a GameStarting payload past the outbound cap, closing
+        // every recipient. (The dead-config rule above already binds the
+        // entry cap under the frame cap, so this rule only bites when the
+        // operator also lowers the outbound cap.)
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.max_outbound_message_size = 2 * 1024 * 1024;
+        config.security.max_connection_info_bytes = 65_536;
+        let err = validate_config_security(&config).expect_err(
+            "65536-byte entries x the 100-player ceiling must exceed a 2 MiB outbound cap",
+        );
+        assert!(
+            err.to_string()
+                .contains("can produce a roster payload of 6553600 bytes"),
+            "error must state the aggregate it rejects: {err}"
+        );
+    }
+
+    /// The relay byte budget shares the other rate budgets' admission shape
+    /// (#519): zero is rejected on the production config path.
+    #[test]
+    fn zero_relay_byte_budget_is_rejected_on_the_config_path() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.rate_limit.max_relay_bytes = 0;
+
+        let err = validate_config_security(&config)
+            .expect_err("a zero relay budget rejects every game-data frame");
+        assert!(
+            err.to_string()
+                .contains("rate_limit.max_relay_bytes must be greater than 0"),
+            "error must name the zero relay budget: {err}"
         );
     }
 

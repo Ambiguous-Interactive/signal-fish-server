@@ -98,7 +98,7 @@ violations.
 | `INVALID_ROOM_CODE` | The room code is invalid or malformed. |
 | `INVALID_PLAYER_NAME` | The player name is invalid. Must be non-empty and meet length requirements. |
 | `INVALID_MAX_PLAYERS` | The maximum player count is invalid. Must be a positive number within limits. |
-| `MESSAGE_TOO_LARGE` | The message size exceeds the maximum allowed limit. |
+| `MESSAGE_TOO_LARGE` | The message size exceeds the maximum allowed limit. Producers: an inbound frame over `security.max_message_size`, an oversized binary game-data payload, or a `ProvideConnectionInfo` entry whose canonical JSON exceeds `security.max_connection_info_bytes` (rejected and not stored; the connection stays open). |
 | `INVALID_DELIVERY_CLASS` | A well-typed delivery class/key pairing is illegal: `latest` requires a `u32` key; reliable/default and volatile forbid a key; connections below v3 must omit both fields. Malformed metadata is `INVALID_INPUT` instead. |
 
 ### Room Errors (3xxx)
@@ -276,6 +276,15 @@ window before reconnecting: the lockout ends when earlier successful
 handshakes age out of the window, so retrying early neither helps nor
 hurts, and a low, steady reconnect rate is the polite choice for the
 app's other players.
+
+A third budget also answers with this code: the per-sender game-data relay
+byte budget (`rate_limit.max_relay_bytes`, issue #519). An over-budget
+`GameData` frame (text or binary) is refused with an inline `Error` frame,
+is not relayed, consumes no budget, and the connection stays open; the
+lockout ends when the shared fixed rate-limit window resets. A client
+hitting it is submitting relay traffic faster than the deployment's
+configured ceiling — back off to the budget's sustained rate
+(`max_relay_bytes / time_window` bytes per second).
 
 ### Reconnection expired (`RECONNECTION_EXPIRED`)
 

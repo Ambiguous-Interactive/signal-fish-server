@@ -186,12 +186,19 @@ pub struct ServerMetrics {
     pub rate_limit_join_attempt_rejections: AtomicU64,
     pub rate_limit_signal_rejections: AtomicU64,
     pub rate_limit_signal_error_rejections: AtomicU64,
+    pub rate_limit_relay_bandwidth_rejections: AtomicU64,
 
     // Player activity metrics
     pub players_joined: AtomicU64,
     pub players_left: AtomicU64,
     pub authority_transfers: AtomicU64,
     pub game_data_messages: AtomicU64,
+    /// Sender-side app payload bytes admitted onto the relayed game-data
+    /// path (binary payload length; canonical JSON length for the text
+    /// lane), charged per accepted frame before fan-out (issue #519). This
+    /// is the sender-controlled inbound measure; per-recipient egress
+    /// amplification is bounded by the roster ceiling.
+    pub relay_bytes_total: AtomicU64,
 
     // Heartbeat throttling metrics
     /// Player last_seen persistence attempts admitted by the throttle window
@@ -305,6 +312,9 @@ pub enum RateLimitRejection {
     JoinAttempt,
     Signal,
     SignalError,
+    /// A relayed game-data frame exceeded the sender's per-window byte
+    /// budget (`rate_limit.max_relay_bytes`, issue #519).
+    RelayBandwidth,
 }
 
 #[derive(Debug, Clone)]
@@ -478,6 +488,7 @@ pub struct RateLimitingMetrics {
     pub join_attempt_rejections: u64,
     pub signal_rejections: u64,
     pub signal_error_rejections: u64,
+    pub relay_bandwidth_rejections: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -486,6 +497,9 @@ pub struct PlayerMetrics {
     pub players_left: u64,
     pub authority_transfers: u64,
     pub game_data_messages: u64,
+    /// Sender-side app payload bytes admitted onto the relayed game-data
+    /// path (issue #519).
+    pub relay_bytes_total: u64,
     /// Player last_seen persistence attempts admitted by the throttle window
     /// (a failed persistence still consumed the window and counts here)
     pub heartbeat_updates: u64,
@@ -612,10 +626,12 @@ impl ServerMetrics {
             rate_limit_join_attempt_rejections: AtomicU64::new(0),
             rate_limit_signal_rejections: AtomicU64::new(0),
             rate_limit_signal_error_rejections: AtomicU64::new(0),
+            rate_limit_relay_bandwidth_rejections: AtomicU64::new(0),
             players_joined: AtomicU64::new(0),
             players_left: AtomicU64::new(0),
             authority_transfers: AtomicU64::new(0),
             game_data_messages: AtomicU64::new(0),
+            relay_bytes_total: AtomicU64::new(0),
             heartbeat_updates: AtomicU64::new(0),
             heartbeat_skipped: AtomicU64::new(0),
             reconnection_tokens_issued: AtomicU64::new(0),
@@ -1024,6 +1040,7 @@ impl ServerMetrics {
             RateLimitRejection::JoinAttempt => &self.rate_limit_join_attempt_rejections,
             RateLimitRejection::Signal => &self.rate_limit_signal_rejections,
             RateLimitRejection::SignalError => &self.rate_limit_signal_error_rejections,
+            RateLimitRejection::RelayBandwidth => &self.rate_limit_relay_bandwidth_rejections,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1044,6 +1061,14 @@ impl ServerMetrics {
 
     pub fn increment_game_data_messages(&self) {
         self.game_data_messages.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record sender-side app payload bytes admitted onto the relayed
+    /// game-data path (issue #519). One call per accepted frame, charged
+    /// before fan-out; rejected frames are not counted here (their drop is
+    /// attributed by the rate-limit rejection counter instead).
+    pub fn record_relay_bytes(&self, bytes: u64) {
+        self.relay_bytes_total.fetch_add(bytes, Ordering::Relaxed);
     }
 
     // Heartbeat throttling metrics
@@ -1408,11 +1433,15 @@ impl ServerMetrics {
                 let signal_error_rejections = self
                     .rate_limit_signal_error_rejections
                     .load(Ordering::Relaxed);
+                let relay_bandwidth_rejections = self
+                    .rate_limit_relay_bandwidth_rejections
+                    .load(Ordering::Relaxed);
                 let rate_limit_rejections = auth_rejections
                     .saturating_add(room_creation_rejections)
                     .saturating_add(join_attempt_rejections)
                     .saturating_add(signal_rejections)
-                    .saturating_add(signal_error_rejections);
+                    .saturating_add(signal_error_rejections)
+                    .saturating_add(relay_bandwidth_rejections);
 
                 RateLimitingMetrics {
                     rate_limit_rejections,
@@ -1421,6 +1450,7 @@ impl ServerMetrics {
                     join_attempt_rejections,
                     signal_rejections,
                     signal_error_rejections,
+                    relay_bandwidth_rejections,
                 }
             },
             players: PlayerMetrics {
@@ -1428,6 +1458,7 @@ impl ServerMetrics {
                 players_left: self.players_left.load(Ordering::Relaxed),
                 authority_transfers: self.authority_transfers.load(Ordering::Relaxed),
                 game_data_messages: self.game_data_messages.load(Ordering::Relaxed),
+                relay_bytes_total: self.relay_bytes_total.load(Ordering::Relaxed),
                 heartbeat_updates: self.heartbeat_updates.load(Ordering::Relaxed),
                 heartbeat_skipped: self.heartbeat_skipped.load(Ordering::Relaxed),
             },
@@ -1777,6 +1808,7 @@ mod tests {
                 RateLimitRejection::JoinAttempt,
                 RateLimitRejection::Signal,
                 RateLimitRejection::SignalError,
+                RateLimitRejection::RelayBandwidth,
             ];
             for index in 0..writes {
                 writer_metrics.record_rate_limit_rejection(kinds[index % kinds.len()]);
@@ -1795,6 +1827,7 @@ mod tests {
                     + rate_limits.join_attempt_rejections
                     + rate_limits.signal_rejections
                     + rate_limits.signal_error_rejections
+                    + rate_limits.relay_bandwidth_rejections
             );
             tokio::task::yield_now().await;
         }
@@ -1820,6 +1853,7 @@ mod tests {
                 + rate_limits.join_attempt_rejections
                 + rate_limits.signal_rejections
                 + rate_limits.signal_error_rejections
+                + rate_limits.relay_bandwidth_rejections
         );
     }
 

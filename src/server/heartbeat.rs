@@ -134,6 +134,7 @@ mod tests {
             max_connections_per_ip: 32,
             max_message_size: 4,
             max_signal_bytes: 4,
+            max_connection_info_bytes: 4,
             ..ServerConfig::default()
         })
         .await;
