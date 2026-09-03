@@ -1754,8 +1754,19 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
                 .request_delivery_timeout_close(trace_delivery_id);
             #[cfg(not(feature = "trace-validation"))]
             let initiated_close = handle.close.request_delivery_timeout_close(None);
+            // Last-straw attribution (issue #530): record the sender of the
+            // reliable-class frame that initiated the recipient's close. The
+            // recipient's queue may hold frames from several senders; this
+            // counter is the O(1) "who pushed the frame that ended it"
+            // signal, beside the per-recipient ledger.
+            let reliable_trigger = initiated_close
+                .then(|| reliable_class_sender(pending.wait.delivery.message()))
+                .flatten();
             if initiated_close {
                 metrics.increment_websocket_slow_consumer_disconnects();
+                if let Some(trigger_sender) = reliable_trigger {
+                    metrics.record_slow_consumer_eviction(&trigger_sender);
+                }
             }
             metrics.increment_websocket_messages_dropped();
             if let Some(stats) = &connection_stats {
@@ -1767,6 +1778,7 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
                 %player_id,
                 timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
                 initiated_close,
+                reliable_trigger_sender = ?reliable_trigger,
                 "Outbound queue full past the slow-consumer timeout; disconnecting recipient \
                  instead of silently dropping messages"
             );
@@ -1779,6 +1791,29 @@ pub(crate) async fn finish_backpressured_delivery_in_room(
 #[cfg(feature = "trace-validation")]
 fn trace_queue_outcome_supported(outcome: QueueEnqueueOutcome) -> bool {
     outcome.enqueued && outcome.losses == 0
+}
+
+/// The sender of a reliable-class game-data frame, for slow-consumer
+/// eviction attribution (issue #530).
+///
+/// Reliable frames apply sender backpressure and can systematically fill a
+/// slow recipient's queue until the recipient is force-closed, while the
+/// flooding sender is never penalized; attributing the close to the sender
+/// of the triggering frame gives operators (and the room's authority) the
+/// cause. Latest/Volatile frames either supersede themselves or bypass
+/// backpressure, so they are not attributed; binary frames are always
+/// reliable-class (the binary lane has no class field).
+fn reliable_class_sender(message: &crate::protocol::ServerMessage) -> Option<PlayerId> {
+    match message {
+        ServerMessage::GameData {
+            from_player, class, ..
+        } => {
+            let reliable = class.unwrap_or_default() == crate::protocol::DeliveryClass::Reliable;
+            reliable.then_some(*from_player)
+        }
+        ServerMessage::GameDataBinary { from_player, .. } => Some(*from_player),
+        _ => None,
+    }
 }
 
 pub(crate) fn record_queue_outcome(
@@ -4591,6 +4626,148 @@ mod tests {
             1
         );
         assert_conservation(&metrics);
+    }
+
+    /// Issue #530: the sender of the reliable-class frame whose enqueue timed
+    /// out owns the eviction attribution when — and only when — this call
+    /// initiated the recipient's close. Latest-class frames (which supersede
+    /// rather than accumulate) never attract attribution, and a concurrent
+    /// timeout against an already-closing recipient (the loser of the
+    /// first-requested-close race) stays unattributed.
+    #[tokio::test(start_paused = true)]
+    async fn reliable_slow_consumer_eviction_is_attributed_to_the_triggering_sender() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let recipient = test_player();
+        let sender_a = PlayerId::from_u128(501);
+        let sender_b = PlayerId::from_u128(502);
+        let room_id = RoomId::new_v4();
+        let game_data_from = |sender: PlayerId, class: Option<DeliveryClass>, key: Option<u32>| {
+            Arc::new(ServerMessage::GameData {
+                from_player: sender,
+                data: serde_json::json!({"state": 1}),
+                seq: None,
+                epoch: None,
+                class,
+                key,
+            })
+        };
+
+        let (sender, mut _receiver) = outbound_queue::channel(1, 1);
+        sender.set_protocol_version(3);
+        let (close, _listener) = ConnectionCloseSignal::channel();
+        let handle = ClientDeliveryHandle::classified(sender, close);
+        handle
+            .sender
+            .try_send(game_data_message(None, None, None, None), None)
+            .expect("prefill the classified data lane");
+
+        // Sender A's reliable frame times out against the full lane and
+        // initiates the close: attributed to sender A.
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &recipient,
+            &handle,
+            DeliveryMessage::new(game_data_from(
+                sender_a,
+                Some(DeliveryClass::Reliable),
+                None,
+            )),
+            Some(room_id),
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+        tokio::time::advance(Duration::from_millis(1001)).await;
+        let (_, _, outcome) = finish_backpressured_delivery_in_room(&metrics, pending).await;
+        assert_eq!(outcome, DeliveryOutcome::SlowConsumer);
+        assert_eq!(
+            metrics.slow_consumer_eviction_attributions_snapshot(),
+            std::iter::once((sender_a, 1)).collect(),
+            "the reliable-class trigger is attributed to its sender exactly once"
+        );
+
+        // Sender B's reliable frame times out against the same stuck
+        // recipient, but the close was already requested: no attribution for
+        // the loser of the first-requested-close race.
+        let pending = match start_message_delivery_in_room(
+            &metrics,
+            Duration::from_secs(1),
+            &recipient,
+            &handle,
+            DeliveryMessage::new(game_data_from(
+                sender_b,
+                Some(DeliveryClass::Reliable),
+                None,
+            )),
+            Some(room_id),
+        ) {
+            DeliveryStart::Backpressured(pending) => pending,
+            DeliveryStart::Complete(outcome) => {
+                panic!("full queue unexpectedly completed with {outcome:?}")
+            }
+        };
+        tokio::time::advance(Duration::from_millis(1001)).await;
+        let (_, _, outcome) = finish_backpressured_delivery_in_room(&metrics, pending).await;
+        assert_eq!(outcome, DeliveryOutcome::SlowConsumer);
+        assert_eq!(
+            metrics.slow_consumer_eviction_attributions_snapshot(),
+            std::iter::once((sender_a, 1)).collect(),
+            "a non-initiating timeout stays unattributed"
+        );
+        assert_conservation(&metrics);
+        // Latest/Volatile classes never attract eviction attribution: they
+        // supersede or bypass sender backpressure rather than accumulate
+        // queue pressure (the classifier test below pins the class gate).
+    }
+
+    /// The attribution classifier: reliable-class data frames carry their
+    /// sender; latest/volatile do not apply sender backpressure; binary
+    /// frames are always reliable-class; non-data frames are never
+    /// attributed.
+    #[test]
+    fn reliable_class_sender_classifies_the_attribution_surface() {
+        let sender = test_player();
+        let game_data = |class: Option<DeliveryClass>, key: Option<u32>| ServerMessage::GameData {
+            from_player: sender,
+            data: serde_json::json!({"state": 1}),
+            seq: Some(1),
+            epoch: Some(1),
+            class,
+            key,
+        };
+
+        assert_eq!(
+            reliable_class_sender(&game_data(Some(DeliveryClass::Reliable), None)),
+            Some(sender)
+        );
+        assert_eq!(
+            reliable_class_sender(&game_data(None, None)),
+            Some(sender),
+            "an omitted class defaults to reliable"
+        );
+        assert_eq!(
+            reliable_class_sender(&game_data(Some(DeliveryClass::Latest), Some(1))),
+            None
+        );
+        assert_eq!(
+            reliable_class_sender(&game_data(Some(DeliveryClass::Volatile), None)),
+            None
+        );
+        assert_eq!(
+            reliable_class_sender(&ServerMessage::GameDataBinary {
+                from_player: sender,
+                encoding: GameDataEncoding::MessagePack,
+                payload: bytes::Bytes::from_static(b"payload"),
+                seq: Some(1),
+                epoch: Some(1),
+            }),
+            Some(sender),
+            "binary frames are always reliable-class"
+        );
+        assert_eq!(reliable_class_sender(&ServerMessage::Pong), None);
     }
 
     /// Issue #416: the capacity witness freezes the lane that was full when

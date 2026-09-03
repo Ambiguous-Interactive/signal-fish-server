@@ -363,6 +363,37 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "Sender-side game-data payload bytes admitted onto the relay path",
         snapshot.players.relay_bytes_total,
     );
+    // Per-application attribution (issue #530). Labeled series over a map
+    // bounded by the configured allowlist (open-mode IDs are client-chosen
+    // labels and are never attributed), so cardinality is deployment-bounded.
+    let _ = writeln!(
+        buf,
+        "# HELP signal_fish_relay_app_bytes_total Sender-side game-data payload bytes admitted onto the relay path, attributed to the authenticated application"
+    );
+    let _ = writeln!(buf, "# TYPE signal_fish_relay_app_bytes_total counter");
+    for (app_id, bytes) in &snapshot.players.app_relay_bytes {
+        let _ = writeln!(
+            buf,
+            "signal_fish_relay_app_bytes_total{{app_id=\"{app_id}\"}} {bytes}"
+        );
+    }
+    // Slow-consumer eviction attribution (issue #530): the sender of the
+    // reliable-class frame that initiated each recipient's close, bounded
+    // by live sender connections that evicted a recipient.
+    let _ = writeln!(
+        buf,
+        "# HELP signal_fish_websocket_slow_consumer_eviction_attributions_total Slow-consumer disconnections attributed to the sender of the reliable-class frame that initiated the recipient's close"
+    );
+    let _ = writeln!(
+        buf,
+        "# TYPE signal_fish_websocket_slow_consumer_eviction_attributions_total counter"
+    );
+    for (sender, evictions) in &snapshot.connections.slow_consumer_eviction_attributions {
+        let _ = writeln!(
+            buf,
+            "signal_fish_websocket_slow_consumer_eviction_attributions_total{{sender=\"{sender}\"}} {evictions}"
+        );
+    }
 
     counter(
         &mut buf,
@@ -871,6 +902,61 @@ mod tests {
                 "unwired series {unwired} must not be exported"
             );
         }
+    }
+
+    /// The per-app relay byte attribution and the per-sender slow-consumer
+    /// eviction attribution (issue #530) export as labeled counter series.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_render_prometheus_metrics_includes_labeled_attribution_series() {
+        let metrics = ServerMetrics::new();
+        let app_a = uuid::Uuid::new_v4();
+        let app_b = uuid::Uuid::new_v4();
+        let sender_a = crate::protocol::PlayerId::new_v4();
+        let sender_b = crate::protocol::PlayerId::new_v4();
+        metrics.record_app_relay_bytes(&app_a, 300);
+        metrics.record_app_relay_bytes(&app_a, 200);
+        metrics.record_app_relay_bytes(&app_b, 1000);
+        metrics.record_slow_consumer_eviction(&sender_a);
+        metrics.record_slow_consumer_eviction(&sender_a);
+        metrics.record_slow_consumer_eviction(&sender_b);
+
+        let rendered = render_prometheus_metrics(&metrics.snapshot().await);
+
+        let app_lines: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with("signal_fish_relay_app_bytes_total{"))
+            .collect();
+        assert_eq!(
+            app_lines.len(),
+            2,
+            "one series per attributed application: {app_lines:?}"
+        );
+        assert!(app_lines
+            .iter()
+            .any(|line| *line
+                == format!("signal_fish_relay_app_bytes_total{{app_id=\"{app_a}\"}} 500")));
+        assert!(app_lines
+            .iter()
+            .any(|line| *line
+                == format!("signal_fish_relay_app_bytes_total{{app_id=\"{app_b}\"}} 1000")));
+        assert!(rendered.contains("# TYPE signal_fish_relay_app_bytes_total counter"));
+
+        let eviction_lines: Vec<&str> = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("signal_fish_websocket_slow_consumer_eviction_attributions_total{")
+            })
+            .collect();
+        assert_eq!(
+            eviction_lines.len(),
+            2,
+            "one series per attributed sender: {eviction_lines:?}"
+        );
+        assert!(eviction_lines.iter().any(|line| *line
+            == format!("signal_fish_websocket_slow_consumer_eviction_attributions_total{{sender=\"{sender_a}\"}} 2")));
+        assert!(eviction_lines.iter().any(|line| *line
+            == format!("signal_fish_websocket_slow_consumer_eviction_attributions_total{{sender=\"{sender_b}\"}} 1")));
     }
 
     #[tokio::test]

@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `security.allowed_apps[].max_relay_bytes` (optional per-app override of
+  `rate_limit.max_relay_bytes`): allowlisted deployments can replace the
+  server-wide per-sender relay byte budget per tenant, so hosted tiers can
+  bill and alarm independently (raise for a paid tier, lower for a trial
+  tier) without moving the global default (issue #530). The override changes
+  only the budget value — the fixed window stays anchored to the sender, so
+  rotating app labels cannot reset or fork a window — and must be `> 0` when
+  set (startup validation rejects zero). Open-mode deployments never carry an
+  override: their application identity is a client-chosen label. Configured
+  via the `SIGNAL_FISH__SECURITY__ALLOWED_APPS` JSON and the external
+  app-registry file.
+- Per-application relay egress attribution: admitted relay payload bytes are
+  attributed per authenticated application — cumulative
+  `signal_fish_relay_app_bytes_total{app_id}` Prometheus series and the
+  snapshot field `players.app_relay_bytes` (sorted map) — so hosted tiers can
+  bill and alarm per tenant (issue #530). Only allowlisted applications are
+  attributed (the map is bounded by the configured allowlist); open-mode
+  application IDs are client-chosen labels and are never attributed.
+- Reliable-class slow-consumer eviction attribution (issue #530): the sender
+  of the reliable-class frame whose enqueue timed out past the slow-consumer
+  deadline — and which initiated the recipient's close — is now attributed in
+  the new cumulative
+  `signal_fish_websocket_slow_consumer_eviction_attributions_total{sender}`
+  Prometheus series and the snapshot field
+  `connections.slow_consumer_eviction_attributions`, and the eviction warning
+  log carries the triggering sender. A member streaming maximal reliable
+  frames could previously evict room-mates with `SLOW_CONSUMER` while the
+  flooding sender was never identifiable. The ledger follows the attributed
+  sender across a reconnection identity swap and is dropped when the sender
+  disconnects, keeping it bounded by live senders; latest/volatile frames
+  (which supersede or bypass backpressure) are never attributed.
 - `rate_limit.max_room_relay_bytes` (default `1073741824`, 1 GiB per window):
   per-room aggregate game-data relay byte ceiling charged on every accepted
   relay, in addition to the per-sender budget (issue #530). The per-sender
@@ -106,6 +137,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Public Rust API (breaking): `RoomRateLimiter::check_relay_bytes` gained an
+  `app: Option<rate_limit::AppRelayPolicy>` parameter carrying the sender's
+  resolved allowlist policy (issue #530); passing `None` preserves the
+  previous server-wide-budget behavior exactly. The new public
+  `rate_limit::AppRelayPolicy { app_id, max_relay_bytes }` and
+  `auth::AppContext.max_relay_bytes` are part of this change; exhaustive
+  call sites and struct literals downstream must adapt.
 - Room admission is now application-scoped in both security modes
   (issue #520): a created room is stamped with its creator's application
   identity (the `Authenticate` handshake app ID), and an owned room admits

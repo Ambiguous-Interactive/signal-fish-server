@@ -90,7 +90,8 @@ impl EnhancedGameServer {
 
     /// Charge one game-data frame's sender-controlled payload size against
     /// the sender's per-window byte budget (`rate_limit.max_relay_bytes`,
-    /// issue #519) and the relaying room's aggregate per-window ceiling
+    /// issue #519, or the sender's per-app override, issue #530) and the
+    /// relaying room's aggregate per-window ceiling
     /// (`rate_limit.max_room_relay_bytes`, issue #530).
     ///
     /// Called only for a sender that is routed in a room (a roomless frame is
@@ -98,15 +99,23 @@ impl EnhancedGameServer {
     /// the fan-out is built. The sender budget is charged first so a frame
     /// its own sender cannot afford never drains its room's ceiling; a room
     /// rejection leaves the frame unrelayed with a wire error. The accepted
-    /// charge is recorded for egress accounting only after both budgets
-    /// admitted the frame.
+    /// charge is recorded for egress accounting — server-wide and, for
+    /// allowlisted applications, per-app — only after both budgets admitted
+    /// the frame.
     async fn check_and_charge_relay_bytes(
         &self,
         player_id: &PlayerId,
         room_id: &crate::protocol::RoomId,
         bytes: u64,
     ) -> Result<(), ()> {
-        if let Err(e) = self.rate_limiter.check_relay_bytes(player_id, bytes).await {
+        // Resolved once per frame; reads are lock-guarded and project only
+        // Copy fields, so the relay hot path stays allocation-free.
+        let app_policy = self.client_app_relay_policy(player_id);
+        if let Err(e) = self
+            .rate_limiter
+            .check_relay_bytes(player_id, bytes, app_policy)
+            .await
+        {
             let _ = self
                 .send_error_to_player(player_id, e.to_string(), Some(ErrorCode::RateLimitExceeded))
                 .await;
@@ -123,6 +132,9 @@ impl EnhancedGameServer {
             return Err(());
         }
         self.metrics.record_relay_bytes(bytes);
+        if let Some(policy) = app_policy {
+            self.metrics.record_app_relay_bytes(&policy.app_id, bytes);
+        }
         Ok(())
     }
 

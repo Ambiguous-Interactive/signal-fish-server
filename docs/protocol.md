@@ -170,7 +170,11 @@ JSON length for the text lane). An over-budget frame is answered with
 `RATE_LIMIT_EXCEEDED` and is not relayed; the budget resets with the shared
 fixed window. This bounds a flooding sender to a metered share of the host's
 egress instead of letting one player run up the bandwidth bill at line rate
-(issue #519). The relaying room's aggregate per-window ceiling
+(issue #519). Allowlisted deployments can replace the server-wide budget per
+tenant with `security.allowed_apps[].max_relay_bytes` (issue #530): the
+override changes only the budget value — the fixed window stays anchored to
+the sender — and open-mode deployments (client-chosen app labels) never carry
+one. The relaying room's aggregate per-window ceiling
 (`rate_limit.max_room_relay_bytes`, default 1 GiB per window) is charged on
 every accepted relay as well, so many individually under-budget senders
 cannot multiply a room's egress without bound (issue #530). Per-recipient

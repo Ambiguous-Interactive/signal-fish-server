@@ -74,6 +74,19 @@ pub struct ServerMetrics {
     /// emission is enabled.
     connection_delivery_stats:
         dashmap::DashMap<crate::protocol::PlayerId, Arc<ConnectionDeliveryStats>>,
+    /// Cumulative admitted relay payload bytes attributed to the
+    /// authenticated application that sent them (issue #530). Only
+    /// allowlisted applications are attributed — open-mode application IDs
+    /// are client-chosen labels, so attributing to them would fabricate
+    /// billing series and grow unboundedly — which bounds this map by the
+    /// configured allowlist size.
+    app_relay_bytes: dashmap::DashMap<uuid::Uuid, AtomicU64>,
+    /// Reliable-class game-data evictions attributed to the sender of the
+    /// frame that closed a slow recipient (issue #530). Keyed by the
+    /// attributed sender and carried across a reconnection's identity swap,
+    /// so the map is bounded by the sender connections that actually evicted
+    /// a recipient; entries are dropped when the sender disconnects.
+    slow_consumer_eviction_attributions: dashmap::DashMap<crate::protocol::PlayerId, AtomicU64>,
     delivery_class_counters: [DeliveryClassAtomicCounters; 3],
 
     // Connection metrics
@@ -374,6 +387,12 @@ pub struct ConnectionMetrics {
     pub websocket_deliveries_enqueued: u64,
     pub websocket_deliveries_channel_closed: u64,
     pub websocket_deliveries_canceled: u64,
+    /// Reliable-class slow-consumer evictions attributed per sender (issue
+    /// #530): the sender of the frame that initiated each recipient's
+    /// close, carried across reconnection identity swaps. Bounded by live
+    /// sender connections that evicted a recipient.
+    pub slow_consumer_eviction_attributions:
+        std::collections::BTreeMap<crate::protocol::PlayerId, u64>,
     pub delivery_by_class: DeliveryMetricsByClass,
 }
 
@@ -508,6 +527,10 @@ pub struct PlayerMetrics {
     /// Sender-side app payload bytes admitted onto the relayed game-data
     /// path (issue #519).
     pub relay_bytes_total: u64,
+    /// Admitted relay payload bytes attributed per authenticated
+    /// application (issue #530). Allowlisted deployments only: open-mode
+    /// application IDs are client-chosen labels and are not attributed.
+    pub app_relay_bytes: std::collections::BTreeMap<uuid::Uuid, u64>,
     /// Player last_seen persistence attempts admitted by the throttle window
     /// (a failed persistence still consumed the window and counts here)
     pub heartbeat_updates: u64,
@@ -580,6 +603,8 @@ impl ServerMetrics {
     pub fn new() -> Self {
         Self {
             connection_delivery_stats: dashmap::DashMap::new(),
+            app_relay_bytes: dashmap::DashMap::new(),
+            slow_consumer_eviction_attributions: dashmap::DashMap::new(),
             delivery_class_counters: std::array::from_fn(|_| DeliveryClassAtomicCounters::new()),
             total_connections: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
@@ -905,6 +930,70 @@ impl ServerMetrics {
     ) {
         if let Some((_, stats)) = self.connection_delivery_stats.remove(current) {
             self.connection_delivery_stats.insert(reassigned, stats);
+        }
+    }
+
+    // Relay egress attribution (issue #530)
+
+    /// Attribute `bytes` of admitted relay payload to the sending
+    /// application (issue #530). One call per accepted frame, charged after
+    /// both the sender and room budgets admitted it; rejected frames are
+    /// attributed by the rejection counters instead.
+    pub fn record_app_relay_bytes(&self, app_id: &uuid::Uuid, bytes: u64) {
+        self.app_relay_bytes
+            .entry(*app_id)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Admitted relay payload bytes per application (issue #530), sorted by
+    /// application ID for deterministic snapshots and Prometheus series.
+    pub fn app_relay_bytes_snapshot(&self) -> std::collections::BTreeMap<uuid::Uuid, u64> {
+        self.app_relay_bytes
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    /// Attribute one reliable-class slow-consumer eviction to the sender of
+    /// the frame that initiated the recipient's close (issue #530).
+    pub fn record_slow_consumer_eviction(&self, sender: &crate::protocol::PlayerId) {
+        self.slow_consumer_eviction_attributions
+            .entry(*sender)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Slow-consumer evictions attributed per sender (issue #530), sorted by
+    /// sender ID for deterministic snapshots and Prometheus series.
+    pub fn slow_consumer_eviction_attributions_snapshot(
+        &self,
+    ) -> std::collections::BTreeMap<crate::protocol::PlayerId, u64> {
+        self.slow_consumer_eviction_attributions
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    /// Drop the eviction attributions of a sender connection that was
+    /// removed, keeping the map bounded by live senders.
+    pub fn unregister_slow_consumer_eviction_attributions(
+        &self,
+        player_id: &crate::protocol::PlayerId,
+    ) {
+        self.slow_consumer_eviction_attributions.remove(player_id);
+    }
+
+    /// Re-key eviction attributions across a reconnection identity swap so
+    /// the cumulative counter follows the surviving connection.
+    pub fn rekey_slow_consumer_eviction_attributions(
+        &self,
+        current: &crate::protocol::PlayerId,
+        reassigned: crate::protocol::PlayerId,
+    ) {
+        if let Some((_, counter)) = self.slow_consumer_eviction_attributions.remove(current) {
+            self.slow_consumer_eviction_attributions
+                .insert(reassigned, counter);
         }
     }
 
@@ -1373,6 +1462,8 @@ impl ServerMetrics {
                 websocket_deliveries_canceled: self
                     .websocket_deliveries_canceled
                     .load(Ordering::Relaxed),
+                slow_consumer_eviction_attributions: self
+                    .slow_consumer_eviction_attributions_snapshot(),
                 delivery_by_class: self.delivery_metrics_by_class(),
             },
             rooms: RoomMetrics {
@@ -1476,6 +1567,7 @@ impl ServerMetrics {
                 authority_transfers: self.authority_transfers.load(Ordering::Relaxed),
                 game_data_messages: self.game_data_messages.load(Ordering::Relaxed),
                 relay_bytes_total: self.relay_bytes_total.load(Ordering::Relaxed),
+                app_relay_bytes: self.app_relay_bytes_snapshot(),
                 heartbeat_updates: self.heartbeat_updates.load(Ordering::Relaxed),
                 heartbeat_skipped: self.heartbeat_skipped.load(Ordering::Relaxed),
             },
@@ -1806,6 +1898,43 @@ mod tests {
         assert_eq!(
             total, increments,
             "total_connections should equal the increment count (never decremented), got {total}"
+        );
+    }
+
+    /// The per-app relay byte attribution and per-sender eviction
+    /// attribution maps (#530) behave as cumulative counters: attribution
+    /// accumulates, the eviction ledger follows a reconnection identity
+    /// swap, and unregistering the sender drops its series.
+    #[test]
+    fn attribution_ledgers_accumulate_rekey_and_unregister() {
+        let metrics = ServerMetrics::new();
+        let app_id = uuid::Uuid::new_v4();
+        metrics.record_app_relay_bytes(&app_id, 300);
+        metrics.record_app_relay_bytes(&app_id, 200);
+        assert_eq!(
+            metrics.app_relay_bytes_snapshot().get(&app_id),
+            Some(&500),
+            "attribution accumulates admitted bytes"
+        );
+
+        let sender = crate::protocol::PlayerId::new_v4();
+        let reassigned = crate::protocol::PlayerId::new_v4();
+        metrics.record_slow_consumer_eviction(&sender);
+        metrics.record_slow_consumer_eviction(&sender);
+        metrics.rekey_slow_consumer_eviction_attributions(&sender, reassigned);
+        assert_eq!(
+            metrics
+                .slow_consumer_eviction_attributions_snapshot()
+                .get(&reassigned),
+            Some(&2),
+            "the attribution ledger follows the surviving connection identity"
+        );
+        metrics.unregister_slow_consumer_eviction_attributions(&reassigned);
+        assert!(
+            metrics
+                .slow_consumer_eviction_attributions_snapshot()
+                .is_empty(),
+            "a disconnected sender's series disappears, keeping the map bounded"
         );
     }
 

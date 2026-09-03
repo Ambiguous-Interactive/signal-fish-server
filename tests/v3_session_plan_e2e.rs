@@ -42,6 +42,7 @@ fn app_entry() -> AppRegistrationEntry {
         max_rooms: Some(10),
         max_players_per_room: Some(8),
         rate_limit_per_minute: Some(600),
+        max_relay_bytes: None,
     }
 }
 

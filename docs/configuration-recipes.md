@@ -547,6 +547,9 @@ When to adjust:
   (a room's admitted submit volume can no longer multiply past the ceiling),
   and lower it to cap a whole room's share of the host's egress bill. Keep it
   at or above the per-sender budgets your rooms legitimately use in aggregate.
+- `allowed_apps[].max_relay_bytes` — the per-tenant override of
+  `max_relay_bytes` for one application (issue #530); raise it for a paid tier
+  or lower it for a trial tier without moving the server-wide default.
 - `time_window` — the window (seconds) all the above counts apply over; must be
   `> 0`.
 

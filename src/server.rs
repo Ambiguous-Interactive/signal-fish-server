@@ -231,6 +231,7 @@ mod constructor_validation_tests {
                         max_rooms: None,
                         max_players_per_room: None,
                         rate_limit_per_minute: None,
+                        max_relay_bytes: None,
                     });
                 },
                 expected: "allowed_apps[0].app_name must not be blank",
@@ -244,6 +245,7 @@ mod constructor_validation_tests {
                         max_rooms: None,
                         max_players_per_room: None,
                         rate_limit_per_minute: None,
+                        max_relay_bytes: None,
                     });
                 },
                 expected: "allowed_apps[0].app_id contains control characters",
@@ -257,6 +259,7 @@ mod constructor_validation_tests {
                         max_rooms: None,
                         max_players_per_room: None,
                         rate_limit_per_minute: None,
+                        max_relay_bytes: None,
                     });
                 },
                 expected: "allowed_apps[0].app_id contains control characters or exceeds",
@@ -1002,6 +1005,23 @@ impl EnhancedGameServer {
     /// Fetch the public app-ID context for a connected client, if known.
     pub fn client_app_context(&self, player_id: &PlayerId) -> Option<AppContext> {
         self.connection_manager.app_context(player_id)
+    }
+
+    /// Resolve the sender's relay-relevant allowlist policy (issue #530), or
+    /// `None` when the deployment runs open mode.
+    ///
+    /// Open-mode application identity is a client-chosen, unauthenticated
+    /// label, so it is not a billable identity and never carries a relay
+    /// budget override; per-app attribution and overrides apply only when
+    /// `security.enforce_app_id_allowlist` is enabled.
+    pub fn client_app_relay_policy(
+        &self,
+        player_id: &PlayerId,
+    ) -> Option<crate::rate_limit::AppRelayPolicy> {
+        if !self.config.app_id_allowlist_enabled {
+            return None;
+        }
+        self.connection_manager.app_relay_policy(player_id)
     }
 
     pub(crate) fn set_client_reconnection_identity(
@@ -4501,6 +4521,7 @@ mod relay_projection_cache_tests {
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: Some(1),
+            max_relay_bytes: None,
         }];
         let server = super::EnhancedGameServer::new(
             config,

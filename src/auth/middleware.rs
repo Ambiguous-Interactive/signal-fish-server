@@ -53,6 +53,9 @@ pub struct AppContext {
     pub max_rooms: Option<u32>,
     pub max_players_per_room: Option<u8>,
     pub rate_limit_per_minute: Option<u32>,
+    /// Optional per-sender relay byte budget override (issue #530); `None`
+    /// falls back to the server-wide `rate_limit.max_relay_bytes`.
+    pub max_relay_bytes: Option<u64>,
     pub rate_limits: RateLimits,
 }
 
@@ -201,6 +204,7 @@ impl AppIdAllowlist {
                 max_rooms: entry.max_rooms,
                 max_players_per_room: entry.max_players_per_room,
                 rate_limit_per_minute: entry.rate_limit_per_minute,
+                max_relay_bytes: entry.max_relay_bytes,
                 rate_limits: RateLimits {
                     per_minute,
                     per_hour: per_minute.saturating_mul(60),
@@ -353,6 +357,11 @@ impl AppIdAllowlist {
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: None,
+            // Open-mode identity is a client-chosen label (see below), so it
+            // can never carry a per-app relay budget override (issue #530):
+            // a spoofable context must not be able to raise or lower the
+            // server-wide budget.
+            max_relay_bytes: None,
             rate_limits: RateLimits {
                 per_minute: DEFAULT_RATE_LIMIT_PER_MINUTE,
                 per_hour: DEFAULT_RATE_LIMIT_PER_HOUR,
@@ -392,6 +401,7 @@ mod tests {
                 max_rooms: Some(50),
                 max_players_per_room: Some(8),
                 rate_limit_per_minute: Some(60),
+                max_relay_bytes: None,
             },
             AppRegistrationEntry {
                 app_id: "game-2".to_string(),
@@ -399,6 +409,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
+                max_relay_bytes: None,
             },
         ]
     }
@@ -410,6 +421,53 @@ mod tests {
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.name, "default");
+    }
+
+    /// The per-app relay budget override (#530) resolves from the allowlist
+    /// entry into the connection's [`AppContext`]; an entry without an
+    /// override — and every open-policy context — resolves with `None` so
+    /// those senders keep the server-wide budget.
+    #[tokio::test]
+    async fn relay_budget_override_resolves_into_the_app_context() {
+        let tiered = AppRegistrationEntry {
+            app_id: "tiered-game".to_string(),
+            app_name: "Tiered Game".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: Some(4096),
+        };
+        let untiered = AppRegistrationEntry {
+            app_id: "game-1".to_string(),
+            app_name: "Test Game".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+        };
+
+        let mw = AppIdAllowlist::new(vec![tiered, untiered]).expect("unique app IDs");
+        let resolved = mw
+            .resolve_app_id("tiered-game", LOCALHOST)
+            .await
+            .expect("tiered app is configured");
+        assert_eq!(resolved.max_relay_bytes, Some(4096));
+
+        let resolved = mw
+            .resolve_app_id("game-1", LOCALHOST)
+            .await
+            .expect("untiered app is configured");
+        assert_eq!(resolved.max_relay_bytes, None);
+
+        let open = AppIdAllowlist::disabled();
+        let resolved = open
+            .resolve_app_id("tiered-game", LOCALHOST)
+            .await
+            .expect("open policy accepts any log-safe ID");
+        assert_eq!(
+            resolved.max_relay_bytes, None,
+            "open-mode contexts never carry an override: the label is spoofable"
+        );
     }
 
     /// Data-driven: app IDs that could forge or bloat operator-facing log
@@ -444,6 +502,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
+                max_relay_bytes: None,
             }]);
             assert!(
                 matches!(constructed, Err(AuthError::InvalidAppId)),
@@ -476,6 +535,7 @@ mod tests {
             max_rooms: Some(999),
             max_players_per_room: None,
             rate_limit_per_minute: Some(1),
+            max_relay_bytes: None,
         });
 
         assert!(matches!(
@@ -521,6 +581,7 @@ mod tests {
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: Some(3),
+            max_relay_bytes: None,
         }];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
@@ -552,6 +613,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: Some(limit),
+                max_relay_bytes: None,
             }];
             let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
             let abuser = source_for(0);
@@ -639,6 +701,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: Some(4),
+                max_relay_bytes: None,
             },
             AppRegistrationEntry {
                 app_id: "other".to_string(),
@@ -646,6 +709,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: Some(2),
+                max_relay_bytes: None,
             },
         ];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
@@ -678,6 +742,7 @@ mod tests {
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: Some(1),
+            max_relay_bytes: None,
         }];
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
         let mw = AppIdAllowlist::with_metrics(entries, metrics.clone()).expect("unique app IDs");
@@ -708,6 +773,7 @@ mod tests {
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: None,
+            max_relay_bytes: None,
         }];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 

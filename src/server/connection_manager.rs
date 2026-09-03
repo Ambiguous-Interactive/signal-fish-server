@@ -699,6 +699,23 @@ impl ConnectionManager {
             .and_then(|conn| conn.app_context.clone())
     }
 
+    /// Read the sender's relay-relevant allowlist policy without cloning the
+    /// whole [`AppContext`] (issue #530): this runs once per relayed frame on
+    /// the byte-budget gate, so only the `Copy` fields are projected.
+    pub fn app_relay_policy(
+        &self,
+        player_id: &PlayerId,
+    ) -> Option<crate::rate_limit::AppRelayPolicy> {
+        self.clients.get(player_id).and_then(|conn| {
+            conn.app_context
+                .as_ref()
+                .map(|ctx| crate::rate_limit::AppRelayPolicy {
+                    app_id: ctx.id,
+                    max_relay_bytes: ctx.max_relay_bytes,
+                })
+        })
+    }
+
     pub(crate) fn set_reconnection_identity(
         &self,
         player_id: &PlayerId,
@@ -1040,6 +1057,8 @@ impl ConnectionManager {
         // cumulative counters stay meaningful across the reassignment.
         self.metrics
             .rekey_connection_delivery_stats(current_player_id, *reconnect_player_id);
+        self.metrics
+            .rekey_slow_consumer_eviction_attributions(current_player_id, *reconnect_player_id);
         ReassignmentOutcome::Reassigned(delivery)
     }
 
@@ -1092,6 +1111,8 @@ impl ConnectionManager {
             .set_player_id(*current_player_id);
         self.metrics
             .rekey_connection_delivery_stats(reconnect_player_id, *current_player_id);
+        self.metrics
+            .rekey_slow_consumer_eviction_attributions(reconnect_player_id, *current_player_id);
         Some(delivery)
     }
 
@@ -1146,6 +1167,8 @@ impl ConnectionManager {
             self.release_ip_slot(connection.client_addr.ip());
             self.release_global_slot();
             self.metrics.unregister_connection_delivery_stats(player_id);
+            self.metrics
+                .unregister_slow_consumer_eviction_attributions(player_id);
             // Every unregistration positively tears down the socket tasks:
             // without this, a connection unregistered by the activity reaper
             // lingers half-alive (undeliverable but still holding its socket)
