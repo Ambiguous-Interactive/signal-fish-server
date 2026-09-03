@@ -71,7 +71,9 @@ cargo run -- --print-config
 - [ ] `rate_limit.*` values fit your traffic — `max_room_creations`,
   `max_join_attempts`, `max_signals`, `max_signal_errors`, `max_relay_bytes`
   (the per-sender game-data relay byte budget; size it against your games'
-  real submit rates), and `time_window`
+  real submit rates), `max_room_relay_bytes` (the per-room aggregate relay
+  ceiling; keep it above the joint submit volume your rooms legitimately
+  produce), and `time_window`
   (see [when to adjust](configuration-recipes.md#rate-limits)).
 - [ ] Per-app overrides (`allowed_apps[*].rate_limit_per_minute`,
   `max_rooms`, `max_players_per_room`) set where an app needs different limits.

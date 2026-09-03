@@ -225,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
             max_signals: cfg.rate_limit.max_signals,
             max_signal_errors: cfg.rate_limit.max_signal_errors,
             max_relay_bytes: cfg.rate_limit.max_relay_bytes,
+            max_room_relay_bytes: cfg.rate_limit.max_room_relay_bytes,
         },
         empty_room_timeout: tokio::time::Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: tokio::time::Duration::from_secs(cfg.server.inactive_room_timeout),

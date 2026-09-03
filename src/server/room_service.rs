@@ -859,16 +859,16 @@ impl EnhancedGameServer {
                     }
                     return;
                 };
-                if self.config.app_id_allowlist_enabled {
-                    if let (Some(application_id), Some(client_application_id)) =
-                        (current_room.application_id, self.client_app_id(player_id))
-                    {
-                        if application_id == client_application_id {
-                            self.mark_pending_room_application_claim_adopted(
-                                current_room.id,
-                                application_id,
-                            );
-                        }
+                // Application claims now happen in both admission modes
+                // (issue #520), so the post-publication ack is mode-agnostic.
+                if let (Some(application_id), Some(client_application_id)) =
+                    (current_room.application_id, self.client_app_id(player_id))
+                {
+                    if application_id == client_application_id {
+                        self.mark_pending_room_application_claim_adopted(
+                            current_room.id,
+                            application_id,
+                        );
                     }
                 }
                 let is_authority = current_room.authority_player == Some(*player_id);
@@ -1909,9 +1909,11 @@ impl EnhancedGameServer {
         ),
         JoinRoomError,
     > {
-        // Open-policy connections still carry a default AppContext for protocol
-        // compatibility. Ownership and quotas apply only when allowlist enforcement
-        // is enabled; otherwise newly-created rooms must remain unowned.
+        // Open-policy connections carry the AppContext resolved from their
+        // optional Authenticate handshake (issue #520). Ownership scoping
+        // applies in both modes; only the hard context requirement is
+        // allowlist-specific. A context-less open-policy connection — one
+        // that never authenticated — keeps the legacy unowned-room behavior.
         let client_app_context = if self.config.app_id_allowlist_enabled {
             match self.client_app_context(player_id) {
                 Some(app_context) => Some(app_context),
@@ -1923,7 +1925,7 @@ impl EnhancedGameServer {
                 }
             }
         } else {
-            None
+            self.client_app_context(player_id)
         };
         let client_app_id = client_app_context.as_ref().map(|app| app.id);
 
@@ -1970,10 +1972,13 @@ impl EnhancedGameServer {
                     }
                 };
 
-                if self.config.app_id_allowlist_enabled
-                    && room
-                        .application_id
-                        .is_some_and(|owner| Some(owner) != client_app_id)
+                // App scoping applies in both admission modes (issue #520):
+                // an owned room is invisible to members of other
+                // applications and to context-less connections, with the
+                // same non-enumerating outcome as a missing room.
+                if room
+                    .application_id
+                    .is_some_and(|owner| Some(owner) != client_app_id)
                 {
                     Err(JoinRoomError::RoomNotFound)
                 } else if let Err(reason) =

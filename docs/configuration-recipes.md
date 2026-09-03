@@ -513,7 +513,8 @@ is rejected atomically when either budget is exhausted.
     "max_join_attempts": 20,
     "max_signals": 600,
     "max_signal_errors": 60,
-    "max_relay_bytes": 268435456
+    "max_relay_bytes": 268435456,
+    "max_room_relay_bytes": 1073741824
   }
 }
 ```
@@ -541,6 +542,11 @@ When to adjust:
   size it against the games' real submit rates (a full roster of 8 relaying
   64 KiB at 30 Hz submits roughly 2 MB/s), and lower it to cap one player's
   share of the host's egress bill.
+- `max_room_relay_bytes` — the per-room aggregate game-data relay byte ceiling
+  per window; bounds many individually under-budget senders jointly
+  (a room's admitted submit volume can no longer multiply past the ceiling),
+  and lower it to cap a whole room's share of the host's egress bill. Keep it
+  at or above the per-sender budgets your rooms legitimately use in aggregate.
 - `time_window` — the window (seconds) all the above counts apply over; must be
   `> 0`.
 

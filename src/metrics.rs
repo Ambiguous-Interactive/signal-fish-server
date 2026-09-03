@@ -187,6 +187,7 @@ pub struct ServerMetrics {
     pub rate_limit_signal_rejections: AtomicU64,
     pub rate_limit_signal_error_rejections: AtomicU64,
     pub rate_limit_relay_bandwidth_rejections: AtomicU64,
+    pub rate_limit_relay_room_bandwidth_rejections: AtomicU64,
 
     // Player activity metrics
     pub players_joined: AtomicU64,
@@ -315,6 +316,10 @@ pub enum RateLimitRejection {
     /// A relayed game-data frame exceeded the sender's per-window byte
     /// budget (`rate_limit.max_relay_bytes`, issue #519).
     RelayBandwidth,
+    /// A relayed game-data frame exceeded the relaying room's aggregate
+    /// per-window byte ceiling (`rate_limit.max_room_relay_bytes`,
+    /// issue #530).
+    RelayRoomBandwidth,
 }
 
 #[derive(Debug, Clone)]
@@ -489,6 +494,9 @@ pub struct RateLimitingMetrics {
     pub signal_rejections: u64,
     pub signal_error_rejections: u64,
     pub relay_bandwidth_rejections: u64,
+    /// Frames rejected because the relaying room's aggregate byte ceiling
+    /// was exhausted (issue #530).
+    pub relay_room_bandwidth_rejections: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -627,6 +635,7 @@ impl ServerMetrics {
             rate_limit_signal_rejections: AtomicU64::new(0),
             rate_limit_signal_error_rejections: AtomicU64::new(0),
             rate_limit_relay_bandwidth_rejections: AtomicU64::new(0),
+            rate_limit_relay_room_bandwidth_rejections: AtomicU64::new(0),
             players_joined: AtomicU64::new(0),
             players_left: AtomicU64::new(0),
             authority_transfers: AtomicU64::new(0),
@@ -1041,6 +1050,9 @@ impl ServerMetrics {
             RateLimitRejection::Signal => &self.rate_limit_signal_rejections,
             RateLimitRejection::SignalError => &self.rate_limit_signal_error_rejections,
             RateLimitRejection::RelayBandwidth => &self.rate_limit_relay_bandwidth_rejections,
+            RateLimitRejection::RelayRoomBandwidth => {
+                &self.rate_limit_relay_room_bandwidth_rejections
+            }
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1436,12 +1448,16 @@ impl ServerMetrics {
                 let relay_bandwidth_rejections = self
                     .rate_limit_relay_bandwidth_rejections
                     .load(Ordering::Relaxed);
+                let relay_room_bandwidth_rejections = self
+                    .rate_limit_relay_room_bandwidth_rejections
+                    .load(Ordering::Relaxed);
                 let rate_limit_rejections = auth_rejections
                     .saturating_add(room_creation_rejections)
                     .saturating_add(join_attempt_rejections)
                     .saturating_add(signal_rejections)
                     .saturating_add(signal_error_rejections)
-                    .saturating_add(relay_bandwidth_rejections);
+                    .saturating_add(relay_bandwidth_rejections)
+                    .saturating_add(relay_room_bandwidth_rejections);
 
                 RateLimitingMetrics {
                     rate_limit_rejections,
@@ -1451,6 +1467,7 @@ impl ServerMetrics {
                     signal_rejections,
                     signal_error_rejections,
                     relay_bandwidth_rejections,
+                    relay_room_bandwidth_rejections,
                 }
             },
             players: PlayerMetrics {
@@ -1809,6 +1826,7 @@ mod tests {
                 RateLimitRejection::Signal,
                 RateLimitRejection::SignalError,
                 RateLimitRejection::RelayBandwidth,
+                RateLimitRejection::RelayRoomBandwidth,
             ];
             for index in 0..writes {
                 writer_metrics.record_rate_limit_rejection(kinds[index % kinds.len()]);
@@ -1828,6 +1846,7 @@ mod tests {
                     + rate_limits.signal_rejections
                     + rate_limits.signal_error_rejections
                     + rate_limits.relay_bandwidth_rejections
+                    + rate_limits.relay_room_bandwidth_rejections
             );
             tokio::task::yield_now().await;
         }
@@ -1854,6 +1873,7 @@ mod tests {
                 + rate_limits.signal_rejections
                 + rate_limits.signal_error_rejections
                 + rate_limits.relay_bandwidth_rejections
+                + rate_limits.relay_room_bandwidth_rejections
         );
     }
 

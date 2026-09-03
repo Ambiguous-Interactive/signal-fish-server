@@ -963,35 +963,32 @@ impl EnhancedGameServer {
 
         // Reconnection tokens prove the prior player identity, not the
         // application principal on this new socket. Re-authorize against the
-        // persisted room owner before restoring membership. Return the same
+        // persisted room owner before restoring membership (the owner gate
+        // applies in both admission modes, issue #520). Return the same
         // non-enumerating outcome as a missing room so an app cannot probe
-        // another app's room through reconnect.
-        let reconnect_app_context = if self.config.app_id_allowlist_enabled {
-            let client_app_context = self.client_app_context(current_player_id);
-            let client_app_id = client_app_context.as_ref().map(|app| app.id);
-            if client_app_id.is_none()
-                || room
-                    .application_id
-                    .is_some_and(|owner| Some(owner) != client_app_id)
-            {
-                return self
-                    .reject_claimed_reconnect(
-                        current_player_id,
-                        claim_guard,
-                        &restore,
-                        "Room no longer exists",
-                        ErrorCode::RoomNotFound,
-                        operation_id,
-                    )
-                    .await;
-            }
-            if let Some(owner) = room.application_id {
-                self.cache_room_application(room_id, owner);
-            }
-            client_app_context
-        } else {
-            None
-        };
+        // another app's room through reconnect. Allowlist mode additionally
+        // hard-requires the application context the handshake guarantees.
+        let reconnect_app_context = self.client_app_context(current_player_id);
+        let client_app_id = reconnect_app_context.as_ref().map(|app| app.id);
+        if (self.config.app_id_allowlist_enabled && client_app_id.is_none())
+            || room
+                .application_id
+                .is_some_and(|owner| Some(owner) != client_app_id)
+        {
+            return self
+                .reject_claimed_reconnect(
+                    current_player_id,
+                    claim_guard,
+                    &restore,
+                    "Room no longer exists",
+                    ErrorCode::RoomNotFound,
+                    operation_id,
+                )
+                .await;
+        }
+        if let Some(owner) = room.application_id {
+            self.cache_room_application(room_id, owner);
+        }
         let reconnect_app_id = reconnect_app_context.as_ref().map(|app| app.id);
 
         if !room.players.contains_key(reconnect_player_id) {

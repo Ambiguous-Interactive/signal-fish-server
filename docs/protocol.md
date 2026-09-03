@@ -61,6 +61,17 @@ message. `JoinRoom` behavior depends on `room_code`:
 3. Provide `room_code` and no room exists for that `game_name`: create a new
    room with that room code.
 
+Rooms are scoped to the application identity presented in the `Authenticate`
+handshake (issue #520). A created room is stamped with its creator's
+application, and an owned room admits only same-application members — seats,
+spectators, and reconnects alike. A room owned by another application answers
+the same non-enumerating `ROOM_NOT_FOUND` as a missing room, in both
+allowlist-enforced and open deployments. A connection that never completed the
+optional `Authenticate` handshake (open deployments only) creates and joins
+unowned rooms but cannot enter an owned one. Open-policy application identity
+is a client-chosen label, not a credential; deployment-grade tenancy requires
+allowlist enforcement (or the credential story of issue #517).
+
 ```json
 
 {
@@ -159,8 +170,11 @@ JSON length for the text lane). An over-budget frame is answered with
 `RATE_LIMIT_EXCEEDED` and is not relayed; the budget resets with the shared
 fixed window. This bounds a flooding sender to a metered share of the host's
 egress instead of letting one player run up the bandwidth bill at line rate
-(issue #519). Per-recipient egress amplification remains bounded by the room
-roster ceiling.
+(issue #519). The relaying room's aggregate per-window ceiling
+(`rate_limit.max_room_relay_bytes`, default 1 GiB per window) is charged on
+every accepted relay as well, so many individually under-budget senders
+cannot multiply a room's egress without bound (issue #530). Per-recipient
+egress amplification remains bounded by the room roster ceiling.
 
 ### PlayerReady
 

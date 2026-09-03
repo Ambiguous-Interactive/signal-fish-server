@@ -128,6 +128,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS` | `rate_limit.max_signals` | `600` | Max validated WebRTC Signal dispatch attempts per player per window (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Detailed WebRTC rejection errors per player per window before generic rate-limit errors |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES` | `rate_limit.max_relay_bytes` | `268435456` | Per-sender game-data relay byte budget per window (sender-controlled payload bytes; must be > 0) |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_RELAY_BYTES` | `rate_limit.max_room_relay_bytes` | `1073741824` | Per-room aggregate game-data relay byte ceiling per window (sender-controlled payload bytes; must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH` | `protocol.max_game_name_length` | `64` | Max bytes (UTF-8) in a game name (must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH` | `protocol.room_code_length` | `6` | Nonzero length of generated room codes |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH` | `protocol.max_player_name_length` | `32` | Max bytes (UTF-8) in a player name (must be > 0) |

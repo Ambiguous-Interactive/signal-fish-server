@@ -98,10 +98,16 @@ The connection-bound application context carries an internal UUID, and its
 provenance differs by policy. Under the enforced allowlist it is always a
 deterministic SHA-256 derivative of the public app ID string, so nothing about
 it is client-chosen. Under the open policy, a well-formed UUID sent as
-`app_id` is used verbatim, so the client chooses the application UUID. No
-current open-mode feature consumes that identity as an authority (per-app
-quotas and the cross-app join gate are allowlist-only); a future feature that
-does must not treat an open-mode application UUID as unspoofable.
+`app_id` is used verbatim, so the client chooses the application UUID.
+
+Open-mode application identity does scope room admission (issue #520): a
+created room is stamped with the creator's application UUID, and an owned
+room admits only same-application seats, spectators, and reconnects. That
+boundary remains a soft one — an attacker who knows (or guesses) a victim's
+public app label can present it and pass the gate — so it must not be
+treated as a tenancy guarantee. Deployment-grade isolation requires
+allowlist enforcement, where the label is verified against configured
+entries, or the credential story tracked in issue #517.
 
 ## Per-app settings
 

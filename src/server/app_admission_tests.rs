@@ -815,82 +815,315 @@ async fn unpublished_room_creation_rolls_back_room_and_frees_application_capacit
     ));
 }
 
+/// The legacy-room claim race is mode-agnostic (issue #520): two identified
+/// applications racing to adopt one unowned room produce exactly one winner,
+/// and the loser sees the same non-enumerating denial as a missing room —
+/// under allowlist enforcement and under the open policy alike.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_room_claim_is_atomic_between_applications() {
-    let server = create_server(
-        true,
-        vec![
-            app_entry(APP_A, Some(10), Some(8)),
-            app_entry(APP_B, Some(10), Some(8)),
-        ],
-    )
-    .await;
-    let legacy_room = server
-        .database
-        .create_room(
-            "claim-race".to_string(),
-            Some("CLAIMR".to_string()),
-            8,
+    for (mode, allowlist_enabled, apps) in [
+        (
+            "allowlist",
             true,
-            PlayerId::new_v4(),
-            "udp".to_string(),
-            "test".to_string(),
-            None,
-        )
-        .await
-        .expect("create claim-race room");
-    let (app_a, mut app_a_rx) = connect_as(&server, APP_A, 42601).await;
-    let (app_b, mut app_b_rx) = connect_as(&server, APP_B, 42602).await;
-    let app_a_id = server.client_app_id(&app_a).expect("app A attached");
-    let app_b_id = server.client_app_id(&app_b).expect("app B attached");
-
-    tokio::join!(
-        join_room(&server, &app_a, "claim-race", Some("CLAIMR"), "AppA", 8,),
-        join_room(&server, &app_b, "claim-race", Some("CLAIMR"), "AppB", 8,),
-    );
-    let app_a_result = receive(&mut app_a_rx).await;
-    let app_b_result = receive(&mut app_b_rx).await;
-    let expected_owner = match (app_a_result.as_ref(), app_b_result.as_ref()) {
-        (ServerMessage::RoomJoined(_), ServerMessage::RoomJoinFailed { error_code, .. }) => {
-            assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
-            app_a_id
-        }
-        (ServerMessage::RoomJoinFailed { error_code, .. }, ServerMessage::RoomJoined(_)) => {
-            assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
-            app_b_id
-        }
-        outcomes => {
-            panic!("expected one claim winner and one hidden-room denial, got {outcomes:?}")
-        }
-    };
-    assert_eq!(
-        server
+            vec![
+                app_entry(APP_A, Some(10), Some(8)),
+                app_entry(APP_B, Some(10), Some(8)),
+            ],
+        ),
+        ("open-policy", false, Vec::new()),
+    ] {
+        let server = create_server(allowlist_enabled, apps).await;
+        let legacy_room = server
             .database
-            .get_room_by_id(&legacy_room.id)
+            .create_room(
+                "claim-race".to_string(),
+                Some("CLAIMR".to_string()),
+                8,
+                true,
+                PlayerId::new_v4(),
+                "udp".to_string(),
+                "test".to_string(),
+                None,
+            )
             .await
-            .expect("read claim-race room")
-            .expect("claim-race room remains")
-            .application_id,
-        Some(expected_owner)
-    );
+            .expect("create claim-race room");
+        let (app_a, mut app_a_rx) = connect_as(&server, APP_A, 42601).await;
+        let (app_b, mut app_b_rx) = connect_as(&server, APP_B, 42602).await;
+        let app_a_id = server.client_app_id(&app_a).expect("app A attached");
+        let app_b_id = server.client_app_id(&app_b).expect("app B attached");
+
+        tokio::join!(
+            join_room(&server, &app_a, "claim-race", Some("CLAIMR"), "AppA", 8,),
+            join_room(&server, &app_b, "claim-race", Some("CLAIMR"), "AppB", 8,),
+        );
+        let app_a_result = receive(&mut app_a_rx).await;
+        let app_b_result = receive(&mut app_b_rx).await;
+        let expected_owner = match (app_a_result.as_ref(), app_b_result.as_ref()) {
+            (ServerMessage::RoomJoined(_), ServerMessage::RoomJoinFailed { error_code, .. }) => {
+                assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
+                app_a_id
+            }
+            (ServerMessage::RoomJoinFailed { error_code, .. }, ServerMessage::RoomJoined(_)) => {
+                assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
+                app_b_id
+            }
+            outcomes => {
+                panic!("expected one claim winner and one hidden-room denial, got {outcomes:?}")
+            }
+        };
+        assert_eq!(
+            server
+                .database
+                .get_room_by_id(&legacy_room.id)
+                .await
+                .expect("read claim-race room")
+                .expect("claim-race room remains")
+                .application_id,
+            Some(expected_owner),
+            "{mode}: the race must leave exactly one atomic claim owner"
+        );
+    }
 }
 
+/// A connection that never completed the (optional) open-policy Authenticate
+/// handshake: registered with a negotiated protocol but no app context.
+async fn connect_contextless(
+    server: &Arc<EnhancedGameServer>,
+    port: u16,
+) -> (PlayerId, mpsc::Receiver<Arc<ServerMessage>>) {
+    let (sender, receiver) = mpsc::channel(32);
+    let player_id = server
+        .register_client(
+            sender,
+            format!("127.0.0.1:{port}")
+                .parse()
+                .expect("parse test client address"),
+        )
+        .await
+        .expect("register test client");
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            ..NegotiatedProtocol::default()
+        },
+    );
+    (player_id, receiver)
+}
+
+/// Issue #520: open-policy room admission scopes rooms by the application
+/// identity a client presented during its (optional) Authenticate handshake.
+/// Created rooms are stamped with the creator's application, and an owned
+/// room is invisible — seats, spectators, and reconnects alike — to members
+/// of other applications, with the same non-enumerating `ROOM_NOT_FOUND`
+/// denial the allowlist mode already returns.
 #[tokio::test]
-async fn open_policy_room_creation_ignores_default_app_context() {
+async fn open_policy_rooms_are_scoped_to_their_application() {
     let server = create_server(false, Vec::new()).await;
-    let (creator, mut creator_rx) = connect_as(&server, "public-label", 43001).await;
-    join_room(&server, &creator, "public-game", None, "Creator", 4).await;
-    let result = receive(&mut creator_rx).await;
-    let (room_id, _, _) = joined_room(result.as_ref());
+
+    let (creator, mut creator_rx) = connect_as(&server, APP_A, 45001).await;
+    join_room(
+        &server,
+        &creator,
+        "scoped-game",
+        Some("SCOPE1"),
+        "Creator",
+        4,
+    )
+    .await;
+    let creator_joined = receive(&mut creator_rx).await;
+    let (room_id, room_code, reconnect_token) = joined_room(creator_joined.as_ref());
+    let reconnect_token = reconnect_token.expect("reconnection token is issued");
+    let app_a = server
+        .client_app_id(&creator)
+        .expect("identified creator retains app identity");
+
+    // The created room carries the creator's application stamp.
     assert_eq!(
         server
             .database
             .get_room_by_id(&room_id)
             .await
-            .expect("read public room")
-            .expect("public room exists")
+            .expect("read scoped room")
+            .expect("scoped room exists")
             .application_id,
-        None
+        Some(app_a),
+        "open-policy creation stamps the creator's application"
+    );
+
+    // A member of another application gets the same non-enumerating denial
+    // as a missing room.
+    let (other, mut other_rx) = connect_as(&server, APP_B, 45002).await;
+    join_room(&server, &other, "scoped-game", Some(&room_code), "Other", 4).await;
+    assert_join_failed(
+        receive(&mut other_rx).await.as_ref(),
+        ErrorCode::RoomNotFound,
+    );
+
+    // Spectator admission is scoped by the same owner gate.
+    let (other_spectator, mut other_spectator_rx) = connect_as(&server, APP_B, 45003).await;
+    server
+        .handle_join_as_spectator(
+            &other_spectator,
+            "scoped-game".to_string(),
+            room_code.clone(),
+            "OtherSpectator".to_string(),
+        )
+        .await;
+    let spectator_result = receive(&mut other_spectator_rx).await;
+    let ServerMessage::SpectatorJoinFailed { error_code, .. } = spectator_result.as_ref() else {
+        panic!("expected SpectatorJoinFailed, got {spectator_result:?}");
+    };
+    assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
+
+    // A wrong-app reconnect is rejected without consuming the token.
+    server.unregister_client(&creator).await;
+    let (wrong_reconnect, mut wrong_reconnect_rx) = connect_as(&server, APP_B, 45004).await;
+    assert!(
+        !server
+            .handle_reconnect(&wrong_reconnect, &creator, &room_id, &reconnect_token)
+            .await
+    );
+    let reconnect_result = receive(&mut wrong_reconnect_rx).await;
+    let ServerMessage::ReconnectionFailed { error_code, .. } = reconnect_result.as_ref() else {
+        panic!("expected ReconnectionFailed, got {reconnect_result:?}");
+    };
+    assert_eq!(*error_code, ErrorCode::RoomNotFound);
+
+    // The owning application keeps full access: rejoin and reclaim.
+    let (same_app, mut same_app_rx) = connect_as(&server, APP_A, 45005).await;
+    join_room(
+        &server,
+        &same_app,
+        "scoped-game",
+        Some(&room_code),
+        "SameApp",
+        4,
+    )
+    .await;
+    assert!(matches!(
+        receive(&mut same_app_rx).await.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    let (right_reconnect, _right_reconnect_rx) = connect_as(&server, APP_A, 45006).await;
+    assert!(
+        server
+            .handle_reconnect(&right_reconnect, &creator, &room_id, &reconnect_token)
+            .await
+    );
+}
+
+/// Issue #520 migration policy: rooms created before application stamping
+/// (or by context-less legacy clients) stay unowned until the first
+/// identified member joins, whose application then claims ownership.
+#[tokio::test]
+async fn open_policy_identified_member_adopts_a_legacy_unowned_room() {
+    let server = create_server(false, Vec::new()).await;
+
+    // A context-less connection creates a legacy unowned room.
+    let (legacy, mut legacy_rx) = connect_contextless(&server, 45011).await;
+    join_room(&server, &legacy, "legacy-game", Some("LEGACY"), "Legacy", 4).await;
+    let (room_id, _, _) = joined_room(receive(&mut legacy_rx).await.as_ref());
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("read legacy room")
+            .expect("legacy room exists")
+            .application_id,
+        None,
+        "a context-less creator leaves the room unowned"
+    );
+
+    // The first identified member claims the room.
+    let (claimer, mut claimer_rx) = connect_as(&server, APP_A, 45012).await;
+    join_room(
+        &server,
+        &claimer,
+        "legacy-game",
+        Some("LEGACY"),
+        "Claimer",
+        4,
+    )
+    .await;
+    assert!(matches!(
+        receive(&mut claimer_rx).await.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    let app_a = server
+        .client_app_id(&claimer)
+        .expect("identified claimer retains app identity");
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("read claimed room")
+            .expect("claimed room exists")
+            .application_id,
+        Some(app_a),
+        "the first identified member adopts the legacy room"
+    );
+
+    // After the claim, other applications are denied.
+    let (other, mut other_rx) = connect_as(&server, APP_B, 45013).await;
+    join_room(&server, &other, "legacy-game", Some("LEGACY"), "Other", 4).await;
+    assert_join_failed(
+        receive(&mut other_rx).await.as_ref(),
+        ErrorCode::RoomNotFound,
+    );
+}
+
+/// Issue #520 compatibility: connections that never present an application
+/// keep the legacy shared-namespace behavior among themselves — they create
+/// unowned rooms, join unowned rooms — but cannot enter a room owned by an
+/// identified application.
+#[tokio::test]
+async fn open_policy_contextless_connections_keep_unowned_room_behavior() {
+    let server = create_server(false, Vec::new()).await;
+
+    let (creator, mut creator_rx) = connect_contextless(&server, 45021).await;
+    join_room(&server, &creator, "anon-game", Some("ANON11"), "Anon1", 4).await;
+    let (room_id, room_code, _) = joined_room(receive(&mut creator_rx).await.as_ref());
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("read anonymous room")
+            .expect("anonymous room exists")
+            .application_id,
+        None,
+    );
+
+    // Another context-less connection joins the unowned room.
+    let (joiner, mut joiner_rx) = connect_contextless(&server, 45022).await;
+    join_room(&server, &joiner, "anon-game", Some(&room_code), "Anon2", 4).await;
+    assert!(matches!(
+        receive(&mut joiner_rx).await.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    // An identified application creates an owned room.
+    let (owner, mut owner_rx) = connect_as(&server, APP_A, 45023).await;
+    join_room(&server, &owner, "anon-game", Some("OWNED1"), "Owner", 4).await;
+    joined_room(receive(&mut owner_rx).await.as_ref());
+
+    // The context-less connection cannot enter the owned room.
+    let (outsider, mut outsider_rx) = connect_contextless(&server, 45024).await;
+    join_room(
+        &server,
+        &outsider,
+        "anon-game",
+        Some("OWNED1"),
+        "Outsider",
+        4,
+    )
+    .await;
+    assert_join_failed(
+        receive(&mut outsider_rx).await.as_ref(),
+        ErrorCode::RoomNotFound,
     );
 }
 

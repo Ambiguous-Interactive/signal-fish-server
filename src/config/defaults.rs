@@ -105,6 +105,19 @@ pub const fn default_max_relay_bytes() -> u64 {
     256 * 1024 * 1024 // 256 MiB per window
 }
 
+/// Default per-room aggregate game-data relay byte budget per
+/// `rate_limit.time_window` (1 GiB per 60-second window).
+///
+/// The per-sender budget bounds one sender; many small senders in one room
+/// can still multiply egress (issue #530). The default admits roughly four
+/// simultaneously maxed per-sender budgets — far above demonstrated real
+/// sessions — while bounding the room's aggregate submit volume to a fixed,
+/// metered share. Fixed-window accounting shares the documented 2x
+/// boundary-burst trade-off of the other budgets.
+pub const fn default_max_room_relay_bytes() -> u64 {
+    4 * 256 * 1024 * 1024 // 1 GiB per window
+}
+
 // =============================================================================
 // Protocol Defaults
 // =============================================================================

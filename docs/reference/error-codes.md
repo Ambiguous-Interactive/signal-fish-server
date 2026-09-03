@@ -286,6 +286,16 @@ hitting it is submitting relay traffic faster than the deployment's
 configured ceiling — back off to the budget's sustained rate
 (`max_relay_bytes / time_window` bytes per second).
 
+A fourth budget answers the same way: the relaying room's aggregate
+per-window ceiling (`rate_limit.max_room_relay_bytes`, issue #530). It
+rejects a frame whose sender budget had room but whose roommates' joint
+traffic exhausted the room's window; the same back-off advice applies, and
+the room's operators can raise the ceiling if its aggregate traffic is
+legitimate. Where the sender-budget rejection consumes no budget at all,
+the room-ceiling rejection retains the sender-budget charge the frame
+already committed — a client that keeps submitting into an exhausted room
+also burns its own window headroom.
+
 ### Reconnection expired (`RECONNECTION_EXPIRED`)
 
 The reconnection window has closed since the client disconnected. The
