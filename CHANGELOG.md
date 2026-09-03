@@ -20,11 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   room's ceiling. Accounting: the new
   `signal_fish_rate_limit_relay_room_bandwidth_rejections_total` Prometheus
   counter (snapshot field `rate_limiting.relay_room_bandwidth_rejections`,
-  included in the rejection total). Room windows are swept by the existing
-  rate-limiter cleanup task, so deleted rooms cannot leak entries. A zero
-  ceiling remains an explicit library-only total-rejection policy; the
-  binary config path rejects it. Configurable via
+  included in the rejection total). A room-ceiling rejection retains the
+  sender-budget charge the frame already committed (the submit happened),
+  so a sender backing off after room rejections also sees its own window
+  headroom shrink. Room windows are swept by the existing rate-limiter
+  cleanup task, so deleted rooms cannot leak entries. A zero ceiling remains
+  an explicit library-only total-rejection policy; the binary config path
+  rejects it. Configurable via
   `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_RELAY_BYTES`.
+  Public Rust API (breaking): `rate_limit::RateLimitError` gained the
+  `RoomRelayLimitExceeded` variant and `metrics::RateLimitingMetrics` gained
+  the `relay_room_bandwidth_rejections` field; exhaustive matches and
+  exhaustive struct literals downstream must handle them.
 - `security.max_connection_info_bytes` (default `8192`): per-entry size cap on
   self-declared peer metadata (`ProvideConnectionInfo`), measured as canonical
   JSON — the same bytes that are broadcast. An oversized entry is answered with
@@ -110,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or join any room across applications. Migration: rooms created before
   this change (and rooms created by connections that never completed the
   optional open-policy `Authenticate`) stay unowned until the first
-  identified member joins, whose application then claims the room;
+  identified seated member joins, whose application then claims the room;
   context-less connections keep the legacy behavior among themselves but
   can no longer enter an owned room. Open-policy application identity
   remains a client-chosen, spoofable label, so this boundary is a soft

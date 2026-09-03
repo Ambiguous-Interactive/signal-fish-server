@@ -717,6 +717,19 @@ mod admission_and_budget {
             snapshot.players.relay_bytes_total, 1200,
             "only admitted bytes are accounted"
         );
+        // The room-ceiling rejection retains the sender charge the frame
+        // already committed: sender A's window shows 600 admitted + the
+        // 1-byte rejected submit.
+        assert_eq!(
+            server
+                .rate_limiter
+                .get_player_stats(&sender_a)
+                .await
+                .expect("sender A stats entry exists")
+                .relay_bytes,
+            601,
+            "a room-ceiling rejection retains the sender-budget charge"
+        );
 
         // After the window resets, the room's ceiling is restored.
         tokio::time::sleep(Duration::from_millis(150)).await;

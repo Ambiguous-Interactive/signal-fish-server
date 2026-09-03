@@ -815,64 +815,74 @@ async fn unpublished_room_creation_rolls_back_room_and_frees_application_capacit
     ));
 }
 
+/// The legacy-room claim race is mode-agnostic (issue #520): two identified
+/// applications racing to adopt one unowned room produce exactly one winner,
+/// and the loser sees the same non-enumerating denial as a missing room —
+/// under allowlist enforcement and under the open policy alike.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_room_claim_is_atomic_between_applications() {
-    let server = create_server(
-        true,
-        vec![
-            app_entry(APP_A, Some(10), Some(8)),
-            app_entry(APP_B, Some(10), Some(8)),
-        ],
-    )
-    .await;
-    let legacy_room = server
-        .database
-        .create_room(
-            "claim-race".to_string(),
-            Some("CLAIMR".to_string()),
-            8,
+    for (mode, allowlist_enabled, apps) in [
+        (
+            "allowlist",
             true,
-            PlayerId::new_v4(),
-            "udp".to_string(),
-            "test".to_string(),
-            None,
-        )
-        .await
-        .expect("create claim-race room");
-    let (app_a, mut app_a_rx) = connect_as(&server, APP_A, 42601).await;
-    let (app_b, mut app_b_rx) = connect_as(&server, APP_B, 42602).await;
-    let app_a_id = server.client_app_id(&app_a).expect("app A attached");
-    let app_b_id = server.client_app_id(&app_b).expect("app B attached");
-
-    tokio::join!(
-        join_room(&server, &app_a, "claim-race", Some("CLAIMR"), "AppA", 8,),
-        join_room(&server, &app_b, "claim-race", Some("CLAIMR"), "AppB", 8,),
-    );
-    let app_a_result = receive(&mut app_a_rx).await;
-    let app_b_result = receive(&mut app_b_rx).await;
-    let expected_owner = match (app_a_result.as_ref(), app_b_result.as_ref()) {
-        (ServerMessage::RoomJoined(_), ServerMessage::RoomJoinFailed { error_code, .. }) => {
-            assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
-            app_a_id
-        }
-        (ServerMessage::RoomJoinFailed { error_code, .. }, ServerMessage::RoomJoined(_)) => {
-            assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
-            app_b_id
-        }
-        outcomes => {
-            panic!("expected one claim winner and one hidden-room denial, got {outcomes:?}")
-        }
-    };
-    assert_eq!(
-        server
+            vec![
+                app_entry(APP_A, Some(10), Some(8)),
+                app_entry(APP_B, Some(10), Some(8)),
+            ],
+        ),
+        ("open-policy", false, Vec::new()),
+    ] {
+        let server = create_server(allowlist_enabled, apps).await;
+        let legacy_room = server
             .database
-            .get_room_by_id(&legacy_room.id)
+            .create_room(
+                "claim-race".to_string(),
+                Some("CLAIMR".to_string()),
+                8,
+                true,
+                PlayerId::new_v4(),
+                "udp".to_string(),
+                "test".to_string(),
+                None,
+            )
             .await
-            .expect("read claim-race room")
-            .expect("claim-race room remains")
-            .application_id,
-        Some(expected_owner)
-    );
+            .expect("create claim-race room");
+        let (app_a, mut app_a_rx) = connect_as(&server, APP_A, 42601).await;
+        let (app_b, mut app_b_rx) = connect_as(&server, APP_B, 42602).await;
+        let app_a_id = server.client_app_id(&app_a).expect("app A attached");
+        let app_b_id = server.client_app_id(&app_b).expect("app B attached");
+
+        tokio::join!(
+            join_room(&server, &app_a, "claim-race", Some("CLAIMR"), "AppA", 8,),
+            join_room(&server, &app_b, "claim-race", Some("CLAIMR"), "AppB", 8,),
+        );
+        let app_a_result = receive(&mut app_a_rx).await;
+        let app_b_result = receive(&mut app_b_rx).await;
+        let expected_owner = match (app_a_result.as_ref(), app_b_result.as_ref()) {
+            (ServerMessage::RoomJoined(_), ServerMessage::RoomJoinFailed { error_code, .. }) => {
+                assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
+                app_a_id
+            }
+            (ServerMessage::RoomJoinFailed { error_code, .. }, ServerMessage::RoomJoined(_)) => {
+                assert_eq!(*error_code, Some(ErrorCode::RoomNotFound));
+                app_b_id
+            }
+            outcomes => {
+                panic!("expected one claim winner and one hidden-room denial, got {outcomes:?}")
+            }
+        };
+        assert_eq!(
+            server
+                .database
+                .get_room_by_id(&legacy_room.id)
+                .await
+                .expect("read claim-race room")
+                .expect("claim-race room remains")
+                .application_id,
+            Some(expected_owner),
+            "{mode}: the race must leave exactly one atomic claim owner"
+        );
+    }
 }
 
 /// A connection that never completed the (optional) open-policy Authenticate
