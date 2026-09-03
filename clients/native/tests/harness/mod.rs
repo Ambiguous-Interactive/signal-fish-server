@@ -86,6 +86,12 @@ pub const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Ceiling for a client process to finish its whole scenario and exit.
 pub const CLIENT_EXIT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Shared app label every harness-spawned client authenticates with
+/// (issue #520): rooms are application-scoped, and the interop scenarios
+/// join rooms across client kinds (native ↔ browser), so all clients must
+/// present the same tenant.
+pub const INTEROP_APP_ID: &str = "reference-interop-app";
+
 /// Resolve the server binary path from the REQUIRED `SIGNAL_FISH_SERVER_BIN`
 /// env var, with actionable failure messages.
 pub fn server_binary_path() -> PathBuf {
@@ -489,6 +495,12 @@ pub fn spawn_client_with_windows(
         .arg(spec.game_name)
         .arg("--player-name")
         .arg(spec.name)
+        // One shared app label for every client kind the harness spawns:
+        // rooms are application-scoped (issue #520), and the interop
+        // scenarios join rooms across client kinds, so all of them must
+        // present the same tenant.
+        .arg("--app-id")
+        .arg(INTEROP_APP_ID)
         .arg("--peers")
         .arg(spec.peers.to_string())
         // Soft/hard windows sized for slow CI machines; clients exit as soon
@@ -550,6 +562,9 @@ pub fn spawn_browser_client(spec: &ClientSpec<'_>, workdir: &Path) -> ClientProc
         .arg(spec.game_name)
         .arg("--player-name")
         .arg(spec.name)
+        // Same shared tenant label as the native spawner above (issue #520).
+        .arg("--app-id")
+        .arg(INTEROP_APP_ID)
         .arg("--peers")
         .arg(spec.peers.to_string())
         // Same ceilings as the native spawn (Chromium launch eats ~1-2 s of
