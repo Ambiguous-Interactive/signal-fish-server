@@ -1151,10 +1151,10 @@ fn validate_workflow_has_required_jobs(
 // Current stable validation checks (Phase 1-2):
 //   - CI / Lint (ubuntu-latest)
 //   - CI / Lint (windows-latest)
-//   - CI / Lint (macos-latest)
+//   - CI / Lint (macos-latest)       — daily cron cohort only (issue #513)
 //   - CI / Nextest (ubuntu-latest)
 //   - CI / Nextest (windows-latest)
-//   - CI / Nextest (macos-latest)
+//   - CI / Nextest (macos-latest)    — daily cron cohort only (issue #513)
 //   - CI / Relay Allocation Ceilings
 //   - CI / Dependency Audit
 //   - CI / MSRV Verification
@@ -1264,7 +1264,21 @@ const MATRIX_OS_PLACEHOLDER: &str = "${{ matrix.os }}";
 
 /// OS values that `matrix.os` expands to in ci.yml.
 /// This must match the `strategy.matrix.os` list in the workflow file.
+///
+/// The macOS entries still expand (the daily cron produces the macOS check
+/// names), but the per-leg schedule guard (issue #513) skips the macOS legs
+/// on push/pull_request events and the ubuntu/windows legs on schedule runs.
 const MATRIX_OS_VALUES: &[&str] = &["ubuntu-latest", "windows-latest", "macos-latest"];
+
+/// CI jobs whose macOS matrix legs run only on the daily schedule cohort
+/// (issue #513: macOS bills at 10x Linux per minute, so macOS lint/nextest
+/// signal moves from every push/PR to the daily cron against main).
+const SCHEDULE_ONLY_MACOS_JOBS: &[&str] = &["lint", "nextest"];
+
+/// The per-leg schedule guard those macOS-cron jobs must use: on push/PR
+/// events every leg runs, on schedule runs only the `macos-latest` leg runs.
+const MACOS_SCHEDULE_GUARD: &str =
+    "${{ !cancelled() && (github.event_name != 'schedule' || matrix.os == 'macos-latest') }}";
 
 /// Expand a job display name template that may contain `${{ matrix.os }}` into
 /// concrete check names. If the template contains the placeholder, one name is
@@ -1917,10 +1931,21 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         );
         let block = extract_workflow_job_block(&workflow, job)
             .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
-        assert!(
-            block.contains("!cancelled() && github.event_name != 'schedule'"),
-            "ci.yml `{job}` must run after quick-check failure but not workflow cancellation"
-        );
+        if matches!(job, "lint" | "nextest") {
+            // Issue #513: these two carry the per-leg macOS cron cohort guard
+            // instead of a blanket schedule exclusion (pinned in full by
+            // test_ci_macos_lanes_run_only_on_the_daily_cron).
+            assert!(
+                block.contains("!cancelled() && (github.event_name != 'schedule' || matrix.os == 'macos-latest')"),
+                "ci.yml `{job}` must run after quick-check failure but not workflow \
+                 cancellation, and must reserve its schedule leg for macOS only"
+            );
+        } else {
+            assert!(
+                block.contains("!cancelled() && github.event_name != 'schedule'"),
+                "ci.yml `{job}` must run after quick-check failure but not workflow cancellation"
+            );
+        }
         assert!(
             block.contains("QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}")
                 && block.contains("test \"$QUICK_CHECK_RESULT\" = success"),
@@ -1930,9 +1955,14 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         let job_config = jobs
             .as_mapping_get(job)
             .unwrap_or_else(|| panic!("parsed ci.yml must define `{job}`"));
+        let expected_if = if matches!(job, "lint" | "nextest") {
+            MACOS_SCHEDULE_GUARD
+        } else {
+            "${{ !cancelled() && github.event_name != 'schedule' }}"
+        };
         assert_eq!(
             job_config.as_mapping_get("if").and_then(Yaml::as_str),
-            Some("${{ !cancelled() && github.event_name != 'schedule' }}"),
+            Some(expected_if),
             "{job} must run after prerequisite failure but not workflow cancellation"
         );
         let first_step = job_config
@@ -25927,16 +25957,17 @@ fn test_audit_job_configuration() {
 }
 
 /// The schedule guard condition that non-audit CI jobs must use.
-/// This ensures only the `deny` and `audit` (security audit) jobs run on the daily
-/// schedule trigger, preventing unnecessary CI resource consumption for scheduled runs.
+/// This ensures only the `deny` and `audit` (security audit) jobs plus the
+/// macOS lint/nextest legs (issue #513) run on the daily schedule trigger,
+/// preventing unnecessary CI resource consumption for scheduled runs.
 const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 
 /// CI jobs that must be excluded from scheduled runs via an `if:` guard.
-/// The `deny` and `audit` jobs are intentionally absent — they are the only
-/// jobs that should run on the daily schedule trigger (for CVE detection).
+/// The `deny` and `audit` jobs are intentionally absent — they run on the
+/// daily schedule trigger (for CVE detection). The `lint` and `nextest` jobs
+/// are also absent: their per-leg guards (`MACOS_SCHEDULE_GUARD`, issue #513)
+/// admit only their macOS legs on the schedule and are pinned separately.
 const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
-    "lint",
-    "nextest",
     "relay-allocations",
     "msrv",
     "docker",
@@ -25947,18 +25978,20 @@ const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
 
 #[test]
 fn test_ci_schedule_only_runs_security_jobs() {
-    // Validates that the daily scheduled trigger only runs the security audit
-    // jobs (`deny` and `audit`), and all other CI jobs are excluded from
-    // schedule runs.
+    // Validates the daily scheduled trigger's cost cohort (issue #513):
+    // only the security audit jobs (`deny` and `audit`), the `quick-check`
+    // gate, and the macOS legs of `lint`/`nextest` run on schedule; every
+    // other job is excluded from schedule runs entirely.
     //
-    // The ci.yml workflow has a daily cron schedule for catching new CVEs.
-    // Only the `deny` and `audit` jobs should run on schedule — all other
-    // jobs waste CI resources when triggered by the cron schedule since they
-    // only need to run on push/PR events.
+    // The ci.yml workflow has a daily cron schedule for catching new CVEs and
+    // for the macOS lint/nextest cohort — macOS bills at 10x Linux per minute,
+    // so its lanes run daily against main instead of on every push/PR.
     //
     // This test ensures:
-    //   1. Every non-audit job has `if: github.event_name != 'schedule'`
+    //   1. Every job in `SCHEDULE_EXCLUDED_CI_JOBS` has a schedule-exclusion guard
     //   2. The `deny` and `audit` jobs do NOT have a schedule exclusion guard
+    //   3. The macOS lint/nextest per-leg cohort guard is pinned separately
+    //      (test_ci_macos_lanes_run_only_on_the_daily_cron)
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
@@ -25980,7 +26013,7 @@ fn test_ci_schedule_only_runs_security_jobs() {
         // condition being None is fine — no `if:` means it runs on all triggers
     }
 
-    // Verify all non-audit jobs HAVE the schedule exclusion guard
+    // Verify all remaining non-audit jobs HAVE the schedule exclusion guard
     let mut missing_guard = Vec::new();
     let mut wrong_guard = Vec::new();
 
@@ -26012,7 +26045,8 @@ fn test_ci_schedule_only_runs_security_jobs() {
     assert!(
         errors.is_empty(),
         "CI jobs are missing schedule exclusion guards.\n\n\
-         The daily schedule trigger should only run the `deny` and `audit` (security) jobs.\n\
+         The daily schedule trigger should only run the `deny` and `audit` (security) jobs \
+         plus the macOS lint/nextest cohort (issue #513).\n\
          All other jobs must have `if: {SCHEDULE_EXCLUSION_GUARD}` to avoid wasting \
          CI resources on scheduled runs.\n\n\
          Issues:\n{}\n\n\
@@ -26020,6 +26054,77 @@ fn test_ci_schedule_only_runs_security_jobs() {
          File: {}",
         errors.join("\n"),
         root.join(".github/workflows/ci.yml").display()
+    );
+}
+
+#[test]
+fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
+    // Issue #513 cost cohort: macOS Lint/Nextest moved out of the per-PR/per-
+    // push hot path into the daily cron. macOS bills at 10x Linux per minute
+    // and the server deploys on Linux containers, so per-event macOS signal
+    // buys little; the daily cron keeps macOS coverage of main with next-day
+    // (instead of pre-merge) regression detection.
+    //
+    // Pins, per job in `SCHEDULE_ONLY_MACOS_JOBS`:
+    //   1. The exact per-leg `if:` guard — on push/PR every leg runs; on the
+    //      schedule only the `macos-latest` leg runs (the guard is evaluated
+    //      once per matrix combination).
+    //   2. The full OS matrix is intact: the macOS check names must keep
+    //      existing (produced by the cron), and ubuntu/windows must stay in
+    //      the per-event cohort — this is what keeps REQUIRED_CHECK_NAMES
+    //      honest for external consumers.
+    //   3. The fail-closed quick-check gate is unchanged on these jobs
+    //      (`needs: quick-check` + gate step), so schedule runs still fail
+    //      fast on an unparseable/uncompilable tree.
+    //   4. `quick-check` itself runs on schedule (no exclusion guard) — it is
+    //      the gate the macOS cron legs depend on.
+    use saphyr::LoadableYamlNode;
+
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci.yml jobs");
+
+    for job in SCHEDULE_ONLY_MACOS_JOBS {
+        let job_config = jobs
+            .as_mapping_get(job)
+            .unwrap_or_else(|| panic!("parsed ci.yml must define `{job}`"));
+        assert_eq!(
+            job_config.as_mapping_get("if").and_then(Yaml::as_str),
+            Some(MACOS_SCHEDULE_GUARD),
+            "`{job}` must carry the per-leg macOS cron cohort guard (issue #513): \
+             push/PR runs every leg, the schedule runs only the macos-latest leg"
+        );
+
+        let block = extract_workflow_job_block(&workflow, job)
+            .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
+        let matrix_oses = extract_yaml_field_values(&block, "os");
+        assert_eq!(
+            matrix_oses,
+            MATRIX_OS_VALUES.to_vec(),
+            "`{job}` must keep the full OS matrix; the cohort split lives in the \
+             per-leg guard, and REQUIRED_CHECK_NAMES still promises the macOS names \
+             from the daily cron"
+        );
+
+        assert!(
+            block.contains("needs: quick-check")
+                && block.contains("QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}")
+                && block.contains("test \"$QUICK_CHECK_RESULT\" = success"),
+            "`{job}` must keep the fail-closed quick-check gate on its cron legs"
+        );
+    }
+
+    let quick_check_condition = extract_job_if_condition(&workflow, "quick-check");
+    assert!(
+        quick_check_condition
+            .as_ref()
+            .is_none_or(|cond| !cond.contains("schedule")),
+        "quick-check must NOT exclude schedule runs: the macOS lint/nextest cron \
+         legs (issue #513) depend on its fail-closed gate result"
     );
 }
 

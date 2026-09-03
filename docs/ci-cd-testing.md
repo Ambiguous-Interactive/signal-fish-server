@@ -223,6 +223,33 @@ published advisories.
 `test_ci_workflow_has_required_jobs`, `test_required_check_names_are_consistent`,
 and `test_ci_schedule_only_runs_security_jobs`.
 
+#### Platform Cohorts (Lint / Nextest)
+
+The `lint` and `nextest` jobs run a three-OS matrix
+(`ubuntu-latest`, `windows-latest`, `macos-latest`) split into two cost
+cohorts (issue #513):
+
+- **Per-event cohort (every push and pull request)**: the `ubuntu-latest` and
+  `windows-latest` legs. Windows bills at 2x Linux and covers the non-unix
+  platform-difference class pre-merge.
+- **Daily cron cohort (the noon UTC schedule)**: the `macos-latest` legs.
+  macOS bills at 10x Linux per minute while the server deploys on Linux
+  containers, so macOS lint/nextest signal runs daily against `main` instead
+  of on every event — a macOS regression surfaces next-day instead of
+  pre-merge.
+
+The split is a per-leg job-level `if`
+(`github.event_name != 'schedule' || matrix.os == 'macos-latest'`,
+evaluated once per matrix combination), so the `CI / Lint (macos-latest)` and
+`CI / Nextest (macos-latest)` check names keep existing (produced by the cron)
+and stay in the repository-owned stable naming contract. The `quick-check`
+fail-fast gate runs on every event — including the schedule — because the
+macOS cron legs depend on its fail-closed result.
+
+**Tests that enforce this:** `test_ci_macos_lanes_run_only_on_the_daily_cron`,
+`test_ci_schedule_only_runs_security_jobs`, and
+`test_ci_quick_check_gate_guards_expensive_jobs`.
+
 #### 4. Documentation Validation Alignment Tests
 
 Tests that ensure the doc-validation workflow stays aligned with the naming contract and quality standards:

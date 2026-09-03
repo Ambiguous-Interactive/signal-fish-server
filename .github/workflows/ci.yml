@@ -6,11 +6,14 @@
 # Runs on:
 #   - Push to main branch
 #   - Pull requests to main
-#   - Daily schedule (security audit only — the `deny` and `audit` jobs)
+#   - Daily schedule (the `deny` and `audit` security-audit jobs, plus the
+#     macOS lint/nextest lanes — issue #513)
 #
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
+#     (ubuntu + windows per push/PR; macOS on the daily schedule only)
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
+#     (ubuntu + windows per push/PR; macOS on the daily schedule only)
 #   - relay-allocations: Deterministic production-seam allocation ceilings
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Security audits, license checks, and dependency validation
@@ -35,7 +38,10 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Daily security audit at noon UTC to catch new CVEs
+    # Daily security audit at noon UTC to catch new CVEs, plus the macOS
+    # lint/nextest lanes (issue #513): macOS bills at 10x Linux per minute and
+    # the server is deployed on Linux, so macOS coverage runs daily against
+    # main instead of on every push/pull request.
     - cron: "0 12 * * *"
 
 concurrency:
@@ -52,17 +58,19 @@ jobs:
   # Fast-fail gate. A single cheap "does it format and compile" pass that the
   # expensive compile/test jobs in this workflow depend on via `needs:
   # quick-check`. A file that does not parse or type-check fails here in seconds,
-  # so the eleven gated lanes (lint x3, nextest x3, relay allocations, msrv,
-  # Docker, coverage, panic policy) allocate only a setup-free fail-closed
+  # so the gated lanes allocate only a setup-free fail-closed
   # status job —
   # collapsing what was a redundant per-lane recompile-and-fail into one fast
   # failure. This exists because an unclosed delimiter in a committed test file
   # once failed every one of those lanes independently. (Compile jobs in sibling
   # workflows such as ci-safety.yml and doc-validation.yml are out of scope here;
   # see test_ci_quick_check_gate_guards_expensive_jobs which pins this wiring.)
+  #
+  # Runs on every event, including the daily schedule: the macOS lint/nextest
+  # cron lanes (issue #513) need the same fail-closed gate, and the remaining
+  # schedule cost is minutes of Linux time per day.
   quick-check:
     name: Quick Check
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -147,7 +155,13 @@ jobs:
   lint:
     name: Lint (${{ matrix.os }})
     needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    # Issue #513 cost cohort: macOS bills at 10x Linux per minute and the
+    # server deploys on Linux, so the macOS legs run only on the daily
+    # schedule (next-day signal for macOS regressions) while ubuntu and
+    # windows cover every push and pull request. The per-leg `if` (evaluated
+    # once per matrix combination) skips exactly one leg per event; the
+    # fail-closed quick-check gate still applies to every leg that runs.
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || matrix.os == 'macos-latest') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -229,7 +243,9 @@ jobs:
   nextest:
     name: Nextest (${{ matrix.os }})
     needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    # Issue #513 cost cohort: same per-leg schedule split as the lint job —
+    # ubuntu + windows per push/pull request, macOS on the daily schedule only.
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || matrix.os == 'macos-latest') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
