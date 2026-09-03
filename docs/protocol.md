@@ -870,7 +870,13 @@ Practical consequences:
   evicted. Operators can watch the
   `signal_fish_websocket_backpressure_events_total` and
   `signal_fish_websocket_slow_consumer_disconnects_total` Prometheus
-  counters to spot backpressure and slow-consumer evictions in production. The
+  counters to spot backpressure and slow-consumer evictions in production.
+  When an eviction was caused by a member flooding reliable frames, the
+  labeled `signal_fish_websocket_slow_consumer_eviction_attributions_total{sender}`
+  counter (JSON `metricsSnapshot.connections.slow_consumer_eviction_attributions`)
+  attributes the close to the sender of the triggering frame (issue #530):
+  series appear at a sender's first eviction and disappear when that sender
+  disconnects. The
   labeled `signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`
   counter and JSON
   `metricsSnapshot.connections.delivery_by_class` (`connections.delivery_by_class`

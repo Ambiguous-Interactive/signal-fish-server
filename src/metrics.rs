@@ -82,10 +82,12 @@ pub struct ServerMetrics {
     /// configured allowlist size.
     app_relay_bytes: dashmap::DashMap<uuid::Uuid, AtomicU64>,
     /// Reliable-class game-data evictions attributed to the sender of the
-    /// frame that closed a slow recipient (issue #530). Keyed by the
-    /// attributed sender and carried across a reconnection's identity swap,
-    /// so the map is bounded by the sender connections that actually evicted
-    /// a recipient; entries are dropped when the sender disconnects.
+    /// frame that closed a slow recipient (issue #530). One ledger per live
+    /// connection, registered at connection registration and dropped at
+    /// unregistration (the `connection_delivery_stats` pattern): a departed
+    /// sender can never resurrect its series, and the map is bounded by
+    /// live connections. Re-keyed across a reconnection identity swap;
+    /// snapshots expose only the senders with at least one eviction.
     slow_consumer_eviction_attributions: dashmap::DashMap<crate::protocol::PlayerId, AtomicU64>,
     delivery_class_counters: [DeliveryClassAtomicCounters; 3],
 
@@ -955,23 +957,41 @@ impl ServerMetrics {
             .collect()
     }
 
-    /// Attribute one reliable-class slow-consumer eviction to the sender of
-    /// the frame that initiated the recipient's close (issue #530).
-    pub fn record_slow_consumer_eviction(&self, sender: &crate::protocol::PlayerId) {
+    /// Register the eviction-attribution ledger for a live sender
+    /// connection (issue #530). Called at connection registration, mirroring
+    /// `connection_delivery_stats`: the ledger's lifetime is the
+    /// registration's, so a departed sender can never resurrect a series.
+    pub fn register_slow_consumer_eviction_attributions(
+        &self,
+        player_id: crate::protocol::PlayerId,
+    ) {
         self.slow_consumer_eviction_attributions
-            .entry(*sender)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+            .entry(player_id)
+            .or_insert_with(|| AtomicU64::new(0));
+    }
+
+    /// Attribute one reliable-class slow-consumer eviction to the sender of
+    /// the frame that initiated the recipient's close (issue #530). A no-op
+    /// for a sender that is not (or no longer) registered — a departed
+    /// sender's attribution dies with its connection instead of
+    /// resurrecting an unbounded stale series.
+    pub fn record_slow_consumer_eviction(&self, sender: &crate::protocol::PlayerId) {
+        if let Some(counter) = self.slow_consumer_eviction_attributions.get(sender) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Slow-consumer evictions attributed per sender (issue #530), sorted by
-    /// sender ID for deterministic snapshots and Prometheus series.
+    /// sender ID for deterministic snapshots and Prometheus series. Senders
+    /// without an eviction are excluded — their zero ledgers exist only for
+    /// lifetime bounding, not for observability.
     pub fn slow_consumer_eviction_attributions_snapshot(
         &self,
     ) -> std::collections::BTreeMap<crate::protocol::PlayerId, u64> {
         self.slow_consumer_eviction_attributions
             .iter()
             .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
+            .filter(|(_, evictions)| *evictions > 0)
             .collect()
     }
 
@@ -1919,6 +1939,8 @@ mod tests {
 
         let sender = crate::protocol::PlayerId::new_v4();
         let reassigned = crate::protocol::PlayerId::new_v4();
+        // The ledger's lifetime is the connection registration's.
+        metrics.register_slow_consumer_eviction_attributions(sender);
         metrics.record_slow_consumer_eviction(&sender);
         metrics.record_slow_consumer_eviction(&sender);
         metrics.rekey_slow_consumer_eviction_attributions(&sender, reassigned);
@@ -1935,6 +1957,23 @@ mod tests {
                 .slow_consumer_eviction_attributions_snapshot()
                 .is_empty(),
             "a disconnected sender's series disappears, keeping the map bounded"
+        );
+        metrics.record_slow_consumer_eviction(&reassigned);
+        assert!(
+            metrics
+                .slow_consumer_eviction_attributions_snapshot()
+                .is_empty(),
+            "a departed sender can never resurrect its series: the record is a \
+             no-op once the ledger is gone"
+        );
+        let live_sender = crate::protocol::PlayerId::new_v4();
+        metrics.register_slow_consumer_eviction_attributions(live_sender);
+        assert!(
+            metrics
+                .slow_consumer_eviction_attributions_snapshot()
+                .is_empty(),
+            "a live sender without evictions stays out of the snapshot: the zero \
+             ledger exists for lifetime bounding, not observability"
         );
     }
 

@@ -36,9 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `connections.slow_consumer_eviction_attributions`, and the eviction warning
   log carries the triggering sender. A member streaming maximal reliable
   frames could previously evict room-mates with `SLOW_CONSUMER` while the
-  flooding sender was never identifiable. The ledger follows the attributed
-  sender across a reconnection identity swap and is dropped when the sender
-  disconnects, keeping it bounded by live senders; latest/volatile frames
+  flooding sender was never identifiable. The ledger's lifetime is the
+  sender's connection registration (the `connection_delivery_stats`
+  pattern): it follows the sender across a reconnection identity swap and
+  dies at disconnect, so a departed sender can never resurrect a stale
+  series and the map is bounded by live connections. Latest/volatile frames
   (which supersede or bypass backpressure) are never attributed.
 - `rate_limit.max_room_relay_bytes` (default `1073741824`, 1 GiB per window):
   per-room aggregate game-data relay byte ceiling charged on every accepted
@@ -137,6 +139,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI cost cohort (issue #513): the macOS `Lint`/`Nextest` lanes moved from
+  every push/pull request to the daily noon cron against `main` (macOS bills
+  at 10x Linux per minute while deployments are Linux containers), so macOS
+  regression signal is next-day instead of pre-merge. The `quick-check`
+  fail-fast gate now runs on every event including the schedule; the
+  `CI / Lint (macos-latest)` and `CI / Nextest (macos-latest)` check names
+  keep existing via the cron.
 - Public Rust API (breaking): `RoomRateLimiter::check_relay_bytes` gained an
   `app: Option<rate_limit::AppRelayPolicy>` parameter carrying the sender's
   resolved allowlist policy (issue #530); passing `None` preserves the

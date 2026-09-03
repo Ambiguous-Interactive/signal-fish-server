@@ -25967,8 +25967,10 @@ const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 /// daily schedule trigger (for CVE detection). The `lint` and `nextest` jobs
 /// are also absent: their per-leg guards (`MACOS_SCHEDULE_GUARD`, issue #513)
 /// admit only their macOS legs on the schedule and are pinned separately.
+/// `quick-check` is absent by design: it gates the macOS cron legs.
 const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
     "relay-allocations",
+    "doc-consistency",
     "msrv",
     "docker",
     "coverage",
@@ -25981,7 +25983,9 @@ fn test_ci_schedule_only_runs_security_jobs() {
     // Validates the daily scheduled trigger's cost cohort (issue #513):
     // only the security audit jobs (`deny` and `audit`), the `quick-check`
     // gate, and the macOS legs of `lint`/`nextest` run on schedule; every
-    // other job is excluded from schedule runs entirely.
+    // job in `SCHEDULE_EXCLUDED_CI_JOBS` is excluded from schedule runs
+    // entirely, and `doc-consistency` — a Linux-only lane — keeps its own
+    // exclusion guard in that list.
     //
     // The ci.yml workflow has a daily cron schedule for catching new CVEs and
     // for the macOS lint/nextest cohort — macOS bills at 10x Linux per minute,

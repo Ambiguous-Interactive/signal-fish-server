@@ -1800,8 +1800,14 @@ fn trace_queue_outcome_supported(outcome: QueueEnqueueOutcome) -> bool {
 /// slow recipient's queue until the recipient is force-closed, while the
 /// flooding sender is never penalized; attributing the close to the sender
 /// of the triggering frame gives operators (and the room's authority) the
-/// cause. Latest/Volatile frames either supersede themselves or bypass
-/// backpressure, so they are not attributed; binary frames are always
+/// cause. The classification reads the frame's wire `class`, which matches
+/// the recipient's effective pressure whenever the recipient negotiates the
+/// classified lanes (v3): Latest supersedes and Volatile bypasses
+/// backpressure there, so neither is attributed. A legacy (pre-v3)
+/// recipient accumulates every data frame in its legacy lane regardless of
+/// wire class, so such evictions are conservatively under-attributed — no
+/// false accusations, and the eviction warning's `reliable_trigger_sender`
+/// field shows `None` in exactly those cases. Binary frames are always
 /// reliable-class (the binary lane has no class field).
 fn reliable_class_sender(message: &crate::protocol::ServerMessage) -> Option<PlayerId> {
     match message {
@@ -4660,6 +4666,10 @@ mod tests {
             .sender
             .try_send(game_data_message(None, None, None, None), None)
             .expect("prefill the classified data lane");
+        // Ledger lifetime = connection registration (issue #530): the
+        // attributed senders must be registered for a record to land.
+        metrics.register_slow_consumer_eviction_attributions(sender_a);
+        metrics.register_slow_consumer_eviction_attributions(sender_b);
 
         // Sender A's reliable frame times out against the full lane and
         // initiates the close: attributed to sender A.

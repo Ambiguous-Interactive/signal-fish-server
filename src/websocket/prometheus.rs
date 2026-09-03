@@ -917,6 +917,8 @@ mod tests {
         metrics.record_app_relay_bytes(&app_a, 300);
         metrics.record_app_relay_bytes(&app_a, 200);
         metrics.record_app_relay_bytes(&app_b, 1000);
+        metrics.register_slow_consumer_eviction_attributions(sender_a);
+        metrics.register_slow_consumer_eviction_attributions(sender_b);
         metrics.record_slow_consumer_eviction(&sender_a);
         metrics.record_slow_consumer_eviction(&sender_a);
         metrics.record_slow_consumer_eviction(&sender_b);

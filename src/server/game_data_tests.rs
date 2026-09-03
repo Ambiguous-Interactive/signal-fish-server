@@ -663,8 +663,12 @@ mod admission_and_budget {
     #[tokio::test]
     async fn room_relay_byte_budget_bounds_joint_senders() {
         // Each sender's own budget (1000 bytes) stays far above every frame
-        // used here; only the room ceiling (1200 bytes) can reject.
+        // used here; only the room ceiling (1200 bytes) can reject. The
+        // allowlisted tiered context pins the attribution ordering: admitted
+        // bytes are attributed per app only AFTER the room ceiling admitted
+        // the frame (issue #530).
         let server = server_with_config(|config| {
+            config.app_id_allowlist_enabled = true;
             config.rate_limit_config.max_relay_bytes = 1000;
             config.rate_limit_config.max_room_relay_bytes = 1200;
             config.rate_limit_config.time_window = Duration::from_secs(60);
@@ -673,6 +677,24 @@ mod admission_and_budget {
         let (sender_a, mut sender_a_rx) = register_client(&server).await;
         let (sender_b, mut sender_b_rx) = register_client(&server).await;
         let (peer, mut peer_rx) = register_client(&server).await;
+        let app_id = uuid::Uuid::new_v4();
+        let tiered_context = crate::auth::middleware::AppContext {
+            id: app_id,
+            name: "Tiered".to_string(),
+            organization: None,
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            rate_limits: crate::auth::middleware::RateLimits {
+                per_minute: 1000,
+                per_hour: 60_000,
+                per_day: 1_440_000,
+            },
+        };
+        for player in [&sender_a, &sender_b, &peer] {
+            server.set_client_app_context(player, tiered_context.clone());
+        }
         join_shared_room(
             &server,
             vec![
@@ -733,6 +755,12 @@ mod admission_and_budget {
         assert_eq!(
             snapshot.players.relay_bytes_total, 1200,
             "only admitted bytes are accounted"
+        );
+        assert_eq!(
+            snapshot.players.app_relay_bytes.get(&app_id),
+            Some(&1200),
+            "per-app attribution runs after the room ceiling admitted each frame: \
+             the rejected 1-byte submit is attributed nowhere"
         );
         // The room-ceiling rejection retains the sender charge the frame
         // already committed: sender A's window shows 600 admitted + the

@@ -418,6 +418,10 @@ impl ConnectionManager {
         if self.track_delivery_stats {
             self.metrics.register_connection_delivery_stats(player_id);
         }
+        // The eviction-attribution ledger's lifetime is the registration's
+        // (issue #530): a departed sender can never resurrect its series.
+        self.metrics
+            .register_slow_consumer_eviction_attributions(player_id);
 
         if let Err(err) = self
             .message_coordinator
@@ -487,6 +491,10 @@ impl ConnectionManager {
         if self.track_delivery_stats {
             self.metrics.register_connection_delivery_stats(player_id);
         }
+        // The eviction-attribution ledger's lifetime is the registration's
+        // (issue #530): a departed sender can never resurrect its series.
+        self.metrics
+            .register_slow_consumer_eviction_attributions(player_id);
 
         if let Err(err) = self
             .message_coordinator
