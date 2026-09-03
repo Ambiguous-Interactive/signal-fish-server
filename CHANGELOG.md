@@ -28,6 +28,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinct source IPs; the ceiling bounds the whole server regardless of source
   spread (issue #502). Startup validation rejects a zero ceiling and a per-IP cap
   above the ceiling (dead config the ceiling would always preempt).
+- `security.app_auth_path` (default unset): path to an external app-registry
+  file of the shape `{"apps": [...]}` whose entries use exactly the
+  `allowed_apps` shape. The file's entries are appended to the allowlist at
+  config load time — before enforcement, `--validate-config`, and
+  `--print-config` — so a control plane can own the live registry in a
+  read-only-mounted file (the intended contract for the cloud deployment's
+  `/etc/signal-fish/app-auth.json`) while the main config keeps static
+  bootstrap apps (issue #516). Admission is fail-closed: a missing, unreadable,
+  malformed, or contract-violating file is a startup error naming the file;
+  unknown entry keys and `app_secret` are rejected outright; duplicate
+  `app_id` values across the two lists fail startup validation with the
+  indexed `allowed_apps[N].app_id` error. Configurable via
+  `SIGNAL_FISH__SECURITY__APP_AUTH_PATH`.
+- Readiness probe endpoints `/readyz` (top level) and `/v2/readyz` (nested
+  router): 200 until the shutdown drain begins, then 503. `/health` stays
+  liveness-only and keeps answering 200 through the drain, so orchestrators
+  can now distinguish "draining: stop routing new connections" from "dead"
+  and remove an instance from rotation while its clients still receive the
+  graceful `GoingAway`/`4000` closes (issue #521).
+- Startup now reports the effective security posture: an info line with the
+  app-ID allowlist mode, registered app count, and metrics-auth mode, plus a
+  warn line per disabled gate (allowlist enforcement off, metrics auth off)
+  so a fail-open deployment is visible in `docker logs` instead of silent
+  (issue #515). `--validate-config` gained `App-ID allowlist enforced` and
+  `Registered applications` summary lines.
 
 ### Changed
 
@@ -80,6 +105,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The shipped Docker image no longer hard-disables the security gates via
+  `ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false` and
+  `ENV SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`: every default
+  container run was fail-open (any client could connect under any app label;
+  metrics served unauthenticated), silently inverting the compiled fail-closed
+  defaults and overriding any mounted config for operators who did not know
+  the image shipped them. The image now ships no `SIGNAL_FISH__*` ENV
+  defaults at all — compiled defaults stand (both gates on); deployments that
+  genuinely want open mode set the documented environment overrides or a
+  mounted config. The BuildKit `check=skip=SecretsUsedInArgOrEnv` directive,
+  present only to suppress scanner warnings about those ENV lines, is removed
+  with them. A structural test pins the image to stay free of
+  `SIGNAL_FISH__*` ENV configuration (issue #515). Note the companion
+  `docker-compose.yml` deliberately mounts `config.example.json`, which
+  disables both gates _visibly in that file_ — the documented local-development
+  posture; the image itself carries no defaults either way.
+- `docker-compose.yml` now sets `stop_grace_period: 60s` for the signaling
+  service: Docker's 10-second default SIGTERM timeout elapses while the
+  default 30-second drain is still settling close frames, so clients lost the
+  coded `4000` closes and `GoingAway` advisories on every compose-driven
+  restart (issue #521).
 - The delivery-contract trace recorder (feature `trace-validation`) now ends
   its projection at the first divergence label (`queue-close-observation-order-race`,
   `enqueue-completed-before-dequeue-observed`, `full-observation-order-race`,

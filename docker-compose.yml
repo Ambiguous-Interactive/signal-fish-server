@@ -6,9 +6,21 @@ services:
     environment:
       RUST_LOG: info
     volumes:
-      # Optional: mount a config file
+      # Optional: mount a config file. NOTE: config.example.json is the
+      # explicit local-development posture — it sets
+      # `enforce_app_id_allowlist: false` and `require_metrics_auth: false`
+      # visibly in the mounted file (the startup log warns about each). It is
+      # NOT a silent image default: the image itself ships the secure
+      # compiled defaults (issue #515). For anything beyond local
+      # development, replace this mount with your own config.
       - ./config.example.json:/app/config.json:ro
     restart: unless-stopped
+    # Outlive the server's own drain choreography (issue #521): SIGTERM starts
+    # a graceful drain (GoingAway advisories, up to `server.drain_grace_secs`
+    # — default 30 — of close-frame settling, then coded 4000 closes). Docker's
+    # 10s default would SIGKILL the container mid-drain, so clients lose the
+    # coded closes. 60s covers the observed ~40s worst case with live clients.
+    stop_grace_period: 60s
 
   # Optional coturn TURN relay for WebRTC sessions (Protocol v3).
   #

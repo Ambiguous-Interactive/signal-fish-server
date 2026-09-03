@@ -192,6 +192,12 @@ pub fn health_route() -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
     get(health_check)
 }
 
+/// Build the readiness-probe route (`/v2/readyz` on the nested router,
+/// `/readyz` on the production topology; see `main.rs`).
+pub fn readyz_route() -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
+    get(readyz)
+}
+
 fn create_router_inner(
     origin_policy: OriginPolicy,
     include_v3_alias: bool,
@@ -204,6 +210,7 @@ fn create_router_inner(
         .route("/ws", get(websocket_handler))
         .route("/client-config", client_config_route())
         .route("/health", get(health_check))
+        .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
         .route("/metrics/prom", get(prometheus_metrics_handler));
 
@@ -253,6 +260,33 @@ async fn health_check(
     } else {
         Err(axum::http::StatusCode::SERVICE_UNAVAILABLE.into())
     }
+}
+
+/// Readiness probe (issue #521): 200 until the shutdown drain begins, 503
+/// once it has.
+///
+/// Deliberately distinct from [`health_check`], which stays liveness-only:
+/// the in-memory database is healthy while the process refuses new work, so
+/// an orchestrator probing liveness would keep routing new connections to a
+/// draining instance. A readiness probe flips to 503 at the moment
+/// `begin_shutdown_drain` commits — before the `GoingAway` fan-out and the
+/// coded `4000` closes — so the deploy tooling can remove the instance from
+/// the load balancer while clients still receive their graceful close. The
+/// verdict varies over time, so the response is `Cache-Control: no-store`:
+/// a cached 200 served during a drain flip would route new connections to a
+/// dying instance.
+async fn readyz(
+    State(server): State<Arc<EnhancedGameServer>>,
+) -> (
+    [(axum::http::HeaderName, &'static str); 1],
+    axum::http::StatusCode,
+) {
+    let status = if server.is_draining() {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    };
+    ([(CACHE_CONTROL, "no-store")], status)
 }
 
 /// Aborts a spawned task if the owning future exits before joining it.
@@ -370,6 +404,68 @@ mod tests {
 
     async fn hold_owner_forever<T>(_owner: T) {
         std::future::pending::<()>().await;
+    }
+
+    /// Minimal test server for probe-handler tests (same construction shape
+    /// as the binary's shutdown-drain tests).
+    async fn probe_test_server() -> Arc<EnhancedGameServer> {
+        EnhancedGameServer::new(
+            ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct probe test server")
+    }
+    /// Readiness vs liveness contract (issue #521): `/readyz` flips to 503
+    /// the moment the drain commits, while `/health` stays liveness-only and
+    /// keeps answering 200 — an orchestrator probing readiness removes the
+    /// instance from rotation without mistaking a draining-but-gracefully-
+    /// closing process for a dead one. The verdict is `Cache-Control:
+    /// no-store` so no intermediary can serve a stale 200 across the flip.
+    #[tokio::test]
+    async fn readyz_flips_to_503_on_drain_while_health_stays_200() {
+        let server = probe_test_server().await;
+
+        let (headers, status) = readyz(State(server.clone())).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "a fresh server must report ready"
+        );
+        assert_eq!(
+            headers[0].0,
+            axum::http::header::CACHE_CONTROL,
+            "the readiness verdict must carry cache headers"
+        );
+        assert_eq!(headers[0].1, "no-store");
+        assert_eq!(
+            health_check(State(server.clone()))
+                .await
+                .expect("health must be 200 while not draining"),
+            "OK",
+            "a fresh server must be live"
+        );
+
+        server.begin_shutdown_drain();
+
+        let (_, status) = readyz(State(server.clone())).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "a draining server must report not-ready so deploy tooling stops routing"
+        );
+        assert!(
+            health_check(State(server.clone())).await.is_ok(),
+            "the drain must not change liveness: /health stays 200"
+        );
     }
 
     #[tokio::test]

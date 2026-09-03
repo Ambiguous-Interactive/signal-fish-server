@@ -196,25 +196,31 @@ When adding a new native dependency, update **both** files.
 
 ### The "Auth Defaults" Pitfall
 
-When `default_require_auth()` returns `true` (secure-by-default), containers without a
-mounted config file **will crash at startup** unless the Dockerfile explicitly disables
-auth via environment variable overrides:
-
-```dockerfile
-# Disable auth by default so the container starts without a config file.
-# Production deployments should mount a config.json or set auth env vars.
-ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
-ENV SIGNAL_FISH__SECURITY__REQUIRE_WEBSOCKET_AUTH=false
-```
+The compiled defaults are secure-by-default (`require_metrics_auth` and
+`enforce_app_id_allowlist` both `true`, issue #515), and the image ships NO
+`SIGNAL_FISH__*` ENV configuration: image-level ENV has final precedence over
+every config source and would silently invert those defaults (a structural
+guard test and `scripts/check-ci-config.sh` reject any `ENV SIGNAL_FISH__*`
+directive). A container started with no config and no env therefore **exits
+at startup** with the `CRITICAL: Metrics authentication ...` validation
+error — the fail-closed design working, not a bug. Opt in explicitly at
+runtime instead: open-mode flags for a local trial
+(`SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`,
+`SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false`; see README.md), or a
+`SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN` to boot with the secure defaults.
 
 ### Smoke Test Pattern (CI)
 
-Use a retry loop instead of a bare `sleep`:
+Use a retry loop instead of a bare `sleep`, and satisfy the secure defaults
+with a metrics token so the smoke run exercises the shipped fail-closed
+posture:
 
 ```yaml
 - name: Smoke test
   run: |
-    docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
+    docker run -d --name test-server -p 3536:3536 \
+      -e SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=ci-smoke-token \
+      signal-fish-server:ci
     for i in $(seq 1 15); do
       if curl -sf http://localhost:3536/v2/health; then
         echo "Health check passed on attempt $i/15"
@@ -230,15 +236,10 @@ Use a retry loop instead of a bare `sleep`:
 
 ### Regression Test
 
-```rust
-#[test]
-fn test_docker_default_config_passes_validation() {
-    let mut config = Config::default();
-    config.security.require_metrics_auth = false;
-    config.security.require_websocket_auth = false;
-    assert!(validate_config_security(&config).is_ok());
-}
-```
+The image-level contract is pinned structurally:
+`test_dockerfile_ships_no_signal_fish_config_env_overrides`
+(tests/ci_config_tests.rs) rejects any `ENV SIGNAL_FISH__*` directive in the
+Dockerfile, with data-driven fixture coverage of the parser shapes.
 
 ---
 

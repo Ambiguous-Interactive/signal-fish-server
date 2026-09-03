@@ -804,6 +804,43 @@ pub fn should_warn_all_liveness_disabled(config: &Config) -> bool {
         && config.websocket.server_ping_interval_secs == 0
 }
 
+/// The disabled security gates that startup should warn about, as
+/// human-readable lines (issue #515).
+///
+/// Both gates are fail-closed in the compiled defaults, but each is
+/// legitimately disabled for local development; the risk is a hosted
+/// deployment that inherits the open posture invisibly — the exact
+/// failure mode the shipped image used to hard-code via ENV defaults
+/// (#515). One warn-level line per disabled gate makes the effective
+/// posture visible in `docker logs` at startup, next to the TLS and
+/// liveness warnings. Advisory only: open mode is valid configuration.
+///
+/// Empty when every gate is enabled (the secure posture is then reported
+/// by the startup info line in `main.rs` instead).
+#[must_use]
+pub fn security_posture_warnings(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !config.security.enforce_app_id_allowlist {
+        warnings.push(
+            "App-ID allowlist enforcement is disabled: any WebSocket client may connect \
+             and act under any self-declared app label (accounting only, no tenant \
+             isolation). Acceptable for local development; hosted or multi-tenant \
+             deployments should enable security.enforce_app_id_allowlist."
+                .to_string(),
+        );
+    }
+    if !config.security.require_metrics_auth {
+        warnings.push(
+            "Metrics endpoints are unauthenticated: operational data (room and \
+             connection counts, per-app metrics) is world-readable. Acceptable for \
+             local development; hosted deployments should enable \
+             security.require_metrics_auth."
+                .to_string(),
+        );
+    }
+    warnings
+}
+
 /// Detect if we're running in production mode.
 ///
 /// Checks for `SIGNAL_FISH_PRODUCTION` or generic `PRODUCTION` / `PROD` environment variables.
@@ -914,6 +951,39 @@ mod tests {
                 "ping_timeout={ping_timeout}, idle_timeout_secs={idle_timeout_secs}, \
                  server_ping_interval_secs={server_ping_interval_secs}"
             );
+        }
+    }
+
+    /// Truth table for the security-posture startup warnings (#515): each
+    /// disabled gate contributes exactly one line naming it, and the secure
+    /// posture produces none.
+    #[test]
+    fn security_posture_warnings_name_exactly_the_disabled_gates() {
+        // (allowlist_enforced, metrics_auth_required, expected gate names)
+        let cases = [
+            (true, true, Vec::new()),
+            (false, true, vec!["App-ID allowlist"]),
+            (true, false, vec!["Metrics endpoints"]),
+            (false, false, vec!["App-ID allowlist", "Metrics endpoints"]),
+        ];
+        for (allowlist_enforced, metrics_auth_required, expected_gates) in cases {
+            let mut config = Config::default();
+            config.security.enforce_app_id_allowlist = allowlist_enforced;
+            config.security.require_metrics_auth = metrics_auth_required;
+
+            let warnings = security_posture_warnings(&config);
+            assert_eq!(
+                warnings.len(),
+                expected_gates.len(),
+                "allowlist_enforced={allowlist_enforced}, \
+                 metrics_auth_required={metrics_auth_required}: {warnings:?}"
+            );
+            for (warning, gate) in warnings.iter().zip(&expected_gates) {
+                assert!(
+                    warning.contains(gate),
+                    "warning must name the disabled gate ({gate}): {warning}"
+                );
+            }
         }
     }
 

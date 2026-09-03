@@ -51,10 +51,14 @@ the operator guides below cover those decisions.
 
 ### Docker
 
-The published image starts with development-friendly access defaults:
+The published image ships the secure compiled defaults (app-ID allowlist
+enforcement and metrics auth on). For a local trial, opt into the open
+development posture explicitly:
 
 ```bash
 docker run --rm -p 127.0.0.1:3536:3536 \
+  -e SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false \
+  -e SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
   ghcr.io/ambiguous-interactive/signal-fish-server:latest
 ```
 

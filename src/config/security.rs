@@ -94,6 +94,18 @@ pub struct SecurityConfig {
     #[serde(default)]
     #[serde(alias = "authorized_apps")]
     pub allowed_apps: Vec<AppRegistrationEntry>,
+    /// Optional path to an external app-registry JSON file of the shape
+    /// `{"apps": [<same entry shape as allowed_apps>]}` (issue #516).
+    ///
+    /// The file's entries are appended to [`Self::allowed_apps`] at config
+    /// load time, so a deployment can keep the static bootstrap apps in the
+    /// main config while an external provisioner (e.g. a control plane
+    /// regenerating a read-only-mounted file) owns the live registry.
+    /// Admission is fail-closed: when set, a missing, unreadable, or invalid
+    /// file is a startup error — never a silent no-op. Duplicate `app_id`
+    /// values between the two lists are rejected by startup validation.
+    #[serde(default)]
+    pub app_auth_path: Option<String>,
 }
 
 impl Default for SecurityConfig {
@@ -110,6 +122,7 @@ impl Default for SecurityConfig {
             max_connections: default_max_connections(),
             transport: TransportSecurityConfig::default(),
             allowed_apps: Vec::new(),
+            app_auth_path: None,
         }
     }
 }
@@ -273,6 +286,23 @@ pub struct AppRegistrationEntry {
     /// legitimate handshakes (issue #502).
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
+}
+
+/// The external app-registry file contract (issue #516): the same
+/// [`AppRegistrationEntry`] shape as `security.allowed_apps`, under a
+/// required top-level `apps` key. Strict admission (`deny_unknown_fields` on
+/// the wrapper and on every entry) so a typo'd cap or a stray `app_secret`
+/// fails loudly instead of being ignored: the registry file must never carry
+/// credential material, and a silently-dropped entry would shrink the
+/// registry invisibly. There are no legacy aliases here — the file is a new
+/// contract, not a second copy of the main config syntax.
+///
+/// Lives beside the other security structs so the module's structural
+/// `deny_unknown_fields` scan covers it too.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppAuthFile {
+    pub apps: Vec<AppRegistrationEntry>,
 }
 
 #[cfg(test)]

@@ -26,5 +26,8 @@ docker build -t "${IMAGE_NAME}:${TAG}" .
 
 echo ""
 echo "Docker build completed successfully!"
-echo "To run the container:"
-echo "  docker run -p 3536:3536 ${IMAGE_NAME}:${TAG}"
+echo "To run the container (see README.md — the image defaults are secure):"
+echo "  docker run --rm -p 3536:3536 \\"
+echo "    -e SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false \\"
+echo "    -e SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \\"
+echo "    ${IMAGE_NAME}:${TAG}"

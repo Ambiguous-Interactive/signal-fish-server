@@ -25505,6 +25505,150 @@ fn test_dockerfile_suppresses_false_positive_security_warnings() {
     );
 }
 
+/// The production image must not encode server configuration in `ENV`
+/// directives (issue #515). Environment variables have final precedence over
+/// every config source (`src/config/loader.rs`), so an image-level
+/// `SIGNAL_FISH__SECURITY__...` default silently inverts the compiled
+/// fail-closed default for any deployment that does not know to override it —
+/// exactly the fail-open-by-default shape #515 filed. Configuration belongs
+/// to the compiled defaults, a mounted config file, or runtime-provided
+/// environment; the image ships none of it. Sweeping every `SIGNAL_FISH__*`
+/// key (not just the security subtree) keeps benign-looking defaults like a
+/// port from re-entering by the same silent-shadowing door.
+///
+/// The scanner is deliberately Dockerfile-shaped, not a naive line search:
+/// directives are matched case-insensitively, backslash continuations are
+/// joined, and **every** `key[=value]` pair of a directive is checked — a
+/// naive first-pair-only match would miss the most likely regression shape,
+/// appending a second pair to the existing `ENV RUST_LOG=info` line.
+fn signal_fish_env_offenders(dockerfile: &str) -> Vec<String> {
+    // Join backslash continuations into logical lines first (comment-stripped
+    // input from `read_live_file`; a comment line cannot continue a directive
+    // because the stripped view removed it).
+    let mut logical_lines: Vec<String> = Vec::new();
+    for line in dockerfile.lines() {
+        if let Some(last) = logical_lines.last_mut() {
+            if last.ends_with('\\') {
+                last.pop();
+                last.push_str(line.trim_start());
+                continue;
+            }
+        }
+        logical_lines.push(line.to_string());
+    }
+
+    let mut offenders = Vec::new();
+    for line in &logical_lines {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .strip_prefix("ENV ")
+            .or_else(|| trimmed.strip_prefix("ENV\t"))
+            .or_else(|| {
+                // Case-insensitive keyword (Dockerfile keywords may be
+                // lowercase), keeping the whitespace that separated it.
+                trimmed
+                    .get(4..)
+                    .filter(|_| trimmed.len() > 4)
+                    .filter(|_| trimmed[..4].eq_ignore_ascii_case("env "))
+                    .or_else(|| {
+                        trimmed.get(4..).filter(|_| {
+                            trimmed.len() > 4 && trimmed[..4].eq_ignore_ascii_case("env\t")
+                        })
+                    })
+            })
+            .map(str::trim_start)
+        else {
+            continue;
+        };
+
+        let mut reported_line = format!("  ENV directive: {trimmed}");
+        let mut saw_offender = false;
+        for token in rest.split_whitespace() {
+            // `ENV key=value` and legacy `ENV key value` forms both bind the
+            // key before the `=` (or the bare token itself).
+            let key = token.split('=').next().unwrap_or(token);
+            if key.starts_with("SIGNAL_FISH__") {
+                reported_line.push_str(&format!("\n    sets {key}"));
+                saw_offender = true;
+            }
+        }
+        if saw_offender {
+            offenders.push(reported_line);
+        }
+    }
+    offenders
+}
+
+#[test]
+fn signal_fish_env_scanner_recognizes_every_directive_shape() {
+    // (dockerfile fixture, whether an offender must be found)
+    let cases = [
+        // Benign shapes that must stay clean.
+        ("ENV RUST_LOG=info", false),
+        ("ARG TARGETARCH", false),
+        ("RUN echo SIGNAL_FISH__SECURITY__X", false),
+        (
+            "# ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false",
+            false,
+        ),
+        // The regression shapes the naive first-pair line search missed.
+        (
+            "ENV RUST_LOG=info SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false",
+            true,
+        ),
+        (
+            "ENV RUST_LOG=info \\\n    SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false",
+            true,
+        ),
+        (
+            "env SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false",
+            true,
+        ),
+        (
+            "ENV\tSIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false",
+            true,
+        ),
+        ("ENV SIGNAL_FISH__PORT=1234", true),
+        ("ENV SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN value", true),
+    ];
+
+    for (fixture, expect_offender) in cases {
+        let offenders = signal_fish_env_offenders(fixture);
+        assert_eq!(
+            !offenders.is_empty(),
+            expect_offender,
+            "fixture {fixture:?} misclassified: {offenders:?}"
+        );
+    }
+}
+
+/// Live-Dockerfile application of the [`signal_fish_env_offenders`] contract:
+/// the shipped image must set no server configuration via ENV (issue #515).
+#[test]
+fn test_dockerfile_ships_no_signal_fish_config_env_overrides() {
+    let root = repo_root();
+    let dockerfile = root.join("Dockerfile");
+
+    if !dockerfile.exists() {
+        return;
+    }
+
+    let content = read_live_file(&dockerfile);
+    let offenders = signal_fish_env_offenders(&content);
+
+    assert!(
+        offenders.is_empty(),
+        "the production image must not set server configuration via ENV (issue #515): \
+         image-level SIGNAL_FISH__* variables have final precedence over every config \
+         source and silently invert compiled fail-closed defaults for deployments that \
+         do not override them.\n\n\
+         Offending directives:\n{}\n\n\
+         Fix: delete the ENV directive and let the compiled default stand; operators \
+         who need a different value set it at runtime (env or mounted config).",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn test_audit_job_installs_and_verifies_pinned_cargo_audit() {
     // Keep the advisory scanner reproducible and fail closed if the installer

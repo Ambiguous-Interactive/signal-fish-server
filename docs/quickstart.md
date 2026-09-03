@@ -10,13 +10,17 @@ Choose Docker or Cargo.
 
 === "Docker"
 
-    The published image is ready for local development without a config file.
-    This command exposes it only on your computer and permits the browser page
-    used below as a WebSocket origin.
+    The published image ships the secure compiled defaults, so this local
+    trial opts into the open development posture explicitly. The command
+    exposes it only on your computer, permits the browser page used below as
+    a WebSocket origin, and disables the app-ID allowlist and metrics auth
+    for the demo.
 
     ```bash
     docker run --rm -p 127.0.0.1:3536:3536 \
       -e SIGNAL_FISH__SECURITY__CORS_ORIGINS=http://localhost:3536 \
+      -e SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false \
+      -e SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
       ghcr.io/ambiguous-interactive/signal-fish-server:latest
     ```
 
@@ -78,8 +82,9 @@ bob.onopen = () => bob.send(JSON.stringify({
 Bob receives `RoomJoined`, and Alice receives `PlayerJoined`. You now have two
 players in the same room.
 
-This example uses the open app-ID policy provided by the Docker image and
-`config.example.json`. A production allowlist requires `Authenticate` before
+This example uses the open app-ID policy — disabled explicitly by the Docker
+command's environment overrides above and by `config.example.json`, never by
+the image itself. A production allowlist requires `Authenticate` before
 `JoinRoom`; see [Application identification and access](authentication.md).
 
 ## Next Steps

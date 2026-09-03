@@ -132,7 +132,7 @@ Before committing workflow changes, verify:
 | `exclude_path` in `.lychee.toml` has no effect | Confirmed bug for glob-expanded paths | Use `--exclude-path` CLI flags |
 | TOML validator fails on "before/after" example | Duplicate `[dependencies]` headers in one block | Split into separate fenced code blocks |
 | `An action could not be found at the URI` | Invalid/disallowed action ref in workflow | Update to explicit version tag allowed by policy |
-| `SecretsUsedInArgOrEnv` Docker build warning | BuildKit flags ENV with security-related names | Add `# check=skip=SecretsUsedInArgOrEnv` as first line |
+| `SecretsUsedInArgOrEnv` Docker build warning | BuildKit flags ENV with security-related names | Remove the ENV (image-level `SIGNAL_FISH__*` is banned, #515); for a benign other-namespace name, add `# check=skip=SecretsUsedInArgOrEnv` as first line |
 | WSL bash has no installed distributions (Windows CI) | Command::new("bash") resolves to WSL not Git Bash | Use Git Bash path on Windows CI runners |
 | `The module 'CHANNEL=$(grep...' could not be loaded` | Bash syntax in `run:` step without `shell: bash` on Windows | Add `shell: bash` to step |
 | `Detected non-internal changes without CHANGELOG.md update: Cargo.toml` | Squash-merged Dependabot PR: actor is the human merger, not `dependabot[bot]` | Add dep-detect step: check if only Cargo.toml/Cargo.lock changed AND commit message matches dependency bump pattern |

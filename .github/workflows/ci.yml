@@ -620,7 +620,13 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker run -d --name test-server -p 3536:3536 signal-fish-server:ci
+          # Secure compiled defaults stand (issue #515): the image ships no
+          # ENV configuration, so the smoke run supplies a metrics token to
+          # satisfy metrics-auth validation — proving the fail-closed posture
+          # itself boots and serves, not an open-mode override.
+          docker run -d --name test-server -p 3536:3536 \
+            -e SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=ci-smoke-token \
+            signal-fish-server:ci
           # Exponential backoff health check: 1s, 2s, 4s, 8s, 8s (max 23s total wait)
           DELAY=1
           HTTP_READY=false
@@ -648,6 +654,7 @@ jobs:
           docker run -d --name test-server-tls -p 3543:3536 \
             --health-interval=1s --health-start-period=1s --health-retries=5 \
             -v "$PWD/tests/fixtures/tls:/tls:ro" \
+            -e SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=ci-smoke-token \
             -e SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true \
             -e SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH=/tls/cert.pem \
             -e SIGNAL_FISH__SECURITY__TRANSPORT__TLS__PRIVATE_KEY_PATH=/tls/key.pem \

@@ -368,6 +368,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("[]"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__APP_AUTH_PATH",
+        path: "security.app_auth_path",
+        default: Some("null"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS",
         path: "coordination.membership_snapshot_interval_secs",
         default: Some("30"),
@@ -1436,6 +1441,41 @@ async fn test_health_endpoint_returns_ok() {
 
     response.assert_status_ok();
     response.assert_text("OK");
+}
+
+/// The versioned router must actually mount the readiness probe (issue
+/// #521): the verdict answers 200 until the drain commits and 503 after,
+/// while `/health` stays liveness-only (200 through the drain). `create_router`
+/// returns the nestable inner router (main.rs nests it under `/v2`), so the
+/// probe path here is `/readyz` on that router.
+#[tokio::test]
+async fn readyz_is_mounted_on_the_versioned_router_and_flips_at_drain() {
+    let server = create_test_server().await;
+    let app = create_router("*").with_state(server.clone());
+
+    let test_server = axum_test::TestServer::new(app);
+
+    let ready = test_server.get("/readyz").await;
+    ready.assert_status_ok();
+
+    server.begin_shutdown_drain();
+
+    let draining = test_server.get("/readyz").await;
+    draining.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+    let live = test_server.get("/health").await;
+    live.assert_status_ok();
+
+    // The verdict varies over time, so it must not be cacheable: an
+    // intermediary serving a stale 200 across the flip would route new
+    // connections to a dying instance.
+    assert_eq!(
+        draining
+            .header("cache-control")
+            .to_str()
+            .expect("header value is ASCII"),
+        "no-store"
+    );
 }
 
 #[tokio::test]
@@ -2854,4 +2894,40 @@ async fn real_binary_routes_top_level_health_to_the_real_handler() {
         let body = response.text().await.expect("health response body");
         assert_eq!(body, "OK", "{path} must serve the real health verdict");
     }
+}
+
+/// The REAL compiled binary must mount the top-level `/readyz` readiness
+/// probe (issue #521) — not fall into the 200-OK catch-all banner, whose
+/// constant text would make a draining instance look ready forever. The
+/// banner sets no `Cache-Control` header and has a body, so the no-store
+/// header plus empty body distinguish the real handler from the fallback.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_binary_routes_top_level_readyz_to_the_real_handler() {
+    use websocket_test_helpers::server_process::spawn_server;
+
+    let server = spawn_server(serde_json::json!({})).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://127.0.0.1:{}/readyz", server.port))
+        .send()
+        .await
+        .expect("GET /readyz");
+    assert_eq!(
+        response.status(),
+        200,
+        "/readyz must be routed, not the banner"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .expect("the real readyz handler sets no-store"),
+        "no-store",
+        "the banner response carries no cache headers; this must be the real handler"
+    );
+    assert!(
+        response.text().await.expect("readyz body").is_empty(),
+        "the readiness verdict is status-only; a text body would be the fallback banner"
+    );
 }

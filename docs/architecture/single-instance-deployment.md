@@ -70,13 +70,39 @@ scope and seeded counterexamples.
 
 For the supported single-active deployment:
 
-1. Route readiness/health checks to `/v2/health`.
+1. Route liveness checks to `/v2/health` (or `/health`) and readiness checks
+   to `/v2/readyz` (or `/readyz`).
 2. Before planned maintenance, remove the process from new connection routing.
 3. Send `SIGTERM` (or Ctrl-C) and allow at least `server.drain_grace_secs`.
 4. The server rejects new upgrades, sends v3 `GoingAway`, and closes remaining
    sockets with `4000 server_shutdown`.
 5. Clients create or join a fresh room after drain; they must not reconnect to
    the exiting process, and the drain deliberately does not arm reconnect state.
+
+### Liveness and readiness are different probes
+
+The two probe surfaces answer different questions, and an orchestrator should
+wire them separately (issue #521):
+
+- `/health` and `/v2/health` are **liveness**: the process is up and its
+  in-memory state is intact. They keep returning 200 through the entire drain.
+- `/readyz` and `/v2/readyz` are **readiness**: they return 200 until the
+  shutdown drain begins, then 503. The flip happens the moment the drain
+  commits — before the `GoingAway` fan-out and the coded `4000` closes — so
+  automated tooling can stop routing new connections while clients already
+  connected still receive their graceful close.
+
+Probing readiness with a liveness endpoint keeps routing traffic to a draining
+instance; treating liveness as readiness makes a draining (but gracefully
+closing) process look dead and can trigger a premature kill.
+
+Container deploys must also give the container a stop grace period that
+outlives the drain: Docker's 10-second default SIGTERM timeout elapses long
+before the default 30-second drain finishes, so clients lose their coded
+closes. The shipped `docker-compose.yml` sets `stop_grace_period: 60s` for
+this reason; encode the equivalent in other orchestrators (Kubernetes
+`terminationGracePeriodSeconds`, and so on). There is no HTTP drain trigger:
+draining starts on SIGTERM/SIGINT or via the library API.
 
 If an external room directory fronts multiple isolated deployments, it must
 stop assigning **new rooms** to a draining home before `SIGTERM`. Existing rooms

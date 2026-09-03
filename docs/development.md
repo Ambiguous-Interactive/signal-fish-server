@@ -421,9 +421,16 @@ docker build -t signal-fish-server --cache-from ghcr.io/ambiguous-interactive/si
 
 ### Run Image
 
+The image ships the secure compiled defaults (metrics auth and the app-ID
+allowlist on). For a local trial, opt into the open development posture
+explicitly:
+
 ```bash
 
-docker run -p 3536:3536 signal-fish-server
+docker run --rm -p 3536:3536 \
+  -e SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false \
+  -e SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
+  signal-fish-server
 
 ```
 
