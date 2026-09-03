@@ -256,8 +256,7 @@ pub const fn default_max_outbound_message_size() -> usize {
 /// server's fallible materialization buffer.
 pub const MAX_OUTBOUND_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Minimum headroom the outbound cap must keep above the inbound frame cap.
-///
+/// Minimum headroom the outbound cap must keep above the inbound frame cap.///
 /// An admitted inbound frame is re-emitted to roommates with the relay
 /// envelope attached, so its relayed form is strictly larger than what the
 /// inbound cap admitted, by at least the fixed envelope. Bounded per carrier:
@@ -280,6 +279,23 @@ pub const MAX_OUTBOUND_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// close a recipient; deployments that relay adversarial payloads should
 /// keep a proportionally larger gap.
 pub const RELAY_ENVELOPE_HEADROOM_BYTES: usize = 256;
+
+/// Fixed per-member wire overhead — beyond the self-declared
+/// `connection_info` payload itself — that one roster entry contributes to
+/// every `GameStarting.peer_connections` and room-snapshot broadcast
+/// (issue #524).
+///
+/// Bounded components: the member's hyphenated UUID plus key (~50 bytes),
+/// `is_authority`/`is_ready` flags (~25), the snapshot-only `connected_at`
+/// RFC 3339 timestamp (~40), optional v3 `epoch`/`seq` delivery stamps
+/// (~25), and outer message envelope punctuation (~64). The variable
+/// components — `player_name` (bounded by `protocol.max_player_name_length`)
+/// and the `relay_type` label (bounded by `crate::auth::MAX_APP_ID_LENGTH`) —
+/// are added on top by the roster-aggregate validation rule, which requires
+/// `(security.max_connection_info_bytes + this bound + the two variable
+/// caps) x protocol.max_players_limit` to stay within
+/// `security.max_outbound_message_size`.
+pub const ROSTER_ENTRY_ENVELOPE_BYTES: usize = 256;
 
 /// Default cap on the serialized size of a v3 `Signal` payload (16 KiB):
 /// generously above any real SDP/ICE payload, well under the 64 KiB

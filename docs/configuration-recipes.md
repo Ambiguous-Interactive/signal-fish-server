@@ -512,7 +512,8 @@ is rejected atomically when either budget is exhausted.
     "time_window": 60,
     "max_join_attempts": 20,
     "max_signals": 600,
-    "max_signal_errors": 60
+    "max_signal_errors": 60,
+    "max_relay_bytes": 268435456
   }
 }
 ```
@@ -536,6 +537,10 @@ When to adjust:
   signal.
 - `max_signal_errors` — the ceiling on detailed rejected-signal error responses;
   lower it to replace validation errors with a generic rate-limit error sooner.
+- `max_relay_bytes` — the per-sender game-data relay byte budget per window;
+  size it against the games' real submit rates (a full roster of 8 relaying
+  64 KiB at 30 Hz submits roughly 2 MB/s), and lower it to cap one player's
+  share of the host's egress bill.
 - `time_window` — the window (seconds) all the above counts apply over; must be
   `> 0`.
 

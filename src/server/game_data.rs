@@ -210,13 +210,11 @@ impl EnhancedGameServer {
             return;
         }
 
-        // Binary frames bypass the message router, so valid frames record
-        // liveness here (mirrors `handle_client_message`). Validate first: a
-        // stream of rejected oversized frames must not keep an otherwise idle
-        // client or room alive indefinitely.
-        self.record_client_activity(player_id);
-        self.maybe_update_last_seen(player_id).await;
-
+        // Binary frames bypass the message router, so admitted frames record
+        // liveness here (mirrors `handle_client_message`). Validation comes
+        // first, and rejected frames — oversized or over-budget — record no
+        // liveness: a stream of rejected frames must not keep an otherwise
+        // idle client or room alive indefinitely.
         if let Some(room_id) = self.get_client_room(player_id).await {
             // Sender-side relay byte budget (issue #519): charge the binary
             // payload before the fan-out, mirroring the text lane.
@@ -227,6 +225,8 @@ impl EnhancedGameServer {
             {
                 return;
             }
+            self.record_client_activity(player_id);
+            self.maybe_update_last_seen(player_id).await;
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
             self.broadcast_game_data_with(player_id, &room_id, move || {
@@ -242,6 +242,10 @@ impl EnhancedGameServer {
             })
             .await;
         } else {
+            // Roomless frames keep their pre-existing liveness contract: the
+            // frame was validly sized and is answered with NOT_IN_ROOM.
+            self.record_client_activity(player_id);
+            self.maybe_update_last_seen(player_id).await;
             // See the text-lane rationale above: an unseated sender must be
             // able to observe the rejection, not infer it from silence.
             let _ = self
