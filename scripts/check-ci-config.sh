@@ -90,16 +90,14 @@ if [[ -f Dockerfile ]]; then
         error "Dockerfile does not contain 'EXPOSE 3536'."
     fi
 
-    if grep -q 'SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false' Dockerfile; then
-        success "Dockerfile sets REQUIRE_METRICS_AUTH=false."
+    if grep -q 'ENV SIGNAL_FISH__' Dockerfile; then
+        error "Dockerfile sets server configuration via ENV (issue #515): image-level \
+SIGNAL_FISH__* variables have final precedence over every config source and \
+silently invert compiled fail-closed defaults. The secure compiled defaults \
+stand on their own; operators who need different values set them at runtime \
+(env or mounted config)."
     else
-        error "Dockerfile missing ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false — server will crash without auth config."
-    fi
-
-    if grep -q 'SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false' Dockerfile; then
-        success "Dockerfile sets ENFORCE_APP_ID_ALLOWLIST=false."
-    else
-        error "Dockerfile missing ENV SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false — server will reject every app ID without allowlist config."
+        success "Dockerfile ships no SIGNAL_FISH__ ENV configuration."
     fi
 
     # Dockerfile instructions may span physical lines. Assemble them without

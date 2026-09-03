@@ -13,8 +13,6 @@ use std::os::unix::fs::PermissionsExt;
 const REQUIRED_DOCKERFILE_PREFIX: &str = "\
 FROM debian:bookworm-slim AS runtime
 EXPOSE 3536
-ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false
-ENV SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false
 ";
 
 fn copy_validator_script(temp_root: &Path) {

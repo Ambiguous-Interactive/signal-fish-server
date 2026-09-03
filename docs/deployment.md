@@ -40,10 +40,16 @@ docker run -d \
   -e SIGNAL_FISH__PORT=8080 \
   -e SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS=16 \
   -e SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true \
+  -e SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=change-me \
   -e 'SIGNAL_FISH__SECURITY__ALLOWED_APPS=[{"app_id":"my-game","app_name":"My Game"}]' \
   ghcr.io/ambiguous-interactive/signal-fish-server:latest
 
 ```
+
+`security.require_metrics_auth` defaults to `true`, so any deployment running
+the secure defaults must also set `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN`
+(or disable metrics auth explicitly for a trusted network) — the server
+otherwise exits at startup with the missing-credentials validation error.
 
 ## Docker Compose
 
@@ -65,6 +71,7 @@ services:
 
       - RUST_LOG=info
       - SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true
+      - SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN=change-me
       - 'SIGNAL_FISH__SECURITY__ALLOWED_APPS=[{"app_id":"my-game","app_name":"My Game"}]'
 
     restart: unless-stopped

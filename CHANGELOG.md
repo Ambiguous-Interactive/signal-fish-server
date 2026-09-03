@@ -119,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with them. A structural test pins the image to stay free of
   `SIGNAL_FISH__*` ENV configuration (issue #515). Note the companion
   `docker-compose.yml` deliberately mounts `config.example.json`, which
-  disables both gates *visibly in that file* — the documented local-development
+  disables both gates _visibly in that file_ — the documented local-development
   posture; the image itself carries no defaults either way.
 - `docker-compose.yml` now sets `stop_grace_period: 60s` for the signaling
   service: Docker's 10-second default SIGTERM timeout elapses while the

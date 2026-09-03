@@ -17,7 +17,10 @@ See also: [CI CD Troubleshooting Ecosystem](ecosystem-and-toolchains.md),
 - **Stale script references**: Audit workflow `run:` steps when deleting scripts;
   `continue-on-error: true` silently masks these
 - **Action ref drift**: floating refs (`@stable`, `@v2`) change unexpectedly; pin to an explicit release tag
-- **Dockerfile BuildKit warning**: Add `# check=skip=SecretsUsedInArgOrEnv` as first line of Dockerfile
+- **Dockerfile BuildKit warning**: Prefer removing the security-adjacent ENV
+  (`SIGNAL_FISH__*` ENV is banned outright, issue #515); only for a benign
+  non-`SIGNAL_FISH` name, add `# check=skip=SecretsUsedInArgOrEnv` as first
+  line of Dockerfile
 
 ---
 
@@ -246,14 +249,21 @@ BuildKit only checks variable **names**, not values.
 
 ### Solution
 
-Add a BuildKit check skip directive as the **first line** of the Dockerfile:
+First, prefer **removing the ENV directive entirely**: image-level
+`SIGNAL_FISH__*` variables are banned outright (issue #515 — they have final
+precedence over every config source and silently invert compiled fail-closed
+defaults; `test_dockerfile_ships_no_signal_fish_config_env_overrides` and
+`scripts/check-ci-config.sh` enforce this). Only if a benign
+security-adjacent ENV from another namespace must stay, suppress the false
+positive with a BuildKit check skip directive as the **first line** of the
+Dockerfile (`test_dockerfile_suppresses_false_positive_security_warnings`
+requires the pairing):
 
 ```dockerfile
 # check=skip=SecretsUsedInArgOrEnv
 FROM rust:1.88-bookworm AS chef
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
-ENV SIGNAL_FISH_SECURITY_ENABLED=false
 ```
 
 ### When to Use This Suppression
