@@ -153,6 +153,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("60"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES",
+        path: "rate_limit.max_relay_bytes",
+        default: Some("268435456"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH",
         path: "protocol.max_game_name_length",
         default: Some("64"),
@@ -301,6 +306,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         env: "SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES",
         path: "security.max_signal_bytes",
         default: Some("16384"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__MAX_CONNECTION_INFO_BYTES",
+        path: "security.max_connection_info_bytes",
+        default: Some("8192"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP",
@@ -1483,11 +1493,13 @@ async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
     const INBOUND_CAP: usize = 12_345;
     let mut config = test_server_config();
     // Pairing-legal caps: the outbound cap keeps the relay envelope headroom
-    // above the inbound cap (constructor guard).
+    // above the inbound cap (constructor guard), and the metadata cap keeps
+    // its roster aggregate under the outbound cap (issue #524 guard).
     config.max_message_size = INBOUND_CAP;
     config.max_signal_bytes = INBOUND_CAP;
     config.max_outbound_message_size =
         INBOUND_CAP + signal_fish_server::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES;
+    config.max_connection_info_bytes = 100;
     let server =
         test_helpers::create_test_server_with_config(config, ProtocolConfig::default()).await;
     let enhanced_router = create_router("https://game.example").with_state(server.clone());
@@ -1570,6 +1582,7 @@ async fn test_metrics_endpoint_no_auth_required() {
         [
             "auth_rejections",
             "join_attempt_rejections",
+            "relay_bandwidth_rejections",
             "room_creation_rejections",
             "signal_error_rejections",
             "signal_rejections",
@@ -1588,6 +1601,7 @@ async fn test_metrics_endpoint_no_auth_required() {
             "auth_rejections",
             "join_attempt_rejections",
             "rate_limit_rejections",
+            "relay_bandwidth_rejections",
             "room_creation_rejections",
             "signal_error_rejections",
             "signal_rejections",

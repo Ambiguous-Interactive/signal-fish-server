@@ -4,6 +4,7 @@ use crate::protocol::{
 use bytes::Bytes;
 use std::sync::Arc;
 
+use super::signaling::canonical_json_len;
 use super::EnhancedGameServer;
 
 impl EnhancedGameServer {
@@ -13,6 +14,29 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         connection_info: crate::protocol::ConnectionInfo,
     ) {
+        // Per-entry size cap, checked before any storage or fan-out
+        // (issue #524). The entry is stored verbatim and broadcast to every
+        // room member in `GameStarting.peer_connections` and room snapshots,
+        // so an unbounded entry shared across a full roster can push those
+        // aggregate payloads past `max_outbound_message_size` and close every
+        // recipient with `OutboundMessageTooLarge` — a one-shot peer-eviction
+        // primitive. The measure is the same canonical JSON bytes that are
+        // broadcast, mirroring the `Signal` payload cap.
+        let info_bytes = canonical_json_len(&connection_info);
+        if info_bytes > self.config.max_connection_info_bytes {
+            let _ = self
+                .send_error_to_player(
+                    player_id,
+                    format!(
+                        "Connection info is {} bytes; the maximum allowed is {} bytes",
+                        info_bytes, self.config.max_connection_info_bytes
+                    ),
+                    Some(ErrorCode::MessageTooLarge),
+                )
+                .await;
+            return;
+        }
+
         let Some(room_id) = self.get_client_room(player_id).await else {
             let _ = self
                 .message_coordinator
@@ -64,6 +88,29 @@ impl EnhancedGameServer {
             .await;
     }
 
+    /// Charge the sender's per-window relay byte budget (`rate_limit.
+    /// max_relay_bytes`, issue #519) with the sender-controlled payload size
+    /// of one game-data frame.
+    ///
+    /// Called only for a sender that is routed in a room (a roomless frame is
+    /// never relayed and must keep its pinned `NOT_IN_ROOM` reply), before
+    /// the fan-out is built. A rejection drops the frame with a wire error;
+    /// the accepted charge is recorded for egress accounting.
+    async fn check_and_charge_relay_bytes(
+        &self,
+        player_id: &PlayerId,
+        bytes: u64,
+    ) -> Result<(), ()> {
+        if let Err(e) = self.rate_limiter.check_relay_bytes(player_id, bytes).await {
+            let _ = self
+                .send_error_to_player(player_id, e.to_string(), Some(ErrorCode::RateLimitExceeded))
+                .await;
+            return Err(());
+        }
+        self.metrics.record_relay_bytes(bytes);
+        Ok(())
+    }
+
     /// Handle JSON game data fan-out with coordination.
     pub async fn handle_game_data(
         &self,
@@ -96,6 +143,15 @@ impl EnhancedGameServer {
         }
 
         if let Some(room_id) = self.get_client_room(player_id).await {
+            // The sender-controlled JSON payload is the budget measure; the
+            // fixed relay envelope is bounded by the outbound headroom rule.
+            if self
+                .check_and_charge_relay_bytes(player_id, canonical_json_len(&data) as u64)
+                .await
+                .is_err()
+            {
+                return;
+            }
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
             self.broadcast_game_data_with(player_id, &room_id, move || {
@@ -162,6 +218,15 @@ impl EnhancedGameServer {
         self.maybe_update_last_seen(player_id).await;
 
         if let Some(room_id) = self.get_client_room(player_id).await {
+            // Sender-side relay byte budget (issue #519): charge the binary
+            // payload before the fan-out, mirroring the text lane.
+            if self
+                .check_and_charge_relay_bytes(player_id, payload.len() as u64)
+                .await
+                .is_err()
+            {
+                return;
+            }
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
             self.broadcast_game_data_with(player_id, &room_id, move || {

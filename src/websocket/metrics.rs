@@ -213,7 +213,9 @@ pub async fn metrics_handler(
                     metrics_snapshot.rate_limiting.join_attempt_rejections,
                 "signal_rejections": metrics_snapshot.rate_limiting.signal_rejections,
                 "signal_error_rejections":
-                    metrics_snapshot.rate_limiting.signal_error_rejections
+                    metrics_snapshot.rate_limiting.signal_error_rejections,
+                "relay_bandwidth_rejections":
+                    metrics_snapshot.rate_limiting.relay_bandwidth_rejections
             }
         }
     });

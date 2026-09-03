@@ -41,14 +41,15 @@ pub(crate) fn local_initiates(local: PlayerId, remote: PlayerId) -> bool {
     local < remote
 }
 
-/// Canonical serialized JSON byte length of an opaque `signal` payload — the
-/// measure `security.max_signal_bytes` caps.
+/// Canonical serialized JSON byte length of an attacker-controlled payload —
+/// the measure the per-payload byte caps (`security.max_signal_bytes`,
+/// `security.max_connection_info_bytes`, the relay byte budget) enforce.
 ///
 /// `serde_json::to_vec` over a `serde_json::Value` can only fail for maps with
 /// non-string keys, which `Value` cannot represent, so the error arm is purely
 /// defensive: treat an unserializable payload as oversized rather than relay it.
-pub(crate) fn canonical_signal_len(signal: &serde_json::Value) -> usize {
-    serde_json::to_vec(signal).map_or(usize::MAX, |bytes| bytes.len())
+pub(crate) fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 impl EnhancedGameServer {
@@ -106,7 +107,7 @@ impl EnhancedGameServer {
         //    maximally cheap. Size is the canonical serialized JSON byte
         //    length of the opaque `signal` value — the same bytes the relay
         //    would otherwise fan out.
-        let payload_bytes = canonical_signal_len(&signal);
+        let payload_bytes = canonical_json_len(&signal);
         let max_signal_bytes = self.config.max_signal_bytes;
         if payload_bytes > max_signal_bytes {
             self.reject_signal(

@@ -232,6 +232,11 @@ components:
     ClientGameData:
       title: GameData
       summary: Send opaque game data to other players in the room (relay floor).
+      description: >-
+        Each relayed frame consumes the sender's per-window relay byte budget
+        (`rate_limit.max_relay_bytes`), measured on the sender-controlled
+        payload. An over-budget frame is answered with RATE_LIMIT_EXCEEDED and
+        is not relayed.
       payload: { $ref: '#/components/schemas/ClientGameData' }
     ClientSignal:
       title: Signal
@@ -255,6 +260,11 @@ components:
     ProvideConnectionInfo:
       title: ProvideConnectionInfo
       summary: Legacy self-declared v2 connection metadata for GameStarting.
+      description: >-
+        The serialized `connection_info` entry must fit
+        `security.max_connection_info_bytes` (default 8192 canonical JSON
+        bytes); oversize submissions are rejected with MESSAGE_TOO_LARGE and
+        not stored.
       payload: { $ref: '#/components/schemas/ProvideConnectionInfo' }
     Ping:
       title: Ping
@@ -760,7 +770,11 @@ components:
         snapshots and GameStarting; not v3 capability negotiation. Values are
         stored and forwarded rather than authenticated. A syntactically
         validated direct value is also used to elect an executable Direct host,
-        but remains self-declared and is not reachability proof.
+        but remains self-declared and is not reachability proof. The serialized
+        entry is size-capped: `ProvideConnectionInfo` submissions whose
+        canonical JSON exceeds `security.max_connection_info_bytes` (default
+        8192 bytes) are rejected with MESSAGE_TOO_LARGE and not stored, so a
+        full roster's entries always fit the outbound message limit.
       oneOf:
         - type: object
           additionalProperties: false

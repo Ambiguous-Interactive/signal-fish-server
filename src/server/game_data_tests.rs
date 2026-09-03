@@ -311,3 +311,332 @@ mod handler_honesty {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Peer-metadata admission cap (issue #524) and the sender-side relay byte
+// budget (issue #519).
+// ---------------------------------------------------------------------------
+
+mod admission_and_budget {
+    use super::*;
+    use crate::config::{
+        CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
+        TransportSecurityConfig, TurnConfig,
+    };
+    use crate::coordination::ConnectionCloseSignal;
+    use crate::database::DatabaseConfig;
+    use crate::protocol::{ConnectionInfo, RoomId};
+    use crate::server::{EnhancedGameServer, ServerConfig};
+    use std::net::SocketAddr;
+
+    static PORT: AtomicU64 = AtomicU64::new(59_600);
+
+    fn next_addr() -> SocketAddr {
+        let port = PORT.fetch_add(1, Ordering::Relaxed);
+        format!("127.0.0.1:{port}").parse().expect("valid addr")
+    }
+
+    /// Build a test server whose `ServerConfig` is visible to the caller's
+    /// mutation closure (e.g. `config.rate_limit_config.max_relay_bytes = …`).
+    async fn server_with_config(mutate: impl FnOnce(&mut ServerConfig)) -> Arc<EnhancedGameServer> {
+        let mut config = ServerConfig::default();
+        mutate(&mut config);
+        EnhancedGameServer::new(
+            config,
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server")
+    }
+
+    async fn register_client(
+        server: &EnhancedGameServer,
+    ) -> (PlayerId, mpsc::Receiver<Arc<ServerMessage>>) {
+        let (sender, receiver) = mpsc::channel(16);
+        let player_id = server
+            .connection_manager
+            .register_client(
+                sender,
+                ConnectionCloseSignal::detached(),
+                next_addr(),
+                server.instance_id,
+            )
+            .await
+            .expect("client registration succeeds");
+        (player_id, receiver)
+    }
+
+    async fn recv(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Arc<ServerMessage> {
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("channel still open")
+            .expect("message present")
+    }
+
+    fn expect_error(message: Arc<ServerMessage>, expected: ErrorCode) {
+        match &*message {
+            ServerMessage::Error {
+                message,
+                error_code,
+            } => {
+                assert_eq!(
+                    *error_code,
+                    Some(expected),
+                    "error code mismatch: {message}"
+                );
+            }
+            other => panic!("expected an Error frame, got {other:?}"),
+        }
+    }
+
+    /// Join `players` into one shared room, draining each player's join
+    /// bookkeeping frames so later receive assertions start from a quiet
+    /// channel.
+    async fn join_shared_room(
+        server: &Arc<EnhancedGameServer>,
+        mut players: Vec<(&PlayerId, &mut mpsc::Receiver<Arc<ServerMessage>>)>,
+    ) -> RoomId {
+        // Six-character code (the default `protocol.room_code_length`).
+        let room_code = format!("P{:05x}", next_addr().port());
+        let mut room_id = None;
+        for (index, (player, _)) in players.iter().enumerate() {
+            server
+                .handle_join_room(
+                    player,
+                    "admission-budget".to_string(),
+                    Some(room_code.clone()),
+                    format!("player-{index}"),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            if room_id.is_none() {
+                room_id = server.get_client_room(player).await;
+            }
+        }
+        for (_, rx) in players.iter_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(message) => match message.as_ref() {
+                        ServerMessage::RoomJoined(_)
+                        | ServerMessage::PlayerJoined { .. }
+                        | ServerMessage::LobbyStateChanged { .. }
+                        | ServerMessage::SpectatorJoined { .. } => {}
+                        other => panic!("unexpected join bookkeeping frame {other:?}"),
+                    },
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(err) => panic!("channel closed while draining join traffic: {err}"),
+                }
+            }
+        }
+        room_id.expect("join routes clients into a room")
+    }
+
+    /// `ConnectionInfo` entries above `security.max_connection_info_bytes`
+    /// (configured here to 16 bytes) are rejected with `MESSAGE_TOO_LARGE`
+    /// and never stored, so a full roster of oversized entries can no longer
+    /// push `GameStarting.peer_connections` past the outbound cap and close
+    /// every recipient (#524 eviction primitive).
+    #[tokio::test]
+    async fn oversized_connection_info_is_rejected_and_not_stored() {
+        let server = server_with_config(|config| {
+            // 64 bytes: the test's oversized Direct entry (~74 bytes of
+            // canonical JSON) must trip the cap while the healthy small
+            // entry (~37 bytes) stays under it.
+            config.max_connection_info_bytes = 64;
+        })
+        .await;
+        let (player, mut rx) = register_client(&server).await;
+        server
+            .handle_join_room(
+                &player,
+                "admission-budget".to_string(),
+                Some("OCI001".to_string()),
+                "player".to_string(),
+                None,
+                None,
+                None,
+            )
+            .await;
+        let room_id = server
+            .get_client_room(&player)
+            .await
+            .expect("join routes the client into a room");
+        loop {
+            match rx.try_recv() {
+                Ok(message) => match message.as_ref() {
+                    ServerMessage::RoomJoined(_)
+                    | ServerMessage::PlayerJoined { .. }
+                    | ServerMessage::LobbyStateChanged { .. } => {}
+                    other => panic!("unexpected join bookkeeping frame {other:?}"),
+                },
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(err) => panic!("channel closed while draining join traffic: {err}"),
+            }
+        }
+
+        let oversized = ConnectionInfo::Direct {
+            host: "host-name-longer-than-sixteen-bytes".to_string(),
+            port: 7777,
+        };
+        server
+            .handle_provide_connection_info(&player, oversized.clone())
+            .await;
+        expect_error(recv(&mut rx).await, ErrorCode::MessageTooLarge);
+
+        let players = server
+            .database()
+            .get_room_players(&room_id)
+            .await
+            .expect("roster readable");
+        let stored = players
+            .iter()
+            .find(|p| p.id == player)
+            .and_then(|p| p.connection_info.as_ref());
+        assert!(
+            stored.is_none(),
+            "an oversized entry must not be stored: {stored:?}"
+        );
+
+        // A small entry below the cap still stores silently (the healthy
+        // path keeps working).
+        server
+            .handle_provide_connection_info(
+                &player,
+                ConnectionInfo::Direct {
+                    host: "h".to_string(),
+                    port: 1,
+                },
+            )
+            .await;
+        match timeout(Duration::from_millis(100), rx.recv()).await {
+            Err(_) => {}
+            Ok(Some(message)) => panic!("expected silence, got {message:?}"),
+            Ok(None) => panic!("channel closed while checking for silence"),
+        }
+    }
+
+    /// The relay byte budget (#519) rejects an over-budget binary frame with
+    /// `RATE_LIMIT_EXCEEDED`, relays nothing to the room-mate, and attributes
+    /// both the rejection and the accepted bytes. After the fixed window
+    /// elapses the sender can relay again.
+    #[tokio::test]
+    async fn relay_byte_budget_rejects_over_budget_frames_and_recovers() {
+        // 64 KiB default window is too big for a snappy test; use 1000 bytes
+        // and a 100 ms window.
+        let server = server_with_config(|config| {
+            config.rate_limit_config.max_relay_bytes = 1000;
+            config.rate_limit_config.time_window = Duration::from_millis(100);
+        })
+        .await;
+        let (sender, mut sender_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        join_shared_room(
+            &server,
+            vec![(&sender, &mut sender_rx), (&peer, &mut peer_rx)],
+        )
+        .await;
+
+        // First frame fits the budget and is relayed to the peer only.
+        server
+            .handle_game_data_binary(
+                &sender,
+                GameDataEncoding::MessagePack,
+                Bytes::from_static(b"within-budget"),
+            )
+            .await;
+        match recv(&mut peer_rx).await.as_ref() {
+            ServerMessage::GameDataBinary { payload, .. } => {
+                assert_eq!(payload.as_ref(), b"within-budget");
+            }
+            other => panic!("expected relayed binary game data, got {other:?}"),
+        }
+
+        // A frame that would exceed the remaining budget is rejected and
+        // relays nothing.
+        let fat_frame = vec![0u8; 2000];
+        server
+            .handle_game_data_binary(
+                &sender,
+                GameDataEncoding::MessagePack,
+                Bytes::from(fat_frame.clone()),
+            )
+            .await;
+        expect_error(recv(&mut sender_rx).await, ErrorCode::RateLimitExceeded);
+        match timeout(Duration::from_millis(100), peer_rx.recv()).await {
+            Err(_) => {}
+            Ok(Some(message)) => panic!("over-budget frame must not relay, got {message:?}"),
+            Ok(None) => panic!("peer channel closed while checking for silence"),
+        }
+
+        let snapshot = server.metrics().snapshot().await;
+        assert_eq!(
+            snapshot.rate_limiting.relay_bandwidth_rejections, 1,
+            "the over-budget frame is attributed exactly once"
+        );
+        assert_eq!(
+            snapshot.players.relay_bytes_total,
+            bytes::Bytes::from_static(b"within-budget").len() as u64,
+            "only admitted bytes are accounted"
+        );
+
+        // The rejected frame also did not consume budget: after the window
+        // resets the sender's full budget (1000 bytes) is available again —
+        // exactly enough for the recovery frame below.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let recovery_frame = vec![0u8; 1000];
+        server
+            .handle_game_data_binary(
+                &sender,
+                GameDataEncoding::MessagePack,
+                Bytes::from(recovery_frame),
+            )
+            .await;
+        match recv(&mut peer_rx).await.as_ref() {
+            ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 1000),
+            other => panic!("expected relayed binary game data after window reset, got {other:?}"),
+        }
+    }
+
+    /// The text lane shares the single relay byte budget: over-budget JSON
+    /// game data is rejected with `RATE_LIMIT_EXCEEDED` without relaying.
+    #[tokio::test]
+    async fn relay_byte_budget_covers_the_text_lane() {
+        let server = server_with_config(|config| {
+            config.rate_limit_config.max_relay_bytes = 1;
+            config.rate_limit_config.time_window = Duration::from_millis(100);
+        })
+        .await;
+        let (sender, mut sender_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        join_shared_room(
+            &server,
+            vec![(&sender, &mut sender_rx), (&peer, &mut peer_rx)],
+        )
+        .await;
+
+        server
+            .handle_game_data(
+                &sender,
+                serde_json::json!("any payload consumes the budget"),
+                None,
+                None,
+            )
+            .await;
+        expect_error(recv(&mut sender_rx).await, ErrorCode::RateLimitExceeded);
+        match timeout(Duration::from_millis(100), peer_rx.recv()).await {
+            Err(_) => {}
+            Ok(Some(message)) => panic!("over-budget frame must not relay, got {message:?}"),
+            Ok(None) => panic!("peer channel closed while checking for silence"),
+        }
+    }
+}

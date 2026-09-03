@@ -471,9 +471,11 @@ mod tests {
             max_message_size: 12_345,
             max_signal_bytes: 12_345,
             // Pairing-legal: the relay envelope headroom above the inbound
-            // cap (constructor guard).
+            // cap (constructor guard), and a metadata cap whose roster
+            // aggregate stays under the outbound cap (issue #524 guard).
             max_outbound_message_size: 12_345
                 + crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
+            max_connection_info_bytes: 100,
             ..crate::server::ServerConfig::default()
         };
         let server = EnhancedGameServer::new(

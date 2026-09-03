@@ -152,6 +152,16 @@ and oversized binary payloads answer `MESSAGE_TOO_LARGE`, regardless of
 seat state. This includes spectators, whose connections are never seated in
 the player roster.
 
+Every relayed frame also consumes the sender's per-window relay byte budget
+(`rate_limit.max_relay_bytes`, default 256 MiB per `rate_limit.time_window`),
+measured on the sender-controlled payload (binary payload length; canonical
+JSON length for the text lane). An over-budget frame is answered with
+`RATE_LIMIT_EXCEEDED` and is not relayed; the budget resets with the shared
+fixed window. This bounds a flooding sender to a metered share of the host's
+egress instead of letting one player run up the bandwidth bill at line rate
+(issue #519). Per-recipient egress amplification remains bounded by the room
+roster ceiling.
+
 ### PlayerReady
 
 Toggle your own ready state in the lobby. This message has no payload.
@@ -337,6 +347,13 @@ not resolve or probe the endpoint, authenticate the token, bind the claimed
 client ID to the sender, or select/open that path. A consuming integration
 must validate reachability, credentials, and source identity before use; do not
 put secrets here unless every receiving peer may see them.
+
+Because the entry is broadcast verbatim to every room member, its serialized
+size is capped by `security.max_connection_info_bytes` (default 8 KiB, measured
+as canonical JSON bytes): an oversized entry is rejected with `MESSAGE_TOO_LARGE`
+and is not stored. The cap keeps a full roster of entries well under the
+outbound message limit, so one member's metadata can no longer close every
+recipient's connection (issue #524).
 
 ```json
 

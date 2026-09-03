@@ -1,9 +1,10 @@
 //! Security and application-identification configuration types.
 
 use super::defaults::{
-    default_client_auth_mode, default_cors_origins, default_max_connections,
-    default_max_connections_per_ip, default_max_message_size, default_max_outbound_message_size,
-    default_max_signal_bytes, default_require_auth, default_token_binding_subprotocol,
+    default_client_auth_mode, default_cors_origins, default_max_connection_info_bytes,
+    default_max_connections, default_max_connections_per_ip, default_max_message_size,
+    default_max_outbound_message_size, default_max_signal_bytes, default_require_auth,
+    default_token_binding_subprotocol,
 };
 use crate::security::token_binding::TokenBindingScheme;
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,21 @@ pub struct SecurityConfig {
     /// dead config: such a frame is rejected by the frame cap first).
     #[serde(default = "default_max_signal_bytes")]
     pub max_signal_bytes: usize,
+    /// Maximum serialized size in bytes of one self-declared peer-metadata
+    /// entry (`ProvideConnectionInfo`, measured as canonical JSON).
+    ///
+    /// Lives in `[security]` beside `max_signal_bytes` because it bounds
+    /// attacker-controlled payload *bytes*, not a request rate. The entry is
+    /// stored and broadcast verbatim to every room member (`GameStarting`
+    /// `peer_connections` and room snapshots), so an oversized entry shared by
+    /// a full roster can push those aggregate payloads past
+    /// `security.max_outbound_message_size` and close every recipient
+    /// (issue #524). Must be `> 0`, must not exceed `max_message_size` (a
+    /// larger value is dead config: such a frame is rejected by the frame cap
+    /// first), and its product with `protocol.max_players_limit` must not
+    /// exceed `max_outbound_message_size` (startup validation rejects it).
+    #[serde(default = "default_max_connection_info_bytes")]
+    pub max_connection_info_bytes: usize,
     /// Maximum concurrent connections per IP address.
     ///
     /// Sized to cover a full client behind one NAT egress (a 16-player
@@ -118,6 +134,7 @@ impl Default for SecurityConfig {
             max_message_size: default_max_message_size(),
             max_outbound_message_size: default_max_outbound_message_size(),
             max_signal_bytes: default_max_signal_bytes(),
+            max_connection_info_bytes: default_max_connection_info_bytes(),
             max_connections_per_ip: default_max_connections_per_ip(),
             max_connections: default_max_connections(),
             transport: TransportSecurityConfig::default(),

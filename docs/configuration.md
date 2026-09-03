@@ -127,6 +127,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Shared max room-creation, seated-join, and spectator-join attempts per player per window (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS` | `rate_limit.max_signals` | `600` | Max validated WebRTC Signal dispatch attempts per player per window (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Detailed WebRTC rejection errors per player per window before generic rate-limit errors |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES` | `rate_limit.max_relay_bytes` | `268435456` | Per-sender game-data relay byte budget per window (sender-controlled payload bytes; must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH` | `protocol.max_game_name_length` | `64` | Max bytes (UTF-8) in a game name (must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH` | `protocol.room_code_length` | `6` | Nonzero length of generated room codes |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH` | `protocol.max_player_name_length` | `32` | Max bytes (UTF-8) in a player name (must be > 0) |
@@ -157,6 +158,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__MAX_MESSAGE_SIZE` | `security.max_message_size` | `65536` | Max inbound WebSocket message size in bytes (must keep 256 bytes of relay envelope headroom below `max_outbound_message_size`) |
 | `SIGNAL_FISH__SECURITY__MAX_OUTBOUND_MESSAGE_SIZE` | `security.max_outbound_message_size` | `8388608` | Max aggregate encoded server WebSocket application payload in bytes (`1..=67108864`, at least `max_message_size + 256` so the fixed relay envelope fits); oversized messages close the affected connection with code `1009` |
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES` | `security.max_signal_bytes` | `16384` | Max serialized size in bytes of a v3 `Signal` payload (must be > 0 and ≤ `max_message_size`) |
+| `SIGNAL_FISH__SECURITY__MAX_CONNECTION_INFO_BYTES` | `security.max_connection_info_bytes` | `8192` | Max serialized size in bytes of one `ProvideConnectionInfo` peer-metadata entry (must be > 0, ≤ `max_message_size`, and its product with `max_players_limit` must not exceed `max_outbound_message_size`) |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `24` | Max concurrent connections from one IP (covers a 16-player NAT/LAN session plus spectators and reconnect churn; must be > 0 — a zero cap rejects every registration; must not exceed `max_connections`) |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS` | `security.max_connections` | `10000` | Max concurrent connections server-wide, regardless of how many distinct IPs are in use (must be > 0 — a zero cap rejects every registration) |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED` | `security.transport.tls.enabled` | `false` | Enable built-in TLS listener |

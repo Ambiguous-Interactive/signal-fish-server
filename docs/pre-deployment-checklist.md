@@ -69,17 +69,22 @@ cargo run -- --print-config
 ## Rate limits sane
 
 - [ ] `rate_limit.*` values fit your traffic — `max_room_creations`,
-  `max_join_attempts`, `max_signals`, `max_signal_errors`, and `time_window`
+  `max_join_attempts`, `max_signals`, `max_signal_errors`, `max_relay_bytes`
+  (the per-sender game-data relay byte budget; size it against your games'
+  real submit rates), and `time_window`
   (see [when to adjust](configuration-recipes.md#rate-limits)).
 - [ ] Per-app overrides (`allowed_apps[*].rate_limit_per_minute`,
   `max_rooms`, `max_players_per_room`) set where an app needs different limits.
-- [ ] `security.max_signal_bytes`, inbound `security.max_message_size`, and
+- [ ] `security.max_signal_bytes`, `security.max_connection_info_bytes`,
+  inbound `security.max_message_size`, and
   `security.max_outbound_message_size` left at sane nonzero caps
-  (`max_signal_bytes` must be `≤ max_message_size`; outbound must keep a
-  256-byte relay envelope headroom above inbound — `max_message_size +
-  256 ≤ max_outbound_message_size`, startup rejects tighter pairings because
-  relayed frames grow by the sender id and delivery stamps; outbound must
-  be no more than 67108864 bytes).
+  (`max_signal_bytes` and `max_connection_info_bytes` must be
+  `≤ max_message_size`; outbound must keep a 256-byte relay envelope headroom
+  above inbound — `max_message_size + 256 ≤ max_outbound_message_size`,
+  startup rejects tighter pairings because relayed frames grow by the sender
+  id and delivery stamps; outbound must be no more than 67108864 bytes; the
+  metadata cap times `protocol.max_players_limit` must not exceed outbound,
+  so a full roster's entries always fit one broadcast).
 
 ## TURN secret shared and rotated
 
