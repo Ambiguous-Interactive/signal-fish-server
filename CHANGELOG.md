@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `security.max_connection_info_bytes` (default `8192`): per-entry size cap on
+  self-declared peer metadata (`ProvideConnectionInfo`), measured as canonical
+  JSON — the same bytes that are broadcast. An oversized entry is answered with
+  `MESSAGE_TOO_LARGE` and not stored. The entry is stored verbatim and
+  broadcast to every room member in `GameStarting.peer_connections` and room
+  snapshots, so an unbounded entry shared across a full roster could push those
+  aggregates past the outbound message cap and close every recipient with
+  `1009 outbound_message_too_large` — a one-shot peer-eviction primitive
+  (issue #524). Startup validation also rejects the dead shape (cap above
+  `max_message_size`) and the roster-busting shape
+  (`(cap + per-member envelope overhead) × protocol.max_players_limit` above
+  `security.max_outbound_message_size`). Configurable via
+  `SIGNAL_FISH__SECURITY__MAX_CONNECTION_INFO_BYTES`.
+- `rate_limit.max_relay_bytes` (default `268435456`, 256 MiB per window):
+  per-sender game-data relay byte budget charged on the sender-controlled
+  payload (binary payload length; canonical JSON length for the text lane).
+  The relayed game-data path previously had no sender-side limit or
+  accounting, so one player could stream 64 KiB frames to a full roster at
+  line rate on the operator's egress bill (issue #519). An over-budget frame
+  is answered with `RATE_LIMIT_EXCEEDED` and is not relayed; the charge is
+  all-or-nothing and overflow-safe. Accounting: per-sender relayed bytes in
+  player rate stats, the new server-wide `signal_fish_relay_bytes_total`
+  Prometheus counter (snapshot field `players.relay_bytes_total`), and the new
+  `signal_fish_rate_limit_relay_bandwidth_rejections_total` rejection family
+  (`rate_limiting.relay_bandwidth_rejections`). A zero budget remains an
+  explicit library-only total-rejection policy; the binary config path rejects
+  it. Configurable via `SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES`.
 - WebSocket upgrade outcomes distinguish server faults from client faults: a
   refused negotiation whose HTTP response is a 5xx now lands in the new
   `rejected_server_fault` outcome lane (response header
