@@ -351,9 +351,12 @@ put secrets here unless every receiving peer may see them.
 Because the entry is broadcast verbatim to every room member, its serialized
 size is capped by `security.max_connection_info_bytes` (default 8 KiB, measured
 as canonical JSON bytes): an oversized entry is rejected with `MESSAGE_TOO_LARGE`
-and is not stored. The cap keeps a full roster of entries well under the
-outbound message limit, so one member's metadata can no longer close every
-recipient's connection (issue #524).
+and is not stored. The cap's product with the roster ceiling must stay under
+the outbound message limit (startup validation enforces it), so one member's
+metadata can no longer push a roster broadcast past the outbound cap and
+close every recipient; keep proportionate headroom for the per-member
+envelope fields, and the write-time outbound check remains the backstop
+(issue #524).
 
 ```json
 

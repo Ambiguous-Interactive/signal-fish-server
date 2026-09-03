@@ -256,7 +256,8 @@ pub const fn default_max_outbound_message_size() -> usize {
 /// server's fallible materialization buffer.
 pub const MAX_OUTBOUND_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Minimum headroom the outbound cap must keep above the inbound frame cap.///
+/// Minimum headroom the outbound cap must keep above the inbound frame cap.
+///
 /// An admitted inbound frame is re-emitted to roommates with the relay
 /// envelope attached, so its relayed form is strictly larger than what the
 /// inbound cap admitted, by at least the fixed envelope. Bounded per carrier:

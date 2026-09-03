@@ -773,8 +773,10 @@ components:
         but remains self-declared and is not reachability proof. The serialized
         entry is size-capped: `ProvideConnectionInfo` submissions whose
         canonical JSON exceeds `security.max_connection_info_bytes` (default
-        8192 bytes) are rejected with MESSAGE_TOO_LARGE and not stored, so a
-        full roster's entries always fit the outbound message limit.
+        8192 bytes) are rejected with MESSAGE_TOO_LARGE and not stored. Its
+        product with the roster ceiling is validated to stay under the
+        outbound message limit (entry payloads alone), so one member's
+        metadata cannot push a roster broadcast past the outbound cap.
       oneOf:
         - type: object
           additionalProperties: false
