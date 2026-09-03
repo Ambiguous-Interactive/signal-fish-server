@@ -565,9 +565,12 @@ impl ClientProcess {
 }
 
 // ---------------------------------------------------------------------------
-// Raw in-test WebSocket helpers (auth is disabled in the temp config, so —
-// like the server repo's relay suites — raw clients join without an
-// Authenticate handshake).
+// Raw in-test WebSocket helpers. Raw clients complete the Authenticate
+// handshake with the same public app label the native clients use
+// ("reference-native-app"): rooms are application-scoped (issue #520), so a
+// connection with no application identity cannot join a room created by an
+// identified client — and Authenticate must be the first application
+// message regardless of the open app-ID policy.
 // ---------------------------------------------------------------------------
 
 async fn connect_raw(port: u16) -> (WsSink, WsReceiver) {
@@ -586,6 +589,40 @@ async fn join_room_raw(
     room_code: &str,
     player_name: &str,
 ) -> PlayerId {
+    let authenticate = ClientMessage::Authenticate {
+        app_id: "reference-native-app".to_string(),
+        sdk_version: None,
+        platform: Some("starved-runtime-e2e".to_string()),
+        game_data_format: None,
+        protocol_version: None,
+        supported_transports: None,
+        supported_topologies: None,
+        requested_capabilities: None,
+    };
+    let handshake = serde_json::to_string(&authenticate).expect("serialize Authenticate");
+    sink.send(Message::Text(handshake.into()))
+        .await
+        .expect("send Authenticate");
+
+    loop {
+        let frame = tokio::time::timeout(EVENT_DEADLINE, receiver.next())
+            .await
+            .expect("timed out waiting for Authenticated")
+            .expect("connection closed while authenticating")
+            .expect("websocket error while authenticating");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
+        match message {
+            ServerMessage::Authenticated { .. } => break,
+            ServerMessage::AuthenticationError { error, .. } => {
+                panic!("raw authentication failed for {player_name}: {error}")
+            }
+            _ => continue,
+        }
+    }
+
     let join = ClientMessage::JoinRoom {
         game_name: GAME_NAME.to_string(),
         room_code: Some(room_code.to_string()),
