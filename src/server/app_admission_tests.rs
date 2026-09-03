@@ -1022,7 +1022,7 @@ async fn open_policy_identified_member_adopts_a_legacy_unowned_room() {
 
     // A context-less connection creates a legacy unowned room.
     let (legacy, mut legacy_rx) = connect_contextless(&server, 45011).await;
-    join_room(&server, &legacy, "legacy-game", Some("LEGAC1"), "Legacy", 4).await;
+    join_room(&server, &legacy, "legacy-game", Some("LEGACY"), "Legacy", 4).await;
     let (room_id, _, _) = joined_room(receive(&mut legacy_rx).await.as_ref());
     assert_eq!(
         server
@@ -1042,7 +1042,7 @@ async fn open_policy_identified_member_adopts_a_legacy_unowned_room() {
         &server,
         &claimer,
         "legacy-game",
-        Some("LEGAC1"),
+        Some("LEGACY"),
         "Claimer",
         4,
     )
@@ -1068,7 +1068,7 @@ async fn open_policy_identified_member_adopts_a_legacy_unowned_room() {
 
     // After the claim, other applications are denied.
     let (other, mut other_rx) = connect_as(&server, APP_B, 45013).await;
-    join_room(&server, &other, "legacy-game", Some("LEGAC1"), "Other", 4).await;
+    join_room(&server, &other, "legacy-game", Some("LEGACY"), "Other", 4).await;
     assert_join_failed(
         receive(&mut other_rx).await.as_ref(),
         ErrorCode::RoomNotFound,
