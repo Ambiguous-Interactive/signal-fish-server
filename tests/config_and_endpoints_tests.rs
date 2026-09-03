@@ -368,6 +368,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("[]"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__APP_AUTH_PATH",
+        path: "security.app_auth_path",
+        default: Some("null"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS",
         path: "coordination.membership_snapshot_interval_secs",
         default: Some("30"),
