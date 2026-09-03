@@ -116,6 +116,30 @@ jobs:
       - name: Check fuzz crate compiles
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
+  # Event-dependent OS cohort for the lint/nextest matrices (issue #513):
+  # macOS bills at 10x Linux per minute and the server deploys on Linux, so
+  # the macOS legs exist only on the daily cron (next-day signal for macOS
+  # regressions) while ubuntu + windows cover every push and pull request.
+  # A dynamic matrix is required because `matrix` is not an available
+  # context in a job-level `if:`; this job costs seconds of Linux time.
+  ci-matrix:
+    name: CI Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.cohort.outputs.os }}
+    steps:
+      - id: cohort
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "schedule" ]; then
+            echo 'os=["macos-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   relay-allocations:
     name: Relay Allocation Ceilings
     needs: quick-check
@@ -154,20 +178,14 @@ jobs:
 
   lint:
     name: Lint (${{ matrix.os }})
-    needs: quick-check
-    # Issue #513 cost cohort: macOS bills at 10x Linux per minute and the
-    # server deploys on Linux, so the macOS legs run only on the daily
-    # schedule (next-day signal for macOS regressions) while ubuntu and
-    # windows cover every push and pull request. The per-leg `if` (evaluated
-    # once per matrix combination) skips exactly one leg per event; the
-    # fail-closed quick-check gate still applies to every leg that runs.
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || matrix.os == 'macos-latest') }}
+    needs: [quick-check, ci-matrix]
+    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.ci-matrix.outputs.os) }}
     steps:
       - name: Require fast-fail gate success
         shell: bash
@@ -242,16 +260,14 @@ jobs:
 
   nextest:
     name: Nextest (${{ matrix.os }})
-    needs: quick-check
-    # Issue #513 cost cohort: same per-leg schedule split as the lint job —
-    # ubuntu + windows per push/pull request, macOS on the daily schedule only.
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || matrix.os == 'macos-latest') }}
+    needs: [quick-check, ci-matrix]
+    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.ci-matrix.outputs.os) }}
     steps:
       - name: Require fast-fail gate success
         shell: bash
