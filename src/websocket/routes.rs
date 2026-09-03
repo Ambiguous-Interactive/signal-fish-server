@@ -271,13 +271,22 @@ async fn health_check(
 /// draining instance. A readiness probe flips to 503 at the moment
 /// `begin_shutdown_drain` commits — before the `GoingAway` fan-out and the
 /// coded `4000` closes — so the deploy tooling can remove the instance from
-/// the load balancer while clients still receive their graceful close.
-async fn readyz(State(server): State<Arc<EnhancedGameServer>>) -> axum::http::StatusCode {
-    if server.is_draining() {
+/// the load balancer while clients still receive their graceful close. The
+/// verdict varies over time, so the response is `Cache-Control: no-store`:
+/// a cached 200 served during a drain flip would route new connections to a
+/// dying instance.
+async fn readyz(
+    State(server): State<Arc<EnhancedGameServer>>,
+) -> (
+    [(axum::http::HeaderName, &'static str); 1],
+    axum::http::StatusCode,
+) {
+    let status = if server.is_draining() {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     } else {
         axum::http::StatusCode::OK
-    }
+    };
+    ([(CACHE_CONTROL, "no-store")], status)
 }
 
 /// Aborts a spawned task if the owning future exits before joining it.
@@ -419,16 +428,24 @@ mod tests {
     /// the moment the drain commits, while `/health` stays liveness-only and
     /// keeps answering 200 — an orchestrator probing readiness removes the
     /// instance from rotation without mistaking a draining-but-gracefully-
-    /// closing process for a dead one.
+    /// closing process for a dead one. The verdict is `Cache-Control:
+    /// no-store` so no intermediary can serve a stale 200 across the flip.
     #[tokio::test]
     async fn readyz_flips_to_503_on_drain_while_health_stays_200() {
         let server = probe_test_server().await;
 
+        let (headers, status) = readyz(State(server.clone())).await;
         assert_eq!(
-            readyz(State(server.clone())).await,
+            status,
             axum::http::StatusCode::OK,
             "a fresh server must report ready"
         );
+        assert_eq!(
+            headers[0].0,
+            axum::http::header::CACHE_CONTROL,
+            "the readiness verdict must carry cache headers"
+        );
+        assert_eq!(headers[0].1, "no-store");
         assert_eq!(
             health_check(State(server.clone()))
                 .await
@@ -439,8 +456,9 @@ mod tests {
 
         server.begin_shutdown_drain();
 
+        let (_, status) = readyz(State(server.clone())).await;
         assert_eq!(
-            readyz(State(server.clone())).await,
+            status,
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "a draining server must report not-ready so deploy tooling stops routing"
         );

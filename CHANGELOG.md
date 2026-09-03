@@ -117,7 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mounted config. The BuildKit `check=skip=SecretsUsedInArgOrEnv` directive,
   present only to suppress scanner warnings about those ENV lines, is removed
   with them. A structural test pins the image to stay free of
-  `SIGNAL_FISH__*` ENV configuration (issue #515).
+  `SIGNAL_FISH__*` ENV configuration (issue #515). Note the companion
+  `docker-compose.yml` deliberately mounts `config.example.json`, which
+  disables both gates *visibly in that file* — the documented local-development
+  posture; the image itself carries no defaults either way.
 - `docker-compose.yml` now sets `stop_grace_period: 60s` for the signaling
   service: Docker's 10-second default SIGTERM timeout elapses while the
   default 30-second drain is still settling close frames, so clients lost the

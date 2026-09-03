@@ -1,5 +1,6 @@
 //! Configuration loading and environment parsing.
 
+use super::security::AppAuthFile;
 use super::validation::validate_config_security;
 use super::{AppRegistrationEntry, Config};
 use serde_json::Value;
@@ -154,39 +155,35 @@ fn apply_app_auth_file(config: &mut Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The external app-registry file contract (issue #516): the same
-/// `AppRegistrationEntry` shape as `security.allowed_apps`, under a required
-/// top-level `apps` key. Strict admission (`deny_unknown_fields` on the
-/// wrapper and on every entry) so a typo'd cap or a stray `app_secret` fails
-/// loudly instead of being ignored: the registry file must never carry
-/// credential material, and a silently-dropped entry would shrink the
-/// registry invisibly. There are no legacy aliases here — the file is a new
-/// contract, not a second copy of the main config syntax.
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppAuthFile {
-    apps: Vec<AppRegistrationEntry>,
-}
-
 fn parse_app_auth_file(contents: &str) -> anyhow::Result<Vec<AppRegistrationEntry>> {
     if contents.trim().is_empty() {
         anyhow::bail!("app registry file is empty: expected {{\"apps\": [...]}}");
     }
 
+    // Strict single-document parse, mirroring `parse_json_document` for the
+    // main config: trailing data after the first JSON document (a
+    // concatenated or partially-overwritten provisioner write) is a hard
+    // error, not a silently-truncated registry.
+    let mut deserializer = serde_json::Deserializer::from_str(contents);
     let file: AppAuthFile =
-        serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_str(contents))
-            .map_err(|error| {
-                let path = error.path().to_string();
-                anyhow::anyhow!(
-                    "app registry file does not match the contract: {}{error} (expected \
-             {{\"apps\": [<same entry shape as security.allowed_apps>]}})",
-                    if path.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{path}: ")
-                    }
-                )
-            })?;
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            let path = error.path().to_string();
+            anyhow::anyhow!(
+                "app registry file does not match the contract: {}{error} (expected \
+                 {{\"apps\": [<same entry shape as security.allowed_apps>]}})",
+                if path.is_empty() {
+                    String::new()
+                } else {
+                    format!("{path}: ")
+                }
+            )
+        })?;
+    deserializer.end().map_err(|error| {
+        anyhow::anyhow!(
+            "app registry file has trailing data after the JSON document: {error} \
+             (the file must contain exactly one {{\"apps\": [...]}} document)"
+        )
+    })?;
     Ok(file.apps)
 }
 
@@ -595,10 +592,17 @@ mod tests {
     }
 
     /// A registry file that is present but unreadable-as-a-contract
-    /// (malformed JSON, empty bytes) is a hard error naming the file.
+    /// (malformed JSON, empty bytes, or trailing data after the document —
+    /// e.g. a concatenated or partially-overwritten provisioner write) is a
+    /// hard error naming the file, never a silently-truncated registry.
     #[test]
     fn malformed_app_auth_file_is_a_hard_error_naming_the_path() {
-        for contents in ["{not json", ""] {
+        for contents in [
+            "{not json",
+            "",
+            r#"{"apps":[]} trailing garbage"#,
+            r#"{"apps":[]} {"apps":[{"app_id":"second","app_name":"Second"}]}"#,
+        ] {
             let dir = write_registry_file(contents);
             let result = finalize_with_security_doc(&format!(
                 r#"{{"security":{{"app_auth_path":"{}"}}}}"#,

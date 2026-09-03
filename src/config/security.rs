@@ -288,6 +288,23 @@ pub struct AppRegistrationEntry {
     pub rate_limit_per_minute: Option<u32>,
 }
 
+/// The external app-registry file contract (issue #516): the same
+/// [`AppRegistrationEntry`] shape as `security.allowed_apps`, under a
+/// required top-level `apps` key. Strict admission (`deny_unknown_fields` on
+/// the wrapper and on every entry) so a typo'd cap or a stray `app_secret`
+/// fails loudly instead of being ignored: the registry file must never carry
+/// credential material, and a silently-dropped entry would shrink the
+/// registry invisibly. There are no legacy aliases here — the file is a new
+/// contract, not a second copy of the main config syntax.
+///
+/// Lives beside the other security structs so the module's structural
+/// `deny_unknown_fields` scan covers it too.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppAuthFile {
+    pub apps: Vec<AppRegistrationEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::SecurityConfig;
