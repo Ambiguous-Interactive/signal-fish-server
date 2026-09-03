@@ -235,8 +235,9 @@ components:
       description: >-
         Each relayed frame consumes the sender's per-window relay byte budget
         (`rate_limit.max_relay_bytes`), measured on the sender-controlled
-        payload. An over-budget frame is answered with RATE_LIMIT_EXCEEDED and
-        is not relayed.
+        payload, and the relaying room's aggregate per-window ceiling
+        (`rate_limit.max_room_relay_bytes`). An over-budget frame is answered
+        with RATE_LIMIT_EXCEEDED and is not relayed.
       payload: { $ref: '#/components/schemas/ClientGameData' }
     ClientSignal:
       title: Signal

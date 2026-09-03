@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `rate_limit.max_room_relay_bytes` (default `1073741824`, 1 GiB per window):
+  per-room aggregate game-data relay byte ceiling charged on every accepted
+  relay, in addition to the per-sender budget (issue #530). The per-sender
+  budget bounds one sender; many individually under-budget senders in one
+  room could still multiply egress without bound. A frame that exhausts the
+  room's window is answered with `RATE_LIMIT_EXCEEDED` and is not relayed;
+  the charge is all-or-nothing and overflow-safe, and the sender's budget is
+  charged first so a frame its own sender cannot afford never drains its
+  room's ceiling. Accounting: the new
+  `signal_fish_rate_limit_relay_room_bandwidth_rejections_total` Prometheus
+  counter (snapshot field `rate_limiting.relay_room_bandwidth_rejections`,
+  included in the rejection total). Room windows are swept by the existing
+  rate-limiter cleanup task, so deleted rooms cannot leak entries. A zero
+  ceiling remains an explicit library-only total-rejection policy; the
+  binary config path rejects it. Configurable via
+  `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_RELAY_BYTES`.
 - `security.max_connection_info_bytes` (default `8192`): per-entry size cap on
   self-declared peer metadata (`ProvideConnectionInfo`), measured as canonical
   JSON — the same bytes that are broadcast. An oversized entry is answered with
@@ -83,6 +99,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Room admission is now application-scoped in both security modes
+  (issue #520): a created room is stamped with its creator's application
+  identity (the `Authenticate` handshake app ID), and an owned room admits
+  only same-application members — seated joins, spectators, and reconnects
+  alike, with the same non-enumerating `ROOM_NOT_FOUND` denial the
+  allowlist mode already returned. Previously the room namespace was shared
+  by `(game_name, room_code)` alone: in open deployments the first
+  authenticated app to touch a room adopted it, and any client could claim
+  or join any room across applications. Migration: rooms created before
+  this change (and rooms created by connections that never completed the
+  optional open-policy `Authenticate`) stay unowned until the first
+  identified member joins, whose application then claims the room;
+  context-less connections keep the legacy behavior among themselves but
+  can no longer enter an owned room. Open-policy application identity
+  remains a client-chosen, spoofable label, so this boundary is a soft
+  tenancy bound; deployment-grade guarantees still require allowlist
+  enforcement. **Behavioral:** clients that share a
+  `game_name` but present different app IDs no longer see each other's
+  rooms.
 - Configuration admission for the `security` subtree is now strict: unknown
   keys in `security`, `security.transport`, `security.transport.tls`,
   `security.transport.token_binding`, and `security.allowed_apps` entries are

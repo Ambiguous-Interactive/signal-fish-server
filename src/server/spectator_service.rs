@@ -46,7 +46,6 @@ pub(crate) struct SpectatorService {
     /// reconnection is disabled.
     reconnection_manager: Option<Arc<ReconnectionManager>>,
     connection_manager: Arc<ConnectionManager>,
-    app_id_allowlist_enabled: bool,
     rate_limiter: Arc<RoomRateLimiter>,
     /// Dev-only panic-injection slot for the owned spectator join transaction
     /// (mirrors `EnhancedGameServer::owned_room_operation_panic`).
@@ -110,7 +109,6 @@ impl SpectatorService {
         protocol_config: ProtocolConfig,
         reconnection_manager: Option<Arc<ReconnectionManager>>,
         connection_manager: Arc<ConnectionManager>,
-        app_id_allowlist_enabled: bool,
         rate_limiter: Arc<RoomRateLimiter>,
     ) -> Self {
         Self {
@@ -123,7 +121,6 @@ impl SpectatorService {
             protocol_config,
             reconnection_manager,
             connection_manager,
-            app_id_allowlist_enabled,
             rate_limiter,
             #[cfg(test)]
             join_panic_point: Arc::new(AtomicU8::new(0)),
@@ -425,25 +422,24 @@ impl SpectatorService {
 
         // Room persistence is authoritative. The process-local room/app map is
         // only a relay cache and may be empty after restart or cache loss.
-        if self.app_id_allowlist_enabled {
+        // App scoping applies in both admission modes (issue #520): an owned
+        // room is invisible to members of other applications and to
+        // context-less connections, while a context-less connection keeps
+        // the legacy behavior for unowned rooms.
+        if let Some(owner) = room.application_id {
             let Some(client_app_id) = self.connection_manager.app_id(player_id) else {
                 return Err(SpectatorError::new(
                     "Room not found",
                     Some(ErrorCode::RoomNotFound),
                 ));
             };
-            if room
-                .application_id
-                .is_some_and(|owner| owner != client_app_id)
-            {
+            if owner != client_app_id {
                 return Err(SpectatorError::new(
                     "Room not found",
                     Some(ErrorCode::RoomNotFound),
                 ));
             }
-            if let Some(owner) = room.application_id {
-                self.room_applications.insert(room.id, owner);
-            }
+            self.room_applications.insert(room.id, owner);
         }
 
         if !room.can_spectate() {
@@ -1614,7 +1610,6 @@ mod tests {
             ProtocolConfig::default(),
             None,
             connection_manager,
-            false,
             Arc::new(RoomRateLimiter::new(
                 crate::rate_limit::RateLimitConfig::default(),
             )),

@@ -135,7 +135,6 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         protocol_config.clone(),
         reconnection_manager.clone(),
         Arc::clone(&connection_manager),
-        config.app_id_allowlist_enabled,
         Arc::clone(&rate_limiter),
     );
 

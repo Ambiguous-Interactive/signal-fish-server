@@ -743,7 +743,6 @@ impl EnhancedGameServer {
             protocol_config.clone(),
             reconnection_manager.clone(),
             Arc::clone(&connection_manager),
-            config.app_id_allowlist_enabled,
             Arc::clone(&rate_limiter),
         );
 
@@ -4492,6 +4491,7 @@ mod relay_projection_cache_tests {
                 max_signal_errors: 0,
                 time_window: Duration::from_secs(60),
                 max_relay_bytes: 0,
+                max_room_relay_bytes: 0,
             },
             ..super::ServerConfig::default()
         };

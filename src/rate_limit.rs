@@ -33,6 +33,14 @@ pub struct RateLimitConfig {
     /// explicit total-rejection policy for direct library construction (the
     /// production config path rejects it).
     pub max_relay_bytes: u64,
+    /// Per-room aggregate game-data relay byte budget per fixed time window
+    /// (issue #530). Every accepted relay additionally charges its
+    /// sender-controlled payload size against the relaying room's window, so
+    /// many individually under-budget senders cannot multiply a room's
+    /// egress without bound. `0` is a valid explicit total-rejection policy
+    /// for direct library construction (the production config path rejects
+    /// it).
+    pub max_room_relay_bytes: u64,
 }
 
 impl Default for RateLimitConfig {
@@ -44,6 +52,7 @@ impl Default for RateLimitConfig {
             max_signals: 600,      // generous for trickle-ICE (~10/sec over the 60s window)
             max_signal_errors: 60, // detailed rejection responses before generic errors
             max_relay_bytes: crate::config::defaults::default_max_relay_bytes(),
+            max_room_relay_bytes: crate::config::defaults::default_max_room_relay_bytes(),
         }
     }
 }
@@ -63,6 +72,52 @@ struct RateLimitEntry {
     relay_bytes: u64,
     /// Window start time
     window_start: Instant,
+}
+
+/// Per-room aggregate relay window state (issue #530).
+#[derive(Debug, Clone)]
+struct RoomRelayWindow {
+    /// Room-aggregate relay bytes charged in the current window.
+    relay_bytes: u64,
+    /// Window start time
+    window_start: Instant,
+}
+
+impl RoomRelayWindow {
+    fn new() -> Self {
+        Self {
+            relay_bytes: 0,
+            window_start: Instant::now(),
+        }
+    }
+
+    /// Reset the window if enough time has passed (same fixed-window
+    /// semantics and boundary-burst trade-off as the per-player budgets).
+    fn maybe_reset_window(&mut self, config: &RateLimitConfig) {
+        if self.window_start.elapsed() >= config.time_window {
+            self.relay_bytes = 0;
+            self.window_start = Instant::now();
+        }
+    }
+
+    /// Charge `bytes` against the room's aggregate relay budget,
+    /// all-or-nothing (same contract as the per-sender charge).
+    fn try_relay_bytes(&mut self, config: &RateLimitConfig, bytes: u64) -> bool {
+        self.maybe_reset_window(config);
+        match self.relay_bytes.checked_add(bytes) {
+            Some(total) if total <= config.max_room_relay_bytes => {
+                self.relay_bytes = total;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn time_until_reset(&self, config: &RateLimitConfig) -> Duration {
+        config
+            .time_window
+            .saturating_sub(self.window_start.elapsed())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +245,8 @@ pub struct RoomRateLimiter {
     config: RateLimitConfig,
     /// Rate limit entries by player ID
     entries: Arc<RwLock<HashMap<Uuid, RateLimitEntry>>>,
+    /// Per-room aggregate relay windows by room ID (issue #530)
+    room_entries: Arc<RwLock<HashMap<Uuid, RoomRelayWindow>>>,
     metrics: Option<Arc<crate::metrics::ServerMetrics>>,
 }
 
@@ -210,6 +267,7 @@ impl RoomRateLimiter {
         Self {
             config,
             entries: Arc::new(RwLock::new(HashMap::new())),
+            room_entries: Arc::new(RwLock::new(HashMap::new())),
             metrics,
         }
     }
@@ -361,14 +419,44 @@ impl RoomRateLimiter {
         }
     }
 
+    /// Charge `bytes` of game-data relay payload against the relaying room's
+    /// aggregate window budget (issue #530).
+    ///
+    /// Called once per accepted relayed frame, after the sender's own budget
+    /// admitted it, so a frame dropped by its sender's budget never drains
+    /// its room's ceiling. A rejection means the frame is not relayed at
+    /// all; the caller owns the wire error.
+    pub async fn check_room_relay_bytes(
+        &self,
+        room_id: &Uuid,
+        bytes: u64,
+    ) -> Result<(), RateLimitError> {
+        let mut entries = self.room_entries.write().await;
+        let entry = entries.entry(*room_id).or_insert_with(RoomRelayWindow::new);
+
+        if entry.try_relay_bytes(&self.config, bytes) {
+            Ok(())
+        } else {
+            let reset_time = entry.time_until_reset(&self.config);
+            self.record_rejection(crate::metrics::RateLimitRejection::RelayRoomBandwidth);
+            Err(RateLimitError::RoomRelayLimitExceeded {
+                retry_after: reset_time,
+            })
+        }
+    }
+
     /// Clean up old entries to prevent memory leaks
     pub async fn cleanup_old_entries(&self) {
-        let mut entries = self.entries.write().await;
         let now = Instant::now();
-
         // Remove entries that haven't been used for 2x the time window
         let cleanup_threshold = self.config.time_window.saturating_mul(2);
+
+        let mut entries = self.entries.write().await;
         entries.retain(|_, entry| now.duration_since(entry.window_start) < cleanup_threshold);
+        drop(entries);
+
+        let mut room_entries = self.room_entries.write().await;
+        room_entries.retain(|_, entry| now.duration_since(entry.window_start) < cleanup_threshold);
     }
 
     /// Period of the background cleanup sweep.
@@ -431,11 +519,26 @@ impl RoomRateLimiter {
 /// Rate limiting errors
 #[derive(Debug, Clone)]
 pub enum RateLimitError {
-    RoomCreationLimitExceeded { retry_after: Duration },
-    JoinLimitExceeded { retry_after: Duration },
-    SignalLimitExceeded { retry_after: Duration },
-    SignalErrorLimitExceeded { retry_after: Duration },
-    RelayLimitExceeded { retry_after: Duration },
+    RoomCreationLimitExceeded {
+        retry_after: Duration,
+    },
+    JoinLimitExceeded {
+        retry_after: Duration,
+    },
+    SignalLimitExceeded {
+        retry_after: Duration,
+    },
+    SignalErrorLimitExceeded {
+        retry_after: Duration,
+    },
+    RelayLimitExceeded {
+        retry_after: Duration,
+    },
+    /// The relaying room's aggregate byte ceiling was exhausted (issue
+    /// #530), even though the sender's own budget had room for the frame.
+    RoomRelayLimitExceeded {
+        retry_after: Duration,
+    },
 }
 
 impl std::fmt::Display for RateLimitError {
@@ -484,6 +587,13 @@ impl std::fmt::Display for RateLimitError {
                     retry_after_secs(retry_after)
                 )
             }
+            Self::RoomRelayLimitExceeded { retry_after } => {
+                write!(
+                    f,
+                    "Room game data relay bandwidth limit exceeded. Try again in {} seconds.",
+                    retry_after_secs(retry_after)
+                )
+            }
         }
     }
 }
@@ -513,6 +623,7 @@ mod tests {
             max_signals: 2,
             max_signal_errors: 2,
             max_relay_bytes: 1000,
+            max_room_relay_bytes: 1000,
         }
     }
 
@@ -754,6 +865,116 @@ mod tests {
                 .expect("stats entry exists")
                 .relay_bytes,
             u64::MAX
+        );
+    }
+
+    /// The room ceiling (#530) aggregates the whole room's submit volume:
+    /// successive charges jointly exhaust the room's window, the over-budget
+    /// charge is rejected all-or-nothing, and the window reset restores the
+    /// ceiling. In production each charge comes from a possibly different
+    /// sender routed into the same room.
+    #[tokio::test(start_paused = true)]
+    async fn room_relay_byte_budget_rejects_only_over_budget_frames() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let limiter = RoomRateLimiter::with_metrics(create_test_config(), Arc::clone(&metrics));
+        let room_id = Uuid::new_v4();
+
+        // Two senders jointly fill the 1000-byte room window.
+        assert!(limiter.check_room_relay_bytes(&room_id, 600).await.is_ok());
+        assert!(limiter.check_room_relay_bytes(&room_id, 400).await.is_ok());
+
+        // One more byte is rejected without consuming anything.
+        assert!(matches!(
+            limiter.check_room_relay_bytes(&room_id, 1).await,
+            Err(RateLimitError::RoomRelayLimitExceeded { .. })
+        ));
+
+        // The window reset restores the full ceiling.
+        tokio::time::advance(Duration::from_millis(150)).await;
+        assert!(limiter.check_room_relay_bytes(&room_id, 1000).await.is_ok());
+        assert_eq!(
+            metrics
+                .snapshot()
+                .await
+                .rate_limiting
+                .relay_room_bandwidth_rejections,
+            1,
+            "only the over-budget frame is attributed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn room_relay_byte_budget_is_independent_per_room_and_of_sender_budgets() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let (room_a, room_b, sender) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+        assert!(limiter.check_room_relay_bytes(&room_a, 1000).await.is_ok());
+        assert!(limiter.check_room_relay_bytes(&room_a, 1).await.is_err());
+
+        // Another room's ceiling is untouched, and the sender's own byte
+        // budget did not move.
+        assert!(limiter.check_room_relay_bytes(&room_b, 1).await.is_ok());
+        assert!(limiter.check_relay_bytes(&sender, 1000).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn room_relay_byte_budget_zero_is_an_explicit_total_rejection_policy() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_room_relay_bytes: 0,
+            ..create_test_config()
+        });
+        let room_id = Uuid::new_v4();
+
+        assert!(matches!(
+            limiter.check_room_relay_bytes(&room_id, 1).await,
+            Err(RateLimitError::RoomRelayLimitExceeded { .. })
+        ));
+        assert!(!RateLimitError::RoomRelayLimitExceeded {
+            retry_after: Duration::from_secs(1)
+        }
+        .to_string()
+        .is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn room_relay_byte_budget_saturates_without_overflow() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_room_relay_bytes: u64::MAX,
+            ..create_test_config()
+        });
+        let room_id = Uuid::new_v4();
+
+        assert!(limiter
+            .check_room_relay_bytes(&room_id, u64::MAX)
+            .await
+            .is_ok());
+        assert!(limiter.check_room_relay_bytes(&room_id, 1).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn room_relay_budget_entries_are_cleaned_up_when_idle() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            time_window: Duration::from_millis(50),
+            ..create_test_config()
+        });
+        let room_id = Uuid::new_v4();
+        assert!(limiter.check_room_relay_bytes(&room_id, 1).await.is_ok());
+        assert!(
+            !limiter.room_entries.read().await.is_empty(),
+            "the charge creates the room's window entry"
+        );
+
+        // The cleanup sweep (2x window idle threshold) removes the idle room
+        // window so deleted rooms do not leak their entries.
+        tokio::time::advance(Duration::from_millis(150)).await;
+        limiter.cleanup_old_entries().await;
+        assert!(
+            limiter.room_entries.read().await.is_empty(),
+            "idle room windows must be swept"
+        );
+        assert!(
+            limiter.check_room_relay_bytes(&room_id, 1000).await.is_ok(),
+            "a swept room starts a fresh full window"
         );
     }
 

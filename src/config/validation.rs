@@ -32,6 +32,7 @@ struct RuntimeServerValidation<'a> {
     event_buffer_size: usize,
     heartbeat_throttle: Duration,
     max_relay_bytes: u64,
+    max_room_relay_bytes: u64,
     websocket: &'a super::WebSocketConfig,
 }
 
@@ -57,6 +58,7 @@ impl<'a> RuntimeServerValidation<'a> {
             event_buffer_size: config.server.event_buffer_size,
             heartbeat_throttle: Duration::from_secs(config.server.heartbeat_throttle_secs),
             max_relay_bytes: config.rate_limit.max_relay_bytes,
+            max_room_relay_bytes: config.rate_limit.max_room_relay_bytes,
             websocket: &config.websocket,
         }
     }
@@ -82,6 +84,7 @@ impl<'a> RuntimeServerValidation<'a> {
             event_buffer_size: config.event_buffer_size,
             heartbeat_throttle: config.heartbeat_throttle,
             max_relay_bytes: config.rate_limit_config.max_relay_bytes,
+            max_room_relay_bytes: config.rate_limit_config.max_room_relay_bytes,
             websocket: &config.websocket_config,
         }
     }
@@ -263,6 +266,12 @@ impl<'a> RuntimeServerValidation<'a> {
                 anyhow::bail!(
                     "rate_limit.max_relay_bytes must be greater than 0: a zero budget rejects \
                      every relayed game-data frame, so peers can never exchange gameplay traffic"
+                );
+            }
+            if self.max_room_relay_bytes == 0 {
+                anyhow::bail!(
+                    "rate_limit.max_room_relay_bytes must be greater than 0: a zero budget \
+                     rejects every relayed game-data frame in every room"
                 );
             }
         }
@@ -1532,6 +1541,23 @@ mod tests {
             err.to_string()
                 .contains("rate_limit.max_relay_bytes must be greater than 0"),
             "error must name the zero relay budget: {err}"
+        );
+    }
+
+    /// The per-room aggregate ceiling shares the sender budget's admission
+    /// shape (#530): zero is rejected on the production config path.
+    #[test]
+    fn zero_room_relay_byte_ceiling_is_rejected_on_the_config_path() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.rate_limit.max_room_relay_bytes = 0;
+
+        let err = validate_config_security(&config)
+            .expect_err("a zero room ceiling rejects every game-data frame in every room");
+        assert!(
+            err.to_string()
+                .contains("rate_limit.max_room_relay_bytes must be greater than 0"),
+            "error must name the zero room ceiling: {err}"
         );
     }
 

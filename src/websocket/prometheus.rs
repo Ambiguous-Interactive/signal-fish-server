@@ -353,6 +353,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
+        "signal_fish_rate_limit_relay_room_bandwidth_rejections_total",
+        "Game-data frames rejected because the relaying room's aggregate relay byte ceiling was exhausted",
+        snapshot.rate_limiting.relay_room_bandwidth_rejections,
+    );
+    counter(
+        &mut buf,
         "signal_fish_relay_bytes_total",
         "Sender-side game-data payload bytes admitted onto the relay path",
         snapshot.players.relay_bytes_total,

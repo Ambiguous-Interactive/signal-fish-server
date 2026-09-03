@@ -158,6 +158,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("268435456"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_RELAY_BYTES",
+        path: "rate_limit.max_room_relay_bytes",
+        default: Some("1073741824"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH",
         path: "protocol.max_game_name_length",
         default: Some("64"),
@@ -1583,6 +1588,7 @@ async fn test_metrics_endpoint_no_auth_required() {
             "auth_rejections",
             "join_attempt_rejections",
             "relay_bandwidth_rejections",
+            "relay_room_bandwidth_rejections",
             "room_creation_rejections",
             "signal_error_rejections",
             "signal_rejections",
@@ -1602,6 +1608,7 @@ async fn test_metrics_endpoint_no_auth_required() {
             "join_attempt_rejections",
             "rate_limit_rejections",
             "relay_bandwidth_rejections",
+            "relay_room_bandwidth_rejections",
             "room_creation_rejections",
             "signal_error_rejections",
             "signal_rejections",

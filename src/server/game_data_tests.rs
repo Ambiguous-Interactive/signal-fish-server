@@ -639,4 +639,99 @@ mod admission_and_budget {
             Ok(None) => panic!("peer channel closed while checking for silence"),
         }
     }
+
+    /// The per-room aggregate ceiling (#530) bounds many individually
+    /// under-budget senders: once their joint submit volume exhausts the
+    /// room's window, further frames are rejected with `RATE_LIMIT_EXCEEDED`
+    /// on their own lane (`relay_room_bandwidth_rejections`), relay nothing,
+    /// and the room recovers after the window resets — while a second room
+    /// keeps its own ceiling.
+    #[tokio::test]
+    async fn room_relay_byte_budget_bounds_joint_senders_and_recovers() {
+        // Each sender's own budget (1000 bytes) stays far above every frame
+        // used here; only the room ceiling (1200 bytes) can reject.
+        let server = server_with_config(|config| {
+            config.rate_limit_config.max_relay_bytes = 1000;
+            config.rate_limit_config.max_room_relay_bytes = 1200;
+            config.rate_limit_config.time_window = Duration::from_millis(100);
+        })
+        .await;
+        let (sender_a, mut sender_a_rx) = register_client(&server).await;
+        let (sender_b, mut sender_b_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        join_shared_room(
+            &server,
+            vec![
+                (&sender_a, &mut sender_a_rx),
+                (&sender_b, &mut sender_b_rx),
+                (&peer, &mut peer_rx),
+            ],
+        )
+        .await;
+
+        // Joint submits fill the room's 1200-byte window (600 + 600). The
+        // fan-out excludes only the sending connection, so each member
+        // receives the other senders' frames.
+        for sender in [&sender_a, &sender_b] {
+            server
+                .handle_game_data_binary(
+                    sender,
+                    GameDataEncoding::MessagePack,
+                    Bytes::from(vec![0u8; 600]),
+                )
+                .await;
+        }
+        for rx in [&mut sender_a_rx, &mut sender_b_rx] {
+            match recv(rx).await.as_ref() {
+                ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 600),
+                other => panic!("expected the peer sender's relayed frame, got {other:?}"),
+            }
+        }
+        for _ in 0..2 {
+            match recv(&mut peer_rx).await.as_ref() {
+                ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 600),
+                other => panic!("expected the relayed frame, got {other:?}"),
+            }
+        }
+
+        // The next frame fits every sender budget but exhausts the room
+        // ceiling: rejected, unrelayed, and attributed on its own lane.
+        server
+            .handle_game_data_binary(
+                &sender_a,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1]),
+            )
+            .await;
+        expect_error(recv(&mut sender_a_rx).await, ErrorCode::RateLimitExceeded);
+        let snapshot = server.metrics().snapshot().await;
+        assert_eq!(
+            snapshot.rate_limiting.relay_room_bandwidth_rejections, 1,
+            "the room-ceiling rejection is attributed on its own lane"
+        );
+        assert_eq!(
+            snapshot.rate_limiting.relay_bandwidth_rejections, 0,
+            "no sender budget rejected anything"
+        );
+        assert_eq!(
+            snapshot.players.relay_bytes_total, 1200,
+            "only admitted bytes are accounted"
+        );
+
+        // After the window resets, the room's ceiling is restored.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        server
+            .handle_game_data_binary(
+                &sender_a,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1]),
+            )
+            .await;
+        for rx in [&mut sender_b_rx, &mut peer_rx] {
+            match recv(rx).await.as_ref() {
+                ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 1),
+                other => panic!("expected relayed frame after room window reset, got {other:?}"),
+            }
+        }
+    }
 }

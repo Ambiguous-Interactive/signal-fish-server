@@ -335,11 +335,13 @@ impl AppIdAllowlist {
     ///
     /// Unlike enforced mode, which always derives the UUID deterministically
     /// from the app ID string, an open-policy client that sends a well-formed
-    /// UUID as its `app_id` chooses the application UUID verbatim. Nothing
-    /// consumes open-mode application identity as an authority today (the
-    /// cross-app join gate is allowlist-only); a future consumer of that
-    /// identity — per-app caps, quotas, room stamping — must not treat this
-    /// client-chosen ID as unspoofable.
+    /// UUID as its `app_id` chooses the application UUID verbatim. Open-mode
+    /// application identity scopes room admission (issue #520): rooms are
+    /// stamped with the creator's application and owned rooms admit only
+    /// same-application members — but the ID remains a client-chosen,
+    /// unauthenticated label, so this boundary must not be treated as
+    /// unspoofable. Deployment tenancy guarantees require allowlist
+    /// enforcement (or the credential-auth story of issue #517).
     fn default_app_context(&self, app_id: &str) -> AppContext {
         let id = app_id
             .parse::<Uuid>()

@@ -4,9 +4,10 @@ use super::defaults::{
     default_drain_grace_secs, default_empty_room_timeout, default_enable_reconnection,
     default_event_buffer_size, default_heartbeat_throttle_secs, default_inactive_room_timeout,
     default_max_join_attempts, default_max_players, default_max_relay_bytes,
-    default_max_room_creations, default_max_rooms_per_game, default_max_signal_errors,
-    default_max_signals, default_ping_timeout, default_rate_limit_time_window,
-    default_reconnection_window, default_region_id, default_room_cleanup_interval,
+    default_max_room_creations, default_max_room_relay_bytes, default_max_rooms_per_game,
+    default_max_signal_errors, default_max_signals, default_ping_timeout,
+    default_rate_limit_time_window, default_reconnection_window, default_region_id,
+    default_room_cleanup_interval,
 };
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +118,11 @@ pub struct RateLimitConfig {
     /// exchange gameplay traffic.
     #[serde(default = "default_max_relay_bytes")]
     pub max_relay_bytes: u64,
+    /// Per-room aggregate game-data relay byte budget per time window. Must
+    /// be `> 0` on the binary config path (startup validation rejects zero):
+    /// a zero budget rejects every relayed game-data frame in every room.
+    #[serde(default = "default_max_room_relay_bytes")]
+    pub max_room_relay_bytes: u64,
 }
 
 impl Default for RateLimitConfig {
@@ -128,6 +134,7 @@ impl Default for RateLimitConfig {
             max_signals: default_max_signals(),
             max_signal_errors: default_max_signal_errors(),
             max_relay_bytes: default_max_relay_bytes(),
+            max_room_relay_bytes: default_max_room_relay_bytes(),
         }
     }
 }

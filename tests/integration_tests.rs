@@ -940,6 +940,7 @@ async fn test_custom_rate_limiting() {
             max_signals: 600,
             max_signal_errors: 60,
             max_relay_bytes: 256 * 1024 * 1024,
+            max_room_relay_bytes: 1024 * 1024 * 1024,
         },
         empty_room_timeout: Duration::from_secs(300),
         inactive_room_timeout: Duration::from_secs(3600),
