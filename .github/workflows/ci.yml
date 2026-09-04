@@ -500,7 +500,11 @@ jobs:
   audit:
     name: Audit (cargo-audit)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 15 min: five cargo-audit lockfile scans plus two npm audits whose
+    # transient-5xx retry (up to 3 attempts + backoff each) legitimately
+    # spends the slack when the npm registry is degraded — the 10-minute
+    # budget cancelled the lane mid-retry on PR #533 (2026-09-04).
+    timeout-minutes: 15
     # Scan Rust lockfiles directly against RustSec and both locked JavaScript
     # graphs against the npm advisory service. This complements cargo-deny's
     # broader Rust policy checks (licenses, bans, and sources).

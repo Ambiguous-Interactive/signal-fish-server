@@ -25951,10 +25951,13 @@ fn test_audit_job_configuration() {
     let audit_section = extract_audit_section(&strip_comment_lines(&ci_content));
 
     assert!(
-        audit_section.contains("timeout-minutes: 10"),
-        "Audit job should have a 10-minute timeout.\n\
-         cargo-audit is a lightweight advisory database check and should complete quickly.\n\
-         A 10-minute budget provides margin without wasting CI resources on hangs."
+        audit_section.contains("timeout-minutes: 15"),
+        "Audit job should have a 15-minute timeout.\n\
+         cargo-audit is a lightweight advisory database check, but the lane runs \
+         five lockfile scans plus two npm audits whose transient-registry retry \
+         legitimately spends slack when the npm registry is degraded.\n\
+         A 15-minute budget absorbs the retry path without wasting CI resources \
+         on hangs."
     );
 
     assert!(
