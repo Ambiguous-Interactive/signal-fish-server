@@ -145,7 +145,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regression signal is next-day instead of pre-merge. The `quick-check`
   fail-fast gate now runs on every event including the schedule; the
   `CI / Lint (macos-latest)` and `CI / Nextest (macos-latest)` check names
-  keep existing via the cron.
+  keep existing via the cron. The audit lane's `npm audit` steps now retry
+  transient registry 5xx responses with bounded backoff instead of failing
+  the lane on an otherwise-green tree.
 - Public Rust API (breaking): `RoomRateLimiter::check_relay_bytes` gained an
   `app: Option<rate_limit::AppRelayPolicy>` parameter carrying the sender's
   resolved allowlist policy (issue #530); passing `None` preserves the

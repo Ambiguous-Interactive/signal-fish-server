@@ -512,11 +512,37 @@ jobs:
         uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
+      # The npm advisory bulk endpoint answers 503 under registry load, which
+      # failed the whole audit lane on an otherwise-green tree (PR #533,
+      # 2026-09-04). A bounded retry with backoff absorbs the transient
+      # class; a genuine advisory finding still fails on the first
+      # successful response because `npm audit` exits non-zero on
+      # vulnerabilities.
       - name: Run npm audit (repository tooling)
-        run: npm audit
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit; then
+              exit 0
+            fi
+            status=$?
+            echo "npm audit attempt $attempt exited $status; retrying after backoff" >&2
+            sleep $((attempt * 15))
+          done
+          echo "npm audit failed after 3 attempts" >&2
+          exit "$status"
       - name: Run npm audit (browser reference client)
         working-directory: clients/browser
-        run: npm audit
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit; then
+              exit 0
+            fi
+            status=$?
+            echo "npm audit attempt $attempt exited $status; retrying after backoff" >&2
+            sleep $((attempt * 15))
+          done
+          echo "npm audit failed after 3 attempts" >&2
+          exit "$status"
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
