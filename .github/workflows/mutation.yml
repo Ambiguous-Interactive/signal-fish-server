@@ -101,7 +101,7 @@ jobs:
         run: bash scripts/run-mutants.sh --warm
 
   mutants:
-    name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/41
+    name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/42
     needs: baseline
     runs-on: ubuntu-latest
     # Per-shard timeout. With the warm shared cache + --in-place there is no cold
@@ -122,11 +122,12 @@ jobs:
         # This list MUST be the complete contiguous partition 0..N-1 and N MUST
         # match every "/N" denominator in this file (job name + the run step).
         # Enforced by test_mutation_shard_matrix_is_complete_contiguous_partition.
-        # N=41: --in-place runs each shard's mutants SERIALLY. Measured shard 22,
+        # N=42: --in-place runs each shard's mutants SERIALLY. Measured shard 22,
         # the worst 12-mutant shard, took 310.12s (25.843s/mutant). Adding ~10%
-        # headroom and rounding up gives a 29s/mutant budget. With 408 mutants,
-        # ceil(408/41) = 10 mutants/shard and the modeled worst shard is
-        # 10 * 29s = 290s, under the 5-minute target. The feasibility
+        # headroom and rounding up gives a 29s/mutant budget. With 413 mutants
+        # (session-212's #530 attribution classifier added 5), ceil(413/42) = 10
+        # mutants/shard and the modeled worst shard is 10 * 29s = 290s, under
+        # the 5-minute target. The feasibility
         # of {mutant-count, N, per-mutant budget, timeout} is asserted by
         # test_mutation_shard_budget_is_feasible_vs_timeout.
         shard:
@@ -172,6 +173,7 @@ jobs:
             38,
             39,
             40,
+            41,
           ]
     steps:
       - name: Checkout repository
@@ -218,11 +220,11 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Run mutation testing (shard ${{ matrix.shard }}/41)
+      - name: Run mutation testing (shard ${{ matrix.shard }}/42)
         # All flags/env (mold, --in-place, --sharding slice, --profile mutants,
         # --baseline=skip, --timeout, --locked, no --all-features) live in the
         # single source of truth so CI and local devs run the identical thing.
-        run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/41
+        run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/42
 
       - name: Upload mutants report
         if: always()
