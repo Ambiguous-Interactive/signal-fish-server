@@ -234,7 +234,8 @@ components:
       summary: Send opaque game data to other players in the room (relay floor).
       description: >-
         Each relayed frame consumes the sender's per-window relay byte budget
-        (`rate_limit.max_relay_bytes`), measured on the sender-controlled
+        (`rate_limit.max_relay_bytes`, or the sending application's
+        `max_relay_bytes` allowlist override), measured on the sender-controlled
         payload, and the relaying room's aggregate per-window ceiling
         (`rate_limit.max_room_relay_bytes`). An over-budget frame is answered
         with RATE_LIMIT_EXCEEDED and is not relayed.

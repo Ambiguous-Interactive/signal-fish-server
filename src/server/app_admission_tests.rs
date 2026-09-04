@@ -24,6 +24,7 @@ fn app_entry(
         max_rooms,
         max_players_per_room,
         rate_limit_per_minute: None,
+        max_relay_bytes: None,
     }
 }
 

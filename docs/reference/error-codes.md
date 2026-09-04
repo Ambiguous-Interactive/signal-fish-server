@@ -284,7 +284,10 @@ is not relayed, consumes no budget, and the connection stays open; the
 lockout ends when the shared fixed rate-limit window resets. A client
 hitting it is submitting relay traffic faster than the deployment's
 configured ceiling — back off to the budget's sustained rate
-(`max_relay_bytes / time_window` bytes per second).
+(`max_relay_bytes / time_window` bytes per second). Allowlisted deployments
+can replace the server-wide budget per tenant with
+`security.allowed_apps[].max_relay_bytes` (issue #530); the same rejection
+semantics apply at the override's ceiling.
 
 A fourth budget answers the same way: the relaying room's aggregate
 per-window ceiling (`rate_limit.max_room_relay_bytes`, issue #530). It

@@ -663,8 +663,12 @@ mod admission_and_budget {
     #[tokio::test]
     async fn room_relay_byte_budget_bounds_joint_senders() {
         // Each sender's own budget (1000 bytes) stays far above every frame
-        // used here; only the room ceiling (1200 bytes) can reject.
+        // used here; only the room ceiling (1200 bytes) can reject. The
+        // allowlisted tiered context pins the attribution ordering: admitted
+        // bytes are attributed per app only AFTER the room ceiling admitted
+        // the frame (issue #530).
         let server = server_with_config(|config| {
+            config.app_id_allowlist_enabled = true;
             config.rate_limit_config.max_relay_bytes = 1000;
             config.rate_limit_config.max_room_relay_bytes = 1200;
             config.rate_limit_config.time_window = Duration::from_secs(60);
@@ -673,6 +677,24 @@ mod admission_and_budget {
         let (sender_a, mut sender_a_rx) = register_client(&server).await;
         let (sender_b, mut sender_b_rx) = register_client(&server).await;
         let (peer, mut peer_rx) = register_client(&server).await;
+        let app_id = uuid::Uuid::new_v4();
+        let tiered_context = crate::auth::middleware::AppContext {
+            id: app_id,
+            name: "Tiered".to_string(),
+            organization: None,
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            rate_limits: crate::auth::middleware::RateLimits {
+                per_minute: 1000,
+                per_hour: 60_000,
+                per_day: 1_440_000,
+            },
+        };
+        for player in [&sender_a, &sender_b, &peer] {
+            server.set_client_app_context(player, tiered_context.clone());
+        }
         join_shared_room(
             &server,
             vec![
@@ -734,6 +756,12 @@ mod admission_and_budget {
             snapshot.players.relay_bytes_total, 1200,
             "only admitted bytes are accounted"
         );
+        assert_eq!(
+            snapshot.players.app_relay_bytes.get(&app_id),
+            Some(&1200),
+            "per-app attribution runs after the room ceiling admitted each frame: \
+             the rejected 1-byte submit is attributed nowhere"
+        );
         // The room-ceiling rejection retains the sender charge the frame
         // already committed: sender A's window shows 600 admitted + the
         // 1-byte rejected submit.
@@ -746,6 +774,276 @@ mod admission_and_budget {
                 .relay_bytes,
             601,
             "a room-ceiling rejection retains the sender-budget charge"
+        );
+    }
+
+    /// Per-app relay budget override (#530, handler level): an allowlisted
+    /// app's tighter override bounds each of that app's senders below the
+    /// server-wide budget, admitted bytes are attributed to the app (and
+    /// only admitted bytes), and a sender without an override keeps the
+    /// global budget.
+    #[tokio::test]
+    async fn per_app_relay_budget_override_bounds_the_apps_senders_and_attracts_their_bytes() {
+        use crate::auth::middleware::{AppContext, RateLimits};
+
+        let app_id = uuid::Uuid::new_v4();
+        // Global sender budget 1000; the app override tightens it to 300.
+        let server = server_with_config(|config| {
+            config.app_id_allowlist_enabled = true;
+            config.rate_limit_config.max_relay_bytes = 1000;
+            config.rate_limit_config.max_room_relay_bytes = 100_000;
+            config.rate_limit_config.time_window = Duration::from_secs(60);
+        })
+        .await;
+        let tiered_context = AppContext {
+            id: app_id,
+            name: "Trial Tier".to_string(),
+            organization: None,
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: Some(300),
+            rate_limits: RateLimits {
+                per_minute: 1000,
+                per_hour: 60_000,
+                per_day: 1_440_000,
+            },
+        };
+        let default_context = AppContext {
+            id: uuid::Uuid::new_v4(),
+            name: "Untiered".to_string(),
+            organization: None,
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            rate_limits: RateLimits {
+                per_minute: 1000,
+                per_hour: 60_000,
+                per_day: 1_440_000,
+            },
+        };
+
+        let (sender_a, mut sender_a_rx) = register_client(&server).await;
+        let (sender_b, mut sender_b_rx) = register_client(&server).await;
+        let (untiered, mut untiered_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        for (player, context) in [
+            (&sender_a, &tiered_context),
+            (&sender_b, &tiered_context),
+            (&peer, &tiered_context),
+            (&untiered, &default_context),
+        ] {
+            server.set_client_app_context(player, context.clone());
+        }
+        // App-scoped room admission (#520) keeps same-app members together,
+        // so the untiered sender exercises its global budget from its own
+        // room; sender budgets are per-sender and room-independent.
+        join_shared_room(
+            &server,
+            vec![
+                (&sender_a, &mut sender_a_rx),
+                (&sender_b, &mut sender_b_rx),
+                (&peer, &mut peer_rx),
+            ],
+        )
+        .await;
+        join_shared_room(&server, vec![(&untiered, &mut untiered_rx)]).await;
+
+        // The override bounds each of the app's senders individually at 300
+        // bytes (it replaces the budget value, it is not a shared pool):
+        // sender A fills his window exactly, his 1-byte follow-up is
+        // rejected, and sender B gets his own 300-byte window under the same
+        // app identity.
+        server
+            .handle_game_data_binary(
+                &sender_a,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 300]),
+            )
+            .await;
+        server
+            .handle_game_data_binary(
+                &sender_a,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1]),
+            )
+            .await;
+        server
+            .handle_game_data_binary(
+                &sender_b,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 300]),
+            )
+            .await;
+        server
+            .handle_game_data_binary(
+                &sender_b,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1]),
+            )
+            .await;
+        // Sender A: B's relayed frame, then the error for his own rejected
+        // follow-up. Sender B: A's relayed frame, then the error for his own
+        // rejected follow-up. The peer sees both admitted frames.
+        expect_error(
+            recv_relaxed(&mut sender_a_rx).await,
+            ErrorCode::RateLimitExceeded,
+        );
+        match recv_relaxed(&mut sender_a_rx).await.as_ref() {
+            ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 300),
+            other => panic!("expected sender B's relayed frame, got {other:?}"),
+        }
+        match recv_relaxed(&mut sender_b_rx).await.as_ref() {
+            ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 300),
+            other => panic!("expected sender A's relayed frame, got {other:?}"),
+        }
+        expect_error(
+            recv_relaxed(&mut sender_b_rx).await,
+            ErrorCode::RateLimitExceeded,
+        );
+        match recv_relaxed(&mut peer_rx).await.as_ref() {
+            ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 300),
+            other => panic!("expected a relayed frame, got {other:?}"),
+        }
+        match recv_relaxed(&mut peer_rx).await.as_ref() {
+            ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 300),
+            other => panic!("expected a relayed frame, got {other:?}"),
+        }
+
+        let snapshot = server.metrics().snapshot().await;
+        assert_eq!(
+            snapshot.rate_limiting.relay_bandwidth_rejections, 2,
+            "each tiered sender's over-override frame lands on the sender-budget lane"
+        );
+        assert_eq!(
+            snapshot.players.relay_bytes_total, 600,
+            "only admitted bytes are accounted server-wide"
+        );
+        assert_eq!(
+            snapshot.players.app_relay_bytes.get(&app_id),
+            Some(&600),
+            "admitted bytes are attributed to the sending application"
+        );
+        assert_eq!(
+            snapshot.players.app_relay_bytes.len(),
+            1,
+            "only the tiered app carries attributed bytes"
+        );
+
+        // The untiered sender keeps the global 1000-byte budget: 1000
+        // admitted, then rejected.
+        server
+            .handle_game_data_binary(
+                &untiered,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1000]),
+            )
+            .await;
+        server
+            .handle_game_data_binary(
+                &untiered,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1]),
+            )
+            .await;
+        expect_error(
+            recv_relaxed(&mut untiered_rx).await,
+            ErrorCode::RateLimitExceeded,
+        );
+        let snapshot = server.metrics().snapshot().await;
+        assert_eq!(
+            snapshot.players.app_relay_bytes.get(&app_id),
+            Some(&600),
+            "a rejected frame is never attributed to an app"
+        );
+        assert_eq!(
+            snapshot.players.app_relay_bytes.len(),
+            2,
+            "every allowlisted app is attributed (billing needs per-tenant totals, \
+             override or not): the untiered sender's admitted 1000 bytes count \
+             under its own app against the global budget"
+        );
+        assert_eq!(snapshot.rate_limiting.relay_bandwidth_rejections, 3);
+        assert_eq!(snapshot.players.relay_bytes_total, 1600);
+    }
+
+    /// Open-mode application identity is a client-chosen label: relay
+    /// budgets and attribution must ignore any context payload, so a
+    /// spoofed override can neither raise the budget nor fabricate a
+    /// per-app billing series (#530).
+    #[tokio::test]
+    async fn open_mode_ignores_app_relay_policy_for_enforcement_and_attribution() {
+        use crate::auth::middleware::{AppContext, RateLimits};
+
+        let spoofed = uuid::Uuid::new_v4();
+        let server = server_with_config(|config| {
+            config.app_id_allowlist_enabled = false;
+            config.rate_limit_config.max_relay_bytes = 1000;
+            config.rate_limit_config.max_room_relay_bytes = 100_000;
+            config.rate_limit_config.time_window = Duration::from_secs(60);
+        })
+        .await;
+        let (sender, mut sender_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        let spoofed_context = AppContext {
+            id: spoofed,
+            name: "spoofed-tier".to_string(),
+            organization: None,
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            // A client-chosen context must not be able to raise the budget;
+            // the wire path never sets one, and this test pins that even a
+            // hand-built one is ignored in open mode.
+            max_relay_bytes: Some(u64::MAX),
+            rate_limits: RateLimits {
+                per_minute: 1000,
+                per_hour: 60_000,
+                per_day: 1_440_000,
+            },
+        };
+        // Both members carry the same spoofed identity: app-scoped room
+        // admission (#520) otherwise refuses a cross-app join into an owned
+        // room.
+        server.set_client_app_context(&sender, spoofed_context.clone());
+        server.set_client_app_context(&peer, spoofed_context);
+        join_shared_room(
+            &server,
+            vec![(&sender, &mut sender_rx), (&peer, &mut peer_rx)],
+        )
+        .await;
+
+        // 1000 admitted under the global budget; a spoofed u64::MAX override
+        // would have admitted far more.
+        server
+            .handle_game_data_binary(
+                &sender,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1000]),
+            )
+            .await;
+        server
+            .handle_game_data_binary(
+                &sender,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![0u8; 1]),
+            )
+            .await;
+        expect_error(
+            recv_relaxed(&mut sender_rx).await,
+            ErrorCode::RateLimitExceeded,
+        );
+        match recv_relaxed(&mut peer_rx).await.as_ref() {
+            ServerMessage::GameDataBinary { payload, .. } => assert_eq!(payload.len(), 1000),
+            other => panic!("expected the first relayed frame, got {other:?}"),
+        }
+
+        let snapshot = server.metrics().snapshot().await;
+        assert_eq!(snapshot.players.relay_bytes_total, 1000);
+        assert!(
+            snapshot.players.app_relay_bytes.is_empty(),
+            "open-mode relays are never attributed per app: the label is spoofable"
         );
     }
 }

@@ -6,11 +6,14 @@
 # Runs on:
 #   - Push to main branch
 #   - Pull requests to main
-#   - Daily schedule (security audit only — the `deny` and `audit` jobs)
+#   - Daily schedule (the `deny` and `audit` security-audit jobs, plus the
+#     macOS lint/nextest lanes — issue #513)
 #
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
+#     (ubuntu + windows per push/PR; macOS on the daily schedule only)
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
+#     (ubuntu + windows per push/PR; macOS on the daily schedule only)
 #   - relay-allocations: Deterministic production-seam allocation ceilings
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Security audits, license checks, and dependency validation
@@ -35,7 +38,10 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Daily security audit at noon UTC to catch new CVEs
+    # Daily security audit at noon UTC to catch new CVEs, plus the macOS
+    # lint/nextest lanes (issue #513): macOS bills at 10x Linux per minute and
+    # the server is deployed on Linux, so macOS coverage runs daily against
+    # main instead of on every push/pull request.
     - cron: "0 12 * * *"
 
 concurrency:
@@ -52,17 +58,19 @@ jobs:
   # Fast-fail gate. A single cheap "does it format and compile" pass that the
   # expensive compile/test jobs in this workflow depend on via `needs:
   # quick-check`. A file that does not parse or type-check fails here in seconds,
-  # so the eleven gated lanes (lint x3, nextest x3, relay allocations, msrv,
-  # Docker, coverage, panic policy) allocate only a setup-free fail-closed
+  # so the gated lanes allocate only a setup-free fail-closed
   # status job —
   # collapsing what was a redundant per-lane recompile-and-fail into one fast
   # failure. This exists because an unclosed delimiter in a committed test file
   # once failed every one of those lanes independently. (Compile jobs in sibling
   # workflows such as ci-safety.yml and doc-validation.yml are out of scope here;
   # see test_ci_quick_check_gate_guards_expensive_jobs which pins this wiring.)
+  #
+  # Runs on every event, including the daily schedule: the macOS lint/nextest
+  # cron lanes (issue #513) need the same fail-closed gate, and the remaining
+  # schedule cost is minutes of Linux time per day.
   quick-check:
     name: Quick Check
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -108,6 +116,30 @@ jobs:
       - name: Check fuzz crate compiles
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
+  # Event-dependent OS cohort for the lint/nextest matrices (issue #513):
+  # macOS bills at 10x Linux per minute and the server deploys on Linux, so
+  # the macOS legs exist only on the daily cron (next-day signal for macOS
+  # regressions) while ubuntu + windows cover every push and pull request.
+  # A dynamic matrix is required because `matrix` is not an available
+  # context in a job-level `if:`; this job costs seconds of Linux time.
+  ci-matrix:
+    name: CI Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.cohort.outputs.os }}
+    steps:
+      - id: cohort
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "schedule" ]; then
+            echo 'os=["macos-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   relay-allocations:
     name: Relay Allocation Ceilings
     needs: quick-check
@@ -146,14 +178,14 @@ jobs:
 
   lint:
     name: Lint (${{ matrix.os }})
-    needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    needs: [quick-check, ci-matrix]
+    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.ci-matrix.outputs.os) }}
     steps:
       - name: Require fast-fail gate success
         shell: bash
@@ -228,14 +260,14 @@ jobs:
 
   nextest:
     name: Nextest (${{ matrix.os }})
-    needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    needs: [quick-check, ci-matrix]
+    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.ci-matrix.outputs.os) }}
     steps:
       - name: Require fast-fail gate success
         shell: bash
@@ -468,7 +500,11 @@ jobs:
   audit:
     name: Audit (cargo-audit)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 15 min: five cargo-audit lockfile scans plus two npm audits whose
+    # transient-5xx retry (up to 3 attempts + backoff each) legitimately
+    # spends the slack when the npm registry is degraded — the 10-minute
+    # budget cancelled the lane mid-retry on PR #533 (2026-09-04).
+    timeout-minutes: 15
     # Scan Rust lockfiles directly against RustSec and both locked JavaScript
     # graphs against the npm advisory service. This complements cargo-deny's
     # broader Rust policy checks (licenses, bans, and sources).
@@ -480,11 +516,37 @@ jobs:
         uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
+      # The npm advisory bulk endpoint answers 503 under registry load, which
+      # failed the whole audit lane on an otherwise-green tree (PR #533,
+      # 2026-09-04). A bounded retry with backoff absorbs the transient
+      # class; a genuine advisory finding still fails on the first
+      # successful response because `npm audit` exits non-zero on
+      # vulnerabilities.
       - name: Run npm audit (repository tooling)
-        run: npm audit
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit; then
+              exit 0
+            fi
+            status=$?
+            echo "npm audit attempt $attempt exited $status; retrying after backoff" >&2
+            sleep $((attempt * 15))
+          done
+          echo "npm audit failed after 3 attempts" >&2
+          exit "$status"
       - name: Run npm audit (browser reference client)
         working-directory: clients/browser
-        run: npm audit
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit; then
+              exit 0
+            fi
+            status=$?
+            echo "npm audit attempt $attempt exited $status; retrying after backoff" >&2
+            sleep $((attempt * 15))
+          done
+          echo "npm audit failed after 3 attempts" >&2
+          exit "$status"
       - name: Read Rust toolchain
         id: toolchain
         shell: bash

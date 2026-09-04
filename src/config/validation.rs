@@ -426,6 +426,13 @@ fn validate_app_registrations(apps: &[super::AppRegistrationEntry]) -> anyhow::R
                  when set: a zero budget rejects every Authenticate for this app"
             );
         }
+        if app.max_relay_bytes == Some(0) {
+            anyhow::bail!(
+                "security.allowed_apps[{index}].max_relay_bytes must be greater than 0 when \
+                 set: a zero relay budget rejects every relayed game-data frame for this \
+                 app, so its players can never exchange gameplay traffic"
+            );
+        }
     }
     Ok(())
 }
@@ -1561,6 +1568,30 @@ mod tests {
         );
     }
 
+    /// A per-app relay budget override shares the global budget's admission
+    /// shape (#530): zero is rejected on the production config path.
+    #[test]
+    fn zero_per_app_relay_budget_override_is_rejected_on_the_config_path() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.allowed_apps = vec![AppRegistrationEntry {
+            app_id: "trial-tier".to_string(),
+            app_name: "Trial Tier".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: Some(0),
+        }];
+
+        let err = validate_config_security(&config)
+            .expect_err("a zero per-app relay override rejects every game-data frame for the app");
+        assert!(
+            err.to_string()
+                .contains("security.allowed_apps[0].max_relay_bytes must be greater than 0"),
+            "error must name the zero per-app override with its index: {err}"
+        );
+    }
+
     #[test]
     fn allowed_apps_reject_blank_required_fields_with_indexed_errors() {
         let cases: [(&str, fn(&mut AppRegistrationEntry)); 2] = [
@@ -1575,6 +1606,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
+                max_relay_bytes: None,
             };
             mutate(&mut app);
 
@@ -1587,6 +1619,7 @@ mod tests {
                     max_rooms: None,
                     max_players_per_room: None,
                     rate_limit_per_minute: None,
+                    max_relay_bytes: None,
                 },
                 app,
             ];
@@ -1609,6 +1642,7 @@ mod tests {
             max_rooms: Some(1),
             max_players_per_room: Some(2),
             rate_limit_per_minute: Some(3),
+            max_relay_bytes: None,
         };
         let mut conflicting = entry.clone();
         conflicting.app_name = "Conflicting".to_string();
@@ -1647,6 +1681,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
+                max_relay_bytes: None,
             }];
             let mut unsafe_app = AppRegistrationEntry {
                 app_id: "probe".to_string(),
@@ -1654,6 +1689,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
+                max_relay_bytes: None,
             };
             mutate(&mut unsafe_app);
             config.security.allowed_apps.push(unsafe_app);
@@ -1810,6 +1846,7 @@ mod tests {
                 max_rooms: None,
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
+                max_relay_bytes: None,
             };
             mutate(&mut app);
             app

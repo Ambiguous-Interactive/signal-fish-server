@@ -71,9 +71,13 @@ correctness evidence appears.
   no race window).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
-- #513 — move macOS Lint/Nextest out of the per-PR/per-push CI cohort into
-  the daily cron (10x billing lever, ~2/3 of CI billed cost); requires the
-  atomic branch-protection migration checklist in the issue before landing.
+  (The #513 migration confirmed main's branch protection carries no required
+  status checks and no ruleset does either — the atomic-settings-change
+  prerequisite is already satisfied repo-side.)
+- #513 — macOS Lint/Nextest moved to the daily cron cohort (workflow,
+  contract tests, docs landed together). Remaining: post-merge verification
+  that one PR run and one cron run produce the expected check sets, and
+  billed-minute before/after evidence on the issue.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
@@ -90,4 +94,6 @@ correctness evidence appears.
   room's recipient mix requires (4–5 allocs/relay single-encoding; 14–21
   for v2+v3 mixed rooms, with each cohort's frame cached once per relay and
   sibling recipients reusing clones), so no allocation-level target remains at
-  these layers without changing wire bytes or delivery semantics.
+  these layers without changing wire bytes or delivery semantics. The
+  session-212 budget gate reads app policy through a lock-guarded projection
+  of `Copy` fields, keeping the charge path allocation-free.

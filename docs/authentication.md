@@ -130,6 +130,12 @@ entries, or the credential story tracked in issue #517.
   entry limited to 1 per minute, the share is that single handshake); clients
   sharing one NAT egress share that source budget. A botnet spanning many
   sources is bounded by the application-wide ceiling itself.
+- `max_relay_bytes` — optional per-sender game-data relay byte budget for this
+  application (issue #530): admitted relay payload charges draw from this
+  budget instead of the server-wide `rate_limit.max_relay_bytes` default, so
+  hosted tiers can bound tenants independently. The fixed rate-limit window
+  stays anchored to the sender, so a client cannot reset its window by
+  switching app labels; must be `> 0` when set.
 
 ## External app-registry file (`security.app_auth_path`)
 

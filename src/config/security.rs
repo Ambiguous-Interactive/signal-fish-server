@@ -303,6 +303,15 @@ pub struct AppRegistrationEntry {
     /// legitimate handshakes (issue #502).
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
+    /// Optional per-sender game-data relay byte budget override for this
+    /// application (issue #530): admitted relay payload charges draw from
+    /// this budget instead of the server-wide `rate_limit.max_relay_bytes`
+    /// default, so hosted tiers can bound tenants independently (e.g. a
+    /// paid tier above the default, or a trial tier below it). Must be
+    /// `> 0` when set: a zero override rejects every relayed game-data
+    /// frame for this app (startup validation rejects it).
+    #[serde(default)]
+    pub max_relay_bytes: Option<u64>,
 }
 
 /// The external app-registry file contract (issue #516): the same

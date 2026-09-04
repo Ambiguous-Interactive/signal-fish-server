@@ -28,7 +28,8 @@ per-app accounting limits. This does not authenticate a hostile client.
         "app_name": "My Awesome Game",
         "max_rooms": 100,
         "max_players_per_room": 16,
-        "rate_limit_per_minute": 60
+        "rate_limit_per_minute": 60,
+        "max_relay_bytes": 536870912
       }
     ]
   }
@@ -42,7 +43,8 @@ export SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true
 export SIGNAL_FISH__SECURITY__CORS_ORIGINS="https://yourgame.com"
 export SIGNAL_FISH__SECURITY__ALLOWED_APPS='[
   {"app_id":"my-game","app_name":"My Awesome Game","max_rooms":100,
-   "max_players_per_room":16,"rate_limit_per_minute":60}
+   "max_players_per_room":16,"rate_limit_per_minute":60,
+   "max_relay_bytes":536870912}
 ]'
 ```
 
@@ -50,9 +52,10 @@ When to use: any non-local deployment. `max_rooms` limits an app's persisted
 rooms across all game names, while `max_players_per_room` caps both new room
 capacity and future admission to existing rooms. Both are enforced only when
 app-ID allowlisting is enabled; omit them to use server-wide admission limits.
-`rate_limit_per_minute` is an optional per-app override. All three must be
-greater than 0 when set — a zero value rejects every creation, join, or
-authentication for that app, so startup validation refuses it (omit the field
+`rate_limit_per_minute` and `max_relay_bytes` are optional per-app overrides.
+Every field above must be greater than 0 when set — a zero value rejects
+every creation, join, authentication, or relayed game-data frame for that
+app, so startup validation refuses it (omit the field
 instead). See [Application identification](authentication.md) for the exact
 trust boundary.
 
@@ -547,6 +550,9 @@ When to adjust:
   (a room's admitted submit volume can no longer multiply past the ceiling),
   and lower it to cap a whole room's share of the host's egress bill. Keep it
   at or above the per-sender budgets your rooms legitimately use in aggregate.
+- `allowed_apps[].max_relay_bytes` — the per-tenant override of
+  `max_relay_bytes` for one application (issue #530); raise it for a paid tier
+  or lower it for a trial tier without moving the server-wide default.
 - `time_window` — the window (seconds) all the above counts apply over; must be
   `> 0`.
 
