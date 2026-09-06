@@ -274,7 +274,18 @@ components:
       payload: { $ref: '#/components/schemas/Ping' }
     Reconnect:
       title: Reconnect
-      summary: Reconnect to a room after disconnection using the join auth_token.
+      summary: >-
+        Reconnect to a room after disconnection using the join auth_token.
+        The token is a bearer seat credential: anyone who possesses it can
+        take over the seat within the reconnection window. Never log, store,
+        or expose it like a public identifier.
+      description: >-
+        Protocol-version support: reconnect tokens are pre-issued on the wire
+        only to v3+ recipients (`RoomJoined.reconnection_token`). The v2
+        envelope carries no token field, so a v2 client cannot honestly
+        present `Reconnect`; the message remains in the v2 floor for envelope
+        compatibility only. See the protocol version lifecycle policy in
+        docs/protocol.md.
       payload: { $ref: '#/components/schemas/Reconnect' }
     JoinAsSpectator:
       title: JoinAsSpectator
@@ -1026,7 +1037,12 @@ components:
           properties:
             player_id: { $ref: '#/components/schemas/PlayerId' }
             room_id: { $ref: '#/components/schemas/RoomId' }
-            auth_token: { type: string, description: Token issued at initial join. }
+            auth_token:
+              type: string
+              description: >-
+                Token issued at initial join. Bearer credential: possession
+                authorizes seat takeover within the reconnection window;
+                protect it like a password (never log, never screenshare).
       required: [type, data]
     JoinAsSpectator:
       type: object
@@ -1053,7 +1069,12 @@ components:
         room_operation_ids and ProtocolInfo.capabilities echoes that token.
         operation_id is an opaque client-generated UUID unique among live or
         recently completed operations on this physical connection. The server
-        echoes it but does not deduplicate or make operations idempotent.
+        echoes it but does not deduplicate or make operations idempotent:
+        duplicate operations MAY re-execute and re-apply their effects.
+        Senders SHOULD correlate operation_id values and deduplicate on their
+        side, and every new operation added to this surface MUST establish
+        its own server-side replay guard (today: `ALREADY_IN_ROOM` and the
+        seat-fill gate).
       properties:
         type: { const: RoomOperation }
         data:
@@ -2226,7 +2247,13 @@ components:
             retry_after_secs:
               type: integer
               nullable: true
-              description: Optional operator retry hint.
+              description: >-
+                Optional operator retry hint: the earliest safe attempt
+                against the DEPLOYMENT, not this instance. Server state
+                (rooms, reconnection tokens) does not survive a restart, so
+                clients should reconnect to another instance of the
+                deployment and build a fresh room rather than retrying this
+                instance.
       required: [type, data]
     DeliveryReport:
       type: object

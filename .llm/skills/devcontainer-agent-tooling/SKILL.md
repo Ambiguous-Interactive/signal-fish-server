@@ -2,9 +2,9 @@
 name: devcontainer-agent-tooling
 description: >-
   Maintain the devcontainer agent-tooling contract: sudo-free npm, fast
-  latest-version CLI refresh (Codex, OpenCode, Nanocoder), and GitHub MCP
-  wiring for every agent harness. Use when touching .devcontainer/, agent CLI
-  installation, or any MCP config file.
+  latest-version CLI/MCP refresh (Codex, OpenCode, Nanocoder, Z.AI Vision),
+  and GitHub/Z.AI MCP wiring for every agent harness. Use when touching
+  .devcontainer/, agent CLI installation, or any MCP config file.
 ---
 
 # Devcontainer Agent Tooling
@@ -17,7 +17,7 @@ description: >-
   post-start.sh, lib-agent-tools.sh)
 - Adding, removing, or reconfiguring an agent harness (Codex, Claude Code,
   Copilot, VS Code, OpenCode, Nanocoder) or its MCP servers
-- Touching npm global installs, the npm prefix, or the GitHub MCP server pin
+- Touching npm global installs, the npm prefix, or GitHub/Z.AI MCP servers
 - Diagnosing "devcontainer opens slowly" or "npm install needs sudo"
 
 ---
@@ -32,29 +32,48 @@ description: >-
    AFTER the Dockerfile, and the nvm-based Node feature aborts its install when
    `NPM_CONFIG_PREFIX` (or `PREFIX`) is set ("nvm is not compatible with the
    NPM_CONFIG_PREFIX environment variable"), failing every image build.
-   `sudo npm install -g` is always a bug.
-2. **Latest agent CLIs**: `@openai/codex@latest`, `opencode-ai@latest`,
-   `@nanocollective/nanocoder@latest` install on create and refresh on every
-   start via `.devcontainer/lib-agent-tools.sh`.
+   The root and browser-client `node_modules` named volumes must be writable by
+   the remote user. `sudo npm install` (local or global) is always a bug.
+2. **Latest npm agent tools**: `@openai/codex@latest`, `opencode-ai@latest`,
+   `@nanocollective/nanocoder@latest`, and `@z_ai/mcp-server@latest` install on
+   create and refresh on every start via `.devcontainer/lib-agent-tools.sh`.
+   Pass `--allow-scripts="$pkg"` so npm 11 runs OpenCode's required postinstall
+   while authorizing lifecycle scripts only for the selected package.
 3. **Fast launches**: the refresh is gated by a registry version-check fast
-   path — probe `npm view <spec> version`, compare with `npm ls -g --json`,
-   skip the reinstall when equal, and when the registry is unreachable keep
-   the installed CLI and skip the otherwise-doomed install of an absent CLI
-   (warn and continue; rerun post-create when online). Never reintroduce an
-   unconditional `npm install -g <pkg>@latest` on the launch path.
-4. **Best-effort lifecycle**: every step in post-create/post-start warns and
+   path — use one bulk `npm outdated -g --json` request with local
+   `npm ls -g --json` state, use `npm view` only for a missing tool, and skip
+   reinstalls when current. When the registry is unreachable, keep installed
+   tools and skip otherwise-doomed absent-tool installs (warn and continue;
+   rerun post-create when online). Never reintroduce an unconditional
+   `npm install -g <pkg>@latest` on the launch path.
+4. **Fast attach**: keep `waitFor: updateContentCommand` explicit so
+   post-create/start network refreshes run behind the editor attach point.
+5. **Best-effort lifecycle**: every step in post-create/post-start warns and
    continues; a failure must never block the container from opening.
    Bootstrap functions `return`, never `exit`.
-5. **GitHub MCP everywhere**: the pinned, checksum-verified
+6. **GitHub MCP everywhere**: the pinned, checksum-verified
    `github-mcp-server` binary (`ARG GITHUB_MCP_VERSION` in the Dockerfile)
    is wired into every harness below. Auth is environmental
-   (`GITHUB_PERSONAL_ACCESS_TOKEN` via `remoteEnv`), never stored in config.
+   (`GITHUB_PERSONAL_ACCESS_TOKEN` via runtime `.env.local` and `remoteEnv`), never stored in config.
 
-6. **The image builds in CI**: `.github/workflows/devcontainer-build.yml`
+7. **Z.AI MCP everywhere**: all frontends invoke `.devcontainer/zai-mcp.mjs`
+   over stdio. It parses repository `.env.local` at startup using Node `parseEnv`;
+   file keys override inherited credentials, including explicit empty values.
+   Missing files/keys fall back to `Z_AI_API_KEY`. Restart MCP servers after key
+   changes; no rebuild required. The launcher runs the preinstalled Vision binary
+   and uses its bundled MCP SDK for remote HTTP/SSE. Never download at startup.
+   `configure-zai-mcp.py` migrates only marker-owned Codex entries to absolute
+   launcher paths and preserves custom tables. No keys are stored in config.
+   Keep `.env*` out of Docker builds; empty `.env.local` is valid without MCP use.
+   `check-zai-mcp.py --live` checks the exact launcher through tools/list.
+8. **The image builds and runs in CI**: `.github/workflows/devcontainer-build.yml`
    builds the devcontainer image via `devcontainers/ci` on `.devcontainer/**`
    changes and monthly (upstream base-image/feature drift). Feature installs
    only fail at image-build time, so this is the only check that catches
-   devcontainer-only breakage before a developer's local rebuild.
+   devcontainer-only breakage before a developer's local rebuild. It runs the
+   real post-start path and `.devcontainer/verify-agent-tooling-runtime.sh` to
+   prove sudo-free global npm installation, writable local dependency volumes,
+   and tool availability.
 
 | Harness | Config | Key fields |
 | --- | --- | --- |
@@ -63,6 +82,11 @@ description: >-
 | Claude Code | `.mcp.json` | `mcpServers.github`, **`"type": "stdio"`** |
 | Nanocoder | `.mcp.json` (same file) | `mcpServers.github`, **`"transport": "stdio"`** |
 | OpenCode | `opencode.json` | `mcp.github`, `"type": "local"`, `command: [...]`, **`environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "{env:GITHUB_PERSONAL_ACCESS_TOKEN}" }`** |
+
+Each config also registers `zai-vision`, `zai-web-search`, `zai-web-reader`,
+and `zai-zread`. Local Vision always invokes the preinstalled
+`/home/vscode/.npm-global/bin/zai-mcp-server`; do not replace it with `npx`,
+which introduces a network/cache dependency during MCP startup.
 
 **Dual-key invariant**: `.mcp.json` must carry BOTH `type` (Claude Code) and
 `transport` (Nanocoder) — dropping either silently unwires one harness.
@@ -96,12 +120,15 @@ Changing the contract requires updating ALL of the above in the same commit.
 bash -n .devcontainer/*.sh
 shellcheck --severity=warning .devcontainer/*.sh
 bash scripts/check-tooling-parity.sh
+python3 scripts/test_zai_mcp.py
+node --test scripts/test-zai-mcp.mjs
 cargo nextest run -E 'test(agent_tooling_guards)'
 ```
 
-For runtime behavior, simulate a launch refresh:
-`bash -c 'source .devcontainer/lib-agent-tools.sh && install_codex_cli'` —
-it must print the fast-path skip when already current.
+For runtime behavior, run `bash .devcontainer/post-start.sh`, then
+`bash .devcontainer/verify-agent-tooling-runtime.sh`. Current packages must
+print the fast-path skip and the smoke check must install its local fixture
+globally without sudo.
 
 The full image build (features included) is validated by
 `.github/workflows/devcontainer-build.yml`; it is too heavy to run locally on
@@ -121,6 +148,14 @@ every change, so rely on it in CI and on the static guards above.
 - Removing the `environment` pass-through from `opencode.json` → the OpenCode
   GitHub MCP server starts unauthenticated and prompts the OAuth device flow
   every session (issue #496).
+- Replacing the preinstalled Z.AI Vision command with `npx` → every MCP startup
+  can wait on the registry and becomes unreliable offline.
+- Dropping the package-scoped `--allow-scripts` option → npm 11 can skip
+  OpenCode's platform-binary postinstall and leave a fresh install unusable.
+- Hardcoding `Z_AI_API_KEY` or derived authorization headers → leaks a secret;
+  use the shared dotenv-aware launcher.
+- Removing `waitFor: updateContentCommand` → future default changes can put
+  registry work back on the editor attach path.
 - Bumping `GITHUB_MCP_VERSION` without fresh SHA256 ARGs → build fails
   checksum verification (that is the supply-chain guard working).
 - Making post-start fail the container on a network error → violates

@@ -155,21 +155,30 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   Devcontainer features install in layers appended after the Dockerfile, and
   the nvm-based Node feature aborts its install when `NPM_CONFIG_PREFIX` (or
   `PREFIX`) is already set, failing every image build.
-  `npm install -g` must never require sudo.
+  `npm install -g` must never require sudo. The root and browser-client
+  `node_modules` named volumes must also remain owned by the remote user so a
+  plain local `npm install` never requires sudo.
 - Keep `.github/workflows/devcontainer-build.yml` building the devcontainer
   image on `.devcontainer/**` changes and on a monthly schedule: feature
   installs only fail at image-build time, so this workflow is the only check
   that catches devcontainer-only breakage and upstream base-image/feature
   drift.
-- Keep the terminal agent CLIs (OpenAI Codex, OpenCode, Nanocoder) installed
-  and refreshed through `.devcontainer/lib-agent-tools.sh` (sourced by
+- Keep the terminal agent CLIs (OpenAI Codex, OpenCode, Nanocoder) and the
+  Z.AI Vision MCP package (`@z_ai/mcp-server@latest`) installed and refreshed
+  through `.devcontainer/lib-agent-tools.sh` (sourced by
   `post-create.sh` on create and `post-start.sh` on every launch) and through
   the user-owned npm prefix (`NPM_CONFIG_PREFIX=/home/vscode/.npm-global`) —
   `npm install -g` must never require sudo.
 - Keep the launch-path CLI refresh behind the registry version-check fast
-  path (`npm view` vs `npm ls -g`, offline-safe, skip when current) — never
+  path (one bulk `npm outdated -g --json` plus local installed state;
+  `npm view` only for a missing tool, offline-safe, skip when current) — never
   reintroduce an unconditional `npm install -g <pkg>@latest` on container
-  start; lifecycle scripts stay best-effort (`return`, never `exit`).
+  start. Keep `waitFor: updateContentCommand` so network refreshes remain
+  behind the editor attach point. Every lifecycle step stays best-effort
+  (`return`, never `exit`) so optional setup cannot prevent a usable attach.
+- Keep npm 11 lifecycle scripts explicitly scoped to the selected package via
+  `--allow-scripts="$pkg"`; OpenCode's platform-binary selection depends on its
+  postinstall, while a broad script allowlist needlessly expands trust.
 - Keep the pinned GitHub MCP server (`GITHUB_MCP_VERSION` in
   `.devcontainer/Dockerfile`) wired into every harness:
   `.vscode/mcp.json` (VS Code + Copilot), `.mcp.json` (Claude Code +
@@ -183,6 +192,19 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   not be relied on. The shared
   `.mcp.json` must keep BOTH keys — `type` (Claude Code) and `transport`
   (Nanocoder) — or one harness silently loses GitHub.
+- Keep the official Z.AI MCP suite wired through `.devcontainer/zai-mcp.mjs`
+  in all four harness configs. It reads `.env.local` at MCP startup, preferring
+  file keys over inherited `Z_AI_API_KEY`; restart MCP servers after edits.
+  Vision uses the preinstalled binary; HTTP servers use its bundled MCP SDK.
+  `configure-zai-mcp.py` migrates only repository-owned Codex blocks.
+  Keep keys out of config and Docker builds. Empty `.env.local` is valid for
+  credential-free fresh clones and CI. Diagnose the complete startup with
+  `python3 scripts/check-zai-mcp.py --live`.
+- Keep `.github/workflows/devcontainer-build.yml` running
+  `.devcontainer/verify-agent-tooling-runtime.sh` after the real post-start
+  path. It proves a local `npm install --global` succeeds as `vscode` without
+  sudo, verifies both project `node_modules` volumes are writable, and checks
+  all four npm-delivered agent tools are on PATH.
 - Any change to the agent-tooling contract (npm prefix, CLI refresh, MCP
   wiring) must update `tests/agent_tooling_guards.rs`,
   `scripts/check-tooling-parity.sh`, and the

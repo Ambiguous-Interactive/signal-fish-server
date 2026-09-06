@@ -30372,7 +30372,7 @@ fn test_post_create_verifies_required_rust_tools() {
 
     let required_fragments = [
         "verify_required_rust_tools",
-        "if ! install_codex_cli; then",
+        "if ! refresh_agent_npm_tools; then",
         "run_with_retries 3 5 cargo fetch",
         "is_truthy",
         "cargo-mutants",

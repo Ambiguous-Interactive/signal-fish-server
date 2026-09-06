@@ -41,12 +41,14 @@ async fn main() -> anyhow::Result<()> {
         ping_timeout: Duration::from_secs(cfg.server.ping_timeout),
         room_cleanup_interval: Duration::from_secs(cfg.server.room_cleanup_interval),
         max_rooms_per_game: cfg.server.max_rooms_per_game,
+        max_rooms: cfg.server.max_rooms,
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
             max_room_creations: cfg.rate_limit.max_room_creations,
             time_window: Duration::from_secs(cfg.rate_limit.time_window),
             max_join_attempts: cfg.rate_limit.max_join_attempts,
             max_signals: cfg.rate_limit.max_signals,
             max_signal_errors: cfg.rate_limit.max_signal_errors,
+            max_inbound_error_replies: cfg.rate_limit.max_inbound_error_replies,
         },
         empty_room_timeout: Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: Duration::from_secs(cfg.server.inactive_room_timeout),
@@ -123,7 +125,13 @@ async fn main() -> anyhow::Result<()> {
 Implement the `GameDatabase` trait for custom room-record storage. This alone
 does not persist a live room across process restart; read the
 [consistency and durability contract](architecture/consistency-and-durability.md)
-before designing a custom backend:
+before designing a custom backend.
+
+Override `get_total_room_count` with your storage's exact live-room count:
+its trait default fails closed (returns an error), and the server-wide room
+ceiling (`server.max_rooms`, on by default) consults it on every room
+creation, so a backend that does not implement the query refuses every
+creation:
 
 ```rust
 
@@ -141,6 +149,13 @@ pub struct MyCustomDatabase {
 
 #[async_trait]
 impl GameDatabase for MyCustomDatabase {
+    // Required for the server-wide room ceiling (server.max_rooms): the
+    // trait default fails closed and refuses every room creation.
+    async fn get_total_room_count(&self) -> anyhow::Result<usize> {
+        // Return the exact live-room row count from your storage.
+        todo!("sum the live rooms your storage holds")
+    }
+
     async fn initialize(&self) -> Result<()> {
         // Initialize database connection and run migrations
         Ok(())
@@ -329,7 +344,12 @@ signal-fish-server = { version = "0.8.0", features = ["tls", "legacy-fullmesh"] 
 Available features:
 
 - `tls` - Built-in TLS/mTLS support
-- `legacy-fullmesh` - Upstream matchbox full-mesh signaling mode
+- `legacy-fullmesh` - Upstream matchbox full-mesh signaling mode. **Dangerous
+  if exposed**: it carries none of the main service's controls — no
+  authentication, no app allowlist, no rate limits, no telemetry, and no
+  graceful shutdown (a matchbox 0.14 limitation). It binds the main port + 1.
+  It must never face the public internet in hosted deployments; use it only
+  for local interop testing against legacy matchbox clients.
 
 ## Testing
 

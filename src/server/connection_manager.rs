@@ -255,6 +255,7 @@ fn is_transient_socket_close_reason(reason: crate::coordination::CloseReason) ->
         | CloseReason::IdleTimeout
         | CloseReason::SlowConsumer
         | CloseReason::OutboundMessageTooLarge
+        | CloseReason::InboundRateLimited
         | CloseReason::Unregistered => true,
         // Identity/room-scoped: a drain must close restored connections, and
         // a room pin reflects the room the claim just verified.

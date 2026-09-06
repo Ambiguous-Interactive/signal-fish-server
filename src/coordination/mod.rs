@@ -349,6 +349,11 @@ pub enum CloseReason {
     /// deleted by maintenance. This is terminal: the deleted room cannot be
     /// resumed through a stale local assignment or reconnection token.
     RoomInactive,
+    /// The connection exhausted its per-window inbound application-message
+    /// budget (`rate_limit.max_inbound_messages`, issue #518). Counting every
+    /// frame before parsing keeps malformed-frame error replies (and per-frame
+    /// CPU) bounded for one connection.
+    InboundRateLimited,
     /// A fully encoded server message exceeded the configured outbound
     /// aggregate payload limit. No prefix of that application message was
     /// handed to the WebSocket sink.
@@ -377,6 +382,7 @@ impl CloseReason {
             Self::ActivityTimeout => 4003,
             Self::IdleTimeout => 4004,
             Self::RoomInactive => 4005,
+            Self::InboundRateLimited => 4006,
             // RFC 6455's standard "message too big" code. Unlike the private
             // operational reasons above, this condition has an exact standard
             // close-code meaning clients already understand.
@@ -397,6 +403,7 @@ impl CloseReason {
             Self::ActivityTimeout => "activity_timeout",
             Self::IdleTimeout => "idle_timeout",
             Self::RoomInactive => "room_inactive",
+            Self::InboundRateLimited => "inbound_rate_limited",
             Self::OutboundMessageTooLarge => "outbound_message_too_large",
             Self::Unregistered => "unregistered",
         }

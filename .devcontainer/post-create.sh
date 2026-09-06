@@ -13,8 +13,8 @@ echo "  Signal Fish Server — Setting up dev env"
 echo "============================================"
 echo ""
 
-# Shared agent-tooling helpers (npm prefix, Codex/OpenCode/Nanocoder install,
-# GitHub MCP wiring) live in lib-agent-tools.sh, which also powers
+# Shared agent-tooling helpers (npm prefix, Codex/OpenCode/Nanocoder/Z.AI
+# installs, GitHub + Z.AI MCP wiring) live in lib-agent-tools.sh, which powers
 # .devcontainer/post-start.sh on every container launch.
 
 prepare_worktree_cache_dirs() {
@@ -91,17 +91,20 @@ verify_required_rust_tools() {
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "[setup] ERROR: required tool '$tool' is missing from PATH."
             echo "[setup] Rebuild the dev container so the tooling image layer is refreshed."
-            exit 1
+            return 1
         fi
     done
 
     # Ensure key binaries execute successfully, not just exist on PATH.
-    cargo-deny --version >/dev/null
-    cargo-nextest --version >/dev/null
-    cargo llvm-cov --version >/dev/null
-    cargo mutants --version >/dev/null
-    cargo fuzz --help >/dev/null 2>&1
-    taplo --version >/dev/null
+    if ! cargo-deny --version >/dev/null \
+        || ! cargo-nextest --version >/dev/null \
+        || ! cargo llvm-cov --version >/dev/null \
+        || ! cargo mutants --version >/dev/null \
+        || ! cargo fuzz --help >/dev/null 2>&1 \
+        || ! taplo --version >/dev/null; then
+        echo "[setup] ERROR: one or more required Rust tools failed their smoke check."
+        return 1
+    fi
     echo "[setup] Rust tooling verified."
 }
 
@@ -126,7 +129,10 @@ make_project_scripts_executable() {
         return 0
     fi
 
-    chmod_log="$(mktemp)"
+    if ! chmod_log="$(mktemp)"; then
+        echo "[setup] Warning: could not create a chmod diagnostic log; skipping executable-bit normalization."
+        return 1
+    fi
     if find scripts -type f -name '*.sh' -exec chmod +x {} + 2>"$chmod_log"; then
         rm -f "$chmod_log"
         echo "[setup] Made scripts/**/*.sh executable."
@@ -138,29 +144,27 @@ make_project_scripts_executable() {
     rm -f "$chmod_log"
 }
 
-prepare_worktree_cache_dirs
-configure_git_safe_directory
-
-if ! install_codex_cli; then
-    echo "[setup] Warning: Codex CLI installation failed after retries; continuing setup."
-    echo "[setup] You can retry later with: npm install --global --include=optional ${CODEX_NPM_SPEC:-@openai/codex@latest}"
+if ! prepare_worktree_cache_dirs; then
+    echo "[setup] Warning: named-volume ownership setup failed; continuing."
 fi
 
-if ! install_opencode_cli; then
-    echo "[setup] Warning: OpenCode CLI installation failed after retries; continuing setup."
-    echo "[setup] You can retry later with: npm install --global --include=optional ${OPENCODE_NPM_SPEC:-opencode-ai@latest}"
+if ! configure_git_safe_directory; then
+    echo "[setup] Warning: Git safe-directory setup failed; continuing."
 fi
 
-if ! install_nanocoder_cli; then
-    echo "[setup] Warning: Nanocoder CLI installation failed after retries; continuing setup."
-    echo "[setup] You can retry later with: npm install --global --include=optional ${NANOCODER_NPM_SPEC:-@nanocollective/nanocoder@latest}"
+# Config is local and fast, so make every MCP available before registry work.
+if ! configure_codex_mcp_servers; then
+    echo "[setup] Warning: Codex MCP configuration failed; continuing setup."
 fi
 
-if ! configure_codex_github_mcp; then
-    echo "[setup] Warning: Codex GitHub MCP configuration failed; continuing setup."
+if ! refresh_agent_npm_tools; then
+    echo "[setup] Warning: one or more agent npm tools failed to refresh; continuing setup."
+    echo "[setup] Retry later with: bash .devcontainer/post-start.sh"
 fi
 
-verify_required_rust_tools
+if ! verify_required_rust_tools; then
+    echo "[setup] Warning: required Rust tooling verification failed; continuing so the container remains usable."
+fi
 
 # Pre-download all dependencies
 echo "[setup] Fetching cargo dependencies..."
@@ -179,12 +183,17 @@ else
     echo "[setup] Skipping cargo check warm-up (set SIGNAL_FISH_WARM_CARGO_CHECK=1 to enable)."
 fi
 
-make_project_scripts_executable
+if ! make_project_scripts_executable; then
+    echo "[setup] Warning: script executable-bit normalization failed; continuing."
+fi
 
 # Install git hooks if the script exists
 if [ -f "scripts/enable-hooks.sh" ]; then
-    bash scripts/enable-hooks.sh --quiet
-    echo "[setup] Git hooks configured."
+    if bash scripts/enable-hooks.sh --quiet; then
+        echo "[setup] Git hooks configured."
+    else
+        echo "[setup] Warning: Git hook setup failed; continuing."
+    fi
 fi
 
 echo ""
@@ -209,12 +218,12 @@ echo "    codex                               Start Codex CLI; sign in if prompt
 echo "    opencode                            Start OpenCode"
 echo "    nanocoder                           Start Nanocoder"
 echo ""
-echo "  Agent CLIs refresh on every container start (.devcontainer/post-start.sh);"
+echo "  Agent CLIs and the Z.AI Vision MCP refresh on every container start;"
 echo "  rerun manually with: bash .devcontainer/post-start.sh"
 echo ""
-echo "  GitHub MCP is wired into every harness (Codex, Claude Code, Copilot,"
-echo "  VS Code, OpenCode, Nanocoder). Export GITHUB_PERSONAL_ACCESS_TOKEN to"
-echo "  authenticate it (set it on your host before opening the container)."
+echo "  GitHub and Z.AI MCPs are wired into every harness (Codex, Claude Code,"
+echo "  Copilot, VS Code, OpenCode, Nanocoder). Set these in .env.local before"
+echo "  opening the container: GITHUB_PERSONAL_ACCESS_TOKEN and Z_AI_API_KEY."
 echo ""
 echo "  Full check (mandatory before commit):"
 echo "    cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features"

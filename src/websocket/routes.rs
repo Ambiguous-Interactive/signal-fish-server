@@ -74,10 +74,13 @@ pub(crate) fn configure_accepted_socket(stream: &TcpStream) {
 /// low-latency relay: a bounded send buffer (via [`bind_tcp_listener`]) plus
 /// `TCP_NODELAY` (via the crate-internal `configure_accepted_socket`).
 ///
-/// This is the single seam every plain `axum::serve` path uses — the production
-/// server, the `run_server` convenience entry point, and the integration-test
-/// harness — so they share identical accepted-socket semantics and a regression
-/// in the nodelay wiring fails tests instead of silently shipping (issue #197).
+/// `bind_serve_listener` (this fn) remains the single seam for plain
+/// `axum::serve` consumers; the production server, `run_server`, and the
+/// integration-test harness instead use
+/// [`serve_with_http_header_deadline`], which applies the identical
+/// `configure_accepted_socket` per accepted stream — so every path shares
+/// accepted-socket semantics and a regression in the nodelay wiring fails
+/// tests instead of silently shipping (issue #197).
 pub fn bind_serve_listener(
     addr: SocketAddr,
     socket_send_buffer_bytes: u32,
@@ -92,6 +95,142 @@ pub fn bind_serve_listener(
 /// concrete `TapIo`.
 fn configure_accepted_socket_io(stream: &mut TcpStream) {
     configure_accepted_socket(stream);
+}
+
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use hyper_util::service::TowerToHyperService;
+// `IntoMakeServiceWithConnectInfo` implements `tower_service::Service<SocketAddr>`
+// through axum's `Connected<SocketAddr>` impl: calling it per accepted
+// connection reproduces exactly what axum::serve does internally.
+use tower_service::Service;
+
+/// Serve the plain-TCP path with an explicitly armed HTTP header-read deadline.
+///
+/// `axum::serve` leaves hyper's `Timer` unset, which silently disables
+/// hyper's own (30-second) header-read timeout: a raw-HTTP client can park a
+/// partial request forever before any application handler or WebSocket
+/// deadline sees it (issue #518). This path drives the same hyper-util auto
+/// builder axum drives, but arms `timer` + `header_read_timeout`, applies the
+/// same accepted-socket configuration as [`bind_serve_listener`], preserves
+/// axum's graceful-shutdown semantics for in-flight connections (same trigger
+/// semantics as `axum::serve::with_graceful_shutdown` over the shutdown
+/// watch), and keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps working.
+pub async fn serve_with_http_header_deadline(
+    listener: TcpListener,
+    mut make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
+        axum::Router,
+        SocketAddr,
+    >,
+    header_read_timeout: std::time::Duration,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    /// Resolves once the shared shutdown watch flips (or its sender drops) —
+    /// the same trigger semantics axum's graceful-shutdown future uses.
+    async fn shutdown_resolved(mut rx: tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *rx.borrow() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    let shutdown = shutdown_resolved(shutdown_rx.clone());
+    tokio::pin!(shutdown);
+
+    // Track every in-flight connection task so the serve future — like axum's
+    // graceful shutdown — waits for them after the accept loop stops.
+    let mut connections = tokio::task::JoinSet::new();
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                // Retry semantics copied from axum's Listener impl: transient
+                // connection errors are shed silently, anything else (e.g.
+                // EMFILE under hostile traffic) logs at error level, sleeps
+                // one second, and retries instead of killing the server.
+                let (stream, remote_addr) = match accepted {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        if !is_accept_connection_error(&error) {
+                            tracing::error!(%error, "accept error");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        continue;
+                    }
+                };
+                configure_accepted_socket(&stream);
+                // Reap completed tasks opportunistically: a JoinSet retains
+                // every finished task until it is joined, so without this the
+                // long-lived server would grow unboundedly with total
+                // connections served. Join failures (handler panics) become
+                // visible here instead of vanishing into the shutdown drain.
+                while let Some(join_result) = connections.try_join_next() {
+                    if let Err(join_error) = join_result {
+                        tracing::warn!(error = %join_error, "connection task failed");
+                    }
+                }
+                let tower_service = make_service
+                    .call(remote_addr)
+                    .await
+                    .unwrap_or_else(|error| match error {});
+                let hyper_service = TowerToHyperService::new(tower_service);
+                let shutdown_rx_clone = shutdown_rx.clone();
+
+                // Per-connection builder, mirroring axum::serve. The timer
+                // must be set for the header-read timeout to take effect at
+                // all — without it hyper's default stays silently inert.
+                connections.spawn(async move {
+                    let mut builder = auto::Builder::new(TokioExecutor::new());
+                    builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(header_read_timeout);
+                    // CONNECT protocol needed for HTTP/2 WebSockets (RFC
+                    // 8441), matching axum::serve's http2 configuration.
+                    builder.http2().enable_connect_protocol();
+
+                    let shutdown_for_task = shutdown_resolved(shutdown_rx_clone.clone());
+                    tokio::pin!(shutdown_for_task);
+                    let conn = builder.serve_connection_with_upgrades(
+                        TokioIo::new(stream),
+                        hyper_service,
+                    );
+                    tokio::pin!(conn);
+                    loop {
+                        tokio::select! {
+                            _ = &mut conn => break,
+                            _ = &mut shutdown_for_task => conn.as_mut().graceful_shutdown(),
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    // axum's graceful shutdown also WAITS for the in-flight connection tasks
+    // after the accept loop stops (each task observed the watch flip above and
+    // called `graceful_shutdown` on its connection). Mirror that: the serve
+    // future resolves only once every tracked connection has finished, so
+    // callers' post-drain bounds remain the true deadline instead of racing
+    // detached tasks.
+    while connections.join_next().await.is_some() {}
+    Ok(())
+}
+
+/// Whether an `accept` failure is a transient per-connection error that can be
+/// shed and retried immediately (copied from axum's `is_connection_error`).
+fn is_accept_connection_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
 }
 
 /// `axum_server` acceptor that applies `configure_accepted_socket` to the raw
@@ -358,8 +497,12 @@ pub async fn run_server(
     .await?;
 
     // Bind before starting background work so a port conflict cannot leave a
-    // detached task retaining the server.
-    let listener = bind_serve_listener(addr, socket_send_buffer_bytes)?;
+    // detached task retaining the server. The header-read deadline serve path
+    // applies the same accepted-socket configuration as bind_serve_listener.
+    let listener = bind_tcp_listener(addr, socket_send_buffer_bytes)?;
+    let http_header_read_timeout = std::time::Duration::from_secs(
+        server_config.websocket_config.http_header_read_timeout_secs,
+    );
 
     // Keep cleanup scoped to this serving future. Normal return signals and
     // joins it; cancellation drops the guard and aborts it.
@@ -384,14 +527,18 @@ pub async fn run_server(
         "Deployment contract: one process owns each room; losing the process loses its rooms"
     );
 
+    // Library convenience path has no shutdown choreography: the sender is
+    // never triggered, so the deadline stays armed without ever cutting the
+    // serve loop short. Named binding: a tuple temporary here would keep the
+    // receiver alive only by accident of expression evaluation order.
+    let (_never_shutdown_tx, never_shutdown_rx) = tokio::sync::watch::channel(false);
     supervise_serve_and_cleanup(
-        async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-        },
+        serve_with_http_header_deadline(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+            http_header_read_timeout,
+            never_shutdown_rx,
+        ),
         cleanup_shutdown_tx,
         cleanup_task,
     )
@@ -608,9 +755,11 @@ mod tests {
     /// algorithm (`TCP_NODELAY`) so small bidirectional relay frames are not
     /// stalled ~40-90 ms by the Nagle × delayed-ACK interaction on loopback.
     ///
-    /// Exercises the real production seam [`bind_serve_listener`] (used by the
-    /// server, `run_server`, and the test harness), so deleting the nodelay
-    /// wiring fails this test rather than shipping silently.
+    /// Exercises the [`bind_serve_listener`] tap_io seam directly, so
+    /// deleting the nodelay wiring fails this test rather than shipping
+    /// silently. The header-deadline serve loop shares the same
+    /// [`configure_accepted_socket`] call, pinned by
+    /// [`serve_loop_configures_accepted_sockets_with_the_shared_helper`].
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn regression_197_accepted_socket_disables_nagle() {
@@ -671,6 +820,32 @@ mod tests {
         assert!(
             nodelay,
             "TLS ConfiguredAcceptor must enable TCP_NODELAY on the raw stream (issue #197)"
+        );
+    }
+
+    /// The header-deadline serve loop must configure accepted sockets through
+    /// the same shared [`configure_accepted_socket`] helper the tap_io and TLS
+    /// seams use (issue #197 invariant). Source-pinned: the loop consumes the
+    /// stream inside its own task, so the behavior-level assertion lives in
+    /// the seam tests above.
+    #[test]
+    fn serve_loop_configures_accepted_sockets_with_the_shared_helper() {
+        let source = include_str!("routes.rs");
+        let serve_fn = source
+            .split("pub async fn serve_with_http_header_deadline")
+            .nth(1)
+            .expect("serve_with_http_header_deadline must exist");
+        let serve_body = serve_fn
+            .split("\n}")
+            .next()
+            .expect("serve fn body delimited");
+        assert!(
+            serve_body.contains("configure_accepted_socket(&stream);"),
+            "the header-deadline serve loop must call configure_accepted_socket on every              accepted stream so both plain paths share identical nodelay semantics"
+        );
+        assert!(
+            serve_body.contains("try_join_next()"),
+            "the serve loop must reap completed connection tasks; a JoinSet that only              joins at shutdown grows unboundedly with total connections served"
         );
     }
 }

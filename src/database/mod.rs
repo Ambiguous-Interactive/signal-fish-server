@@ -350,6 +350,14 @@ pub trait GameDatabase: Send + Sync {
         anyhow::bail!("application room counting is not supported by this database")
     }
 
+    /// Get the authoritative live-room count across every game name
+    /// (server-wide ceiling). Backends that cannot provide this query must
+    /// return an error; configured server-wide ceilings fail closed rather
+    /// than using a cache or silently bypassing the limit.
+    async fn get_total_room_count(&self) -> Result<usize> {
+        anyhow::bail!("total room counting is not supported by this database")
+    }
+
     /// Health check
     async fn health_check(&self) -> bool;
 
@@ -546,6 +554,12 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     release_get_application_room_count: tokio::sync::Notify,
     #[cfg(test)]
+    pause_get_total_room_count: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    get_total_room_count_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_get_total_room_count: tokio::sync::Notify,
+    #[cfg(test)]
     get_room_by_id_calls: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     pause_get_room_by_id: std::sync::atomic::AtomicBool,
@@ -609,6 +623,12 @@ impl InMemoryDatabase {
             get_application_room_count_reached: tokio::sync::Notify::new(),
             #[cfg(test)]
             release_get_application_room_count: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            pause_get_total_room_count: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            get_total_room_count_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_get_total_room_count: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_by_id_calls: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
@@ -702,6 +722,22 @@ impl InMemoryDatabase {
     pub(crate) fn get_application_room_count_calls_for_test(&self) -> u32 {
         self.get_application_room_count_calls
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_get_total_room_count_for_test(&self) {
+        self.pause_get_total_room_count
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_paused_get_total_room_count_for_test(&self) {
+        self.get_total_room_count_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_paused_get_total_room_count_for_test(&self) {
+        self.release_get_total_room_count.notify_one();
     }
 
     #[cfg(test)]
@@ -1517,6 +1553,19 @@ impl GameDatabase for InMemoryDatabase {
             .count())
     }
 
+    async fn get_total_room_count(&self) -> Result<usize> {
+        #[cfg(test)]
+        if self
+            .pause_get_total_room_count
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.get_total_room_count_reached.notify_one();
+            self.release_get_total_room_count.notified().await;
+        }
+        let rooms = self.rooms.read().await;
+        Ok(rooms.len())
+    }
+
     async fn health_check(&self) -> bool {
         true
     }
@@ -1878,6 +1927,44 @@ mod tests {
     use crate::protocol::ErrorCode;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    /// The server-wide room-cap pause hooks must stay usable from the
+    /// packaged crate's own test surface (their other caller lives in a test
+    /// file excluded from packaging), and `get_total_room_count` must report
+    /// the exact live-room row count.
+    #[tokio::test]
+    async fn total_room_count_reports_exact_rows_and_supports_pauses() {
+        let database = Arc::new(InMemoryDatabase::new());
+        database
+            .create_room(
+                "count-game".to_string(),
+                Some("COUNT1".to_string()),
+                4,
+                true,
+                crate::protocol::PlayerId::new_v4(),
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("fixture room created");
+
+        database.pause_next_get_total_room_count_for_test();
+        let paused_database = Arc::clone(&database);
+        let read_task = tokio::spawn(async move { paused_database.get_total_room_count().await });
+        database
+            .wait_for_paused_get_total_room_count_for_test()
+            .await;
+        database.release_paused_get_total_room_count_for_test();
+        assert_eq!(
+            read_task
+                .await
+                .expect("count task completes")
+                .expect("total count reads"),
+            1,
+            "one live room row must count as one"
+        );
+    }
 
     #[test]
     fn test_percentile_index_rounds_without_overflow() {

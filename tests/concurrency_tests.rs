@@ -171,6 +171,90 @@ async fn test_max_rooms_per_game_cap_is_enforced_under_concurrency() {
     );
 }
 
+#[tokio::test]
+async fn test_server_room_cap_is_enforced_across_games_under_concurrency() {
+    let mut server_config = test_server_config();
+    server_config.max_rooms = 2;
+    let room_cap = server_config.max_rooms;
+    let server = create_test_server_with_config(server_config, ProtocolConfig::default()).await;
+    let attempts = 6usize;
+    let barrier = Arc::new(Barrier::new(attempts));
+    let mut handles = Vec::new();
+
+    for i in 0..attempts {
+        let server_clone = server.clone();
+        let barrier_clone = barrier.clone();
+        // A distinct game per attempt: the per-game cap must never bind, so
+        // every rejection is attributable to the server-wide ceiling alone.
+        let game_name_clone = format!("server_cap_game_{i}");
+        handles.push(tokio::spawn(async move {
+            barrier_clone.wait().await;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let player_id = uuid::Uuid::new_v4();
+            server_clone.connect_client(player_id, tx).await;
+
+            server_clone
+                .handle_join_room(
+                    &player_id,
+                    game_name_clone,
+                    None,
+                    format!("Player{i}"),
+                    Some(4),
+                    Some(true),
+                    None,
+                )
+                .await;
+
+            let joined = server_clone.get_client_room(&player_id).await.is_some();
+            let mut error_code = None;
+            if !joined {
+                while let Some(message) = rx.recv().await {
+                    if let ServerMessage::RoomJoinFailed {
+                        error_code: code, ..
+                    } = message.as_ref()
+                    {
+                        error_code = code.clone();
+                        break;
+                    }
+                }
+            }
+
+            (joined, error_code)
+        }));
+    }
+
+    let mut successful_creations = 0;
+    let mut cap_rejections = 0;
+    for handle in handles {
+        let (joined, error_code) = handle.await.unwrap();
+        if joined {
+            successful_creations += 1;
+        } else if matches!(error_code, Some(ErrorCode::MaxRoomsPerGameExceeded)) {
+            cap_rejections += 1;
+        }
+    }
+
+    assert_eq!(
+        successful_creations, room_cap,
+        "Only {room_cap} rooms should be created server-wide"
+    );
+    assert_eq!(
+        cap_rejections,
+        attempts - room_cap,
+        "Every over-ceiling creation should be rejected by the server-wide cap"
+    );
+
+    let recorded_room_count = server
+        .database()
+        .get_total_room_count()
+        .await
+        .expect("total room count lookup succeeds");
+    assert_eq!(
+        recorded_room_count, room_cap,
+        "Database should never report more rooms than the server-wide cap"
+    );
+}
+
 /// Test atomic authority requests under concurrent conditions
 #[tokio::test]
 async fn test_concurrent_authority_requests() {

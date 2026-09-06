@@ -17,7 +17,7 @@
 #   - Manual dispatch
 #
 # Features:
-#   - Build-only validation via devcontainers/ci (never publishes the image)
+#   - Build-and-run validation via devcontainers/ci (never publishes the image)
 #   - Runtime smoke checks of the installed features: the Node feature must
 #     resolve `node`, and the user-owned npm prefix directory must exist and
 #     belong to the non-root `vscode` user
@@ -58,12 +58,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
+      - name: Prepare credential-free runtime environment
+        run: touch .env.local
+
       - name: Build dev container image
         uses: devcontainers/ci@v0.3.1900000450
         with:
-          # Build-only validation; the image is tagged locally, never pushed.
+          # Build the feature-augmented image, then exercise the real launch
+          # refresh and sudo-free npm path as the non-root remote user.
           imageName: signal-fish-devcontainer-ci
           push: never
+          runCmd: |
+            bash .devcontainer/post-start.sh
+            bash .devcontainer/verify-agent-tooling-runtime.sh
 
       - name: Smoke-check installed features at runtime
         run: |

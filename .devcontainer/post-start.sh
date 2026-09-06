@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Signal Fish Server — Post-start refresh (runs on EVERY container start/launch)
 #
-# Keeps the terminal agent CLIs current even when Docker reuses a cached
-# container between launches, and re-applies the Codex GitHub MCP wiring.
-# A registry version-check fast path makes the refresh a ~1s no-op when the
-# CLIs are already current, so container launch stays fast. Everything here is
+# Keeps the terminal agent CLIs and Z.AI Vision MCP current even when Docker
+# reuses a cached container, and re-applies the Codex GitHub + Z.AI MCP wiring.
+# A bulk registry version-check makes the refresh a low-cost no-op when the
+# tools are already current, so container launch stays fast. Everything here is
 # best-effort: a failure must never block the container from opening.
 set -euo pipefail
 
@@ -24,25 +24,17 @@ echo "  Signal Fish Server — Refreshing agent CLIs"
 echo "============================================"
 echo ""
 
-# Route npm global installs through the user-owned prefix (no sudo, ever).
+# Local configuration goes first so registry latency never delays MCP wiring.
 if ! configure_user_npm_prefix; then
     echo "[post-start] Warning: could not configure the user-owned npm prefix."
 fi
 
-if ! install_codex_cli; then
-    echo "[post-start] Warning: Codex CLI refresh failed; continuing."
+if ! configure_codex_mcp_servers; then
+    echo "[post-start] Warning: Codex MCP configuration failed; continuing."
 fi
 
-if ! install_opencode_cli; then
-    echo "[post-start] Warning: OpenCode CLI refresh failed; continuing."
-fi
-
-if ! install_nanocoder_cli; then
-    echo "[post-start] Warning: Nanocoder CLI refresh failed; continuing."
-fi
-
-if ! configure_codex_github_mcp; then
-    echo "[post-start] Warning: Codex GitHub MCP configuration failed; continuing."
+if ! refresh_agent_npm_tools; then
+    echo "[post-start] Warning: one or more agent npm tools failed to refresh; continuing."
 fi
 
 echo ""

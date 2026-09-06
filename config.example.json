@@ -6,6 +6,7 @@
     "room_cleanup_interval": 60,
     "drain_grace_secs": 30,
     "max_rooms_per_game": 1000,
+    "max_rooms": 10000,
     "empty_room_timeout": 300,
     "inactive_room_timeout": 3600,
     "reconnection_window": 300,
@@ -20,7 +21,8 @@
     "time_window": 60,
     "max_join_attempts": 20,
     "max_signals": 600,
-    "max_signal_errors": 60
+    "max_signal_errors": 60,
+    "max_inbound_error_replies": 3000
   },
   "protocol": {
     "max_game_name_length": 64,
@@ -97,6 +99,7 @@
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
+    "http_header_read_timeout_secs": 10,
     "idle_timeout_secs": 300,
     "server_ping_interval_secs": 10,
     "pong_timeout_secs": 5,
