@@ -45,8 +45,9 @@ description: >-
 - Verification beats inspection — always run cargo check/clippy/test
 - Two-Strike Rule: new approach after 2 failed fixes
 - Load context progressively, not all at once
-- Write all user-facing text (PRs, comments, reviews) in Simplified Technical
-  English: short sentences, active voice, common words, no hype
+- Write all user-facing text in Simplified Technical English — canonical scope
+  list in `.llm/context.md` ("Writing Style for User-Facing Text"): short
+  sentences, active voice, common words, no hype
 
 ---
 
@@ -184,8 +185,9 @@ If you've attempted to fix an issue twice and it's still broken:
 
 ## Structured Review Output
 
-Write review text in Simplified Technical English: short sentences, active
-voice, common words, concrete fixes. No praise padding, no hedging.
+Write review text in Simplified Technical English (canonical scope list in
+`.llm/context.md`): short sentences, active voice, common words, concrete
+fixes. No praise padding, no hedging.
 
 ```markdown
 ## Code Review: [description of changes]

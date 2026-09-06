@@ -99,7 +99,7 @@ provenance differs by policy. Under the enforced allowlist it is always a
 deterministic SHA-256 derivative of the public app ID string, so nothing about
 it is client-chosen. Under the open policy it is derived the same way but
 hashed under an open-policy-only namespace (issue #518), so an open-mode UUID
-can never equal a configured application's UUID and a client cannot claim
+does not equal a configured application's UUID and a client cannot claim
 another application's identity by sending that application's UUID as its
 `app_id`. The same label still always yields the same UUID, so attribution and
 room membership stay stable across handshakes and restarts.

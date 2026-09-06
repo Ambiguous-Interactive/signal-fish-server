@@ -25,7 +25,7 @@ v2 relay floor, so enabling v3 never breaks a v2-only client.
 
 | Mode | What it does | Key config (file keys + env overrides) | Exact command |
 | --- | --- | --- | --- |
-| Dev (relay v2, open app IDs) | Plain v2 WebSocket relay, open CORS, no app-ID restriction — for local development | `security.enforce_app_id_allowlist=false`, `security.cors_origins="*"`, `logging.enable_file_logging=false` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`) | `cargo run` |
+| Dev (relay v2, open app IDs) | Plain v2 WebSocket relay, open CORS, no app-ID restriction — for local development | `security.enforce_app_id_allowlist=false`, `security.cors_origins="*"` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`) | `cargo run` |
 | Prod relay v2 + app allowlist | v2 relay with public app-ID allowlisting and locked-down CORS | `security.enforce_app_id_allowlist=true`, `security.allowed_apps=[…]`, `security.cors_origins="https://yourgame.com"`, `security.max_connections_per_ip=10` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true`) | `cargo run -- --validate-config && cargo run` |
 | v3 WebRTC mesh/host + STUN | Advertises a v3 `SessionPlan` so peers connect over WebRTC, using public/self-hosted STUN to hole-punch | `session.default_topology="mesh"` (or `"host"`), `session.enable_webrtc=true`, `turn.stun_urls=["stun:…"]` (env: `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=mesh`) | `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=mesh cargo run` |
 | v3 + TURN | Adds a self-hosted coturn relay for the ~15–20% of peers that cannot hole-punch; the server mints ephemeral coturn credentials | `turn.enabled=true`, `turn.urls=["turn:turn.yourgame.com:3478"]`, `turn.static_auth_secret=<shared>`, `turn.credential_ttl_secs=3600` (env: `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET`) | `export TURN_STATIC_AUTH_SECRET="$(openssl rand -hex 32)"`<br>`export SIGNAL_FISH__TURN__STATIC_AUTH_SECRET="$TURN_STATIC_AUTH_SECRET"`<br>`docker compose --profile turn up -d` |
@@ -44,8 +44,9 @@ Per-feature JSON snippets (with env equivalents and "when to use") live in the
 The fastest way to run the server. The compiled defaults fail closed:
 metrics authentication is enabled with no token, so a bare `cargo run`
 refuses to start. The example config disables metrics auth and app-ID
-allowlisting for local use (file logging stays on; disable it with
-`logging.enable_file_logging=false` if unwanted):
+allowlisting for local use (file logging stays off, matching the compiled
+default; enable it with `logging.enable_file_logging=true` if you want
+rolling files):
 
 ```bash
 cp config.example.json config.json

@@ -212,8 +212,8 @@ Validate locally with:
 ## Writing Style: Simplified Technical English (STE)
 
 Write all user-facing text in Simplified Technical English: short, simple,
-direct. This applies to docs, CHANGELOG entries, doc comments, PR and issue
-text, commit messages, and review comments.
+direct. The canonical scope list (which texts this covers) lives in
+`.llm/context.md` under "Writing Style for User-Facing Text".
 
 - Short sentences. One idea per sentence.
 - Active voice. Name the actor ("The server closes the connection").

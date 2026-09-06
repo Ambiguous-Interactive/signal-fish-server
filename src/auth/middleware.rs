@@ -146,9 +146,10 @@ fn deterministic_uuid(key: &str) -> Uuid {
 ///
 /// Configured allowlist applications derive their UUID from the bare app ID.
 /// Hashing the open-policy label under this distinct domain keeps the two ID
-/// spaces disjoint (issue #518): an open-mode client can never land on a
+/// spaces separate (issue #518): an open-mode client cannot land on a
 /// configured application's UUID, whether by sending that UUID verbatim or by
-/// guessing a colliding label.
+/// guessing a colliding label. The separation rests on SHA-256 collision
+/// resistance (~2^-128 for a deliberate collision).
 const OPEN_POLICY_APP_ID_NAMESPACE: &str = "signal-fish:open-policy-app\0";
 
 /// Derive the open-policy application UUID for a client-supplied `app_id`.
@@ -359,12 +360,12 @@ impl AppIdAllowlist {
     ///
     /// Open-policy application identity is a client-chosen, unauthenticated
     /// label, so the UUID is always derived from the label under an
-    /// open-policy-only namespace (issue #518): it can never equal a
-    /// configured application's UUID (derived from the bare app ID), and a
-    /// client cannot claim another application's identity by sending that
-    /// application's UUID as its `app_id`. The derivation stays deterministic,
-    /// so one label keeps one UUID across handshakes and restarts — metrics
-    /// attribution and same-application room membership remain stable.
+    /// open-policy-only namespace (issue #518): it does not equal a configured
+    /// application's UUID (derived from the bare app ID), and a client cannot
+    /// claim another application's identity by sending that application's UUID
+    /// as its `app_id`. The derivation stays deterministic, so one label keeps
+    /// one UUID across handshakes and restarts — metrics attribution and
+    /// same-application room membership remain stable.
     ///
     /// Open-mode application identity scopes room admission (issue #520):
     /// rooms are stamped with the creator's application and owned rooms admit
@@ -857,13 +858,14 @@ mod tests {
         );
     }
 
-    /// The open-policy namespace must keep open-mode application UUIDs disjoint
-    /// from configured-application UUIDs (issue #518): the constructor derives
-    /// a configured UUID from the bare label, so resolving the same label in
-    /// open mode must not yield that UUID, or an open-mode client could forge a
-    /// configured application's identity in per-app metrics.
+    /// The open-policy namespace must keep open-mode application UUIDs
+    /// separate from configured-application UUIDs (issue #518): the
+    /// constructor derives a configured UUID from the bare label, so resolving
+    /// the same label in open mode must not yield that UUID, or an open-mode
+    /// client could forge a configured application's identity in per-app
+    /// metrics.
     #[tokio::test]
-    async fn open_policy_uuid_never_collides_with_configured_app_uuid() {
+    async fn open_policy_uuids_are_namespaced_away_from_configured_uuids() {
         let open = AppIdAllowlist::disabled();
         for label in ["game-1", "550e8400-e29b-41d4-a716-446655440000", "my-game"] {
             let configured_id = deterministic_uuid(label);

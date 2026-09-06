@@ -169,16 +169,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `logging.dir`) explicitly and manage retention themselves.
 - Open-policy application UUIDs are now derived under an open-policy-only
   namespace (issue #518). Previously a well-formed UUID sent as `app_id`
-  became the application UUID verbatim, so a client could forge any
-  application's identity in per-app metrics and attribution — including a
+  became the application UUID verbatim. A client could therefore forge any
+  application's identity in per-app metrics and attribution, including a
   configured application's derived UUID. The derivation stays deterministic in
   the label: the same label keeps the same UUID, and room-membership behavior
-  is unchanged; only the resulting UUID values differ.
-- The `/metrics` `metricsSnapshot` field is capped at 128 KiB of serialized
-  JSON (issue #518). The raw snapshot includes per-identity maps
-  (slow-consumer eviction attributions, per-app relay bytes) whose size grows
-  with live traffic; an oversized snapshot is replaced by a small
-  `truncated`/`sizeBytes`/`capBytes` marker instead of an unbounded response.
+  is unchanged. Only the resulting UUID values differ.
+- The `/metrics` response is now size-bounded (issue #518). Three guards:
+  the `metricsSnapshot` field is capped at 128 KiB of serialized JSON and
+  replaced by a `truncated`/`sizeBytes`/`capBytes` marker when larger; the
+  `roomsByGame` and `gamePercentiles` maps are capped at 256 entries each
+  (lexicographically first names kept) with a `<field>Truncated: true` marker
+  when entries are dropped; truncation warnings are throttled. These maps grow
+  with live traffic (per-identity attribution maps, client-chosen game names),
+  so an unauthenticated or misconfigured metrics endpoint was an
+  information-disclosure firehose and a response-size amplifier.
 - CI cost cohort (issue #513): the macOS `Lint`/`Nextest` lanes moved from
   every push/pull request to the daily noon cron against `main` (macOS bills
   at 10x Linux per minute while deployments are Linux containers), so macOS
