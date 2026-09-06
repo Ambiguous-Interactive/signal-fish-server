@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Devcontainer agent tooling now keeps Codex, OpenCode, Nanocoder, and the
+  Z.AI Vision MCP server current on create and launch without blocking editor
+  attachment; configures GitHub plus Z.AI Vision, Web Search, Web Reader, and
+  Zread MCP servers for Codex, Claude Code, Copilot/VS Code, OpenCode, and
+  Nanocoder, loading `.env.local` at Z.AI MCP startup so credential updates
+  take effect after restarting MCP servers; and verifies that user-owned global npm installs work without
+  `sudo` across fresh clones and full rebuilds.
 - `security.allowed_apps[].max_relay_bytes` (optional per-app override of
   `rate_limit.max_relay_bytes`): allowlisted deployments can replace the
   server-wide per-sender relay byte budget per tenant, so hosted tiers can

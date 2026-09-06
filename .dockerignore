@@ -1,3 +1,7 @@
 target/
 .git/
 coverage/
+
+# Local credentials are runtime-only, never part of the build context.
+.env
+.env.*

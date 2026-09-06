@@ -7,16 +7,20 @@
 //!      a Dockerfile `ENV NPM_CONFIG_PREFIX` leaks into devcontainer feature
 //!      installs, which run in layers appended AFTER the Dockerfile, and nvm
 //!      aborts when NPM_CONFIG_PREFIX is set — breaking every image build.
-//!   2. The terminal agent CLIs (OpenAI Codex, OpenCode, Nanocoder) installed
-//!      at the latest npm version and refreshed on every container start —
-//!      through a registry version-check fast path, so an ordinary launch
-//!      pays a couple of registry probes instead of three full reinstalls.
+//!   2. The terminal agent CLIs (OpenAI Codex, OpenCode, Nanocoder) and Z.AI
+//!      Vision MCP server installed at the latest npm version and refreshed on
+//!      every container start — through a registry version-check fast path, so
+//!      an ordinary launch never performs unconditional reinstalls.
 //!   3. The pinned, checksum-verified GitHub MCP server wired into every
 //!      agent harness: Codex (`~/.codex/config.toml`, written idempotently by
 //!      `.devcontainer/lib-agent-tools.sh`), VS Code + Copilot
 //!      (`.vscode/mcp.json`), Claude Code + Nanocoder (`.mcp.json`), and
-//!      OpenCode (`opencode.json`).
-//!   4. The devcontainer image itself builds in CI
+//!      OpenCode (`opencode.json`). The same harnesses receive the official
+//!      Z.AI Vision, Web Search, Web Reader, and Zread MCP servers without
+//!      storing the Z.AI API key in the repository.
+//!   4. Every lifecycle step is best-effort so an optional network/tooling
+//!      failure cannot prevent VS Code from attaching to the container.
+//!   5. The devcontainer image itself builds in CI
 //!      (`.github/workflows/devcontainer-build.yml`): feature installs only
 //!      fail at image-build time, so a broken build must surface there, not
 //!      the first time a developer rebuilds locally.
@@ -135,6 +139,28 @@ fn npm_global_installs_never_need_sudo() {
         ],
         contract,
     );
+
+    let post_create = read_live(".devcontainer/post-create.sh");
+    require_fragments(
+        &post_create,
+        &[
+            "refresh_agent_npm_tools",
+            "node_modules",
+            "sudo install -d -m 0755",
+        ],
+        contract,
+    );
+
+    let runtime_check = read_live(".devcontainer/verify-agent-tooling-runtime.sh");
+    require_fragments(
+        &runtime_check,
+        &[
+            "npm install --global",
+            "$workspace_root/node_modules",
+            "$workspace_root/clients/browser/node_modules",
+        ],
+        contract,
+    );
 }
 
 #[test]
@@ -176,18 +202,17 @@ fn build_time_env_never_breaks_the_nvm_node_feature() {
 
 #[test]
 fn agent_clis_refresh_to_latest_on_every_launch() {
-    let contract = "Codex, OpenCode, and Nanocoder must install/refresh to the \
-                    latest npm version on container create and on every start, \
-                    best-effort and skippable, via .devcontainer/lib-agent-tools.sh.";
+    let contract = "Codex, OpenCode, Nanocoder, and the Z.AI Vision MCP server \
+                    must install/refresh to the latest npm version on container \
+                    create and on every start, best-effort and skippable, via \
+                    .devcontainer/lib-agent-tools.sh.";
 
     let post_start = read_live(".devcontainer/post-start.sh");
     require_fragments(
         &post_start,
         &[
-            "install_codex_cli",
-            "install_opencode_cli",
-            "install_nanocoder_cli",
-            "configure_codex_github_mcp",
+            "refresh_agent_npm_tools",
+            "configure_codex_mcp_servers",
             "SIGNAL_FISH_SKIP_AGENT_REFRESH",
         ],
         contract,
@@ -200,6 +225,92 @@ fn agent_clis_refresh_to_latest_on_every_launch() {
             "@openai/codex@latest",
             "opencode-ai@latest",
             "@nanocollective/nanocoder@latest",
+            "@z_ai/mcp-server@latest",
+            "--allow-scripts=\"$pkg\"",
+        ],
+        contract,
+    );
+}
+
+#[test]
+fn zai_mcp_suite_is_wired_to_every_harness() {
+    let contract = "Every supported agent harness must receive the official Z.AI \
+                    Vision, Web Search, Web Reader, and Zread MCP servers. The \
+                    API key must come from Z_AI_API_KEY in the environment, \
+                    never from committed configuration.";
+
+    let devcontainer = read_live(".devcontainer/devcontainer.json");
+    require_fragments(
+        &devcontainer,
+        &[
+            "\"Z_AI_API_KEY\"",
+            "\"Z_AI_MODE\": \"ZAI\"",
+            "\"--env-file\"",
+            "${localWorkspaceFolder}/.env.local",
+            "${containerEnv:Z_AI_API_KEY:}",
+        ],
+        contract,
+    );
+
+    for path in [".vscode/mcp.json", ".mcp.json", "opencode.json"] {
+        require_fragments(
+            &read_live(path),
+            &[
+                "zai-vision",
+                "zai-web-search",
+                "zai-web-reader",
+                "zai-zread",
+                "zai-mcp.mjs",
+            ],
+            contract,
+        );
+    }
+    require_fragments(
+        &read_live(".devcontainer/lib-agent-tools.sh"),
+        &["configure_codex_mcp_servers", "configure-zai-mcp.py"],
+        contract,
+    );
+    require_fragments(
+        &read_live(".devcontainer/zai-mcp.mjs"),
+        &[
+            "../.env.local",
+            "parseEnv",
+            "values.Z_AI_API_KEY ?? environment.Z_AI_API_KEY",
+            "/home/vscode/.npm-global/bin/zai-mcp-server",
+            "https://api.z.ai/api/mcp/web_search_prime/mcp",
+            "https://api.z.ai/api/mcp/web_reader/mcp",
+            "https://api.z.ai/api/mcp/zread/mcp",
+        ],
+        contract,
+    );
+}
+
+#[test]
+fn lifecycle_tooling_failures_never_block_container_attach() {
+    let contract = "Optional devcontainer setup and refresh steps must be guarded \
+                    at the lifecycle-script top level so a transient registry, \
+                    filesystem, or tooling failure cannot prevent VS Code from \
+                    attaching or skip later setup steps.";
+
+    let post_create = read_live(".devcontainer/post-create.sh");
+    require_fragments(
+        &post_create,
+        &[
+            "if ! prepare_worktree_cache_dirs; then",
+            "if ! configure_git_safe_directory; then",
+            "if ! configure_codex_mcp_servers; then",
+            "if ! verify_required_rust_tools; then",
+            "if ! make_project_scripts_executable; then",
+        ],
+        contract,
+    );
+
+    let post_start = read_live(".devcontainer/post-start.sh");
+    require_fragments(
+        &post_start,
+        &[
+            "if ! configure_codex_mcp_servers; then",
+            "if ! refresh_agent_npm_tools; then",
         ],
         contract,
     );
@@ -223,6 +334,9 @@ fn agent_cli_refresh_is_fast_by_default() {
         &[
             "npm_registry_latest_version",
             "npm_global_installed_version",
+            "npm outdated --global --json",
+            "refresh_agent_npm_tools",
+            "known_installed",
             "[[ -z \"$latest\" ]]",
             "[[ -n \"$latest\" && \"$latest\" = \"$installed\" ]]",
             "skipping reinstall",
@@ -310,6 +424,8 @@ fn every_harness_is_wired_to_the_github_mcp_server() {
             "[mcp_servers.github]",
             "command = \"/usr/local/bin/github-mcp-server\"",
             "args = [\"stdio\"]",
+            "migrate_managed_github_env",
+            "env_vars = [\"GITHUB_PERSONAL_ACCESS_TOKEN\"]",
         ],
         contract,
     );
@@ -335,6 +451,10 @@ fn ci_enforces_the_agent_tooling_contract() {
             "\"transport\": \"stdio\"",
             "\"type\": \"local\"",
             "\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{env:GITHUB_PERSONAL_ACCESS_TOKEN}\"",
+            "@z_ai/mcp-server@latest",
+            "for endpoint in web_search_prime web_reader zread",
+            "https://api.z.ai/api/mcp/$endpoint/mcp",
+            "verify-agent-tooling-runtime.sh",
             ".devcontainer/*.sh",
             // The flipped npm-prefix guard lives in the parity script too.
             "ENV NPM_CONFIG_PREFIX",
@@ -365,6 +485,18 @@ fn ci_builds_the_devcontainer_image() {
             "cron:",
             "node --version",
             "/home/vscode/.npm-global",
+            "verify-agent-tooling-runtime.sh",
+        ],
+        contract,
+    );
+
+    let runtime_check = read_live(".devcontainer/verify-agent-tooling-runtime.sh");
+    require_fragments(
+        &runtime_check,
+        &[
+            "npm install --global",
+            "zai-mcp-server",
+            "scripts/test_zai_mcp.py",
         ],
         contract,
     );

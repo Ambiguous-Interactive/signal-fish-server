@@ -9,9 +9,9 @@
 #   5. Workspace build/dependency outputs use fast named volumes.
 #   6. Devcontainer uses cargo-binstall for heavy cargo tools to keep rebuilds fast.
 #   7. Post-create keeps required Rust tool verification and opt-in warm-up behavior.
-#   8. Agent CLIs (Codex, OpenCode, Nanocoder) install/refresh without sudo on
-#      create and on every launch, and every harness is wired to the pinned
-#      GitHub MCP server — including OpenCode's explicit
+#   8. Agent CLIs (Codex, OpenCode, Nanocoder) and the Z.AI Vision MCP server
+#      install/refresh without sudo on create and every launch. Every harness
+#      is wired to GitHub and the official Z.AI MCP suite — including OpenCode's explicit
 #      GITHUB_PERSONAL_ACCESS_TOKEN environment pass-through (observed in
 #      #496: the opencode-launched server device-flowed even with the token
 #      in the container shell). The npm prefix is runtime-only
@@ -75,6 +75,8 @@ DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
 DEVCONTAINER_POST_CREATE=".devcontainer/post-create.sh"
 DEVCONTAINER_POST_START=".devcontainer/post-start.sh"
 DEVCONTAINER_AGENT_LIB=".devcontainer/lib-agent-tools.sh"
+DEVCONTAINER_ZAI_HEADER_HELPER=".devcontainer/zai-mcp-headers.sh"
+DEVCONTAINER_RUNTIME_CHECK=".devcontainer/verify-agent-tooling-runtime.sh"
 DEVCONTAINER_BUILD_WORKFLOW=".github/workflows/devcontainer-build.yml"
 VSCODE_MCP_JSON=".vscode/mcp.json"
 ROOT_MCP_JSON=".mcp.json"
@@ -185,6 +187,8 @@ require_file "$DEVCONTAINER_JSON"
 require_file "$DEVCONTAINER_POST_CREATE"
 require_file "$DEVCONTAINER_POST_START"
 require_file "$DEVCONTAINER_AGENT_LIB"
+require_file "$DEVCONTAINER_ZAI_HEADER_HELPER"
+require_file "$DEVCONTAINER_RUNTIME_CHECK"
 require_file "$DEVCONTAINER_BUILD_WORKFLOW"
 require_file "$VSCODE_MCP_JSON"
 require_file "$ROOT_MCP_JSON"
@@ -259,10 +263,12 @@ assert_contains_literal "$DEVCONTAINER_POST_CREATE" "prepare_worktree_cache_dirs
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "configure_git_safe_directory" "Post-create trusts the bind-mounted workspace for Git"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "safe.directory" "Post-create handles Git dubious-ownership protection"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "verify_required_rust_tools" "Post-create verifies required Rust tools"
-assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! install_codex_cli; then" "Post-create treats Codex install failures as non-fatal"
-assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! install_opencode_cli; then" "Post-create treats OpenCode install failures as non-fatal"
-assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! install_nanocoder_cli; then" "Post-create treats Nanocoder install failures as non-fatal"
-assert_contains_literal "$DEVCONTAINER_POST_CREATE" "configure_codex_github_mcp" "Post-create wires the GitHub MCP server into Codex"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! refresh_agent_npm_tools; then" "Post-create treats agent npm tool refresh failures as non-fatal"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! configure_codex_mcp_servers; then" "Post-create wires GitHub and Z.AI MCP servers into Codex"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! prepare_worktree_cache_dirs; then" "Post-create treats named-volume setup failures as non-fatal"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! configure_git_safe_directory; then" "Post-create treats Git safe-directory failures as non-fatal"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! verify_required_rust_tools; then" "Post-create treats Rust tool verification failures as non-fatal"
+assert_contains_literal "$DEVCONTAINER_POST_CREATE" "if ! make_project_scripts_executable; then" "Post-create treats executable-bit normalization failures as non-fatal"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "run_with_retries 3 5 cargo fetch" "Post-create retries cargo dependency prefetch"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "is_truthy" "Post-create supports standard truthy warm-up values"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "cargo-mutants" "Post-create required-tools list includes cargo-mutants"
@@ -271,7 +277,7 @@ assert_contains_literal "$DEVCONTAINER_POST_CREATE" "cargo mutants --version" "P
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "cargo fuzz --help" "Post-create validates cargo-fuzz via cargo plugin entrypoint"
 assert_contains_literal "$DEVCONTAINER_POST_CREATE" "SIGNAL_FISH_WARM_CARGO_CHECK" "Post-create uses opt-in cargo warm-up"
 
-# Agent CLIs + GitHub MCP wiring (no-sudo npm, refresh on every launch).
+# Agent CLIs + GitHub/Z.AI MCP wiring (no-sudo npm, refresh on every launch).
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ARG GITHUB_MCP_VERSION=" "Devcontainer pins the GitHub MCP server version"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "install -m 0755 github-mcp-server /usr/local/bin/github-mcp-server" "Devcontainer installs the GitHub MCP server binary"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "github-mcp-server --version" "Devcontainer smoke checks the GitHub MCP server"
@@ -286,13 +292,16 @@ assert_not_contains_literal "$DEVCONTAINER_DOCKERFILE" "ENV PREFIX=" "Devcontain
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "mkdir -p /home/vscode/.npm-global" "Devcontainer pre-creates the user-owned npm prefix directory"
 assert_contains_literal "$DEVCONTAINER_JSON" '"NPM_CONFIG_PREFIX": "/home/vscode/.npm-global"' "Devcontainer containerEnv overrides the root-owned npm prefix"
 assert_contains_literal "$DEVCONTAINER_JSON" '"postStartCommand": "bash .devcontainer/post-start.sh"' "Devcontainer refreshes agent CLIs on every container start"
+assert_contains_literal "$DEVCONTAINER_JSON" '"waitFor": "updateContentCommand"' "Devcontainer attaches before post-create/start network work"
 assert_contains_literal "$DEVCONTAINER_JSON" '"GITHUB_PERSONAL_ACCESS_TOKEN"' "Devcontainer passes the GitHub token into the container environment"
-assert_contains_literal "$DEVCONTAINER_POST_START" "install_codex_cli" "Post-start refreshes the Codex CLI"
-assert_contains_literal "$DEVCONTAINER_POST_START" "install_opencode_cli" "Post-start refreshes the OpenCode CLI"
-assert_contains_literal "$DEVCONTAINER_POST_START" "install_nanocoder_cli" "Post-start refreshes the Nanocoder CLI"
-assert_contains_literal "$DEVCONTAINER_POST_START" "configure_codex_github_mcp" "Post-start re-applies the Codex GitHub MCP wiring"
+assert_contains_literal "$DEVCONTAINER_JSON" '"Z_AI_API_KEY"' "Devcontainer passes the Z.AI API key into the container environment"
+assert_contains_literal "$DEVCONTAINER_JSON" '"Z_AI_MODE": "ZAI"' "Devcontainer selects the Z.AI service mode"
+assert_contains_literal "$DEVCONTAINER_POST_START" "refresh_agent_npm_tools" "Post-start refreshes all npm-delivered agent tools"
+assert_contains_literal "$DEVCONTAINER_POST_START" "configure_codex_mcp_servers" "Post-start re-applies the Codex GitHub and Z.AI MCP wiring"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "install_opencode_cli" "Agent tooling library installs OpenCode"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "install_nanocoder_cli" "Agent tooling library installs Nanocoder"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '@z_ai/mcp-server@latest' "Agent tooling library installs the latest Z.AI Vision MCP server"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '--allow-scripts="$pkg"' "Agent tooling library explicitly allows only the selected package lifecycle scripts"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "NPM_CONFIG_PREFIX" "Agent tooling library enforces the user-owned npm prefix"
 assert_contains_literal "$VSCODE_MCP_JSON" '"github"' "VS Code/Copilot MCP config registers the GitHub server"
 assert_contains_literal "$VSCODE_MCP_JSON" "github-mcp-server" "VS Code/Copilot MCP config uses the pinned GitHub MCP server binary"
@@ -307,11 +316,31 @@ assert_contains_literal "$OPENCODE_JSON" '"type": "local"' "OpenCode config regi
 assert_contains_literal "$OPENCODE_JSON" '"environment"' "OpenCode config declares an MCP server environment"
 assert_contains_literal "$OPENCODE_JSON" '"GITHUB_PERSONAL_ACCESS_TOKEN": "{env:GITHUB_PERSONAL_ACCESS_TOKEN}"' "OpenCode config forwards the GitHub token into the MCP server environment"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "[mcp_servers.github]" "Agent tooling library registers the Codex GitHub MCP server table"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "migrate_managed_github_env" "Agent tooling library migrates its older Codex GitHub MCP block"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" 'env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]' "Codex explicitly forwards the GitHub token to GitHub MCP"
+
+assert_contains_literal "$DEVCONTAINER_JSON" '"--env-file"' "Devcontainer imports runtime credentials from an env file"
+assert_contains_literal "$DEVCONTAINER_JSON" '${localWorkspaceFolder}/.env.local' "Devcontainer loads the workspace credential file"
+assert_contains_literal "$DEVCONTAINER_JSON" '${containerEnv:Z_AI_API_KEY:}' "VS Code inherits the container Z.AI key"
+for config in "$VSCODE_MCP_JSON" "$ROOT_MCP_JSON" "$OPENCODE_JSON"; do
+    assert_contains_literal "$config" "zai-mcp.mjs" "Every frontend uses the dotenv-aware Z.AI launcher"
+done
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "configure-zai-mcp.py" "Codex setup migrates managed Z.AI entries"
+assert_contains_literal ".devcontainer/zai-mcp.mjs" "parseEnv" "Z.AI credentials use a data-only dotenv parser"
+assert_contains_literal ".devcontainer/zai-mcp.mjs" "../.env.local" "Z.AI startup loads the repository credential file"
+assert_contains_literal ".devcontainer/zai-mcp.mjs" "values.Z_AI_API_KEY ?? environment.Z_AI_API_KEY" "File credentials take precedence over stale inherited values"
+assert_contains_literal ".devcontainer/zai-mcp.mjs" "/home/vscode/.npm-global/bin/zai-mcp-server" "Vision uses the preinstalled binary"
+for endpoint in web_search_prime web_reader zread; do
+    assert_contains_literal ".devcontainer/zai-mcp.mjs" "https://api.z.ai/api/mcp/$endpoint/mcp" "Shared launcher registers Z.AI $endpoint"
+done
+assert_contains_literal "$DEVCONTAINER_ZAI_HEADER_HELPER" "Authorization" "Legacy header helper remains available"
 
 # Launch speed: post-start refreshes must be gated by a registry version-check
 # fast path, never by unconditional npm reinstalls on every container launch.
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "npm_registry_latest_version" "Agent tooling library probes the npm registry for the latest version"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "npm_global_installed_version" "Agent tooling library reads the installed version via npm"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "npm outdated --global --json" "Agent tooling library batches the ordinary launch registry check"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "known_installed" "Agent tooling library reuses bulk installed-version state"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "skipping reinstall" "Agent tooling library skips reinstall when a CLI is current"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "Registry unreachable; keeping installed" "Agent tooling library keeps installed CLIs when the registry is unreachable"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '[[ -z "$latest" ]]' "Agent tooling library gates every offline path behind a single registry probe"
@@ -328,7 +357,7 @@ assert_contains_literal "$ROOT_MCP_JSON" '"transport": "stdio"' "Nanocoder MCP c
 # must stay shellcheck-clean via scripts/validate-ci.sh.
 assert_contains_literal "scripts/validate-ci.sh" ".devcontainer/*.sh" "validate-ci shellchecks the devcontainer lifecycle scripts"
 
-# The devcontainer image is only ever exercised by devcontainer-build.yml:
+# The devcontainer image is exercised end-to-end by devcontainer-build.yml:
 # feature installs fail at image-build time (see the nvm/NPM_CONFIG_PREFIX
 # guard above), so no other check catches devcontainer-only breakage. The
 # workflow must keep building the image on .devcontainer changes and on a
@@ -339,6 +368,12 @@ assert_contains_literal "$DEVCONTAINER_BUILD_WORKFLOW" "'.devcontainer/**'" "Dev
 assert_contains_literal "$DEVCONTAINER_BUILD_WORKFLOW" "cron:" "Devcontainer CI build runs on a schedule to catch upstream image/feature drift"
 assert_contains_literal "$DEVCONTAINER_BUILD_WORKFLOW" "node --version" "Devcontainer CI build smoke-checks the Node feature at runtime"
 assert_contains_literal "$DEVCONTAINER_BUILD_WORKFLOW" "/home/vscode/.npm-global" "Devcontainer CI build verifies the user-owned npm prefix directory"
+assert_contains_literal "$DEVCONTAINER_BUILD_WORKFLOW" "verify-agent-tooling-runtime.sh" "Devcontainer CI runs the agent-tooling runtime smoke check"
+assert_contains_literal "$DEVCONTAINER_RUNTIME_CHECK" "npm install --global" "Runtime smoke check proves global npm installs work without sudo"
+assert_contains_literal "$DEVCONTAINER_RUNTIME_CHECK" '$workspace_root/node_modules' "Runtime smoke check verifies the root local npm dependency volume"
+assert_contains_literal "$DEVCONTAINER_RUNTIME_CHECK" '$workspace_root/clients/browser/node_modules' "Runtime smoke check verifies the browser local npm dependency volume"
+assert_contains_literal "$DEVCONTAINER_RUNTIME_CHECK" "scripts/test_zai_mcp.py" "Runtime smoke check exercises Z.AI auth regression tests"
+assert_contains_literal "$DEVCONTAINER_RUNTIME_CHECK" "zai-mcp-server" "Runtime smoke check verifies the Z.AI Vision MCP binary"
 
 if [ "$ERRORS" -gt 0 ]; then
     echo ""

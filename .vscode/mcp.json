@@ -1,17 +1,46 @@
-// GitHub MCP server for VS Code and GitHub Copilot (agent mode).
-// The server binary is pinned and checksum-verified in .devcontainer/Dockerfile.
-// The token comes from the container environment (see remoteEnv in
-// .devcontainer/devcontainer.json); VS Code expands ${env:VAR} at start.
-// Limit the token surface per project with `--toolsets` (see the
-// github/github-mcp-server README) if the default toolset list is too broad.
+// Z.AI reads .env.local at MCP startup; GitHub inherits its container token.
 {
     "servers": {
         "github": {
             "command": "github-mcp-server",
-            "args": ["stdio"],
+            "args": [
+                "stdio"
+            ],
             "env": {
                 "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_PERSONAL_ACCESS_TOKEN}"
             }
+        },
+        "zai-vision": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                "${workspaceFolder}/.devcontainer/zai-mcp.mjs",
+                "vision"
+            ]
+        },
+        "zai-web-search": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                "${workspaceFolder}/.devcontainer/zai-mcp.mjs",
+                "web-search"
+            ]
+        },
+        "zai-web-reader": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                "${workspaceFolder}/.devcontainer/zai-mcp.mjs",
+                "web-reader"
+            ]
+        },
+        "zai-zread": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                "${workspaceFolder}/.devcontainer/zai-mcp.mjs",
+                "zread"
+            ]
         }
     }
 }
