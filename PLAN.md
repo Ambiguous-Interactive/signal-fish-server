@@ -66,10 +66,12 @@ correctness evidence appears.
   pre-parse per-connection inbound-message budget closing with new close code
   `4006 inbound_rate_limited`, and an explicitly armed pre-upgrade HTTP
   header-read deadline on both serve paths (hyper's 30 s default was inert
-  without a Timer). Remaining frontier: continue seam sweeps; the parked-state
-  (`senderState`) producers are same-thread program-ordered behind their
-  `SendFull` record (verified, no race window). #518 items 4-5 (client-chosen
-  app UUID namespacing in open mode, metrics-snapshot size guard) remain.
+  without a Timer). Session 214 closed the last two #518 items: open-mode
+  app UUIDs are now namespaced (no verbatim client-chosen identity) and the
+  `/metrics` response is bounded (snapshot byte cap, game-name map entry caps
+  incl. history samples). Remaining frontier: continue seam sweeps; the
+  parked-state (`senderState`) producers are same-thread program-ordered
+  behind their `SendFull` record (verified, no race window).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
   (The #513 migration confirmed main's branch protection carries no required
