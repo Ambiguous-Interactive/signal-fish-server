@@ -72,9 +72,15 @@ export async function main(name, path = envFile) {
   const environment = credentials(path);
   if (name === 'vision') {
     const child = spawn(vision, [], { env: environment, stdio: ['inherit', 'inherit', 'inherit'] });
+    // Forward termination signals to the binary; the parent must not outlive
+    // it (a dead Vision child with a live parent would leave the harness
+    // talking to a zombie MCP server), so the child's exit terminates us.
     for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
-    child.on('error', () => { console.error('Z.AI Vision binary unavailable; rerun agent setup'); process.exitCode = 1; });
-    child.on('exit', code => { process.exitCode = code ?? 1; });
+    child.on('error', error => {
+      console.error('Z.AI Vision binary unavailable; rerun agent setup:', error.message);
+      process.exit(1);
+    });
+    child.on('exit', code => process.exit(code ?? 1));
     return;
   }
   if (!Object.hasOwn(endpoints, name)) throw new Error('Unknown Z.AI MCP server');
