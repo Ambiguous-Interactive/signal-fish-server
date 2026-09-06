@@ -183,6 +183,9 @@ fn bounded_game_name_map(
 /// Replace `map_field` in `response` with its bounded form, inserting
 /// `marker_field: true` when entries were dropped and throttled-logging the
 /// truncation with `reason` through `log`.
+///
+/// The handler always passes a top-level object and map-typed fields; any
+/// other shape is restored verbatim (fail-open to the previous behavior).
 fn bound_response_game_map(
     response: &mut serde_json::Value,
     map_field: &str,
@@ -190,10 +193,6 @@ fn bound_response_game_map(
     reason: &'static str,
     log: &RejectionLogThrottle,
 ) {
-    debug_assert!(
-        response.is_object(),
-        "bound_response_game_map expects the handler-built response object"
-    );
     let Some(taken) = response.get_mut(map_field).map(std::mem::take) else {
         return;
     };

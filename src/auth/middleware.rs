@@ -157,10 +157,7 @@ const OPEN_POLICY_APP_ID_NAMESPACE: &str = "signal-fish:open-policy-app\0";
 /// Deterministic in the label, so the same label always resolves to the same
 /// application UUID (stable attribution, stable room membership).
 fn open_policy_app_uuid(app_id: &str) -> Uuid {
-    let mut keyed = String::with_capacity(OPEN_POLICY_APP_ID_NAMESPACE.len() + app_id.len());
-    keyed.push_str(OPEN_POLICY_APP_ID_NAMESPACE);
-    keyed.push_str(app_id);
-    deterministic_uuid(&keyed)
+    deterministic_uuid(&format!("{OPEN_POLICY_APP_ID_NAMESPACE}{app_id}"))
 }
 
 /// In-memory public app-ID allowlist backed by configured application entries.
