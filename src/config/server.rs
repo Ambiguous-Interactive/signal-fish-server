@@ -3,11 +3,11 @@
 use super::defaults::{
     default_drain_grace_secs, default_empty_room_timeout, default_enable_reconnection,
     default_event_buffer_size, default_heartbeat_throttle_secs, default_inactive_room_timeout,
-    default_max_join_attempts, default_max_players, default_max_relay_bytes,
-    default_max_room_creations, default_max_room_relay_bytes, default_max_rooms_per_game,
-    default_max_signal_errors, default_max_signals, default_ping_timeout,
-    default_rate_limit_time_window, default_reconnection_window, default_region_id,
-    default_room_cleanup_interval,
+    default_max_inbound_error_replies, default_max_join_attempts, default_max_players,
+    default_max_relay_bytes, default_max_room_creations, default_max_room_relay_bytes,
+    default_max_rooms, default_max_rooms_per_game, default_max_signal_errors, default_max_signals,
+    default_ping_timeout, default_rate_limit_time_window, default_reconnection_window,
+    default_region_id, default_room_cleanup_interval,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,11 @@ pub struct ServerConfig {
     /// every room creation (startup validation rejects it).
     #[serde(default = "default_max_rooms_per_game")]
     pub max_rooms_per_game: usize,
+    /// Server-wide ceiling on total live rooms across every game name. Must
+    /// be `> 0`: a zero cap rejects every room creation (startup validation
+    /// rejects it).
+    #[serde(default = "default_max_rooms")]
+    pub max_rooms: usize,
     /// Time after creation when empty rooms expire (seconds)
     #[serde(default = "default_empty_room_timeout")]
     pub empty_room_timeout: u64,
@@ -76,6 +81,7 @@ impl Default for ServerConfig {
             room_cleanup_interval: default_room_cleanup_interval(),
             drain_grace_secs: default_drain_grace_secs(),
             max_rooms_per_game: default_max_rooms_per_game(),
+            max_rooms: default_max_rooms(),
             empty_room_timeout: default_empty_room_timeout(),
             inactive_room_timeout: default_inactive_room_timeout(),
             reconnection_window: default_reconnection_window(),
@@ -112,6 +118,16 @@ pub struct RateLimitConfig {
     /// zero): a zero budget suppresses every detailed rejection immediately.
     #[serde(default = "default_max_signal_errors")]
     pub max_signal_errors: u32,
+    /// Per-connection inbound error-reply budget per time window: how many
+    /// inbound frames the server will answer with a polite `Error` reply
+    /// (malformed, oversized, wrong-state) before closing the connection
+    /// with `4006 inbound_rate_limited`. Admitted traffic is bounded by its
+    /// own per-kind budgets, so this gate only ever binds amplified
+    /// rejections. Must be `> 0` on the binary config path (startup
+    /// validation rejects zero): a zero budget closes every connection on
+    /// its first rejected frame.
+    #[serde(default = "default_max_inbound_error_replies")]
+    pub max_inbound_error_replies: u32,
     /// Per-sender game-data relay byte budget per time window. Must be `> 0`
     /// on the binary config path (startup validation rejects zero): a zero
     /// budget rejects every relayed game-data frame, so peers can never
@@ -133,6 +149,7 @@ impl Default for RateLimitConfig {
             max_join_attempts: default_max_join_attempts(),
             max_signals: default_max_signals(),
             max_signal_errors: default_max_signal_errors(),
+            max_inbound_error_replies: default_max_inbound_error_replies(),
             max_relay_bytes: default_max_relay_bytes(),
             max_room_relay_bytes: default_max_room_relay_bytes(),
         }

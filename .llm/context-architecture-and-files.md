@@ -104,8 +104,10 @@ Nagle so small bidirectional relay frames are not stalled ~40-90 ms by the
 Nagle x delayed-ACK interaction. `TCP_NODELAY` is per-connection and not reliably
 inherited from the listen socket, so it is set on each accepted stream, not in
 `bind_tcp_listener`. Both serve paths funnel through one seam — the plain
-`axum::serve` stack via `websocket::bind_serve_listener` (`tap_io`) and the TLS
-stack via `websocket::ConfiguredAcceptor` — both calling
+stack via `websocket::serve_with_http_header_deadline` (which also arms the
+pre-upgrade header-read deadline; the legacy `bind_serve_listener` `tap_io`
+seam remains for plain `axum::serve` consumers) and the TLS stack via
+`websocket::ConfiguredAcceptor` — all calling
 `configure_accepted_socket`, so tests and production share identical semantics.
 This complements (does not conflict with) the bounded-send-buffer
 control-priority contract in `bind_tcp_listener`. Known gap: the optional

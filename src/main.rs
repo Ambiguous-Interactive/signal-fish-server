@@ -12,7 +12,6 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::watch;
 
 use std::fmt::Write as _;
-use std::future::IntoFuture as _;
 
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
@@ -218,12 +217,14 @@ async fn main() -> anyhow::Result<()> {
         room_cleanup_interval: tokio::time::Duration::from_secs(cfg.server.room_cleanup_interval),
         drain_grace: tokio::time::Duration::from_secs(cfg.server.drain_grace_secs),
         max_rooms_per_game: cfg.server.max_rooms_per_game,
+        max_rooms: cfg.server.max_rooms,
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
             max_room_creations: cfg.rate_limit.max_room_creations,
             time_window: tokio::time::Duration::from_secs(cfg.rate_limit.time_window),
             max_join_attempts: cfg.rate_limit.max_join_attempts,
             max_signals: cfg.rate_limit.max_signals,
             max_signal_errors: cfg.rate_limit.max_signal_errors,
+            max_inbound_error_replies: cfg.rate_limit.max_inbound_error_replies,
             max_relay_bytes: cfg.rate_limit.max_relay_bytes,
             max_room_relay_bytes: cfg.rate_limit.max_room_relay_bytes,
         },
@@ -324,6 +325,15 @@ async fn main() -> anyhow::Result<()> {
         // port with a loud error and a working main server instead.
         match legacy_fullmesh_addr(port) {
             Some(legacy_addr) => {
+                // Guardrail (#526): the legacy plane carries none of the main
+                // service's admission controls. Say so at startup so an
+                // operator who compiled it in cannot miss what they exposed.
+                tracing::warn!(
+                    %legacy_addr,
+                    "legacy fullmesh: UNAUTHENTICATED full-mesh relay on a permissive CORS \
+                     surface — no app allowlist, no rate limits, no telemetry, no graceful \
+                     shutdown; it must never face the public internet in hosted deployments"
+                );
                 let legacy_server =
                     matchbox_signaling::SignalingServer::full_mesh_builder(legacy_addr)
                         .cors()
@@ -416,7 +426,7 @@ async fn main() -> anyhow::Result<()> {
 
         let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?
             .into_std()?;
-        let server = axum_server::from_tcp_rustls(listener, tls_config)?
+        let mut server = axum_server::from_tcp_rustls(listener, tls_config)?
             // Disable Nagle on the raw TCP stream before the TLS handshake (#197).
             .map(|rustls| {
                 signal_fish_server::security::VerifiedClientCertificateAcceptor::new(
@@ -424,6 +434,19 @@ async fn main() -> anyhow::Result<()> {
                 )
             })
             .handle(tls_handle);
+        // Arm the pre-upgrade header-read deadline on the TLS path too:
+        // axum-server also leaves hyper's Timer unset, so its header-read
+        // timeout would otherwise stay inert (issue #518).
+        {
+            use hyper_util::rt::TokioTimer;
+            server
+                .http_builder()
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(std::time::Duration::from_secs(
+                    cfg.websocket.http_header_read_timeout_secs,
+                ));
+        }
         // Log "started" only after the bind and TLS setup have actually
         // succeeded: a log scraper reading the earlier placement would see a
         // successful start that never happened whenever the port was taken or
@@ -442,18 +465,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start the server over plain TCP (typically behind a reverse proxy).
-    // Accepted sockets are configured for low-latency relay (#197).
-    let listener = websocket::bind_serve_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
+    // Accepted sockets are configured for low-latency relay (#197), and the
+    // HTTP header-read deadline is armed explicitly: axum::serve leaves
+    // hyper's Timer unset, silently disabling hyper's header-read timeout
+    // (issue #518).
+    let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
+    let http_header_read_timeout =
+        std::time::Duration::from_secs(cfg.websocket.http_header_read_timeout_secs);
     tracing::info!(
         %addr,
         cors_origins = %cfg.security.cors_origins,
+        http_header_read_timeout_secs = cfg.websocket.http_header_read_timeout_secs,
         "Server started over HTTP - Enhanced protocol: /v2/ws, Metrics: /v1/metrics"
     );
 
     let serve_result = serve_with_post_drain_bound(
-        axum::serve(listener, make_service)
-            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
-            .into_future(),
+        websocket::serve_with_http_header_deadline(
+            listener,
+            make_service,
+            http_header_read_timeout,
+            shutdown_rx.clone(),
+        ),
         drain_done_rx,
         post_drain_settle_budget,
     )

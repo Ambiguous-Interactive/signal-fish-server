@@ -88,6 +88,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("1000"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SERVER__MAX_ROOMS",
+        path: "server.max_rooms",
+        default: Some("10000"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT",
         path: "server.empty_room_timeout",
         default: Some("300"),
@@ -151,6 +156,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         env: "SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS",
         path: "rate_limit.max_signal_errors",
         default: Some("60"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__RATE_LIMIT__MAX_INBOUND_ERROR_REPLIES",
+        path: "rate_limit.max_inbound_error_replies",
+        default: Some("3000"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES",
@@ -503,6 +513,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("10"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__WEBSOCKET__HTTP_HEADER_READ_TIMEOUT_SECS",
+        path: "websocket.http_header_read_timeout_secs",
+        default: Some("10"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS",
         path: "websocket.idle_timeout_secs",
         default: Some("300"),
@@ -771,6 +786,7 @@ fn test_config_default_values() {
     assert_eq!(config.server.room_cleanup_interval, 60);
     assert_eq!(config.server.drain_grace_secs, 30);
     assert_eq!(config.server.max_rooms_per_game, 1000);
+    assert_eq!(config.server.max_rooms, 10_000);
     assert_eq!(config.server.empty_room_timeout, 300);
     assert_eq!(config.server.inactive_room_timeout, 3600);
     assert_eq!(config.protocol.room_code_length, 6);
@@ -995,6 +1011,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
         "max_join_attempts",
         "max_signals",
         "max_signal_errors",
+        "max_inbound_error_replies",
     ] {
         assert!(
             rate_limit.contains_key(key),
@@ -1006,6 +1023,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
         serde_json::from_str(&content).expect("config.example.json must parse as Config");
     assert_eq!(config.rate_limit.max_signals, 600);
     assert_eq!(config.rate_limit.max_signal_errors, 60);
+    assert_eq!(config.rate_limit.max_inbound_error_replies, 3000);
     assert_eq!(config.logging.format, LogFormat::Json);
     assert_eq!(
         value.pointer("/logging/format"),
@@ -1305,6 +1323,9 @@ fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
         // not a server configuration field override.
         "SIGNAL_FISH_PUBLIC_WS_URL",
         "SIGNAL_FISH_WARM_CARGO_CHECK",
+        // Devcontainer lifecycle opt-out consumed by post-start.sh, not a
+        // server configuration field override.
+        "SIGNAL_FISH_SKIP_AGENT_REFRESH",
     ];
 
     let mut violations = Vec::new();
@@ -1586,6 +1607,7 @@ async fn test_metrics_endpoint_no_auth_required() {
         dashboard_keys,
         [
             "auth_rejections",
+            "inbound_error_reply_rejections",
             "join_attempt_rejections",
             "relay_bandwidth_rejections",
             "relay_room_bandwidth_rejections",
@@ -1605,6 +1627,7 @@ async fn test_metrics_endpoint_no_auth_required() {
         snapshot_keys,
         [
             "auth_rejections",
+            "inbound_error_reply_rejections",
             "join_attempt_rejections",
             "rate_limit_rejections",
             "relay_bandwidth_rejections",

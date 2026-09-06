@@ -125,6 +125,7 @@ self-hosted only.
     "ping_timeout": 30,
     "room_cleanup_interval": 60,
     "max_rooms_per_game": 1000,
+    "max_rooms": 10000,
     "empty_room_timeout": 180,
     "inactive_room_timeout": 1800,
     "reconnection_window": 300,

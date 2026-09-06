@@ -4,10 +4,48 @@
             "type": "stdio",
             "transport": "stdio",
             "command": "github-mcp-server",
-            "args": ["stdio"],
+            "args": [
+                "stdio"
+            ],
             "env": {
                 "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
             }
+        },
+        "zai-vision": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                ".devcontainer/zai-mcp.mjs",
+                "vision"
+            ],
+            "transport": "stdio"
+        },
+        "zai-web-search": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                ".devcontainer/zai-mcp.mjs",
+                "web-search"
+            ],
+            "transport": "stdio"
+        },
+        "zai-web-reader": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                ".devcontainer/zai-mcp.mjs",
+                "web-reader"
+            ],
+            "transport": "stdio"
+        },
+        "zai-zread": {
+            "type": "stdio",
+            "command": "node",
+            "args": [
+                ".devcontainer/zai-mcp.mjs",
+                "zread"
+            ],
+            "transport": "stdio"
         }
     }
 }

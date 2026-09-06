@@ -1,7 +1,8 @@
 use super::{
     session_policy::joiner_supports_sticky_plan, EnhancedGameServer,
-    MaxPlayersPerApplicationExceededError, MaxRoomsPerApplicationExceededError,
-    MaxRoomsPerGameExceededError, PendingApplicationClaimRollback,
+    MaxPlayersPerApplicationExceededError, MaxRoomsExceededError,
+    MaxRoomsPerApplicationExceededError, MaxRoomsPerGameExceededError,
+    PendingApplicationClaimRollback,
 };
 use crate::coordination::RoomEventMutationGuard;
 use crate::database::CreateRoomError;
@@ -22,6 +23,7 @@ use thiserror::Error;
 const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
 const APPLICATION_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
+const SERVER_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const GENERATED_ROOM_CODE_MAX_ATTEMPTS: u8 = 8;
 
 #[derive(Clone, Copy)]
@@ -93,6 +95,10 @@ pub(super) enum JoinRoomError {
     /// uses the existing v2 room-cap wire code for backward compatibility.
     #[error(transparent)]
     MaxRoomsPerApplicationExceeded(#[from] MaxRoomsPerApplicationExceededError),
+    /// The server-wide room ceiling (all game names) is reached. This
+    /// uses the existing v2 room-cap wire code for backward compatibility.
+    #[error(transparent)]
+    MaxRoomsExceeded(#[from] MaxRoomsExceededError),
     /// A creator requested a capacity above its configured application cap.
     #[error(transparent)]
     MaxPlayersPerApplicationExceeded(#[from] MaxPlayersPerApplicationExceededError),
@@ -127,6 +133,7 @@ impl JoinRoomError {
             Self::SessionIncompatible => ErrorCode::RoomSessionIncompatible,
             Self::MaxRoomsPerGameExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
             Self::MaxRoomsPerApplicationExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
+            Self::MaxRoomsExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
             Self::MaxPlayersPerApplicationExceeded(_) => ErrorCode::InvalidMaxPlayers,
             Self::RoomNotFound => ErrorCode::RoomNotFound,
             Self::ServerDraining => ErrorCode::ServerDraining,
@@ -1929,9 +1936,10 @@ impl EnhancedGameServer {
         };
         let client_app_id = client_app_context.as_ref().map(|app| app.id);
 
-        // Global lock order is room-code -> application-cap -> game-cap. Every
-        // release happens in reverse order. Existing-room joins acquire the
-        // application-cap lock only when claiming a legacy unowned room.
+        // Global lock order is room-code -> application-cap -> game-cap ->
+        // server-cap. Every release happens in reverse order. Existing-room
+        // joins acquire the application-cap lock only when claiming a legacy
+        // unowned room.
         let lock_key = format!("room_join:{game_name}:{room_code}");
         let lock_handle = self
             .distributed_lock
@@ -1939,6 +1947,7 @@ impl EnhancedGameServer {
             .await?;
         let mut application_cap_lock: Option<LockHandle> = None;
         let mut game_cap_lock: Option<LockHandle> = None;
+        let mut server_cap_lock: Option<LockHandle> = None;
         let mut room_event_guard = None;
 
         // Try to join existing room or create new one
@@ -2204,6 +2213,31 @@ impl EnhancedGameServer {
                                 },
                             ));
                         }
+                        // Server-wide ceiling (issue #518): in open mode an
+                        // attacker minting many distinct game names otherwise
+                        // faces no aggregate bound. Checked under a server-global
+                        // lock so concurrent creations across games cannot
+                        // overshoot, mirroring the per-game and per-app caps.
+                        server_cap_lock = Some(
+                            self.distributed_lock
+                                .acquire("server_room_cap", SERVER_ROOM_CAP_LOCK_TTL)
+                                .await
+                                .map_err(|error| {
+                                    tracing::error!(%error, "Failed to acquire server room-cap lock");
+                                    self.metrics.increment_room_cap_lock_failures();
+                                    JoinRoomError::Internal(error)
+                                })?,
+                        );
+                        self.metrics.increment_room_cap_lock_acquisitions();
+
+                        let total_room_count = self.database.get_total_room_count().await?;
+                        if total_room_count >= self.config.max_rooms {
+                            self.metrics.increment_room_cap_denials();
+                            return Err(JoinRoomError::MaxRoomsExceeded(MaxRoomsExceededError {
+                                current: total_room_count,
+                                limit: self.config.max_rooms,
+                            }));
+                        }
 
                         let relay_type = self.resolve_relay_type(game_name);
                         let region_id = self.region_id().to_string();
@@ -2344,6 +2378,7 @@ impl EnhancedGameServer {
             Err(e) => Err(e.into()),
         };
 
+        self.release_cap_lock(&server_cap_lock).await;
         self.release_cap_lock(&game_cap_lock).await;
         self.release_cap_lock(&application_cap_lock).await;
         self.release_lock_accounted(&lock_handle).await;

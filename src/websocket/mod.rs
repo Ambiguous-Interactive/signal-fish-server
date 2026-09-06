@@ -142,8 +142,8 @@ pub use routes::{
     bind_serve_listener, bind_tcp_listener, client_config_route, create_router,
     create_router_with_origin_policy, create_standalone_router,
     create_standalone_router_with_origin_policy, health_route, readyz_route, run_server,
-    try_create_router, try_create_standalone_router, try_websocket_route_v3, websocket_route_v3,
-    websocket_route_v3_with_origin_policy,
+    serve_with_http_header_deadline, try_create_router, try_create_standalone_router,
+    try_websocket_route_v3, websocket_route_v3, websocket_route_v3_with_origin_policy,
 };
 pub(crate) use upgrade_rejection_log::UpgradeRejectionLogThrottle;
 

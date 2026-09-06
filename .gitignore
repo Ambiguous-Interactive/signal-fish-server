@@ -70,3 +70,4 @@ site/
 progress/
 GOAL.md
 .claude/
+.env*

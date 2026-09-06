@@ -17,6 +17,8 @@ pre-commit support scripts, and local test workflows, including:
 - `rg` / ripgrep (search tooling)
 - `fd` (modern file discovery)
 - Docker CLI support in VS Code devcontainers
+- Latest Codex, OpenCode, and Nanocoder terminal clients
+- GitHub and Z.AI MCP servers for every supported coding-agent frontend
 
 To keep rebuilds reliable on Windows + WSL + Docker Desktop and avoid known
 DNS failures in the feature install path:
@@ -26,6 +28,64 @@ DNS failures in the feature install path:
 - `.devcontainer/Dockerfile` installs heavy cargo tools via `cargo-binstall`.
 - `.devcontainer/post-create.sh` skips `cargo check --all-features` warm-up by
    default for faster startup. Set `SIGNAL_FISH_WARM_CARGO_CHECK=1` to enable it.
+- Agent CLI refreshes use a version-check fast path and run behind the editor
+  attach point. Set `SIGNAL_FISH_SKIP_AGENT_REFRESH=1` only when working in a
+  constrained/offline environment and an installed version is sufficient.
+
+Global npm packages use `/home/vscode/.npm-global`, owned by `vscode`. Run
+`npm install --global <package>` directly; do not use `sudo`.
+The root and browser-client `node_modules` named volumes are also initialized
+for the `vscode` user, so ordinary local `npm install` commands need no `sudo`.
+
+Before opening a fresh clone, create `.env.local` in the repository root.
+An empty file is sufficient if you do not use authenticated MCP servers.
+For MCP access, add `GITHUB_PERSONAL_ACCESS_TOKEN` and `Z_AI_API_KEY` using
+Docker env-file syntax: one unquoted `KEY=value` per line, without `export`.
+The file is gitignored and excluded from the Docker build context. CI creates
+an empty file before starting its test container.
+
+The devcontainer imports this file for GitHub and other environment consumers.
+Z.AI additionally reads the repository `.env.local` **at each MCP startup**, with
+file values taking precedence over inherited `Z_AI_API_KEY`. Missing files or
+missing keys fall back to the environment; an explicit empty key fails closed.
+The launcher accepts dotenv quotes and comments without executing shell code.
+For Docker compatibility, keep entries unquoted when using the devcontainer.
+Restart Z.AI MCP servers after editing the key; no container rebuild is needed.
+
+All supported frontends use `.devcontainer/zai-mcp.mjs` over stdio. Vision runs
+the preinstalled binary; the remote servers use the MCP SDK bundled with the
+installed Vision package for HTTP sessions and SSE. There is no startup download.
+Claude Code, Nanocoder and OpenCode resolve the launcher from the project root;
+VS Code uses its workspace path and Codex gets an absolute path during setup.
+Codex setup migrates only repository-marked entries and preserves custom tables.
+For an existing container, apply the migration once with:
+
+```bash
+python3 .devcontainer/configure-zai-mcp.py "${CODEX_HOME:-$HOME/.codex}/config.toml"
+```
+
+Restart the affected MCP servers or agent after migration. Never paste keys
+into bug reports or committed config.
+
+```bash
+python3 scripts/check-zai-mcp.py --live
+```
+
+This defaults to `.env.local`; `--env-file PATH` selects another file.
+Without `--live`, it makes no network requests. The live check uses the same
+launcher as frontends and checks initialize, initialized notification, and
+list-tools without invoking search or vision tools.
+
+The startup RCA identified a credential-loading gap: Docker's env-file import was a creation-time snapshot:
+editing `.env.local` could leave GUI agents and terminals with stale or empty
+credentials. Native remote configurations relied on those inherited values, and
+the old diagnostic stopped before the notification failure reported by Codex.
+The inherited key matched `.env.local` during this investigation, so missing
+credentials do not explain the reported failure in this session. That key passed
+the complete direct HTTP handshake and all four shared launcher checks; the original frontend transport failure was not
+independently reproduced. The shared launcher removes both the stale environment dependency
+and frontend-specific HTTP handling. A valid key and Z.AI account access remain
+required.
 
 Validate parity at any time with:
 
@@ -66,7 +126,8 @@ Optimized and stripped for production.
 # TLS support
 cargo build --features tls
 
-# Legacy full-mesh mode
+# Legacy full-mesh mode (UNAUTHENTICATED, unguarded; local interop testing only,
+# never expose to the public internet)
 cargo build --features legacy-fullmesh
 
 # All features

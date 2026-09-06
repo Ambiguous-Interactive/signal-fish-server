@@ -933,12 +933,14 @@ async fn test_custom_rate_limiting() {
         room_cleanup_interval: Duration::from_secs(60),
         drain_grace: Duration::from_secs(30),
         max_rooms_per_game: 1000,
+        max_rooms: 10_000,
         rate_limit_config: RateLimitConfig {
             max_room_creations: 1,               // Very restrictive for testing
             time_window: Duration::from_secs(5), // Longer window to ensure test stability
             max_join_attempts: 2,
             max_signals: 600,
             max_signal_errors: 60,
+            max_inbound_error_replies: 10_000,
             max_relay_bytes: 256 * 1024 * 1024,
             max_room_relay_bytes: 1024 * 1024 * 1024,
         },

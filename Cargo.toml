@@ -94,6 +94,18 @@ tokio = { version = "1.52", features = [
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
+# Explicit HTTP/1 connection builder so the pre-upgrade header-read deadline
+# is actually armed (issue #518): axum::serve and axum-server leave hyper's
+# `Timer` unset, which silently disables its default header-read timeout and
+# leaves direct-to-port deployments open to pre-upgrade slowloris.
+hyper-util = { version = "0.1", default-features = false, features = [
+    "server-auto",
+    "tokio",
+    "service",
+] }
+# Trait-only crate (no runtime surface) used to drive axum's make service
+# manually on the header-read-deadline serve path.
+tower-service = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

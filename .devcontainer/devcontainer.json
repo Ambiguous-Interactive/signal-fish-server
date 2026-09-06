@@ -25,6 +25,9 @@
             "onAutoForward": "notify"
         }
     },
+    // Create .env.local before opening (an empty file is valid without MCP credentials).
+    // Docker loads it at runtime; never copy credentials into the image.
+    "runArgs": ["--env-file", "${localWorkspaceFolder}/.env.local"],
     // Environment variables
     "containerEnv": {
         "RUST_LOG": "debug",
@@ -32,13 +35,15 @@
         // Route npm global installs (codex, opencode, nanocoder, ...) through
         // a user-owned prefix so `npm install -g` never needs sudo. Overrides
         // the root-owned nvm prefix inherited from the base image/features.
-        "NPM_CONFIG_PREFIX": "/home/vscode/.npm-global"
+        "NPM_CONFIG_PREFIX": "/home/vscode/.npm-global",
+        // Z.AI's local Vision MCP requires this service selector.
+        "Z_AI_MODE": "ZAI"
     },
-    // Pass the host's GitHub token into the container so the GitHub MCP
-    // server works in every agent harness (Codex, Claude Code, Copilot,
-    // VS Code, OpenCode, Nanocoder) without storing it in any config file.
+    // Forward the runtime env-file values to VS Code and its agent processes.
+    // Empty host variables must not overwrite the container credentials.
     "remoteEnv": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "${localEnv:GITHUB_PERSONAL_ACCESS_TOKEN:}"
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${containerEnv:GITHUB_PERSONAL_ACCESS_TOKEN:}",
+        "Z_AI_API_KEY": "${containerEnv:Z_AI_API_KEY:}"
     },
     // Keep high-churn build/dependency trees off Windows/macOS bind mounts.
     // Per-devcontainer volumes survive rebuilds without colliding across clones.
@@ -50,9 +55,12 @@
     // Post-create setup
     "postCreateCommand": "bash .devcontainer/post-create.sh",
     // Runs on EVERY container start/launch: refresh the agent CLIs (latest
-    // Codex, OpenCode, Nanocoder) and re-apply GitHub MCP wiring. Best-effort
-    // and non-blocking; skip with SIGNAL_FISH_SKIP_AGENT_REFRESH=1.
+    // Codex, OpenCode, Nanocoder) and re-apply GitHub + Z.AI MCP wiring.
+    // Best-effort and non-blocking; skip with SIGNAL_FISH_SKIP_AGENT_REFRESH=1.
     "postStartCommand": "bash .devcontainer/post-start.sh",
+    // Keep post-create/start network refreshes behind the editor attach point.
+    // This is the spec default, made explicit as a launch-latency invariant.
+    "waitFor": "updateContentCommand",
     // Probe nvm/npm paths from login+interactive shells so agent CLIs land on
     // PATH for terminals, tasks, and extensions.
     "userEnvProbe": "loginInteractiveShell",

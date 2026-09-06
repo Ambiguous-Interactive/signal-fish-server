@@ -24,6 +24,14 @@ pub struct RateLimitConfig {
     pub max_join_attempts: u32,
     /// Maximum number of WebRTC signaling messages per fixed time window
     pub max_signals: u32,
+    /// Per-connection inbound error-reply budget per fixed time window
+    /// (issue #518). Counts every inbound frame the receive loop answers
+    /// with a polite `Error` reply (malformed, oversized, wrong-state), so
+    /// one-write-per-reply amplification stays bounded without constraining
+    /// admitted high-throughput traffic (which carries its own per-kind
+    /// budgets). `0` is a valid explicit total-rejection policy for direct
+    /// library construction (the production config path rejects it).
+    pub max_inbound_error_replies: u32,
     /// Detailed rejected-signal responses per fixed time window before
     /// generic rate-limit errors.
     pub max_signal_errors: u32,
@@ -51,6 +59,7 @@ impl Default for RateLimitConfig {
             max_join_attempts: 20, // per fixed 60-second window
             max_signals: 600,      // generous for trickle-ICE (~10/sec over the 60s window)
             max_signal_errors: 60, // detailed rejection responses before generic errors
+            max_inbound_error_replies: crate::config::defaults::default_max_inbound_error_replies(),
             max_relay_bytes: crate::config::defaults::default_max_relay_bytes(),
             max_room_relay_bytes: crate::config::defaults::default_max_room_relay_bytes(),
         }
@@ -642,6 +651,57 @@ pub struct PlayerRateStats {
     pub time_until_reset: Duration,
 }
 
+/// Per-connection inbound error-reply budget (issue #518).
+///
+/// One fixed-window gate per WebSocket connection, charged for every inbound
+/// frame the receive loop answers with a polite `Error` reply (malformed
+/// JSON, oversized text, wrong-state refusals, ...). Those 1:1 replies are
+/// the amplification channel: a frame that costs the attacker one write must
+/// not be able to buy unlimited server work and one reply each. Every
+/// *admitted* message kind already carries its own budget (signals, joins,
+/// room creations, relay bytes), so honest high-throughput clients never
+/// touch this gate. An exhausted budget closes the connection with
+/// `4006 inbound_rate_limited` instead of replying again. The gate lives on
+/// the receive task, so it needs no synchronization.
+#[derive(Debug)]
+pub struct ErrorReplyGate {
+    limit: u32,
+    window: Duration,
+    window_start: Instant,
+    charged: u32,
+}
+
+impl ErrorReplyGate {
+    pub fn new(limit: u32, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            window_start: Instant::now(),
+            charged: 0,
+        }
+    }
+
+    /// Charge one polite error reply. `false` means the fixed window is
+    /// exhausted and the connection must close instead of replying.
+    pub fn charge(&mut self, now: Instant) -> bool {
+        if self.limit == 0 {
+            return false;
+        }
+        if now.duration_since(self.window_start) >= self.window {
+            self.window_start = now;
+            self.charged = 0;
+        }
+        if self.charged >= self.limit {
+            return false;
+        }
+        // The `charged >= limit` guard above bounds this increment, so
+        // saturation is unreachable; it exists to keep the panic-free
+        // arithmetic policy (clippy::arithmetic_side_effects) satisfied.
+        self.charged = self.charged.saturating_add(1);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,6 +713,7 @@ mod tests {
             max_join_attempts: 3,
             max_signals: 2,
             max_signal_errors: 2,
+            max_inbound_error_replies: 5,
             max_relay_bytes: 1000,
             max_room_relay_bytes: 1000,
         }
@@ -1445,5 +1506,49 @@ mod tests {
             error.to_string(),
             "Join attempt rate limit exceeded. Try again in 1 seconds."
         );
+    }
+
+    #[test]
+    fn error_reply_gate_charges_exactly_the_budget_per_window() {
+        let mut gate = ErrorReplyGate::new(3, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(gate.charge(start));
+        assert!(gate.charge(start));
+        assert!(gate.charge(start));
+        assert!(
+            !gate.charge(start),
+            "the fourth reply in one window must be refused"
+        );
+    }
+
+    #[test]
+    fn error_reply_gate_refuses_everything_when_the_budget_is_zero() {
+        let mut gate = ErrorReplyGate::new(0, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(
+            !gate.charge(start),
+            "a zero budget is a total-rejection policy"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_reply_gate_reanchors_the_window_after_it_elapses() {
+        let mut gate = ErrorReplyGate::new(2, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(gate.charge(start));
+        assert!(gate.charge(start));
+        assert!(!gate.charge(start));
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let later = tokio::time::Instant::now();
+        assert!(
+            gate.charge(later),
+            "the window must re-anchor once it has elapsed"
+        );
+        assert!(gate.charge(later));
+        assert!(!gate.charge(later));
     }
 }
