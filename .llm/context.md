@@ -117,6 +117,22 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   supply (notably detailed GitHub Actions logs or GraphQL review-thread
   operations), and only when an authenticated CLI session is available.
 
+### Writing Style for User-Facing Text (Required)
+
+Write every user-facing text in Simplified Technical English (STE): short,
+simple, direct. This applies to PR titles and descriptions, issue text and
+comments, commit messages, code review comments, documentation, CHANGELOG
+entries, and operator-facing log messages.
+
+- Write short sentences. One idea per sentence.
+- Use active voice. Name the actor ("The server closes the connection").
+- Use common words. No idioms, jokes, marketing language, or hype.
+- Say exactly what happened and what to do next.
+- Use lists for steps. Keep paragraphs to 3-4 sentences.
+
+The audience includes non-native English readers, operators under pressure,
+and automated tools. Simple text is faster to read and harder to misread.
+
 ### Hook Reliability Rules (Required)
 
 - Git hooks are last-resort guards and must stay cross-platform (`pwsh` + `git` only) and sub-second.

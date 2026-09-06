@@ -140,7 +140,7 @@ self-hosted only.
   },
   "logging": {
     "dir": "logs",
-    "enable_file_logging": true,
+    "enable_file_logging": false,
     "rotation": "daily",
     "format": "json"
   },

@@ -162,6 +162,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `logging.enable_file_logging` now defaults to `false` (issue #526): stdout is
+  the single log sink, and rolling files have no size cap, so the default
+  container configuration wrote into the writable layer without bound between
+  stdout shipments. Deployments that want rolling files set the flag (and
+  `logging.dir`) explicitly and manage retention themselves.
+- Open-policy application UUIDs are now derived under an open-policy-only
+  namespace (issue #518). Previously a well-formed UUID sent as `app_id`
+  became the application UUID verbatim, so a client could forge any
+  application's identity in per-app metrics and attribution — including a
+  configured application's derived UUID. The derivation stays deterministic in
+  the label: the same label keeps the same UUID, and room-membership behavior
+  is unchanged; only the resulting UUID values differ.
+- The `/metrics` `metricsSnapshot` field is capped at 128 KiB of serialized
+  JSON (issue #518). The raw snapshot includes per-identity maps
+  (slow-consumer eviction attributions, per-app relay bytes) whose size grows
+  with live traffic; an oversized snapshot is replaced by a small
+  `truncated`/`sizeBytes`/`capBytes` marker instead of an unbounded response.
 - CI cost cohort (issue #513): the macOS `Lint`/`Nextest` lanes moved from
   every push/pull request to the daily noon cron against `main` (macOS bills
   at 10x Linux per minute while deployments are Linux containers), so macOS

@@ -250,8 +250,12 @@ pub fn default_rotation() -> String {
     "daily".to_string()
 }
 
+/// File logging is off by default (issue #526): stdout is the single log
+/// sink, and rolling files without a size cap grow without bound — in a
+/// container that writes into the writable layer between stdout shipments.
+/// Operators who run their own log management opt in explicitly.
 pub const fn default_enable_file_logging() -> bool {
-    true
+    false
 }
 
 pub const fn default_log_format() -> LogFormat {

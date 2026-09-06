@@ -280,7 +280,7 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING",
         path: "logging.enable_file_logging",
-        default: Some("true"),
+        default: Some("false"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__LOGGING__FORMAT",

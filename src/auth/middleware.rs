@@ -142,6 +142,26 @@ fn deterministic_uuid(key: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// Namespace hashed into every open-policy application UUID.
+///
+/// Configured allowlist applications derive their UUID from the bare app ID.
+/// Hashing the open-policy label under this distinct domain keeps the two ID
+/// spaces disjoint (issue #518): an open-mode client can never land on a
+/// configured application's UUID, whether by sending that UUID verbatim or by
+/// guessing a colliding label.
+const OPEN_POLICY_APP_ID_NAMESPACE: &str = "signal-fish:open-policy-app\0";
+
+/// Derive the open-policy application UUID for a client-supplied `app_id`.
+///
+/// Deterministic in the label, so the same label always resolves to the same
+/// application UUID (stable attribution, stable room membership).
+fn open_policy_app_uuid(app_id: &str) -> Uuid {
+    let mut keyed = String::with_capacity(OPEN_POLICY_APP_ID_NAMESPACE.len() + app_id.len());
+    keyed.push_str(OPEN_POLICY_APP_ID_NAMESPACE);
+    keyed.push_str(app_id);
+    deterministic_uuid(&keyed)
+}
+
 /// In-memory public app-ID allowlist backed by configured application entries.
 pub struct AppIdAllowlist {
     /// Map of public app ID to its accounting and quota context.
@@ -337,19 +357,24 @@ impl AppIdAllowlist {
 
     /// Build a default context for use when allowlist enforcement is disabled.
     ///
-    /// Unlike enforced mode, which always derives the UUID deterministically
-    /// from the app ID string, an open-policy client that sends a well-formed
-    /// UUID as its `app_id` chooses the application UUID verbatim. Open-mode
-    /// application identity scopes room admission (issue #520): rooms are
-    /// stamped with the creator's application and owned rooms admit only
-    /// same-application members — but the ID remains a client-chosen,
-    /// unauthenticated label, so this boundary must not be treated as
-    /// unspoofable. Deployment tenancy guarantees require allowlist
-    /// enforcement (or the credential-auth story of issue #517).
+    /// Open-policy application identity is a client-chosen, unauthenticated
+    /// label, so the UUID is always derived from the label under an
+    /// open-policy-only namespace (issue #518): it can never equal a
+    /// configured application's UUID (derived from the bare app ID), and a
+    /// client cannot claim another application's identity by sending that
+    /// application's UUID as its `app_id`. The derivation stays deterministic,
+    /// so one label keeps one UUID across handshakes and restarts — metrics
+    /// attribution and same-application room membership remain stable.
+    ///
+    /// Open-mode application identity scopes room admission (issue #520):
+    /// rooms are stamped with the creator's application and owned rooms admit
+    /// only same-application members. The label remains unauthenticated, so
+    /// this boundary must not be treated as unspoofable: any client can still
+    /// join a room by sending the same label. Deployment tenancy guarantees
+    /// require allowlist enforcement (or the credential-auth story of issue
+    /// #517).
     fn default_app_context(&self, app_id: &str) -> AppContext {
-        let id = app_id
-            .parse::<Uuid>()
-            .unwrap_or_else(|_| deterministic_uuid(app_id));
+        let id = open_policy_app_uuid(app_id);
         AppContext {
             id,
             name: "default".to_string(),
@@ -813,17 +838,41 @@ mod tests {
         assert_eq!(info.rate_limits.per_minute, DEFAULT_RATE_LIMIT_PER_MINUTE);
     }
 
-    /// Pins the documented open-policy divergence: a valid UUID sent as
-    /// `app_id` is used verbatim, so the client chooses the application UUID.
-    /// Enforced mode never does this (the UUID is always derived from the app
-    /// ID string). Acceptable only because nothing consumes open-mode
-    /// application identity as an authority; a future consumer must revisit.
+    /// Pins the issue-#518 open-policy UUID contract: a client-supplied label
+    /// never becomes the application UUID verbatim, not even a well-formed
+    /// UUID label. The UUID is derived under the open-policy namespace, so it
+    /// differs from both the sent value and the bare-label derivation used for
+    /// configured applications.
     #[tokio::test]
-    async fn disabled_app_id_parsed_as_uuid_when_valid() {
+    async fn disabled_uuid_labeled_app_id_gets_namespaced_id() {
         let mw = AppIdAllowlist::disabled();
         let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
         let info = mw.resolve_app_id(uuid_str, LOCALHOST).await.unwrap();
-        assert_eq!(info.id.to_string(), uuid_str);
+        assert_ne!(info.id.to_string(), uuid_str);
+        assert_eq!(info.id, open_policy_app_uuid(uuid_str));
+        assert_eq!(
+            info.id,
+            mw.resolve_app_id(uuid_str, OTHER).await.unwrap().id,
+            "the derivation must not depend on the connection source"
+        );
+    }
+
+    /// The open-policy namespace must keep open-mode application UUIDs disjoint
+    /// from configured-application UUIDs (issue #518): the constructor derives
+    /// a configured UUID from the bare label, so resolving the same label in
+    /// open mode must not yield that UUID, or an open-mode client could forge a
+    /// configured application's identity in per-app metrics.
+    #[tokio::test]
+    async fn open_policy_uuid_never_collides_with_configured_app_uuid() {
+        let open = AppIdAllowlist::disabled();
+        for label in ["game-1", "550e8400-e29b-41d4-a716-446655440000", "my-game"] {
+            let configured_id = deterministic_uuid(label);
+            let open_id = open.resolve_app_id(label, LOCALHOST).await.unwrap().id;
+            assert_ne!(
+                configured_id, open_id,
+                "open-mode UUID for {label:?} must be namespaced away from the configured UUID"
+            );
+        }
     }
 
     #[tokio::test]

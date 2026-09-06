@@ -209,6 +209,23 @@ Validate locally with:
 
 ---
 
+## Writing Style: Simplified Technical English (STE)
+
+Write all user-facing text in Simplified Technical English: short, simple,
+direct. This applies to docs, CHANGELOG entries, doc comments, PR and issue
+text, commit messages, and review comments.
+
+- Short sentences. One idea per sentence.
+- Active voice. Name the actor ("The server closes the connection").
+- Common words. No idioms, jokes, or marketing language.
+- Say exactly what happened and what to do next.
+- Lists for steps. Paragraphs of 3-4 sentences at most.
+
+Simple text is faster to read and harder to misread, for non-native readers
+and for operators under pressure.
+
+---
+
 ## Spelling Consistency: American English
 
 Use **American English** consistently across all source files, CI workflows, and documentation.
@@ -250,4 +267,5 @@ After every feature/bugfix:
 - [ ] If enforcing a minimum badge count, run strict mode (`./scripts/check-readme-badges.sh --require-at-least-one README.md`)
 - [ ] All code blocks have language identifiers
 - [ ] Technical terms added to `.typos.toml` if needed
+- [ ] All text uses Simplified Technical English: short, simple, direct
 - [ ] All text uses American English spellings (not British)

@@ -136,6 +136,40 @@ pub struct MetricsQuery {
     include_snapshot: bool,
 }
 
+/// Maximum serialized size of the `metricsSnapshot` response field.
+///
+/// The raw snapshot includes per-identity maps (slow-consumer eviction
+/// attributions, per-app relay bytes) whose size grows with live traffic. The
+/// endpoint is bearer-token-gated, but if metrics auth is ever relaxed the
+/// snapshot echo must not become an information-disclosure firehose or an
+/// unbounded response-size amplifier (issue #518). A snapshot above this cap
+/// is replaced by a small truncation marker; the rest of the response (fixed
+/// counters plus the bounded dashboard cache) is unchanged.
+const METRICS_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
+
+/// Bound the serialized `metricsSnapshot` response field.
+///
+/// Returns `value` unchanged when it serializes within
+/// [`METRICS_SNAPSHOT_MAX_BYTES`]; otherwise returns a small truncation marker
+/// carrying the measured size, so oversized snapshots fail visibly instead of
+/// silently disappearing.
+fn bounded_metrics_snapshot(value: serde_json::Value) -> serde_json::Value {
+    let size_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    if size_bytes <= METRICS_SNAPSHOT_MAX_BYTES {
+        return value;
+    }
+    tracing::warn!(
+        size_bytes,
+        cap_bytes = METRICS_SNAPSHOT_MAX_BYTES,
+        "metricsSnapshot exceeded the response cap; returning a truncation marker"
+    );
+    serde_json::json!({
+        "truncated": true,
+        "sizeBytes": size_bytes,
+        "capBytes": METRICS_SNAPSHOT_MAX_BYTES,
+    })
+}
+
 /// Metrics API endpoint - returns real data from server metrics
 pub async fn metrics_handler(
     headers: axum::http::HeaderMap,
@@ -227,7 +261,10 @@ pub async fn metrics_handler(
     if query.include_snapshot {
         if let Ok(snapshot_value) = serde_json::to_value(&metrics_snapshot) {
             if let Some(obj) = response.as_object_mut() {
-                obj.insert("metricsSnapshot".to_string(), snapshot_value);
+                obj.insert(
+                    "metricsSnapshot".to_string(),
+                    bounded_metrics_snapshot(snapshot_value),
+                );
             }
         }
     }
@@ -264,6 +301,47 @@ mod tests {
     use crate::server::ServerConfig;
     use axum::http::header::AUTHORIZATION;
     use axum::http::HeaderMap;
+
+    /// Data-driven: a snapshot within the cap passes through byte-identical;
+    /// an oversized snapshot is replaced by a truncation marker that is small,
+    /// fail-visible (carries the measured size), and itself within the cap.
+    #[test]
+    fn bounded_metrics_snapshot_passes_through_or_truncates_visibly() {
+        let small = serde_json::json!({ "connections": { "total": 7_u64 } });
+        assert_eq!(
+            bounded_metrics_snapshot(small.clone()),
+            small,
+            "a snapshot within the cap must be returned unchanged"
+        );
+
+        let oversized = serde_json::Value::Array(vec![
+            serde_json::json!({ "padding": "x".repeat(64) });
+            (METRICS_SNAPSHOT_MAX_BYTES / 32) + 1
+        ]);
+        let serialized_size = serde_json::to_vec(&oversized)
+            .expect("a constructed value always serializes")
+            .len();
+        assert!(serialized_size > METRICS_SNAPSHOT_MAX_BYTES);
+
+        let bounded = bounded_metrics_snapshot(oversized);
+        let bounded_size = serde_json::to_vec(&bounded)
+            .expect("a constructed value always serializes")
+            .len();
+        assert!(
+            bounded_size <= METRICS_SNAPSHOT_MAX_BYTES,
+            "the replacement marker must itself respect the cap"
+        );
+        assert_eq!(bounded["truncated"], serde_json::Value::Bool(true));
+        assert_eq!(
+            bounded["sizeBytes"],
+            serde_json::json!(serialized_size),
+            "the marker must report the measured pre-truncation size"
+        );
+        assert_eq!(
+            bounded["capBytes"],
+            serde_json::json!(METRICS_SNAPSHOT_MAX_BYTES)
+        );
+    }
 
     /// Data-driven, sleep-free: the throttle emits the first rejection,
     /// suppresses everything inside the quiet period (counting the
