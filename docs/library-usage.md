@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
             max_join_attempts: cfg.rate_limit.max_join_attempts,
             max_signals: cfg.rate_limit.max_signals,
             max_signal_errors: cfg.rate_limit.max_signal_errors,
+            max_inbound_messages: cfg.rate_limit.max_inbound_messages,
         },
         empty_room_timeout: Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: Duration::from_secs(cfg.server.inactive_room_timeout),
@@ -124,7 +125,13 @@ async fn main() -> anyhow::Result<()> {
 Implement the `GameDatabase` trait for custom room-record storage. This alone
 does not persist a live room across process restart; read the
 [consistency and durability contract](architecture/consistency-and-durability.md)
-before designing a custom backend:
+before designing a custom backend.
+
+Override `get_total_room_count` with your storage's exact live-room count:
+its trait default fails closed (returns an error), and the server-wide room
+ceiling (`server.max_rooms`, on by default) consults it on every room
+creation, so a backend that does not implement the query refuses every
+creation:
 
 ```rust
 

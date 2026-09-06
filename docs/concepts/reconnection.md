@@ -66,16 +66,16 @@ seat credential: anyone who possesses it can take over the player's seat
 for the whole reconnection window — receiving the player's gameplay
 traffic and inheriting its budgets. Never write it to logs, never include
 it in crash reports or screenshots, and redact it in any `Debug` output.
-(The string is
+The string is
 stable from join through a later disconnect, but it only becomes
 claimable for `server.reconnection_window` seconds counted from the
 disconnect (holding it early does not widen the window), and it rotates
 on every join and every successful reconnect
-(`Reconnected.reconnection_token` carries the replacement). Discarded on
+(`Reconnected.reconnection_token` carries the replacement). It is discarded on
 a voluntary `LeaveRoom` — leaving cleanly is not a disconnect. It is also not
 armed for a server shutdown drain (`GoingAway` / close code `4000
 server_shutdown`); the instance is going away, so clients should join or create a
-fresh room on another healthy instance.)
+fresh room on another healthy instance.
 
 ### Phase 2: Reconnect After a Disconnect
 

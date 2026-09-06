@@ -71,7 +71,7 @@ export async function relay(local, remote) {
 export async function main(name, path = envFile) {
   const environment = credentials(path);
   if (name === 'vision') {
-    const child = spawn(vision, [], { env: environment, stdio: ['inherit', 'inherit', 'ignore'] });
+    const child = spawn(vision, [], { env: environment, stdio: ['inherit', 'inherit', 'inherit'] });
     for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
     child.on('error', () => { console.error('Z.AI Vision binary unavailable; rerun agent setup'); process.exitCode = 1; });
     child.on('exit', code => { process.exitCode = code ?? 1; });

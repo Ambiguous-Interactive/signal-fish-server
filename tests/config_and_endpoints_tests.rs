@@ -1607,6 +1607,7 @@ async fn test_metrics_endpoint_no_auth_required() {
         dashboard_keys,
         [
             "auth_rejections",
+            "inbound_message_rejections",
             "join_attempt_rejections",
             "relay_bandwidth_rejections",
             "relay_room_bandwidth_rejections",
@@ -1626,6 +1627,7 @@ async fn test_metrics_endpoint_no_auth_required() {
         snapshot_keys,
         [
             "auth_rejections",
+            "inbound_message_rejections",
             "join_attempt_rejections",
             "rate_limit_rejections",
             "relay_bandwidth_rejections",

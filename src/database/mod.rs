@@ -1928,6 +1928,44 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    /// The server-wide room-cap pause hooks must stay usable from the
+    /// packaged crate's own test surface (their other caller lives in a test
+    /// file excluded from packaging), and `get_total_room_count` must report
+    /// the exact live-room row count.
+    #[tokio::test]
+    async fn total_room_count_reports_exact_rows_and_supports_pauses() {
+        let database = Arc::new(InMemoryDatabase::new());
+        database
+            .create_room(
+                "count-game".to_string(),
+                Some("COUNT1".to_string()),
+                4,
+                true,
+                crate::protocol::PlayerId::new_v4(),
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("fixture room created");
+
+        database.pause_next_get_total_room_count_for_test();
+        let paused_database = Arc::clone(&database);
+        let read_task = tokio::spawn(async move { paused_database.get_total_room_count().await });
+        database
+            .wait_for_paused_get_total_room_count_for_test()
+            .await;
+        database.release_paused_get_total_room_count_for_test();
+        assert_eq!(
+            read_task
+                .await
+                .expect("count task completes")
+                .expect("total count reads"),
+            1,
+            "one live room row must count as one"
+        );
+    }
+
     #[test]
     fn test_percentile_index_rounds_without_overflow() {
         let cases = [

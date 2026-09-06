@@ -1014,6 +1014,10 @@ impl GameDatabase for DrainAfterCreateDatabase {
         self.inner.get_application_room_count(application_id).await
     }
 
+    async fn get_total_room_count(&self) -> anyhow::Result<usize> {
+        self.inner.get_total_room_count().await
+    }
+
     async fn health_check(&self) -> bool {
         self.inner.health_check().await
     }
@@ -5435,20 +5439,20 @@ async fn server_room_cap_is_atomic_across_games() {
     database.release_paused_get_total_room_count_for_test();
     paused_task.await.expect("paused create task completes");
     waiting_task.await.expect("waiting create task completes");
+    let first_response = timeout(Duration::from_secs(1), first_rx.recv())
+        .await
+        .expect("first join answer arrives")
+        .expect("first channel open");
     assert!(matches!(
-        timeout(Duration::from_secs(1), first_rx.recv())
-            .await
-            .expect("first join answer arrives")
-            .expect("first channel open")
-            .as_ref(),
+        first_response.as_ref(),
         ServerMessage::RoomJoined(_)
     ));
+    let second_response = timeout(Duration::from_secs(1), second_rx.recv())
+        .await
+        .expect("second join answer arrives")
+        .expect("second channel open");
     assert!(matches!(
-        timeout(Duration::from_secs(1), second_rx.recv())
-            .await
-            .expect("second join answer arrives")
-            .expect("second channel open")
-            .as_ref(),
+        second_response.as_ref(),
         ServerMessage::RoomJoined(_)
     ));
 
@@ -7973,11 +7977,12 @@ async fn test_join_flow_counts_backend_release_errors() {
             .metrics
             .distributed_lock_release_failures
             .load(Ordering::Relaxed),
-        2,
-        "the game-cap and room-join release errors must each count exactly once"
+        3,
+        "the game-cap, server-cap, and room-join release errors must each count exactly once"
     );
     for key in [
         "game_room_cap:failed-release",
+        "server_room_cap",
         "room_join:failed-release:FAILR1",
     ] {
         assert!(

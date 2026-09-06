@@ -217,7 +217,9 @@ pub async fn metrics_handler(
                 "relay_bandwidth_rejections":
                     metrics_snapshot.rate_limiting.relay_bandwidth_rejections,
                 "relay_room_bandwidth_rejections":
-                    metrics_snapshot.rate_limiting.relay_room_bandwidth_rejections
+                    metrics_snapshot.rate_limiting.relay_room_bandwidth_rejections,
+                "inbound_message_rejections":
+                    metrics_snapshot.rate_limiting.inbound_message_rejections
             }
         }
     });

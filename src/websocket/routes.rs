@@ -74,10 +74,13 @@ pub(crate) fn configure_accepted_socket(stream: &TcpStream) {
 /// low-latency relay: a bounded send buffer (via [`bind_tcp_listener`]) plus
 /// `TCP_NODELAY` (via the crate-internal `configure_accepted_socket`).
 ///
-/// This is the single seam every plain `axum::serve` path uses — the production
-/// server, the `run_server` convenience entry point, and the integration-test
-/// harness — so they share identical accepted-socket semantics and a regression
-/// in the nodelay wiring fails tests instead of silently shipping (issue #197).
+/// `bind_serve_listener` (this fn) remains the single seam for plain
+/// `axum::serve` consumers; the production server, `run_server`, and the
+/// integration-test harness instead use
+/// [`serve_with_http_header_deadline`], which applies the identical
+/// [`configure_accepted_socket`] per accepted stream — so every path shares
+/// accepted-socket semantics and a regression in the nodelay wiring fails
+/// tests instead of silently shipping (issue #197).
 pub fn bind_serve_listener(
     addr: SocketAddr,
     socket_send_buffer_bytes: u32,
@@ -138,11 +141,28 @@ pub async fn serve_with_http_header_deadline(
     let shutdown = shutdown_resolved(shutdown_rx.clone());
     tokio::pin!(shutdown);
 
+    // Track every in-flight connection task so the serve future — like axum's
+    // graceful shutdown — waits for them after the accept loop stops.
+    let mut connections = tokio::task::JoinSet::new();
+
     loop {
         tokio::select! {
-            _ = &mut shutdown => return Ok(()),
+            _ = &mut shutdown => break,
             accepted = listener.accept() => {
-                let (stream, remote_addr) = accepted?;
+                // Retry semantics copied from axum's Listener impl: transient
+                // connection errors are shed silently, anything else (e.g.
+                // EMFILE under hostile traffic) logs at error level, sleeps
+                // one second, and retries instead of killing the server.
+                let (stream, remote_addr) = match accepted {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        if !is_accept_connection_error(&error) {
+                            tracing::error!(%error, "accept error");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        continue;
+                    }
+                };
                 configure_accepted_socket(&stream);
                 let tower_service = make_service
                     .call(remote_addr)
@@ -154,7 +174,7 @@ pub async fn serve_with_http_header_deadline(
                 // Per-connection builder, mirroring axum::serve. The timer
                 // must be set for the header-read timeout to take effect at
                 // all — without it hyper's default stays silently inert.
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     let mut builder = auto::Builder::new(TokioExecutor::new());
                     builder
                         .http1()
@@ -181,6 +201,26 @@ pub async fn serve_with_http_header_deadline(
             }
         }
     }
+
+    // axum's graceful shutdown also WAITS for the in-flight connection tasks
+    // after the accept loop stops (each task observed the watch flip above and
+    // called `graceful_shutdown` on its connection). Mirror that: the serve
+    // future resolves only once every tracked connection has finished, so
+    // callers' post-drain bounds remain the true deadline instead of racing
+    // detached tasks.
+    while connections.join_next().await.is_some() {}
+    Ok(())
+}
+
+/// Whether an `accept` failure is a transient per-connection error that can be
+/// shed and retried immediately (copied from axum's `is_connection_error`).
+fn is_accept_connection_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
 }
 
 /// `axum_server` acceptor that applies `configure_accepted_socket` to the raw
@@ -477,14 +517,17 @@ pub async fn run_server(
         "Deployment contract: one process owns each room; losing the process loses its rooms"
     );
 
+    // Library convenience path has no shutdown choreography: the sender is
+    // never triggered, so the deadline stays armed without ever cutting the
+    // serve loop short. Named binding: a tuple temporary here would keep the
+    // receiver alive only by accident of expression evaluation order.
+    let (_never_shutdown_tx, never_shutdown_rx) = tokio::sync::watch::channel(false);
     supervise_serve_and_cleanup(
         serve_with_http_header_deadline(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
             http_header_read_timeout,
-            // Library convenience path has no shutdown choreography; keep the
-            // deadline armed but never trigger graceful shutdown early.
-            tokio::sync::watch::channel(false).1,
+            never_shutdown_rx,
         ),
         cleanup_shutdown_tx,
         cleanup_task,
