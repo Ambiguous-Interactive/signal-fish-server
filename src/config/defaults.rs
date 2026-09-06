@@ -47,6 +47,26 @@ pub const fn default_max_rooms_per_game() -> usize {
     1000
 }
 
+/// Per-connection inbound application-message budget per 60-second window
+/// (issue #518). Bounds the 1:1 malformed-frame error-reply amplification and
+/// per-frame CPU a single connection can force: every text/binary frame is
+/// counted before parsing, and an exhausted budget closes the connection
+/// (`4006 inbound_rate_limited`). 3,000 per window (~50/s sustained) is
+/// generous for honest game clients -- the signal budget alone is 600 -- while
+/// still bounding nuisance traffic.
+pub const fn default_max_inbound_messages() -> u32 {
+    3000
+}
+
+/// Server-wide live-room ceiling across every game name (issue #518). In
+/// open/allowlist-disabled mode an attacker can mint arbitrarily many game
+/// names, so the per-game cap alone bounds total rooms only by memory. 10,000
+/// matches the default server-wide connection ceiling scale: generous for
+/// honest deployments, bounded for hostile ones.
+pub const fn default_max_rooms() -> usize {
+    10_000
+}
+
 pub const fn default_empty_room_timeout() -> u64 {
     300 // 5 minutes
 }
@@ -480,6 +500,15 @@ pub const fn default_batch_size() -> usize {
 
 pub const fn default_batch_interval_ms() -> u64 {
     16 // One frame at 60fps for minimal latency
+}
+
+/// Pre-upgrade HTTP header-read deadline in seconds (issue #518). hyper's
+/// 30-second default is inert without an explicitly set `Timer`, so this
+/// deadline is applied explicitly on both serve paths. Request headers are
+/// small; ten seconds is generous for mobile clients while bounding
+/// pre-upgrade slowloris well inside the idle-timeout scale.
+pub const fn default_http_header_read_timeout_secs() -> u64 {
+    10
 }
 
 pub const fn default_auth_timeout_secs() -> u64 {

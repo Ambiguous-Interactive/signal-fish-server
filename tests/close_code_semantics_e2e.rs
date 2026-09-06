@@ -17,6 +17,8 @@
 //!   `websocket.idle_timeout_secs`.
 //! - `4005 room_inactive` — the assigned room was deleted after exceeding
 //!   `server.inactive_room_timeout`.
+//! - `4006 inbound_rate_limited` — the connection exhausted its per-window
+//!   inbound application-message budget (`rate_limit.max_inbound_messages`).
 //! - `1009 outbound_message_too_large` — a complete encoded server message
 //!   exceeded the deployment's advertised aggregate outbound payload limit.
 //!
@@ -388,6 +390,92 @@ async fn idle_timeout_closes_with_4004() {
     let (code, reason) = read_close_frame(&mut ws, "idle timeout").await;
     assert_eq!(code, 4004, "idle timeout must close with 4004 ({reason})");
     assert_eq!(reason, "idle_timeout");
+    running_server.shutdown().await;
+}
+
+/// A connection that exhausts `rate_limit.max_inbound_messages` inside one
+/// window is closed with `4006 inbound_rate_limited` (issue #518). Frames
+/// are counted before parsing, so garbage frames spend the same budget as
+/// valid ones: one connection can no longer buy unbounded 1:1 error replies.
+#[tokio::test]
+async fn inbound_rate_limit_exhaustion_closes_with_4006() {
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_messages = 3;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+    // The Authenticate frame itself spends the first budget slot: every
+    // application frame counts, valid or not.
+    authenticate(&mut ws).await;
+
+    let garbage = Message::Text("not json at all".into());
+    for _ in 0..2 {
+        ws.send(garbage.clone())
+            .await
+            .expect("send garbage frame while budget admits it");
+    }
+    ws.send(garbage)
+        .await
+        .expect("send the budget-exhausting frame");
+
+    let (code, reason) = read_close_frame(&mut ws, "inbound rate limit").await;
+    assert_eq!(
+        code, 4006,
+        "inbound rate-limit exhaustion must close with 4006 ({reason})"
+    );
+    assert_eq!(reason, "inbound_rate_limited");
+    running_server.shutdown().await;
+}
+
+/// A connection under its inbound budget is never disconnected by the gate:
+/// the cap bounds nuisance traffic, not honest clients.
+#[tokio::test]
+async fn inbound_frames_under_the_budget_leave_the_connection_open() {
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_messages = 5;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+    authenticate(&mut ws).await;
+
+    // Spend four more slots (five total, budget five), then prove the
+    // connection still answers a Ping after the malformed frames.
+    let garbage = Message::Text("not json at all".into());
+    for _ in 0..4 {
+        ws.send(garbage.clone())
+            .await
+            .expect("send garbage frame under budget");
+    }
+    ws.send(Message::Ping(b"still-here".as_ref().into()))
+        .await
+        .expect("send liveness Ping");
+    let pong_deadline = tokio::time::Instant::now() + CLOSE_DEADLINE;
+    let mut saw_pong = false;
+    while tokio::time::Instant::now() < pong_deadline {
+        match tokio::time::timeout(
+            pong_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            ws.next(),
+        )
+        .await
+        {
+            Ok(Some(Ok(Message::Pong(_)))) => {
+                saw_pong = true;
+                break;
+            }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(error))) => panic!("transport error under budget: {error}"),
+            Ok(None) => panic!("stream ended while under the inbound budget"),
+            Err(_elapsed) => break,
+        }
+    }
+    assert!(
+        saw_pong,
+        "a connection within its inbound budget must stay open and answer Pings"
+    );
     running_server.shutdown().await;
 }
 

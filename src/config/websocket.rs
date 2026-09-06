@@ -3,8 +3,8 @@
 use super::defaults::{
     default_auth_timeout_secs, default_batch_interval_ms, default_batch_size,
     default_control_queue_capacity, default_delivery_stats_interval_secs, default_enable_batching,
-    default_idle_timeout_secs, default_max_sojourn_ms, default_pong_timeout_secs,
-    default_send_queue_capacity, default_server_ping_interval_secs,
+    default_http_header_read_timeout_secs, default_idle_timeout_secs, default_max_sojourn_ms,
+    default_pong_timeout_secs, default_send_queue_capacity, default_server_ping_interval_secs,
     default_slow_consumer_timeout_ms, default_socket_send_buffer_bytes,
 };
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,16 @@ pub struct WebSocketConfig {
     /// Exclusive app-ID handshake-input deadline in seconds.
     #[serde(default = "default_auth_timeout_secs")]
     pub auth_timeout_secs: u64,
+    /// Pre-upgrade HTTP header-read deadline in seconds.
+    ///
+    /// Applied on BOTH serve paths (plain and TLS) together with hyper's
+    /// `Timer`, because hyper's 30-second header-read default stays inert
+    /// unless a timer is explicitly set — a gap that left direct-to-port
+    /// deployments open to pre-upgrade slowloris (issue #518). A client that
+    /// does not finish transmitting its request headers within the deadline
+    /// is closed before any application handler runs.
+    #[serde(default = "default_http_header_read_timeout_secs")]
+    pub http_header_read_timeout_secs: u64,
     /// Exclusive post-handshake idle-input deadline in seconds; `0`
     /// disables the timeout.
     ///
@@ -120,6 +130,7 @@ impl Default for WebSocketConfig {
             batch_size: default_batch_size(),
             batch_interval_ms: default_batch_interval_ms(),
             auth_timeout_secs: default_auth_timeout_secs(),
+            http_header_read_timeout_secs: default_http_header_read_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             server_ping_interval_secs: default_server_ping_interval_secs(),
             pong_timeout_secs: default_pong_timeout_secs(),
@@ -158,6 +169,19 @@ impl WebSocketConfig {
             anyhow::bail!(
                 "websocket.auth_timeout_secs must not exceed 60 seconds (configured: {})",
                 self.auth_timeout_secs
+            );
+        }
+        if self.http_header_read_timeout_secs == 0 {
+            anyhow::bail!(
+                "websocket.http_header_read_timeout_secs must be greater than 0; there is no \
+                 supported way to disable the pre-upgrade header-read deadline (configured: 0)"
+            );
+        }
+        if self.http_header_read_timeout_secs > 60 {
+            anyhow::bail!(
+                "websocket.http_header_read_timeout_secs must not exceed 60 seconds \
+                 (configured: {})",
+                self.http_header_read_timeout_secs
             );
         }
         if self.pong_timeout_secs == 0 {
@@ -388,6 +412,18 @@ mod tests {
                 expect_error_containing: "auth_timeout_secs must not exceed 60",
             },
             Case {
+                name: "header read timeout rejected at zero",
+                mutate: |config| config.http_header_read_timeout_secs = 0,
+                expect_ok: false,
+                expect_error_containing: "http_header_read_timeout_secs must be greater than 0",
+            },
+            Case {
+                name: "header read timeout above ceiling",
+                mutate: |config| config.http_header_read_timeout_secs = 61,
+                expect_ok: false,
+                expect_error_containing: "http_header_read_timeout_secs must not exceed 60",
+            },
+            Case {
                 name: "zero batch interval rejected only while batching",
                 mutate: |config| {
                     config.enable_batching = true;
@@ -586,6 +622,10 @@ mod tests {
         assert_eq!(config.batch_size, 10);
         assert_eq!(config.batch_interval_ms, 16);
         assert_eq!(config.auth_timeout_secs, 10);
+        assert_eq!(
+            config.http_header_read_timeout_secs, 10,
+            "pre-upgrade header-read deadline is armed by default (issue #518)"
+        );
         assert_eq!(config.idle_timeout_secs, 300);
         assert_eq!(config.send_queue_capacity, 1024);
         assert_eq!(config.control_queue_capacity, 128);

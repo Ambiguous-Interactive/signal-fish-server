@@ -24,6 +24,12 @@ pub struct RateLimitConfig {
     pub max_join_attempts: u32,
     /// Maximum number of WebRTC signaling messages per fixed time window
     pub max_signals: u32,
+    /// Per-connection inbound application-message budget per fixed time
+    /// window (issue #518). Counts every text/binary frame before parsing so
+    /// malformed frames cannot buy unbounded error replies. `0` is a valid
+    /// explicit total-rejection policy for direct library construction (the
+    /// production config path rejects it).
+    pub max_inbound_messages: u32,
     /// Detailed rejected-signal responses per fixed time window before
     /// generic rate-limit errors.
     pub max_signal_errors: u32,
@@ -51,6 +57,7 @@ impl Default for RateLimitConfig {
             max_join_attempts: 20, // per fixed 60-second window
             max_signals: 600,      // generous for trickle-ICE (~10/sec over the 60s window)
             max_signal_errors: 60, // detailed rejection responses before generic errors
+            max_inbound_messages: crate::config::defaults::default_max_inbound_messages(),
             max_relay_bytes: crate::config::defaults::default_max_relay_bytes(),
             max_room_relay_bytes: crate::config::defaults::default_max_room_relay_bytes(),
         }
@@ -642,6 +649,50 @@ pub struct PlayerRateStats {
     pub time_until_reset: Duration,
 }
 
+/// Per-connection inbound application-message budget (issue #518).
+///
+/// One fixed-window gate per WebSocket connection, charged for every
+/// text/binary frame *before parsing*, so malformed frames cannot buy
+/// unbounded 1:1 error replies (or per-frame CPU) on a live connection. An
+/// exhausted budget closes the connection with `4006 inbound_rate_limited`
+/// instead of replying. The gate lives on the receive task, so it needs no
+/// synchronization.
+#[derive(Debug)]
+pub struct InboundMessageGate {
+    limit: u32,
+    window: Duration,
+    window_start: Instant,
+    admitted: u32,
+}
+
+impl InboundMessageGate {
+    pub fn new(limit: u32, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            window_start: Instant::now(),
+            admitted: 0,
+        }
+    }
+
+    /// Charge one inbound application message. `false` means the fixed window
+    /// is exhausted and the connection must close.
+    pub fn admit(&mut self, now: Instant) -> bool {
+        if self.limit == 0 {
+            return false;
+        }
+        if now.duration_since(self.window_start) >= self.window {
+            self.window_start = now;
+            self.admitted = 0;
+        }
+        if self.admitted >= self.limit {
+            return false;
+        }
+        self.admitted += 1;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,6 +704,7 @@ mod tests {
             max_join_attempts: 3,
             max_signals: 2,
             max_signal_errors: 2,
+            max_inbound_messages: 5,
             max_relay_bytes: 1000,
             max_room_relay_bytes: 1000,
         }
@@ -1445,5 +1497,49 @@ mod tests {
             error.to_string(),
             "Join attempt rate limit exceeded. Try again in 1 seconds."
         );
+    }
+
+    #[test]
+    fn inbound_gate_admits_exactly_the_budget_per_window() {
+        let mut gate = InboundMessageGate::new(3, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(gate.admit(start));
+        assert!(gate.admit(start));
+        assert!(gate.admit(start));
+        assert!(
+            !gate.admit(start),
+            "the fourth message in one window must be refused"
+        );
+    }
+
+    #[test]
+    fn inbound_gate_refuses_everything_when_the_budget_is_zero() {
+        let mut gate = InboundMessageGate::new(0, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(
+            !gate.admit(start),
+            "a zero budget is a total-rejection policy"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_gate_reanchors_the_window_after_it_elapses() {
+        let mut gate = InboundMessageGate::new(2, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(gate.admit(start));
+        assert!(gate.admit(start));
+        assert!(!gate.admit(start));
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let later = tokio::time::Instant::now();
+        assert!(
+            gate.admit(later),
+            "the window must re-anchor once it has elapsed"
+        );
+        assert!(gate.admit(later));
+        assert!(!gate.admit(later));
     }
 }

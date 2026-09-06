@@ -94,6 +94,95 @@ fn configure_accepted_socket_io(stream: &mut TcpStream) {
     configure_accepted_socket(stream);
 }
 
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use hyper_util::service::TowerToHyperService;
+// `IntoMakeServiceWithConnectInfo` implements `tower_service::Service<SocketAddr>`
+// through axum's `Connected<SocketAddr>` impl: calling it per accepted
+// connection reproduces exactly what axum::serve does internally.
+use tower_service::Service;
+
+/// Serve the plain-TCP path with an explicitly armed HTTP header-read deadline.
+///
+/// `axum::serve` leaves hyper's `Timer` unset, which silently disables
+/// hyper's own (30-second) header-read timeout: a raw-HTTP client can park a
+/// partial request forever before any application handler or WebSocket
+/// deadline sees it (issue #518). This path drives the same hyper-util auto
+/// builder axum drives, but arms `timer` + `header_read_timeout`, applies the
+/// same accepted-socket configuration as [`bind_serve_listener`], preserves
+/// axum's graceful-shutdown semantics for in-flight connections (same trigger
+/// semantics as `axum::serve::with_graceful_shutdown` over the shutdown
+/// watch), and keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps working.
+pub async fn serve_with_http_header_deadline(
+    listener: TcpListener,
+    mut make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
+        axum::Router,
+        SocketAddr,
+    >,
+    header_read_timeout: std::time::Duration,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    /// Resolves once the shared shutdown watch flips (or its sender drops) —
+    /// the same trigger semantics axum's graceful-shutdown future uses.
+    async fn shutdown_resolved(mut rx: tokio::sync::watch::Receiver<bool>) {
+        loop {
+            if *rx.borrow() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    let shutdown = shutdown_resolved(shutdown_rx.clone());
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return Ok(()),
+            accepted = listener.accept() => {
+                let (stream, remote_addr) = accepted?;
+                configure_accepted_socket(&stream);
+                let tower_service = make_service
+                    .call(remote_addr)
+                    .await
+                    .unwrap_or_else(|error| match error {});
+                let hyper_service = TowerToHyperService::new(tower_service);
+                let shutdown_rx_clone = shutdown_rx.clone();
+
+                // Per-connection builder, mirroring axum::serve. The timer
+                // must be set for the header-read timeout to take effect at
+                // all — without it hyper's default stays silently inert.
+                tokio::spawn(async move {
+                    let mut builder = auto::Builder::new(TokioExecutor::new());
+                    builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(header_read_timeout);
+                    // CONNECT protocol needed for HTTP/2 WebSockets (RFC
+                    // 8441), matching axum::serve's http2 configuration.
+                    builder.http2().enable_connect_protocol();
+
+                    let shutdown_for_task = shutdown_resolved(shutdown_rx_clone.clone());
+                    tokio::pin!(shutdown_for_task);
+                    let conn = builder.serve_connection_with_upgrades(
+                        TokioIo::new(stream),
+                        hyper_service,
+                    );
+                    tokio::pin!(conn);
+                    loop {
+                        tokio::select! {
+                            _ = &mut conn => break,
+                            _ = &mut shutdown_for_task => conn.as_mut().graceful_shutdown(),
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
 /// `axum_server` acceptor that applies `configure_accepted_socket` to the raw
 /// TCP stream before the TLS handshake, so the TLS serve path shares the exact
 /// accepted-socket configuration (and warn-and-continue semantics) of the plain
@@ -358,8 +447,12 @@ pub async fn run_server(
     .await?;
 
     // Bind before starting background work so a port conflict cannot leave a
-    // detached task retaining the server.
-    let listener = bind_serve_listener(addr, socket_send_buffer_bytes)?;
+    // detached task retaining the server. The header-read deadline serve path
+    // applies the same accepted-socket configuration as bind_serve_listener.
+    let listener = bind_tcp_listener(addr, socket_send_buffer_bytes)?;
+    let http_header_read_timeout = std::time::Duration::from_secs(
+        server_config.websocket_config.http_header_read_timeout_secs,
+    );
 
     // Keep cleanup scoped to this serving future. Normal return signals and
     // joins it; cancellation drops the guard and aborts it.
@@ -385,13 +478,14 @@ pub async fn run_server(
     );
 
     supervise_serve_and_cleanup(
-        async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-        },
+        serve_with_http_header_deadline(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+            http_header_read_timeout,
+            // Library convenience path has no shutdown choreography; keep the
+            // deadline armed but never trigger graceful shutdown early.
+            tokio::sync::watch::channel(false).1,
+        ),
         cleanup_shutdown_tx,
         cleanup_task,
     )

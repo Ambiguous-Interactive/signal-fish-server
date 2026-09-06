@@ -16,7 +16,7 @@ use tokio::time::Duration;
 pub struct RunningTestServer {
     addr: std::net::SocketAddr,
     server: Arc<EnhancedGameServer>,
-    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
     serve_task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     shutdown_complete: bool,
 }
@@ -24,26 +24,32 @@ pub struct RunningTestServer {
 #[allow(dead_code)]
 impl RunningTestServer {
     pub async fn spawn(server: Arc<EnhancedGameServer>, router: axum::Router) -> Self {
-        // Configure accepted sockets exactly as production does (issue #197), so
-        // latency-sensitive e2e tests observe production socket semantics.
-        use axum::serve::Listener;
-        let listener = signal_fish_server::websocket::bind_serve_listener(
+        // Serve through the production plain-TCP path (issue #197 accepted-
+        // socket configuration, issue #518 armed HTTP header-read deadline),
+        // so latency- and deadline-sensitive e2e tests observe production
+        // semantics.
+        let listener = signal_fish_server::websocket::bind_tcp_listener(
             "127.0.0.1:0".parse().expect("parse test listener address"),
             server.config().websocket_config.socket_send_buffer_bytes,
         )
         .expect("bind test listener");
         let addr = listener.local_addr().expect("read test listener address");
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let serve_task = tokio::spawn(async move {
-            axum::serve(
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let make_service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let http_header_read_timeout = std::time::Duration::from_secs(
+            server
+                .config()
+                .websocket_config
+                .http_header_read_timeout_secs,
+        );
+        let serve_task = tokio::spawn(
+            signal_fish_server::websocket::serve_with_http_header_deadline(
                 listener,
-                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-        });
+                make_service,
+                http_header_read_timeout,
+                shutdown_rx,
+            ),
+        );
 
         Self {
             addr,
@@ -64,7 +70,7 @@ impl RunningTestServer {
             .shutdown_tx
             .take()
             .expect("test server shutdown signal missing")
-            .send(());
+            .send(true);
         self.server.close_connections_for_shutdown();
 
         let settle_timeout =
@@ -105,7 +111,7 @@ impl Drop for RunningTestServer {
         self.server.begin_shutdown_drain();
         self.server.close_connections_for_shutdown();
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            let _ = shutdown_tx.send(());
+            let _ = shutdown_tx.send(true);
         }
         if let Some(serve_task) = self.serve_task.take() {
             serve_task.abort();
@@ -186,12 +192,14 @@ pub fn test_server_config() -> ServerConfig {
         room_cleanup_interval: Duration::from_secs(1), // Fast cleanup for tests
         drain_grace: Duration::from_secs(30),
         max_rooms_per_game: 100,
+        max_rooms: 10_000, // Generous server-wide ceiling for tests
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
             max_room_creations: 10,
             time_window: Duration::from_secs(60),
             max_join_attempts: 20,
             max_signals: 600,
             max_signal_errors: 60,
+            max_inbound_messages: 10_000, // Generous for tests
             max_relay_bytes: 256 * 1024 * 1024,
             max_room_relay_bytes: 1024 * 1024 * 1024,
         },

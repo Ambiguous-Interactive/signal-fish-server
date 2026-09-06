@@ -55,6 +55,7 @@ SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
 {
   "server": {
     "max_rooms_per_game": 1000,
+    "max_rooms": 10000,
     "empty_room_timeout": 300,
     "inactive_room_timeout": 3600
   }
@@ -63,6 +64,7 @@ SIGNAL_FISH__SERVER__DEFAULT_MAX_PLAYERS=16 cargo run
 ```
 
 - `max_rooms_per_game` - Maximum concurrent rooms per game name (must be > 0)
+- `max_rooms` - Server-wide ceiling on total live rooms across every game name (must be > 0)
 - `empty_room_timeout` - Seconds before an empty room is cleaned up (default: 300)
 - `inactive_room_timeout` - Seconds before an inactive room is removed (default: 3600)
 
@@ -114,6 +116,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__ROOM_CLEANUP_INTERVAL` | `server.room_cleanup_interval` | `60` | Seconds between room cleanup sweeps (must be > 0) |
 | `SIGNAL_FISH__SERVER__DRAIN_GRACE_SECS` | `server.drain_grace_secs` | `30` | Seconds between shutdown drain start and forced close `4000`; `0` closes immediately |
 | `SIGNAL_FISH__SERVER__MAX_ROOMS_PER_GAME` | `server.max_rooms_per_game` | `1000` | Max rooms allowed per game name (must be > 0) |
+| `SIGNAL_FISH__SERVER__MAX_ROOMS` | `server.max_rooms` | `10000` | Server-wide ceiling on total live rooms across every game name (must be > 0) |
 | `SIGNAL_FISH__SERVER__EMPTY_ROOM_TIMEOUT` | `server.empty_room_timeout` | `300` | Seconds before an empty room is removed |
 | `SIGNAL_FISH__SERVER__INACTIVE_ROOM_TIMEOUT` | `server.inactive_room_timeout` | `3600` | Seconds before an inactive room is removed and assigned clients close with `4005 room_inactive` |
 | `SIGNAL_FISH__SERVER__RECONNECTION_WINDOW` | `server.reconnection_window` | `300` | Seconds a reconnection token stays valid (must be > 0) |
@@ -126,6 +129,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Shared max room-creation, seated-join, and spectator-join attempts per player per window (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS` | `rate_limit.max_signals` | `600` | Max validated WebRTC Signal dispatch attempts per player per window (must be > 0) |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_INBOUND_MESSAGES` | `rate_limit.max_inbound_messages` | `3000` | Per-connection inbound application-message budget per window; exhausting it closes the connection with `4006 inbound_rate_limited` (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Detailed WebRTC rejection errors per player per window before generic rate-limit errors |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES` | `rate_limit.max_relay_bytes` | `268435456` | Per-sender game-data relay byte budget per window (sender-controlled payload bytes; must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_RELAY_BYTES` | `rate_limit.max_room_relay_bytes` | `1073741824` | Per-room aggregate game-data relay byte ceiling per window (sender-controlled payload bytes; must be > 0) |
@@ -196,6 +200,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__WEBSOCKET__BATCH_SIZE` | `websocket.batch_size` | `10` | Max messages per batch (must be > 0 when `enable_batching` is true; maximum: 65,536) |
 | `SIGNAL_FISH__WEBSOCKET__BATCH_INTERVAL_MS` | `websocket.batch_interval_ms` | `16` | Batch flush interval in milliseconds (must be > 0 and ≤ 60000 when `enable_batching` is true) |
 | `SIGNAL_FISH__WEBSOCKET__AUTH_TIMEOUT_SECS` | `websocket.auth_timeout_secs` | `10` | Exclusive deadline for the initial app-ID/protocol handshake after connect (legacy key name) |
+| `SIGNAL_FISH__WEBSOCKET__HTTP_HEADER_READ_TIMEOUT_SECS` | `websocket.http_header_read_timeout_secs` | `10` | Pre-upgrade HTTP header-read deadline; a client that does not finish sending request headers within it is closed before any handler runs (must be > 0 and ≤ 60) |
 | `SIGNAL_FISH__WEBSOCKET__IDLE_TIMEOUT_SECS` | `websocket.idle_timeout_secs` | `300` | Exclusive inbound-frame deadline after handshake completion (`0` disables; values beyond the platform `Instant` range remain later than the process can represent) |
 | `SIGNAL_FISH__WEBSOCKET__SERVER_PING_INTERVAL_SECS` | `websocket.server_ping_interval_secs` | `10` | Cadence for server-initiated RFC 6455 Ping frames (`0` disables; must be ≤ `3600`) |
 | `SIGNAL_FISH__WEBSOCKET__PONG_TIMEOUT_SECS` | `websocket.pong_timeout_secs` | `5` | Seconds allowed for the matching Pong before close `4003 activity_timeout` (must be > `0` and ≤ `3600`) |
@@ -251,7 +256,8 @@ and the authenticated WebSocket relay floor remains available independently.
     "time_window": 60,
     "max_join_attempts": 20,
     "max_signals": 600,
-    "max_signal_errors": 60
+    "max_signal_errors": 60,
+    "max_inbound_messages": 3000
   },
   "logging": {
     "enable_file_logging": true,
@@ -288,6 +294,9 @@ and the authenticated WebSocket relay floor remains available independently.
   per player per time window (must be > 0)
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per time window (must be > 0)
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
+- `max_inbound_messages` - Per-connection inbound application-message budget per time window,
+  counted before parsing (malformed frames count). Exhausting it closes the connection with
+  `4006 inbound_rate_limited` (must be > 0)
 - `time_window` - Rate limit window in seconds
 
 These budgets use **fixed-window** accounting: a player's counters reset to
@@ -344,6 +353,7 @@ candidate codes or changing the behavior of explicit room-code requests.
     "batch_size": 10,
     "batch_interval_ms": 16,
     "auth_timeout_secs": 10,
+    "http_header_read_timeout_secs": 10,
     "idle_timeout_secs": 300,
     "server_ping_interval_secs": 10,
     "pong_timeout_secs": 5,
@@ -363,6 +373,10 @@ candidate codes or changing the behavior of explicit room-code requests.
 - `batch_interval_ms` - Batch flush interval
 - `auth_timeout_secs` - Exclusive deadline for app-ID handshake input after
   connect
+- `http_header_read_timeout_secs` - Pre-upgrade HTTP header-read deadline. A
+  raw-HTTP client that does not finish transmitting request headers within it
+  is closed before any handler runs (bounds pre-upgrade slowloris; issue
+  #518). Applied on both the plain and TLS serve paths.
 - `idle_timeout_secs` - Exclusive post-handshake inbound-frame deadline
   (default: 300; `0` disables). A handshake-complete connection that produces no inbound WebSocket
   frame of any kind (including Ping/Pong) for this long receives a

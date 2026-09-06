@@ -922,6 +922,7 @@ assignments that are never renumbered:
 | `4003` | `activity_timeout` | An idle server WebSocket Ping write timed out, the matching Pong missed its deadline while no inbound or outbound application progress superseded the probe, or the `server.ping_timeout` activity reaper evicted the connection. A Ping queued after outbound progress inherits the earlier capacity-wait/maximum-sojourn delivery budget and closes `4002` if that write stalls |
 | `4004` | `idle_timeout` | No inbound frame was observed strictly before the `websocket.idle_timeout_secs` deadline |
 | `4005` | `room_inactive` | The assigned room exceeded `server.inactive_room_timeout` and was deleted; the client must join or create a new room |
+| `4006` | `inbound_rate_limited` | The connection exhausted its per-window inbound application-message budget (`rate_limit.max_inbound_messages`); reconnect and stay within the budget |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 | `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |
 

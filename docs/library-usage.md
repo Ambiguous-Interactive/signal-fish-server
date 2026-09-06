@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         ping_timeout: Duration::from_secs(cfg.server.ping_timeout),
         room_cleanup_interval: Duration::from_secs(cfg.server.room_cleanup_interval),
         max_rooms_per_game: cfg.server.max_rooms_per_game,
+        max_rooms: cfg.server.max_rooms,
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
             max_room_creations: cfg.rate_limit.max_room_creations,
             time_window: Duration::from_secs(cfg.rate_limit.time_window),

@@ -5290,6 +5290,201 @@ async fn max_room_cap_denial_releases_join_coordination_locks() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn server_room_cap_denial_releases_join_coordination_locks() {
+    let server = create_test_server_with_config(ServerConfig {
+        max_rooms: 1,
+        ..ServerConfig::default()
+    })
+    .await;
+    server
+        .database
+        .create_room(
+            "game-a".to_string(),
+            Some("FILLED".to_string()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("fixture room reaches the server-wide cap");
+    let (player_id, mut receiver) =
+        register_client(&server, "127.0.0.1:48011".parse().unwrap()).await;
+
+    server
+        .handle_join_room(
+            &player_id,
+            "game-b".to_string(),
+            Some("ABCDEF".to_string()),
+            "player".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("channel still open")
+        .expect("join failure message present");
+    match response.as_ref() {
+        ServerMessage::RoomJoinFailed { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::MaxRoomsPerGameExceeded),
+                "server-wide cap denial reuses the v2 room-cap wire code"
+            );
+        }
+        other => panic!("expected RoomJoinFailed, got {other:?}"),
+    }
+
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("room_join:game-b:ABCDEF")
+            .await
+            .expect("room join lock check succeeds"),
+        "room join lock must be released after server-wide cap denial"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("game_room_cap:game-b")
+            .await
+            .expect("game cap lock check succeeds"),
+        "game cap lock must be released after server-wide cap denial"
+    );
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked("server_room_cap")
+            .await
+            .expect("server cap lock check succeeds"),
+        "server-wide cap lock must be released after denial"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn server_room_cap_is_atomic_across_games() {
+    let server = create_test_server_with_config(ServerConfig {
+        max_rooms: 2,
+        ..ServerConfig::default()
+    })
+    .await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .expect("in-memory test database");
+    let (first_player, mut first_rx) =
+        register_client(&server, "127.0.0.1:48012".parse().unwrap()).await;
+    let (second_player, mut second_rx) =
+        register_client(&server, "127.0.0.1:48013".parse().unwrap()).await;
+    let (third_player, mut third_rx) =
+        register_client(&server, "127.0.0.1:48014".parse().unwrap()).await;
+
+    // Park the first creator inside the server-wide count check so the second
+    // creator of a *different* game must prove it serializes on the shared
+    // `server_room_cap` lock instead of winning a stale-count race.
+    database.pause_next_get_total_room_count_for_test();
+    let paused_server = Arc::clone(&server);
+    let paused_player = first_player;
+    let paused_task = tokio::spawn(async move {
+        paused_server
+            .handle_join_room(
+                &paused_player,
+                "game-a".to_string(),
+                Some("AAAAAA".to_string()),
+                "one".to_string(),
+                Some(4),
+                Some(true),
+                None,
+            )
+            .await;
+    });
+    database
+        .wait_for_paused_get_total_room_count_for_test()
+        .await;
+
+    let waiting_server = Arc::clone(&server);
+    let waiting_player = second_player;
+    let waiting_task = tokio::spawn(async move {
+        waiting_server
+            .handle_join_room(
+                &waiting_player,
+                "game-b".to_string(),
+                Some("BBBBBB".to_string()),
+                "two".to_string(),
+                Some(4),
+                Some(true),
+                None,
+            )
+            .await;
+    });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !waiting_task.is_finished(),
+        "second create in another game must wait on the server-wide cap lock"
+    );
+
+    database.release_paused_get_total_room_count_for_test();
+    paused_task.await.expect("paused create task completes");
+    waiting_task.await.expect("waiting create task completes");
+    assert!(matches!(
+        timeout(Duration::from_secs(1), first_rx.recv())
+            .await
+            .expect("first join answer arrives")
+            .expect("first channel open")
+            .as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    assert!(matches!(
+        timeout(Duration::from_secs(1), second_rx.recv())
+            .await
+            .expect("second join answer arrives")
+            .expect("second channel open")
+            .as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    // The cap is now saturated: a third game's creation must be denied even
+    // though each individual game stays far below its per-game cap.
+    server
+        .handle_join_room(
+            &third_player,
+            "game-c".to_string(),
+            Some("CCCCCC".to_string()),
+            "three".to_string(),
+            Some(4),
+            Some(true),
+            None,
+        )
+        .await;
+    let third_response = timeout(Duration::from_secs(1), third_rx.recv())
+        .await
+        .expect("third join answer arrives")
+        .expect("third channel open");
+    match third_response.as_ref() {
+        ServerMessage::RoomJoinFailed { error_code, .. } => {
+            assert_eq!(*error_code, Some(ErrorCode::MaxRoomsPerGameExceeded));
+        }
+        other => panic!("expected server-wide cap denial, got {other:?}"),
+    }
+
+    assert_eq!(
+        server.database.get_total_room_count().await.expect("count"),
+        2,
+        "server-wide ceiling bounds total rooms across games"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
     let server = create_test_server().await;
 

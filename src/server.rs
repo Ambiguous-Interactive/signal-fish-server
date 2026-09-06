@@ -134,6 +134,11 @@ mod constructor_validation_tests {
                 expected: "max_rooms_per_game must be greater than 0",
             },
             InvalidConstructorCase {
+                name: "zero server-wide room cap",
+                mutate: |inputs| inputs.server.max_rooms = 0,
+                expected: "max_rooms must be greater than 0",
+            },
+            InvalidConstructorCase {
                 name: "zero game-name cap",
                 mutate: |inputs| inputs.protocol.max_game_name_length = 0,
                 expected: "max_game_name_length must be greater than 0",
@@ -516,6 +521,13 @@ pub struct MaxRoomsPerGameExceededError {
 }
 
 #[derive(Debug, Error)]
+#[error("Server already has {current} rooms (limit {limit})")]
+pub struct MaxRoomsExceededError {
+    pub current: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Error)]
 #[error("Application already has {current} rooms (limit {limit})")]
 pub struct MaxRoomsPerApplicationExceededError {
     pub current: usize,
@@ -536,6 +548,10 @@ pub struct ServerConfig {
     pub room_cleanup_interval: Duration,
     pub drain_grace: Duration,
     pub max_rooms_per_game: usize,
+    /// Server-wide live-room ceiling across every game name. Mirrors
+    /// validated `server.max_rooms` and must be greater than 0 for direct
+    /// library construction (a zero cap rejects every room creation).
+    pub max_rooms: usize,
     pub rate_limit_config: RateLimitConfig,
     pub empty_room_timeout: Duration,
     pub inactive_room_timeout: Duration,
@@ -583,6 +599,7 @@ impl Default for ServerConfig {
             room_cleanup_interval: Duration::from_secs(60),
             drain_grace: Duration::from_secs(30),
             max_rooms_per_game: 1000,
+            max_rooms: crate::config::defaults::default_max_rooms(),
             rate_limit_config: RateLimitConfig::default(),
             empty_room_timeout: Duration::from_secs(300),
             inactive_room_timeout: Duration::from_secs(3600),
@@ -4509,6 +4526,7 @@ mod relay_projection_cache_tests {
                 max_join_attempts: 0,
                 max_signals: 0,
                 max_signal_errors: 0,
+                max_inbound_messages: 0,
                 time_window: Duration::from_secs(60),
                 max_relay_bytes: 0,
                 max_room_relay_bytes: 0,

@@ -10,6 +10,7 @@ use crate::protocol::{
     ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
     PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY,
 };
+use crate::rate_limit::InboundMessageGate;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -942,6 +943,7 @@ async fn finalize_closed_connection(
             | CloseReason::ActivityTimeout
             | CloseReason::IdleTimeout
             | CloseReason::RoomInactive
+            | CloseReason::InboundRateLimited
             | CloseReason::Unregistered,
         )
         | None => {
@@ -1965,6 +1967,13 @@ pub(super) async fn handle_socket(
         let idle_timeout_secs = server_clone.config().websocket_config.idle_timeout_secs;
         let idle_timeout = (idle_timeout_secs > 0).then(|| Duration::from_secs(idle_timeout_secs));
 
+        // Per-connection inbound budget (issue #518): every text/binary frame
+        // charges before parsing, so garbage frames cannot buy unbounded
+        // error replies or CPU on this connection.
+        let rate_config = server_clone.config().rate_limit_config.clone();
+        let mut inbound_gate =
+            InboundMessageGate::new(rate_config.max_inbound_messages, rate_config.time_window);
+
         loop {
             let inbound_deadline = InboundDeadline::for_connection(
                 app_handshake_complete,
@@ -2032,6 +2041,35 @@ pub(super) async fn handle_socket(
             } else {
                 None
             };
+
+            if matches!(msg, Message::Text(_) | Message::Binary(_))
+                && !inbound_gate.admit(received_at)
+            {
+                tracing::warn!(
+                    %active_player_id,
+                    budget = rate_config.max_inbound_messages,
+                    window_secs = rate_config.time_window.as_secs(),
+                    "Inbound message rate limit exceeded, closing connection"
+                );
+                server_clone.metrics().record_rate_limit_rejection(
+                    crate::metrics::RateLimitRejection::InboundMessage,
+                );
+                // The budget-exhaustion farewell uses this connection's own
+                // outbound channel and never waits for capacity. The semantic
+                // close reason is pinned before generic unregistration can win.
+                enqueue_farewell_message(
+                    &tx_clone,
+                    &close_signal,
+                    &active_player_id,
+                    ServerMessage::Error {
+                        message: "Inbound message rate limit exceeded".to_string(),
+                        error_code: Some(ErrorCode::RateLimitExceeded),
+                    },
+                    "inbound rate limit error",
+                );
+                close_signal.request_close(CloseReason::InboundRateLimited);
+                break;
+            }
 
             match msg {
                 Message::Text(text) => {
