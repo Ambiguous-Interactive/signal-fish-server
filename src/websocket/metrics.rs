@@ -7,28 +7,33 @@ use std::time::{Duration, Instant};
 
 use super::prometheus::render_prometheus_metrics;
 
-/// Minimum quiet period between emitted unauthorized-metrics-access warnings.
+/// Minimum quiet period between emitted metrics-endpoint warnings.
 ///
-/// Unauthenticated endpoints are a log-volume amplification vector: every
-/// admitted log line reaches the operator's sink(s), there is no HTTP rate
-/// limiter on these routes, and one JSON log line per rejection would let an
-/// anonymous request loop grow log volume indefinitely before any credential
-/// guess matters. Sixty seconds keeps the first signal and a periodic
-/// suppressed-count summary at negligible volume.
+/// These endpoints are log-volume amplification vectors: every admitted log
+/// line reaches the operator's sink(s), there is no HTTP rate limiter on the
+/// routes, and one JSON log line per event would let a request loop grow log
+/// volume indefinitely (anonymous rejection loops before any credential guess
+/// matters; dashboard polls against a persistently oversized response). Sixty
+/// seconds keeps the first signal and a periodic suppressed-count summary at
+/// negligible volume.
 const REJECTION_LOG_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// One decision to emit a rejected-metrics-access warning.
+/// One decision to emit a throttled metrics-endpoint warning.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RejectionLogEmission<'a> {
-    /// The first rejection after a quiet period (or ever).
+    /// The first event after a quiet period (or ever).
     First { reason: &'a str },
-    /// A quiet-period boundary reached while earlier rejections were
+    /// A quiet-period boundary reached while earlier same-reason events were
     /// suppressed; the count summarizes them.
     WithSuppressedCount { reason: &'a str, suppressed: u64 },
 }
 
-/// Emits at most one unauthorized-access warning per [`REJECTION_LOG_MIN_INTERVAL`],
+/// Emits at most one warning per [`REJECTION_LOG_MIN_INTERVAL`] per instance,
 /// counting suppressed repeats so the next emission carries their number.
+///
+/// Instances exist for unauthorized-access rejections and for response
+/// truncation events; each call supplies its own event message, so one
+/// throttle type serves both without conflating their log lines.
 ///
 /// The decision logic is pure (tests drive it with synthetic instants); the
 /// handler maps a returned [`RejectionLogEmission`] to the actual `tracing::warn!`.
@@ -71,18 +76,18 @@ impl RejectionLogThrottle {
     }
 
     /// Production entry point: decide and emit the warning in one step.
-    pub(crate) fn record(&self, reason: &'static str) {
+    ///
+    /// `message` is the human-readable event line (it must fit every event
+    /// class sharing this throttle instance); `reason` is the structured
+    /// per-event field.
+    pub(crate) fn record(&self, message: &'static str, reason: &'static str) {
         if let Some(emission) = self.record_at(reason, Instant::now()) {
             match emission {
                 RejectionLogEmission::First { reason } => {
-                    tracing::warn!(reason, "Unauthorized metrics access attempt");
+                    tracing::warn!(reason, message);
                 }
                 RejectionLogEmission::WithSuppressedCount { reason, suppressed } => {
-                    tracing::warn!(
-                        reason,
-                        suppressed_repeats = suppressed,
-                        "Unauthorized metrics access attempts (throttled)"
-                    );
+                    tracing::warn!(reason, suppressed_repeats = suppressed, message);
                 }
             }
         }
@@ -98,16 +103,18 @@ async fn enforce_metrics_auth(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
     else {
-        server
-            .metrics_rejection_log()
-            .record("missing Authorization header");
+        server.metrics_rejection_log().record(
+            "Unauthorized metrics access attempt",
+            "missing Authorization header",
+        );
         return Err(StatusCode::UNAUTHORIZED);
     };
 
     let Some(token) = raw_header.strip_prefix("Bearer ") else {
-        server
-            .metrics_rejection_log()
-            .record("invalid Authorization scheme");
+        server.metrics_rejection_log().record(
+            "Unauthorized metrics access attempt",
+            "invalid Authorization scheme",
+        );
         return Err(StatusCode::UNAUTHORIZED);
     };
 
@@ -120,7 +127,9 @@ async fn enforce_metrics_auth(
         }
     }
 
-    server.metrics_rejection_log().record("token rejected");
+    server
+        .metrics_rejection_log()
+        .record("Unauthorized metrics access attempt", "token rejected");
     Err(StatusCode::UNAUTHORIZED)
 }
 
@@ -208,7 +217,7 @@ fn bound_response_game_map(
         obj.insert(map_field.to_string(), serde_json::Value::Object(bounded));
         if truncated {
             obj.insert(marker_field.to_string(), serde_json::Value::Bool(true));
-            log.record(reason);
+            log.record("Metrics response game-name map truncated", reason);
         }
     }
 }
@@ -229,9 +238,10 @@ fn bounded_metrics_snapshot(
     if size_bytes <= METRICS_SNAPSHOT_MAX_BYTES {
         return value;
     }
-    server
-        .metrics_truncation_log()
-        .record("metricsSnapshot exceeded the response cap");
+    server.metrics_truncation_log().record(
+        "Metrics snapshot truncated",
+        "metricsSnapshot exceeded the response cap",
+    );
     serde_json::json!({
         "truncated": true,
         "sizeBytes": size_bytes,
